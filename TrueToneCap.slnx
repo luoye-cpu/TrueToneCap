@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TrueToneCap.App/TrueToneCap.App.csproj" />
+    <Project Path="src/TrueToneCap.Core/TrueToneCap.Core.csproj" />
+    <Project Path="src/TrueToneCap.Test/TrueToneCap.Test.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/DiagCapture/DiagCapture.csproj" />
+  </Folder>
+</Solution>

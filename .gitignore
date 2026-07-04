@@ -1,0 +1,81 @@
+# ── .NET Build Artifacts ──
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# ── Visual Studio ──
+.vs/
+*.rsuser
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+# ── NuGet ──
+*.nupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+project.assets.json
+NuGet.Config
+
+# ── Compiler Output ──
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.sbr
+*.bsc
+*.iobj
+*.ipdb
+*.[Cc]ache
+*.appxsym
+*.eappxsym
+
+# ── Shader Compilation ──
+shaders/*.cso
+shaders/*.dxbc
+
+# ── OS junk ──
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ── Crash / Log files ──
+*.log
+crash.log
+*_crash.log
+*_error.log
+*.dmp
+
+# ── IDE / Editor ──
+*.swp
+*.swo
+*~
+.idea/
+*.sublime-*
+.vscode/
+*.code-workspace
+
+# ── Temp / Test outputs ──
+TestResults/
+*.tmp
+*.temp
+
+# ── TrueToneCap specific ──
+TrueToneCap.settings.json
+# Keep shader source, discard compiled
+shaders/Compiled/

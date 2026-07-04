@@ -1,0 +1,130 @@
+<Window x:Class="TrueToneCap.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="TrueToneCap 设置" Closed="OnWindowClosed">
+    <Grid RowDefinitions="Auto,*,Auto">
+        <Grid Grid.Row="0" Padding="24,20" Background="{ThemeResource CardBackgroundFillColorDefault}">
+            <StackPanel>
+                <TextBlock Text="TrueToneCap" FontSize="28" FontWeight="Bold"/>
+                <TextBlock Text="HDR 截图工具" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="0,4,0,0"/>
+            </StackPanel>
+        </Grid>
+        <ScrollViewer Grid.Row="1" Padding="24,16">
+            <StackPanel Spacing="16">
+                <!-- 输出设置 -->
+                <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="输出设置" FontSize="16" FontWeight="Bold"/>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="格式" VerticalAlignment="Center"/><ComboBox x:Name="FormatCbo" Grid.Column="1" SelectionChanged="OnFormatChanged"/></Grid>
+                        <Grid ColumnDefinitions="120,*,50,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged" SmallChange="0.1" LargeChange="0.5"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
+                        <Grid ColumnDefinitions="120,*,50"><TextBlock Text="保存路径" VerticalAlignment="Center"/><TextBox x:Name="PathTxt" Grid.Column="1"/><Button Grid.Column="2" Content="..." Click="OnBrowsePath" Width="40" Margin="4,0,0,0"/></Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="文件名前缀" VerticalAlignment="Center"/><TextBox x:Name="PrefixTxt" Grid.Column="1"/></Grid>
+                        <CheckBox x:Name="AvifPngSuffixChk" Content="为 AVIF 文件添加 .png 后缀" Visibility="Collapsed"/>
+                        <Grid x:Name="AvifBackendPanel" ColumnDefinitions="120,*" Visibility="Collapsed">
+                            <TextBlock Text="AVIF 后端" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="AvifBackendCbo" Grid.Column="1" SelectionChanged="OnAvifBackendChanged">
+                                <ComboBoxItem Tag="Auto">自动检测</ComboBoxItem><ComboBoxItem Tag="LibAom">libaom (软件)</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC</ComboBoxItem>
+                            </ComboBox>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+                <!-- 色彩 -->
+                <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="色彩设置" FontSize="16" FontWeight="Bold"/>
+
+                        <!-- HDR -->
+                        <StackPanel Spacing="4">
+                            <Grid ColumnDefinitions="140,*"><TextBlock Text="HDR 输出" VerticalAlignment="Center"/><ToggleSwitch x:Name="HdrSwitch" Grid.Column="1" Toggled="OnHdrToggled"/></Grid>
+                            <TextBlock x:Name="HdrHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- ICC 烘焙 -->
+                        <StackPanel Spacing="4">
+                            <Grid ColumnDefinitions="140,*"><TextBlock Text="ICC 烘焙" VerticalAlignment="Center"/><ToggleSwitch x:Name="IccBakeSwitch" Grid.Column="1" ToolTipService.ToolTip="将显示器 ICC 校色应用到像素，使图片在不支持 ICC 的设备上正确显示"/></Grid>
+                            <TextBlock x:Name="IccHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- 色彩空间 -->
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="色彩空间" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="ColorCbo" Grid.Column="1">
+                                <ComboBoxItem Tag="System">跟随系统（ACM 动态管理）</ComboBoxItem>
+                                <ComboBoxItem Tag="sRGB">sRGB (IEC 61966-2-1)</ComboBoxItem>
+                                <ComboBoxItem Tag="DisplayP3">Display P3</ComboBoxItem>
+                                <ComboBoxItem Tag="DCI_P3">DCI-P3</ComboBoxItem>
+                                <ComboBoxItem Tag="AdobeRGB">Adobe RGB (1998)</ComboBoxItem>
+                                <ComboBoxItem Tag="BT2020">BT.2020</ComboBoxItem>
+                                <ComboBoxItem Tag="scRGB">scRGB (线性)</ComboBoxItem>
+                            </ComboBox>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+                <!-- 预览 -->
+                <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="12"><TextBlock Text="预览" FontSize="16" FontWeight="Bold"/><CheckBox x:Name="PreviewChk" Content="截图后在右下角显示缩略图预览" IsChecked="True"/></StackPanel>
+                </Border>
+                <!-- 动图录制 -->
+                <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="动图录制" FontSize="16" FontWeight="Bold"/>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="快捷键" VerticalAlignment="Center"/><TextBox x:Name="RecordHotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+G"/></Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="格式" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="AnimFormatCbo" Grid.Column="1"><ComboBoxItem Tag="GIF">GIF</ComboBoxItem><ComboBoxItem Tag="APNG">APNG</ComboBoxItem><ComboBoxItem Tag="AVIF">动画 AVIF</ComboBoxItem></ComboBox>
+                        </Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="帧率" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="RecordFpsCbo" Grid.Column="1"><ComboBoxItem>10 fps</ComboBoxItem><ComboBoxItem IsSelected="True">15 fps</ComboBoxItem><ComboBoxItem>20 fps</ComboBoxItem><ComboBoxItem>30 fps</ComboBoxItem></ComboBox>
+                        </Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="最大时长" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="MaxDurationCbo" Grid.Column="1"><ComboBoxItem>15 秒</ComboBoxItem><ComboBoxItem IsSelected="True">30 秒</ComboBoxItem><ComboBoxItem>60 秒</ComboBoxItem><ComboBoxItem>120 秒</ComboBoxItem></ComboBox>
+                        </Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1"/></Grid>
+                    </StackPanel>
+                </Border>
+                <!-- AI 翻译 -->
+                <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="AI 翻译设置" FontSize="16" FontWeight="Bold"/>
+                        <CheckBox x:Name="UseLlmChk" Content="使用自定义大语言模型翻译（关闭则用 Google 翻译）"/>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="API 端点" VerticalAlignment="Center"/><TextBox x:Name="LlmEndpointTxt" Grid.Column="1" PlaceholderText="https://api.openai.com/v1/chat/completions"/></Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="API 密钥" VerticalAlignment="Center"/><TextBox x:Name="LlmApiKeyTxt" Grid.Column="1" PlaceholderText="sk-..."/></Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="模型名称" VerticalAlignment="Center"/><TextBox x:Name="LlmModelTxt" Grid.Column="1" PlaceholderText="gpt-4o-mini"/></Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="系统提示词" VerticalAlignment="Center"/><TextBox x:Name="LlmPromptTxt" Grid.Column="1" PlaceholderText="你是一个专业翻译..." AcceptsReturn="True" Height="60"/></Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="目标语言" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="TargetLangCbo" Grid.Column="1">
+                                <ComboBoxItem Tag="zh-CN" IsSelected="True">中文（简体）</ComboBoxItem>
+                                <ComboBoxItem Tag="en">English</ComboBoxItem>
+                                <ComboBoxItem Tag="ja">日本語</ComboBoxItem>
+                                <ComboBoxItem Tag="ko">한국어</ComboBoxItem>
+                                <ComboBoxItem Tag="fr">Français</ComboBoxItem>
+                                <ComboBoxItem Tag="de">Deutsch</ComboBoxItem>
+                            </ComboBox>
+                        </Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="OCR 语言" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="OcrLangCbo" Grid.Column="1">
+                                <ComboBoxItem Tag="" IsSelected="True">跟随系统</ComboBoxItem>
+                                <ComboBoxItem Tag="zh-Hans">中文（简体）</ComboBoxItem>
+                                <ComboBoxItem Tag="en-US">English</ComboBoxItem>
+                                <ComboBoxItem Tag="ja">日本語</ComboBoxItem>
+                            </ComboBox>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+                <!-- 系统 -->
+                <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="系统" FontSize="16" FontWeight="Bold"/>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="截图快捷键" VerticalAlignment="Center"/><TextBox x:Name="HotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+S"/></Grid>
+                        <CheckBox x:Name="AutoStartChk" Content="开机自动启动"/><CheckBox x:Name="MinimizeTrayChk" Content="关闭时最小化到托盘" IsChecked="True"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+        <Grid Grid.Row="2" Padding="24,16" Background="{ThemeResource CardBackgroundFillColorDefault}">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+                <TextBlock x:Name="StatusTxt" Text="就绪" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                <Button x:Name="CaptureBtn" Grid.Column="1" Content="区域截图" Click="OnCaptureBtn" Width="110" Height="36" Margin="0,0,8,0" Style="{StaticResource AccentButtonStyle}"/>
+                <Button Grid.Column="2" Content="保存设置" Click="OnSaveSettings" Width="110" Height="36"/>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

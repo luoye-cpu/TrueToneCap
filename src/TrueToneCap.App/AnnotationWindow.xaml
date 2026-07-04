@@ -1,0 +1,60 @@
+<Window x:Class="TrueToneCap.App.AnnotationWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="TrueToneCap 标注"
+    Closed="OnClosed">
+
+    <Grid x:Name="RootGrid" RowDefinitions="Auto,*,Auto">
+        <!-- 工具栏 -->
+        <Grid Grid.Row="0" Padding="8" Background="{ThemeResource CardBackgroundFillColorDefault}">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+                <Button x:Name="RectBtn" Content="□" Width="36" Click="OnToolClick" Tag="Rect" ToolTipService.ToolTip="矩形"/>
+                <Button x:Name="EllipseBtn" Content="○" Width="36" Click="OnToolClick" Tag="Ellipse" ToolTipService.ToolTip="椭圆"/>
+                <Button x:Name="ArrowBtn" Content="→" Width="36" Click="OnToolClick" Tag="Arrow" ToolTipService.ToolTip="箭头"/>
+                <Button x:Name="PenBtn" Content="✎" Width="36" Click="OnToolClick" Tag="Pen" ToolTipService.ToolTip="画笔"/>
+                <Button x:Name="TextBtn" Content="T" Width="36" Click="OnToolClick" Tag="Text" ToolTipService.ToolTip="文字"/>
+                <Button x:Name="MosaicBtn" Content="▣" Width="36" Click="OnToolClick" Tag="Mosaic" ToolTipService.ToolTip="马赛克"/>
+                <Rectangle Width="1" Fill="{ThemeResource TextFillColorSecondaryBrush}" Margin="8,4"/>
+                <Button Content="↩" Width="36" Click="OnUndo" ToolTipService.ToolTip="撤销"/>
+                <Button Content="↪" Width="36" Click="OnRedo" ToolTipService.ToolTip="重做"/>
+                <Rectangle Width="1" Fill="{ThemeResource TextFillColorSecondaryBrush}" Margin="8,4"/>
+                <Button Click="OnSave" Style="{StaticResource AccentButtonStyle}" Width="70" Height="34" Margin="2,0"
+                        ToolTipService.ToolTip="保存图片到文件 (S)">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE8FB;" FontSize="14"/>
+                        <TextBlock Text="保存" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button Click="OnCopy" Width="70" Height="34" Margin="2,0"
+                        ToolTipService.ToolTip="复制图像到剪贴板 (Enter)">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE8C8;" FontSize="14"/>
+                        <TextBlock Text="复制" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button Click="OnDiscard" Width="70" Height="34" Margin="2,0"
+                        ToolTipService.ToolTip="丢弃截图 (Esc)">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE10A;" FontSize="14"/>
+                        <TextBlock Text="丢弃" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- 画布区域（图片+标注层居中对齐） -->
+        <Border Grid.Row="1" Background="#40000000">
+            <Grid x:Name="CanvasGrid" Background="Transparent">
+                <Image x:Name="PreviewImage" Stretch="Uniform"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <Canvas x:Name="AnnotationCanvas" Background="Transparent"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+
+        <!-- 底部状态 -->
+        <Grid Grid.Row="2" Padding="8" Background="{ThemeResource CardBackgroundFillColorDefault}">
+            <TextBlock x:Name="InfoTxt" Text="选择工具后在图像上拖动以添加标注" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        </Grid>
+    </Grid>
+</Window>
