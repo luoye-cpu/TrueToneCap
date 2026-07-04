@@ -77,5 +77,6 @@ TestResults/
 
 # ── TrueToneCap specific ──
 TrueToneCap.settings.json
+publish/
 # Keep shader source, discard compiled
 shaders/Compiled/
