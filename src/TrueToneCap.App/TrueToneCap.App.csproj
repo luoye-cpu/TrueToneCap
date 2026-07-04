@@ -30,4 +30,15 @@
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
   </ItemGroup>
 
+  <!-- Post-publish: copy PRI (compiled XAML resources) and XBF (binary XAML) to output -->
+  <Target Name="CopyPriAndXbf" AfterTargets="Publish">
+    <ItemGroup>
+      <_PriFiles Include="$(OutputPath)TrueToneCap.pri" />
+      <_XbfFiles Include="$(OutputPath)*.xbf" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PriFiles)" DestinationFolder="$(PublishDir)" Condition="Exists('$(OutputPath)TrueToneCap.pri')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_XbfFiles)" DestinationFolder="$(PublishDir)" Condition="Exists('$(OutputPath)*.xbf')" SkipUnchangedFiles="true" />
+    <Message Text="[TrueToneCap] Copied PRI and XBF resources to publish output" Importance="high" />
+  </Target>
+
 </Project>

@@ -16,7 +16,7 @@
                     <StackPanel Spacing="12">
                         <TextBlock Text="输出设置" FontSize="16" FontWeight="Bold"/>
                         <Grid ColumnDefinitions="120,*"><TextBlock Text="格式" VerticalAlignment="Center"/><ComboBox x:Name="FormatCbo" Grid.Column="1" SelectionChanged="OnFormatChanged"/></Grid>
-                        <Grid ColumnDefinitions="120,*,50,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged" SmallChange="0.1" LargeChange="0.5"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
+                        <Grid ColumnDefinitions="120,*,50,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
                         <Grid ColumnDefinitions="120,*,50"><TextBlock Text="保存路径" VerticalAlignment="Center"/><TextBox x:Name="PathTxt" Grid.Column="1"/><Button Grid.Column="2" Content="..." Click="OnBrowsePath" Width="40" Margin="4,0,0,0"/></Grid>
                         <Grid ColumnDefinitions="120,*"><TextBlock Text="文件名前缀" VerticalAlignment="Center"/><TextBox x:Name="PrefixTxt" Grid.Column="1"/></Grid>
                         <CheckBox x:Name="AvifPngSuffixChk" Content="为 AVIF 文件添加 .png 后缀" Visibility="Collapsed"/>
@@ -61,7 +61,7 @@
                 </Border>
                 <!-- 预览 -->
                 <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                    <StackPanel Spacing="12"><TextBlock Text="预览" FontSize="16" FontWeight="Bold"/><CheckBox x:Name="PreviewChk" Content="截图后在右下角显示缩略图预览" IsChecked="True"/></StackPanel>
+                    <StackPanel Spacing="12"><TextBlock Text="预览" FontSize="16" FontWeight="Bold"/><CheckBox x:Name="PreviewChk" Content="截图后在右下角显示缩略图预览"/></StackPanel>
                 </Border>
                 <!-- 动图录制 -->
                 <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">

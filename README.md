@@ -31,18 +31,14 @@
 
 ### 安装运行（普通用户）
 
-1. 安装 **[.NET 10 Desktop Runtime x64](https://dotnet.microsoft.com/download/dotnet/10.0)**（必需）
-2. 安装 **[Windows App Runtime 1.6](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)**（必需，WinUI 3 框架运行库）
-3. 下载 `TrueToneCap-v0.1-beta-win-x64.zip`，解压到任意目录
-4. 双击 `TrueToneCap.exe` 运行
+1. 下载 `TrueToneCap-v0.1-beta-win-x64.zip`，解压到任意目录
+2. 双击 `TrueToneCap.exe` 运行
 
-> **💡 提示**：Windows 11 24H2 用户可通过 Windows 更新自动获得 Windows App Runtime。如果已安装过其他 WinUI 3 应用（如 Dev Home、PowerToys 等），步骤 2 通常已满足。
+> **🎉 零依赖开箱即用**：.NET 10 运行时 + Windows App Runtime 1.6 均已嵌入程序目录，首次启动时自动部署，无需手动安装任何组件。
 
 ### 系统要求
 
 - **Windows 11** 24H2 (build 26100) 或更高
-- **.NET 10 Desktop Runtime x64**
-- **Windows App Runtime 1.6+**
 - 支持 HDR 的显示器（可选，SDR 模式正常使用）
 
 ### 开发者构建
