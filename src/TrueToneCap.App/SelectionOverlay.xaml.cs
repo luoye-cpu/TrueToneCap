@@ -11,6 +11,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using WinRT.Interop;
 using TrueToneCap.Core.Annotation;
+using TrueToneCap.App.Services;
 
 namespace TrueToneCap.App;
 
@@ -49,15 +50,24 @@ public sealed partial class SelectionOverlay : Window
     private static extern int SetWindowLong(nint hWnd, int nIndex, int dwNewLong);
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(nint hwnd);
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmExtendFrameIntoClientArea(nint hwnd, ref int margins);
 
     private static readonly nint HWND_TOPMOST = new(-1);
     private const uint SWP_SHOWWINDOW = 0x0040;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOSIZE = 0x0001;
     private const int GWL_STYLE = -16;
+    private const int GWL_EXSTYLE = -20;
     private const int WS_CAPTION = 0x00C00000;
     private const int WS_THICKFRAME = 0x00040000;
     private const int WS_MINIMIZEBOX = 0x00020000;
     private const int WS_MAXIMIZEBOX = 0x00010000;
     private const int WS_SYSMENU = 0x00080000;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_APPWINDOW = 0x00040000;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
 
     private readonly int _vx, _vy, _vw, _vh;  // 物理像素
     private double _dpiScale = 1.0;
@@ -94,9 +104,21 @@ public sealed partial class SelectionOverlay : Window
         style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
         SetWindowLong(hwnd, GWL_STYLE, style);
 
+        // 移除任务栏图标 + 防止意外激活（保持为透明覆盖层）
+        int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+        exStyle |= WS_EX_NOACTIVATE;
+        exStyle &= ~WS_EX_APPWINDOW;
+        exStyle |= WS_EX_TOOLWINDOW;
+        SetWindowLong(hwnd, GWL_EXSTYLE, exStyle);
+
         this.Activated += (_, _) =>
         {
-            _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh, SWP_SHOWWINDOW);
+            // 全屏无边框覆盖：覆盖整个虚拟桌面（支持负坐标多屏）
+            _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
+                SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            // 消除 DWM 窗口阴影（无边框窗口可能仍有 1px 边缘）
+            int dwmMargin = 1;
+            _ = DwmExtendFrameIntoClientArea(hwnd, ref dwmMargin);
             // 获取 DPI 缩放：主路径 GetDpiForWindow，回落 XamlRoot.RasterizationScale
             uint dpi = GetDpiForWindow(hwnd);
             if (dpi > 0)
@@ -115,6 +137,12 @@ public sealed partial class SelectionOverlay : Window
         RootGrid.PointerPressed += OnPointerPressed;
         RootGrid.PointerMoved += OnPointerMoved;
         RootGrid.PointerReleased += OnPointerReleased;
+
+        // ── 字体注入 ──
+        if (RootGrid.IsLoaded)
+            FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+        else
+            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
 
         // ── 标注画布鼠标事件（在画布元素上） ──
         AnnotationCanvas.PointerPressed += OnAnnoCanvasPressed;
@@ -628,37 +656,52 @@ public sealed partial class SelectionOverlay : Window
             var bounds = layer.GetBounds();
             int lx = Math.Max(0, (int)bounds.Left), ly = Math.Max(0, (int)bounds.Top);
             int rx = Math.Min(imgW - 1, (int)bounds.Right), ry = Math.Min(imgH - 1, (int)bounds.Bottom);
+            if (lx >= imgW || ly >= imgH || rx < 0 || ry < 0) continue;
 
-            if (layer is MosaicLayer)
+            byte lr = 255, lg = 0, lb = 0;
+            // 从图层样式中提取颜色（若图层有 Style 属性）
+            if (layer is RectangleLayer rl) { lr = (byte)(rl.Style.StrokeColor.R * 255); lg = (byte)(rl.Style.StrokeColor.G * 255); lb = (byte)(rl.Style.StrokeColor.B * 255); }
+            else if (layer is EllipseLayer el) { lr = (byte)(el.Style.StrokeColor.R * 255); lg = (byte)(el.Style.StrokeColor.G * 255); lb = (byte)(el.Style.StrokeColor.B * 255); }
+            else if (layer is ArrowLayer al) { lr = (byte)(al.Style.StrokeColor.R * 255); lg = (byte)(al.Style.StrokeColor.G * 255); lb = (byte)(al.Style.StrokeColor.B * 255); }
+            else if (layer is FreehandLayer fl) { lr = (byte)(fl.Style.StrokeColor.R * 255); lg = (byte)(fl.Style.StrokeColor.G * 255); lb = (byte)(fl.Style.StrokeColor.B * 255); }
+            int t = 2;
+
+            switch (layer)
             {
-                for (int y = ly; y <= ry; y += 6)
-                for (int x = lx; x <= rx; x += 6)
-                {
-                    int r = 0, g = 0, b = 0, cnt = 0;
-                    for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
-                    for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
-                    { int idx = ((y + dy) * imgW + (x + dx)) * 4; b += result[idx]; g += result[idx + 1]; r += result[idx + 2]; cnt++; }
-                    byte av = (byte)((r + g + b) / (cnt * 3));
-                    for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
-                    for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
-                    { int idx = ((y + dy) * imgW + (x + dx)) * 4; result[idx] = result[idx + 1] = result[idx + 2] = av; }
-                }
-            }
-            else
-            {
-                int t = 2;
-                for (int y = ly; y <= Math.Min(ly + t, ry); y++)
-                for (int x = lx; x <= rx; x++)
-                { int idx = (y * imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
-                for (int y = Math.Max(ly, ry - t); y <= ry; y++)
-                for (int x = lx; x <= rx; x++)
-                { int idx = (y * imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
-                for (int x = lx; x <= Math.Min(lx + t, rx); x++)
-                for (int y = ly; y <= ry; y++)
-                { int idx = (y * imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
-                for (int x = Math.Max(lx, rx - t); x <= rx; x++)
-                for (int y = ly; y <= ry; y++)
-                { int idx = (y * imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
+                case MosaicLayer:
+                    for (int y = ly; y <= ry; y += 6)
+                    for (int x = lx; x <= rx; x += 6)
+                    {
+                        int r2 = 0, g2 = 0, b2 = 0, cnt = 0;
+                        for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
+                        for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
+                        { int idx = ((y + dy) * imgW + (x + dx)) * 4; b2 += result[idx]; g2 += result[idx + 1]; r2 += result[idx + 2]; cnt++; }
+                        byte av = (byte)((r2 + g2 + b2) / (cnt * 3));
+                        for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
+                        for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
+                        { int idx = ((y + dy) * imgW + (x + dx)) * 4; result[idx] = result[idx + 1] = result[idx + 2] = av; }
+                    }
+                    break;
+
+                case RectangleLayer:
+                case EllipseLayer:
+                case ArrowLayer:
+                case FreehandLayer:
+                case TextLayer:
+                    // 边框渲染：四边条纹（上/下/左/右）
+                    for (int y = ly; y <= Math.Min(ly + t, ry); y++)
+                    for (int x = lx; x <= rx; x++)
+                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
+                    for (int y = Math.Max(ly, ry - t); y <= ry; y++)
+                    for (int x = lx; x <= rx; x++)
+                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
+                    for (int x = lx; x <= Math.Min(lx + t, rx); x++)
+                    for (int y = ly; y <= ry; y++)
+                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
+                    for (int x = Math.Max(lx, rx - t); x <= rx; x++)
+                    for (int y = ly; y <= ry; y++)
+                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
+                    break;
             }
         }
         return result;

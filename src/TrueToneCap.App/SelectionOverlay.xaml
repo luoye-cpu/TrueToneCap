@@ -49,14 +49,14 @@
 
         <!-- ═══════ 主操作工具栏（选区完成后显示） ═══════ -->
         <Border x:Name="Toolbar" 
-                Background="#F2FFFFFF" CornerRadius="8" 
-                BorderBrush="#FF888888" BorderThickness="1"
+                Background="{ThemeResource CardBackgroundFillColorDefault}" CornerRadius="8" 
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
                 Padding="6,4" Visibility="Collapsed"
                 HorizontalAlignment="Left" VerticalAlignment="Top">
             <StackPanel Orientation="Horizontal" Spacing="4">
                 <Button x:Name="BtnConfirm" Width="70" Height="36"
                         Click="OnConfirm" ToolTipService.ToolTip="保存截图到文件并复制 (Enter)"
-                        Background="#FF4488FF" Foreground="White">
+                        Style="{StaticResource AccentButtonStyle}">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon Glyph="&#xE8FB;" FontSize="14"/>
                         <TextBlock Text="保存" FontSize="12" VerticalAlignment="Center"/>
@@ -102,8 +102,8 @@
 
         <!-- ═══════ 标注工具栏（标注模式下显示） ═══════ -->
         <Border x:Name="AnnotationToolbar" 
-                Background="#F2FFFFFF" CornerRadius="8" 
-                BorderBrush="#FF888888" BorderThickness="1"
+                Background="{ThemeResource CardBackgroundFillColorDefault}" CornerRadius="8" 
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
                 Padding="6,4" Visibility="Collapsed"
                 HorizontalAlignment="Left" VerticalAlignment="Top">
             <StackPanel Orientation="Horizontal" Spacing="3">

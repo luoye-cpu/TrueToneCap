@@ -1,207 +1,108 @@
-# 真色截图（TrueToneCap）— HDR现代化截图工具 / HDR Modern Screenshot Tool
+# TrueToneCap / 真色截图
 
-> **v0.1.2 Beta** · Windows 11 24H2+ · C# 13 · WinUI 3 · .NET 10 · DXGI/DirectX
+> **v0.1.5 Beta** · Windows 11 24H2+ · WinUI 3 · .NET 10 · DXGI
 
-<br/>
+HDR screenshot tool — captures Float16 framebuffer via DXGI, full-screen overlay annotation, OCR & translation. Zero dependencies.
 
-**English** — TrueToneCap is a scalpel made for pixels. In an era where HDR displays are everywhere but screenshot tools remain stuck in SDR, TrueToneCap takes a different path: it captures your display's Float16 framebuffer directly from DXGI, preserving every nit of light, then gracefully tone-maps it into what your eyes can see with GPU shaders. Selection, annotation, OCR, and translation all happen on a full-screen overlay in real time — no popups, no context switches. Export to PNG (mathematically lossless), JPEG Gain Map (Ultra HDR compatible), AVIF, JPEG XL, and more. Translation engine features Youdao + Google multi-endpoint fallback with optional LLM backend.
-
-**中文** — TrueToneCap 是一把为像素而生的手术刀。HDR 显示器早已普及，截图工具却仍停留在 SDR 时代——TrueToneCap 走了另一条路：从 DXGI 底层直接捕获 Float16 浮点帧缓冲，完整保留每一尼特的光照信息，再通过 GPU 着色器将 HDR 优雅地映射到人眼可视范围。框选、标注、OCR、翻译——全部在按下快捷键后的全屏覆盖层上实时完成，无需弹窗，无需跳转。导出格式涵盖 PNG（数学无损）、JPEG Gain Map（Ultra HDR 兼容）、AVIF、JPEG XL 等。翻译引擎内置有道 + Google 多端点自动降级，LLM 后端可按需接入。
-
-这是 0.1.2 测试版，功能在快速迭代中。欢迎反馈。 / This is v0.1.2 beta — rapidly iterating. Feedback welcome.
+HDR 截图工具 — DXGI 底层捕获 Float16 帧缓冲，全屏覆盖层标注/OCR/翻译。零依赖开箱即用。
 
 ---
-
-## Features / 功能亮点
-
-| Module / 模块 | Capability / 能力 |
-|---------------|-------------------|
-| 📷 **Capture / 屏幕捕获** | DXGI Desktop Duplication, Float16 HDR / BGRA8 SDR, GDI fallback / DXGI 桌面复制, Float16 HDR / BGRA8 SDR, GDI 回退 |
-| 🎨 **Color / 色彩管理** | Display ICC detection & baking, ACM adaptation, BT.2020 / sRGB gamut / 显示器 ICC 检测与烘焙, ACM 适配, BT.2020 / sRGB 色域 |
-| ✏️ **Annotation / 矢量标注** | Rect, Ellipse, Arrow, Pen, Text, Mosaic — full-screen overlay real-time editing / 矩形/椭圆/箭头/画笔/文字/马赛克, 全屏覆盖层实时编辑 |
-| 🖼️ **Export / 多格式导出** | AVIF (HDR) · JPEG XL (HDR) · JPEG Gain Map (Ultra HDR) · PNG · WebP · JPEG LI · BMP |
-| 🔤 **OCR / 文字识别** | Windows built-in OCR engine, multi-language / Windows 内置 OCR 引擎, 多语言支持 |
-| 🌐 **Translate / 翻译** | Youdao + Google multi-endpoint fallback + configurable LLM (OpenAI/DeepSeek compatible) / 有道 + Google 多端点降级 + 可配置 LLM |
-| 🎬 **Recording / 动图录制** | WebP / APNG / AVIF / GIF, ring buffer + frame diff detection / 环形缓冲 + 帧差检测 |
-| ⌨️ **Hotkeys / 全局热键** | Customizable screenshot/record hotkeys, tray background running / 可自定义截图/录制快捷键, 托盘后台运行 |
 
 ## Quick Start / 快速开始
 
-### Installation / 安装运行
+1. Download `TrueToneCap-v0.1.5-beta-win-x64.zip`, extract / 下载解压
+2. Run `TrueToneCap.exe` / 双击运行
+3. Press `Ctrl+Shift+S` to capture / 按快捷键截图
 
-1. Download `TrueToneCap-v0.1.2-beta-win-x64.zip`, extract to any folder / 下载 zip 并解压到任意目录
-2. Double-click `TrueToneCap.exe` / 双击 `TrueToneCap.exe`
-
-> **🎉 Zero dependencies / 零依赖开箱即用**：.NET 10 runtime + Windows App Runtime 1.6 are embedded in the app directory and auto-deployed on first launch. No manual installation needed. / .NET 10 运行时 + Windows App Runtime 1.6 均已嵌入程序目录, 首次启动时自动部署, 无需手动安装。
-
-### System Requirements / 系统要求
-
-- **Windows 11** 24H2 (build 26100) or later. Windows 10 and older Windows 11 builds may also work but are untested. / Windows 11 24H2 (build 26100) 或更高。Windows 10 及旧版 Windows 11 理论上也可运行, 但未经充分测试。
-- HDR-capable display is optional (SDR mode works perfectly) / 支持 HDR 的显示器可选（SDR 模式正常使用）
-
-### Developer Build / 开发者构建
-
-```powershell
-git clone https://github.com/your-org/TrueToneCap.git
-cd TrueToneCap
-
-# Restore dependencies / 还原依赖
-dotnet restore
-
-# Compile shaders (requires dxc.exe, included in Windows SDK) / 编译着色器
-.\shaders\CompileShaders.ps1
-
-# Build & run / 构建 & 运行
-dotnet run --project src\TrueToneCap.App -c Release
-```
-
-### Usage / 使用
-
-1. App lives in system tray after launch / 启动后软件驻留系统托盘
-2. Press `Ctrl+Shift+S` (default hotkey) to capture / 按默认热键触发截图
-3. Drag to select region → toolbar appears / 拖拽框选区域 → 工具栏出现:
-   - **Save / 保存** → Encode, save & copy to clipboard / 编码保存 + 复制到剪贴板
-   - **Annotate / 标注** → Draw directly on selection (rect, arrow, mosaic, etc.) / 选区上直接绘图
-   - **Copy / 复制** → Copy image to clipboard / 直接复制图像
-   - **OCR / 识字** → Extract text from selection / 提取选区文字
-   - **Translate / 翻译** → Recognize & translate text / 识别并翻译
-4. `Enter` to save, `Esc` to cancel / `Enter` 保存, `Esc` 取消
-
-## Project Structure / 项目结构
-
-```
-TrueToneCap/
-├── docs/
-│   └── architecture-design.md    # Architecture documentation / 架构设计文档
-├── shaders/
-│   ├── ToneMapping.hlsl          # HDR→SDR tone mapping / 色调映射着色器
-│   └── MosaicEffect.hlsl         # Mosaic effect / 马赛克效果着色器
-├── src/
-│   ├── TrueToneCap.Core/         # Core library / 核心类库
-│   │   ├── Capture/              # Screen capture (DXGI/D3D11) / 屏幕捕获
-│   │   ├── Annotation/           # Vector annotation engine / 矢量标注引擎
-│   │   ├── Encoding/             # Multi-format encoders (Magick.NET) / 多格式编码器
-│   │   ├── ColorManagement/      # Color management (ICC/ACM) / 色彩管理
-│   │   ├── Processing/           # GPU tone mapping / GPU 色调映射
-│   │   └── Services/             # OCR / Translation services / OCR 翻译服务
-│   ├── TrueToneCap.App/          # WinUI 3 desktop app / WinUI 3 桌面应用
-│   └── TrueToneCap.Test/         # Test project / 测试项目
-├── tools/
-│   └── DiagCapture/              # Diagnostic tool / 诊断工具
-└── Publish.ps1                   # One-click publish script / 一键发布脚本
-```
-
-## Output Formats / 输出格式
-
-| Format / 格式 | HDR | Bit Depth / 位深 | Default Quality / 默认质量 | Encoder / 编码引擎 |
-|---------------|-----|-------------------|---------------------------|---------------------|
-| PNG | ✅ cICP | 8/16-bit | Lossless / 无损 | Magick.NET |
-| JPEG Gain Map | ✅ Ultra HDR | 8-bit + gain map | Dist 1.0 / Gain 85% / 距离 1.0 / 增益 85% | Magick.NET + MPF |
-| JPEG XL | ✅ Native / 原生 | Float/16-bit | Visually lossless 0.8 / 视觉无损 | Magick.NET (libjxl) |
-| AVIF | ✅ Native / 原生 | 10/12-bit | CRF 18 | libaom / QSV / NVENC |
-| WebP | ❌ | 8-bit | 92% | Magick.NET |
-| JPEG LI | ❌ | 8-bit | Dist 1.0 / 距离 1.0 | Magick.NET (jpegli) |
-| BMP | ❌ | 8-bit | Lossless / 无损 | Magick.NET |
-
-## Dependencies / 主要依赖
-
-| Package / 包 | Purpose / 用途 |
-|-------------|----------------|
-| [Vortice.Windows](https://github.com/amerkoleci/Vortice.Windows) | DirectX managed bindings (DXGI/D3D11/D3D12) / DirectX 托管绑定 |
-| [Magick.NET](https://github.com/dlemstra/Magick.NET) | Image encoding/decoding (PNG/JXL/AVIF/WebP) / 图像编解码 |
-| [Microsoft.WindowsAppSDK](https://github.com/microsoft/WindowsAppSDK) | WinUI 3 framework / WinUI 3 框架 |
-| [Microsoft.Graphics.Win2D](https://github.com/microsoft/Win2D) | Direct2D Canvas wrapper / Direct2D Canvas 封装 |
+> **System / 系统**: Windows 11 24H2+ · HDR display optional / HDR 显示器可选
 
 ---
 
-## Changelog / 版本日志
+## Features / 功能
 
-### v0.1.2 Beta — 2026-07-04
+| Feature | Detail |
+|---------|--------|
+| 📷 Capture / 捕获 | DXGI Desktop Duplication, Float16 HDR / BGRA8 SDR, GDI fallback |
+| 🎨 Color / 色彩 | ICC detection & baking, BT.2020 / sRGB / Display P3, ACM |
+| ✏️ Annotate / 标注 | Rect, Ellipse, Arrow, Pen, Text, Mosaic — full-screen overlay |
+| 🖼️ Export / 导出 | PNG (lossless HDR) · JPEG Gain Map (Ultra HDR) · JPEG XL · AVIF (QSV/NVENC) · WebP · JPEG LI · BMP |
+| 🔤 OCR / 识字 | Windows OCR + preprocess (contrast / scale-up / threshold) / 预处理管线 |
+| 🌐 Translate / 翻译 | Youdao → Google multi-endpoint → custom LLM (OpenAI/DeepSeek) |
+| ⌨️ Hotkeys / 热键 | Recordable / 可录制 · tray minimize / 托盘 · autostart / 开机启动 |
 
-- 🔤 全局字体切换为 **HarmonyOS Sans SC (鸿蒙黑体)**，回落链：微软雅黑 → Segoe UI
-- 🚀 **开机静默托盘启动** — 注册表 `--autostart` 参数独立启动流程，不显示窗口
-- 🎨 **Gain Map 增益图模式选择** — RGB 彩色增益图（色彩精度最高）/ 灰度增益图（体积更小）
-- 🎯 **ICC 检测逻辑修正** — 独立于 sRGB 描述文本，任意 >500 字节 ICC 即视为自定义并默认启用烘焙
-- 🖥️ **高色深显示器输出位深保护** — AVIF 10-bit / JPEG XL 16-bit / PNG 16-bit 自动匹配防止条带效应
-- 🔧 AVIF 色度采样 4:2:0/4:2:2/4:4:4 选择器 + libaom 后端自动应用
-- 🔧 修复 WinUI 3 `Window` 无 `FontFamily` 属性导致 XAML 编译器静默失败 — 改用隐式 Style
-- 🔧 `ColorProfileProvider` WCS 失败时返回 `null` 而非伪造 sRGB ICC
+---
 
-### v0.1.1 Beta — 2026-07-04
+## Output Formats / 输出格式
 
-- 🖼️ 新增 **JPEG Gain Map (Ultra HDR)** 输出格式 — Gray/RGB 双模增益图 + MPF 封装
-- 📁 新增 **文件归档**选项 — 按年/月/日自动创建子目录
-- 🔧 修复双击 exe 启动崩溃 — 自动复制 PRI/XBF 资源 + MSIX 框架嵌入
-- 🔧 修复 DPI 缩放下选区蓝线与实际范围不匹配
-- 🔧 修复录屏质量滑块范围缺失导致启动闪退
-- 🔧 修复质量设置重启后丢失
-- 🔧 防止多实例同时运行
-- 🔧 配置文件自动检测 EXE 目录写入权限，无权限时回落 AppData
-- 🎨 选区蓝色方框改为四边细线 + 浮动尺寸标签
-- 🌐 翻译引擎新增有道（国内首选）+ Google 多端点自动降级
-- 🖊️ 标注功能集成到全屏覆盖层，无需弹窗
-- 📋 剪贴板改为 `SetStorageItems` 文件粘贴（兼容微信/QQ）
-- 🎯 窗口关闭时自动保存设置
+| Format | HDR | Bit Depth | Encoder |
+|--------|-----|-----------|---------|
+| PNG | ✅ cICP | 8/16-bit | Magick.NET |
+| JPEG Gain Map | ✅ Ultra HDR | 8-bit + gain map | Magick.NET + MPF |
+| JPEG XL | ✅ | Float/16-bit | libjxl |
+| AVIF | ✅ | 10/12-bit | libaom / QSV / NVENC |
+| WebP | ❌ | 8-bit | Magick.NET |
+| JPEG LI | ❌ | 8-bit | jpegli |
+| BMP | ❌ | 8-bit | Magick.NET |
 
-### v0.1 Beta — 2026-07-04
+---
 
-**First public beta release. / 首个公开测试版。**
+## Build / 构建
 
-#### 🎯 Core / 核心功能
-- DXGI Desktop Duplication capture with Float16 HDR support / DXGI 桌面复制, Float16 HDR 支持
-- GPU tone mapping via HLSL pixel shaders (Hable Filmic) / GPU 色调映射 (HLSL 像素着色器)
-- GDI fallback for locked screens / UAC / GDI 回退 (锁屏/UAC 场景)
-- Per-monitor DPI awareness (PerMonitorV2) / 逐显示器 DPI 感知
-- Screen-coordinate-accurate selection with DPI-scale correction / DPI 缩放校正的屏幕坐标精确选区
+```powershell
+dotnet restore
+dotnet run --project src\TrueToneCap.App -c Release
+.\Publish.ps1   # one-click publish / 一键发布
+```
 
-#### ✏️ Annotation / 标注
-- Full-screen overlay annotation: Rect, Ellipse, Arrow, Pen, Text, Mosaic / 全屏覆盖层标注
-- Infinite undo/redo via command pattern / 命令模式无限撤销/重做
-- Real-time preview during drawing / 绘制时实时预览
-- Physical-pixel-accurate coordinate mapping / 物理像素精确坐标映射
+---
 
-#### 🖼️ Export / 导出
-- **PNG**: Mathematically lossless, 8/16-bit, cICP HDR metadata / 数学无损 HDR
-- **JPEG Gain Map**: ISO 21496-1 Ultra HDR, MPF + XMP container, Gray/RGB dual-mode gain map / Ultra HDR 双模增益图
-- **JPEG XL**: Visually lossless (butteraugli dist 0.8), float/16-bit HDR, effort=7 / 视觉无损
-- **AVIF**: CRF 18 default, libaom / Intel QSV / NVIDIA NVENC auto-select, chroma 444 / 三后端
-- **WebP**: 92% quality, method=6, alpha-quality=100 / 视觉近无损
-- **JPEG LI**: butteraugli distance 1.0, DCT float precision / DCT 浮点精度
-- Clipboard: `SetStorageItems` (file paste) for WeChat/QQ/Explorer compatibility / 文件粘贴兼容
+## Changelog / 更新日志
 
-#### 🔤 OCR & Translation / 识别与翻译
-- Windows built-in OCR engine, multi-language / Windows 内置 OCR
-- Youdao Translate (primary, China-friendly, free, no API key) / 有道翻译 (国内首选)
-- Google Translate multi-endpoint auto-fallback (gtx, chrome-ex) / Google 多端点降级
-- Configurable LLM backend (OpenAI/DeepSeek compatible API) / 可配置 LLM
+### v0.1.5 — 2026-07-05
 
-#### 🎬 Recording / 动图录制
-- WebP / APNG / AVIF / GIF animation / 动画录制
-- Ring buffer + frame diff detection / 环形缓冲 + 帧差检测
+- 🎨 Theme: 完整重写主题系统 — 浅色/深色/OLED/跟随系统四种模式全面可用
+- 🖼️ Window: 默认窗口尺寸增大至 1260×840
+- 🏷️ TitleBar: 深色模式标题栏扩展消除顶部白条
+- 🛠️ Toolbar: 截图预览工具栏深色主题适配（硬编码色 → 主题感知）
+- 🧹 Deps: Magick.NET 14.5.0 → 14.14.0 (消除 500+ 安全漏洞警告)
+- 🔧 Fix: WinUI 3 `RequestedTheme` 启动崩溃修复
+- 🔧 Fix: HotkeyManager 窗口子类化失败保护
+- 🔧 Fix: TrayIcon/StartupManager 初始化异常防御
+- 📐 Layout: OCR 引擎选项移至 AI 翻译面板
 
-#### 🎨 Color / 色彩管理
-- Display ICC profile detection & sRGB baking / 显示器 ICC 检测与烘焙
-- ACM (Auto Color Management) detection / ACM 检测
-- BT.2020 / sRGB / Display P3 / Adobe RGB color space / 多色彩空间
+### v0.1.4 — 2026-07-05
 
-#### 🛠️ Engineering / 工程
-- .NET 10 self-contained publish (zero dependencies) / 自包含发布 (零依赖)
-- Windows App Runtime 1.6 MSIX auto-deployment / 框架自动部署
-- `Publish.ps1` one-click release script / 一键发布脚本
-- Apache 2.0 License / Apache 2.0 开源许可证
+- 🖥️ Window: `ExtendsContentIntoTitleBar` 消除深色模式顶部白条
+- 🎨 Theme: App.xaml ThemeDictionaries 标准化 (Default/Light/Dark)
+- 🖊️ Overlay: SelectionOverlay 工具栏主题感知化
+- 📦 OCR: ONNX DirectML/CPU 引擎诊断与验证
 
-#### ⚠️ Known Issues / 已知问题
-- JPEG Gain Map compatibility depends on viewer (Chrome 124+, Google Photos) / JPEG Gain Map 需新版查看器
-- Animation recording UI not yet integrated into selection overlay / 动图录制界面尚未集成
-- HDR capture may fail on some dual-GPU laptops / 部分双显卡笔记本 HDR 捕获可能失败
-- Youdao Translate signature key may expire and require update / 有道签名 Key 可能过期需更新
+### v0.1.3 — 2026-07-05
+
+- 🔧 DPI: `SetProcessDpiAwarenessContext` 强制 PerMonitorV2 修复窗口模糊
+- 🔧 Font: `ThemeDictionaries` 覆盖 WinUI 控件模板字体 / 微软雅黑优先
+- 🔧 Close: `AppWindow.Closing` 替代不可取消的 `Window.Closed`
+- 🔧 Hotkey: `GCHandle` 防 GC 闪退 + 单次窗口子类化
+- 🔧 OCR: 双 Pass 预处理管线（对比度增强 / 放大 / 自适应二值化）
+- ✨ Hotkey record button / 快捷键录制按钮 — 按键即录即时生效
+
+### v0.1.2 — 2026-07-04
+
+- 🔤 HarmonyOS Sans SC 内嵌 / 回落微软雅黑
+- 🚀 开机静默托盘 (`--autostart`)
+- 🎨 Gain Map 灰度/RGB 双模 + ICC 检测修正
+- 🖥️ AVIF 10-bit / JXL 16-bit / PNG 16-bit 高色深保护
+
+### v0.1.1 — 2026-07-04
+
+- 🖼️ JPEG Gain Map (Ultra HDR) + 文件归档
+- 🌐 有道 + Google 翻译多端点降级
+- 🖊️ 全屏覆盖层标注 + 剪贴板文件粘贴
 
 ---
 
 ## License / 许可证
 
-Licensed under **Apache License 2.0**. See [LICENSE](./LICENSE) for full text. / 基于 **Apache License 2.0** 开源。详见 [LICENSE](./LICENSE)。
-
----
+Apache 2.0 · [LICENSE](./LICENSE)
 
 **TrueToneCap** — Every frame deserves to be remembered. / 让每一帧都值得被记住。

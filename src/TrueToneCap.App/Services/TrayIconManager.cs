@@ -18,23 +18,33 @@ public sealed class TrayIconManager : IDisposable
     {
         _window = window;
 
-        _contextMenu = new System.Windows.Forms.ContextMenuStrip();
-        _contextMenu.Items.Add("打开主窗口", null, (_, _) => Restore());
-        _contextMenu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
-        _contextMenu.Items.Add("退出 TrueToneCap", null, (_, _) => ExitApp());
+        try
+        {
+            _contextMenu = new System.Windows.Forms.ContextMenuStrip();
+            _contextMenu.Items.Add("打开主窗口", null, (_, _) => Restore());
+            _contextMenu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+            _contextMenu.Items.Add("退出 TrueToneCap", null, (_, _) => ExitApp());
 
-        _notifyIcon = new System.Windows.Forms.NotifyIcon
+            _notifyIcon = new System.Windows.Forms.NotifyIcon
+            {
+                Icon = System.Drawing.SystemIcons.Application,
+                Text = "TrueToneCap",
+                ContextMenuStrip = _contextMenu,
+                Visible = true
+            };
+            _notifyIcon.MouseClick += (_, e) =>
+            {
+                if (e.Button == System.Windows.Forms.MouseButtons.Left)
+                    Restore();
+            };
+        }
+        catch (Exception ex)
         {
-            Icon = System.Drawing.SystemIcons.Application,
-            Text = "TrueToneCap",
-            ContextMenuStrip = _contextMenu,
-            Visible = true
-        };
-        _notifyIcon.MouseClick += (_, e) =>
-        {
-            if (e.Button == System.Windows.Forms.MouseButtons.Left)
-                Restore();
-        };
+            System.Diagnostics.Debug.WriteLine($"[TrayIconManager] 托盘初始化失败: {ex.Message}");
+            // 托盘不可用时不影响主功能，创建空壳对象防止 NullReferenceException
+            _contextMenu = new System.Windows.Forms.ContextMenuStrip();
+            _notifyIcon = new System.Windows.Forms.NotifyIcon { Visible = false };
+        }
     }
 
     public void MinimizeToTray()
@@ -58,11 +68,14 @@ public sealed class TrayIconManager : IDisposable
             _window.DispatcherQueue.TryEnqueue(() => OnCaptureHotkey?.Invoke()));
     }
 
+    public Action? OnExitApp { get; set; }
+
     private void ExitApp()
     {
         _notifyIcon.Visible = false;
         HotkeyManager.Unregister();
-        System.Environment.Exit(0);
+        OnExitApp?.Invoke();  // 通知 MainWindow 设置 _isExiting 标志
+        _window.Close();
     }
 
     public void Dispose()

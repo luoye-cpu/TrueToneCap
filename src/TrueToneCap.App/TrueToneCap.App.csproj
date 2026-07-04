@@ -15,9 +15,9 @@
     <ApplicationTitle>TrueToneCap</ApplicationTitle>
     <ApplicationId>com.trueonecap.app</ApplicationId>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.1.2</Version>
-    <AssemblyVersion>0.1.2.0</AssemblyVersion>
-    <FileVersion>0.1.2.0</FileVersion>
+    <Version>0.1.5</Version>
+    <AssemblyVersion>0.1.5.0</AssemblyVersion>
+    <FileVersion>0.1.5.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,6 +31,17 @@
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+  </ItemGroup>
+
+  <!-- 内嵌字体: 将 Fonts/ 目录中的所有 .ttf/.otf 作为内容复制到输出 -->
+  <ItemGroup>
+    <Content Include="Fonts\**\*.ttf" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <Content Include="Fonts\**\*.otf" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <!-- 字体安装说明 (README) -->
+  <ItemGroup>
+    <Content Include="Fonts\README_FONTS.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
   <!-- Post-publish: copy PRI (compiled XAML resources) and XBF (binary XAML) to output -->

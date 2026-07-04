@@ -185,7 +185,7 @@ public static class ColorProfileProvider
             img.ReadPixels(bgra, ps);
             img.SetProfile(new ImageMagick.ColorProfile(iccProfile));
             // 转换为 sRGB（使用内置 sRGB profile）
-            img.TransformColorSpace(ImageMagick.ColorProfile.SRGB);
+            img.TransformColorSpace(ImageMagick.ColorProfiles.SRGB);
             // 移除 ICC 配置文件（已烘焙到像素中）
             img.RemoveProfile("icc");
             // 导出为 BGRA 原始像素

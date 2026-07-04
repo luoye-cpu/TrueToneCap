@@ -3,14 +3,14 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$OutputDir = "publish\TrueToneCap-v0.1.2-beta"
+    [string]$OutputDir = "publish\TrueToneCap-v0.1.5-beta"
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "╔══════════════════════════════════╗"
-Write-Host "║  TrueToneCap v0.1.2 Beta 发布脚本 ║"
+Write-Host "║  TrueToneCap v0.1.5 Beta 发布脚本 ║"
 Write-Host "╚══════════════════════════════════╝"
 Write-Host ""
 
@@ -71,6 +71,15 @@ if (Test-Path $MsixDir) {
 
 # ── Copy static files ──
 Copy-Item README.md, LICENSE $OutputDir -Force
+
+# ── Copy bundled fonts ──
+if (Test-Path "src\TrueToneCap.App\Fonts") {
+    Copy-Item "src\TrueToneCap.App\Fonts" $OutputDir -Recurse -Force
+}
+$binFonts = Join-Path $BinDir "Fonts"
+if (Test-Path $binFonts) {
+    Copy-Item "$binFonts\*" "$OutputDir\Fonts\" -Force -ErrorAction SilentlyContinue
+}
 
 # ── Cleanup ──
 Remove-Item $OutputDir\*.pdb -Force -ErrorAction SilentlyContinue

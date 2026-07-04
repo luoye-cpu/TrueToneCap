@@ -5,16 +5,32 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Application.Resources>
         <ResourceDictionary>
+            <!-- ═══ 覆盖 WinUI 主题字体 ═══ -->
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default">
+                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
 
-            <!-- 全局默认字体：鸿蒙黑体 > 微软雅黑 > Segoe UI > 系统后备 -->
+            <!-- 全局默认字体隐式回退 -->
             <Style TargetType="TextBlock">
-                <Setter Property="FontFamily" Value="HarmonyOS Sans SC, Microsoft YaHei, Segoe UI, sans-serif" />
+                <Setter Property="FontFamily" Value="Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif" />
             </Style>
             <Style TargetType="Control">
-                <Setter Property="FontFamily" Value="HarmonyOS Sans SC, Microsoft YaHei, Segoe UI, sans-serif" />
+                <Setter Property="FontFamily" Value="Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif" />
             </Style>
 
             <!-- 应用级主题色 -->

@@ -5,6 +5,5 @@
     <Project Path="src/TrueToneCap.Test/TrueToneCap.Test.csproj" />
   </Folder>
   <Folder Name="/tools/">
-    <Project Path="tools/DiagCapture/DiagCapture.csproj" />
   </Folder>
 </Solution>

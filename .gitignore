@@ -58,6 +58,9 @@ Desktop.ini
 *.log
 crash.log
 *_crash.log
+
+# ── Temp / Accidental files ──
+0
 *_error.log
 *.dmp
 

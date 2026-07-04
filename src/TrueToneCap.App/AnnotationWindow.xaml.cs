@@ -14,6 +14,7 @@ using Windows.Graphics.Imaging;
 using WinRT.Interop;
 using TrueToneCap.Core.Annotation;
 using TrueToneCap.Core.Encoding;
+using TrueToneCap.App.Services;
 
 namespace TrueToneCap.App;
 
@@ -37,6 +38,12 @@ public sealed partial class AnnotationWindow : Window
         this.InitializeComponent();
         _rawPixels = bgraPixels;
         _imgW = width; _imgH = height;
+
+        // ── 字体注入 ──
+        if (RootGrid.IsLoaded)
+            FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+        else
+            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
 
         // ── 智能窗口尺寸：基于当前显示器工作区，图片自适应 ──
         try
