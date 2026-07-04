@@ -36,6 +36,22 @@
                                 <ComboBoxItem Tag="Auto">自动检测</ComboBoxItem><ComboBoxItem Tag="LibAom">libaom (软件)</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC</ComboBoxItem>
                             </ComboBox>
                         </Grid>
+                        <Grid x:Name="AvifChromaPanel" ColumnDefinitions="120,*" Visibility="Collapsed">
+                            <TextBlock Text="色度采样" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="AvifChromaCbo" Grid.Column="1">
+                                <ComboBoxItem Tag="420">4:2:0 (默认, 体积最小)</ComboBoxItem>
+                                <ComboBoxItem Tag="422">4:2:2</ComboBoxItem>
+                                <ComboBoxItem Tag="444">4:4:4 (文字最清晰)</ComboBoxItem>
+                            </ComboBox>
+                        </Grid>
+                        <!-- JPEG Gain Map 增益图模式（仅 JPEG_GAINMAP 可见） -->
+                        <Grid x:Name="GainMapModePanel" ColumnDefinitions="120,*" Visibility="Collapsed">
+                            <TextBlock Text="增益图模式" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="GainMapModeCbo" Grid.Column="1">
+                                <ComboBoxItem Tag="Rgb">RGB 彩色增益图 (色彩精度最高)</ComboBoxItem>
+                                <ComboBoxItem Tag="Gray">灰度增益图 (体积更小)</ComboBoxItem>
+                            </ComboBox>
+                        </Grid>
                     </StackPanel>
                 </Border>
                 <!-- 色彩 -->

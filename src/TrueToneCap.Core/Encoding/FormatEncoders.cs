@@ -52,7 +52,7 @@ public sealed class AvifEncoder : ImageEncoder
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     { if (s.HdrOutput) await H.SaveHdr(f, path, MagickFormat.Avif, s, ct); else { var d = H.ToSdr(f, s); await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct); } }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
-    { var be = AvifEncoderSelector.Select(s.AvifBackend); await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct); }
+    { var be = AvifEncoderSelector.Select(s.AvifBackend); await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct, s.AvifChroma, s.DisplayBitDepth); }
 }
 
 // ────── WebP ──────
@@ -93,15 +93,27 @@ public sealed class LibAomAvifBackend : IAvifEncoder
 {
     public AvifEncoderBackend Backend => AvifEncoderBackend.LibAom;
     public bool IsAvailable => true;
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct)
-    { await Task.Run(() => { ct.ThrowIfCancellationRequested(); var ps = new PixelReadSettings((uint)w, (uint)h, StorageType.Char, PixelMapping.BGRA); using var img = new MagickImage(); img.ReadPixels(bgra, ps); img.Format = MagickFormat.Avif; img.Quality = (uint)Math.Clamp(100 - crf * 100 / 63, 0, 100); img.Write(path, MagickFormat.Avif); }, ct); }
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8)
+    {
+        await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var ps = new PixelReadSettings((uint)w, (uint)h, StorageType.Char, PixelMapping.BGRA);
+            using var img = new MagickImage();
+            img.ReadPixels(bgra, ps);
+            img.Format = MagickFormat.Avif;
+            img.Quality = (uint)Math.Clamp(100 - crf * 100 / 63, 0, 100);
+            H.ApplyQualityDefinesPublic(img, MagickFormat.Avif, chroma, displayBitDepth);
+            img.Write(path, MagickFormat.Avif);
+        }, ct);
+    }
 }
 
 public sealed class QsvAvifBackend : IAvifEncoder
 {
     public AvifEncoderBackend Backend => AvifEncoderBackend.Qsv;
     public bool IsAvailable => QsvEncoderNative.IsAvailable;
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8)
     {
         await Task.Run(() =>
         {
@@ -126,7 +138,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
 {
     public AvifEncoderBackend Backend => AvifEncoderBackend.Nvenc;
     public bool IsAvailable => NvEncoderNative.IsAvailable;
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8)
     {
         await Task.Run(() =>
         {
@@ -164,8 +176,8 @@ internal static class H
             img.Format = fmt;
             img.Quality = (uint)Math.Clamp((int)s.Quality, 0, 100);
 
-            // ── 格式专属画质增强选项 ──
-            ApplyQualityDefines(img, fmt);
+            // ── 格式专属画质增强 + 位深选项 ──
+            ApplyQualityDefines(img, fmt, s.AvifChroma, s.DisplayBitDepth);
 
             if (s.IccProfile is { Length: > 0 })
             {
@@ -175,40 +187,63 @@ internal static class H
         }, ct);
     }
 
-    /// <summary>为各格式设置画质增强的 ImageMagick define 选项。</summary>
-    private static void ApplyQualityDefines(MagickImage img, MagickFormat fmt)
+    /// <summary>为各格式设置画质增强 + 位深保护（避免色彩降级）。</summary>
+    private static void ApplyQualityDefines(MagickImage img, MagickFormat fmt, string avifChroma = "420", int displayBitDepth = 8)
     {
+        // ── 高色深显示器：提升输出位深防止色彩降级 ──
+        // SDR 源为 8-bit，但 10/12-bit 显示器 + 有损编码会导致条带效应
+        // 将输出位深提升至显示器匹配级别可消除量化误差
+        bool highDepth = displayBitDepth >= 10;
+
         if (fmt == MagickFormat.WebP)
         {
-            // method=6: 最强压缩（慢但文件最小/画质最好）
+            // WebP 仅支持 8-bit，无法提升位深
             img.Settings.SetDefine(MagickFormat.WebP, "method", "6");
-            // alpha-quality=100: Alpha 通道不压缩
             img.Settings.SetDefine(MagickFormat.WebP, "alpha-quality", "100");
-            // lossless=false: 使用有损模式（视觉近无损 + 文件小）
             img.Settings.SetDefine(MagickFormat.WebP, "lossless", "false");
-            // exact=1: 保留 RGB 值精确度（避免有损模式下的色彩偏移）
             img.Settings.SetDefine(MagickFormat.WebP, "exact", "true");
+            img.Settings.SetDefine(MagickFormat.WebP, "pass", "1");
+            img.Settings.SetDefine(MagickFormat.WebP, "filter-strength", "0");
+            img.Settings.SetDefine(MagickFormat.WebP, "sharpness", "0");
         }
         else if (fmt == MagickFormat.Avif)
         {
-            // speed=0: 最慢/最高画质（libaom cpu-used=0）
             img.Settings.SetDefine(MagickFormat.Avif, "speed", "0");
-            // chroma=444: 完整色度采样（截图文字更清晰）
-            img.Settings.SetDefine(MagickFormat.Avif, "chroma", "444");
-            // tiles=0: 不使用瓦片编码（截图通常不超过 4K，单帧编码更高效）
+            string chroma = avifChroma switch { "422" => "422", "444" => "444", _ => "420" };
+            img.Settings.SetDefine(MagickFormat.Avif, "chroma", chroma);
             img.Settings.SetDefine(MagickFormat.Avif, "tiles", "0");
+            img.Settings.SetDefine(MagickFormat.Avif, "enable-chroma-deltaq", "1");
+            // 10/12-bit 显示器 → 10-bit AVIF（libaom/QSV/NVENC 均支持 10-bit）
+            if (highDepth) img.Depth = 10;
         }
         else if (fmt == MagickFormat.Jxl)
         {
-            // effort=7: 最高编码努力（慢但压缩率最佳）
             img.Settings.SetDefine(MagickFormat.Jxl, "effort", "7");
-            // Lossless/modular mode when distance ~= 0
+            img.Settings.SetDefine(MagickFormat.Jxl, "decoding_speed", "0");
+            img.Settings.SetDefine(MagickFormat.Jxl, "modular", "1");
+            // 10/12-bit 显示器 → 16-bit JPEG XL（原生支持高精度）
+            if (highDepth) img.Depth = 16;
+        }
+        else if (fmt == MagickFormat.Jpeg)
+        {
+            // JPEG 仅 8-bit
+            img.Settings.SetDefine(MagickFormat.Jpeg, "sampling-factor", "4:4:4");
+            img.Settings.SetDefine(MagickFormat.Jpeg, "dct", "float");
+            img.Settings.SetDefine(MagickFormat.Jpeg, "optimize-coding", "true");
         }
         else if (fmt == MagickFormat.Png)
         {
-            // PNG 已无损，无需额外选项
+            img.Settings.SetDefine(MagickFormat.Png, "compression-level", "9");
+            img.Settings.SetDefine(MagickFormat.Png, "compression-filter", "1");
+            img.Settings.SetDefine(MagickFormat.Png, "exclude-chunks", "date,time");
+            // 10/12-bit 显示器 → 16-bit PNG
+            if (highDepth) img.Depth = 16;
         }
+        // BMP: 8-bit only, no defines needed
     }
+
+    public static void ApplyQualityDefinesPublic(MagickImage img, MagickFormat fmt, string avifChroma = "420", int displayBitDepth = 8)
+        => ApplyQualityDefines(img, fmt, avifChroma, displayBitDepth);
 
     // ═══════════════════════════
     // HDR PNG: scRGB → PQ (ST.2084), 10-bit, cICP Rec.2100 PQ

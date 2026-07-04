@@ -14,7 +14,6 @@ public static class ColorProfileProvider
         try
         {
             // 通过 WCS API 获取显示器关联的颜色配置文件
-            // WcsGetDefaultColorProfile 需要显示器名称
             var monitorName = GetMonitorName(monitorHandle);
             if (string.IsNullOrEmpty(monitorName)) return null;
 
@@ -22,7 +21,8 @@ public static class ColorProfileProvider
         }
         catch
         {
-            return GetDefaultSRgbIcc();
+            // WCS 获取失败 = 无可检测的自定义 ICC，返回 null
+            return null;
         }
     }
 

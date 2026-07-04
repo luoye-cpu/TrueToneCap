@@ -16,6 +16,12 @@ public sealed class EncodingSettings
     public AvifEncoderBackend AvifBackend { get; set; } = AvifEncoderBackend.Auto;
     /// <summary>是否为 AVIF 文件添加 .png 后缀（兼容不支持 .avif 的软件）。</summary>
     public bool AvifPngSuffix { get; set; }
+    /// <summary>AVIF 色度采样: 420 / 422 / 444。默认 420。</summary>
+    public string AvifChroma { get; set; } = "420";
+    /// <summary>显示器位深 (8/10 bit)，用于匹配输出精度。</summary>
+    public int DisplayBitDepth { get; set; } = 8;
+    /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>
+    public GainMapMode GainMapMode { get; set; } = GainMapMode.Rgb;
 }
 
 public enum OutputFormat { PNG, JPEG_LI, JPEG_XL, AVIF, WebP, BMP, JPEG_GAINMAP }
@@ -58,5 +64,5 @@ public interface IAvifEncoder
 {
     AvifEncoderBackend Backend { get; }
     bool IsAvailable { get; }
-    Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct);
+    Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8);
 }

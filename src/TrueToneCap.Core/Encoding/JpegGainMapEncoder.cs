@@ -40,6 +40,9 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     public override async Task EncodeAsync(HdrFrameData frame, EncodingSettings settings,
         string outputPath, CancellationToken ct = default)
     {
+        // 从 settings 读取增益图模式（默认 RGB）
+        GainMapMode = settings.GainMapMode;
+
         if (!settings.HdrOutput)
         {
             // SDR 模式：回退为普通 JPEG LI

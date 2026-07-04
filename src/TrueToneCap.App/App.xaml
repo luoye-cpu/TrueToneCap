@@ -9,6 +9,14 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
 
+            <!-- 全局默认字体：鸿蒙黑体 > 微软雅黑 > Segoe UI > 系统后备 -->
+            <Style TargetType="TextBlock">
+                <Setter Property="FontFamily" Value="HarmonyOS Sans SC, Microsoft YaHei, Segoe UI, sans-serif" />
+            </Style>
+            <Style TargetType="Control">
+                <Setter Property="FontFamily" Value="HarmonyOS Sans SC, Microsoft YaHei, Segoe UI, sans-serif" />
+            </Style>
+
             <!-- 应用级主题色 -->
             <SolidColorBrush x:Key="AccentBrush" Color="#FF0078D4"/>
         </ResourceDictionary>

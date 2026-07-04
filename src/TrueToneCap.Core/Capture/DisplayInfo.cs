@@ -18,6 +18,7 @@ public sealed class DisplayInfo
     public int Height { get; init; }
     public bool IsPrimary { get; init; }
     public bool IsHdr { get; init; }
+    public int BitsPerColor { get; init; } = 8; // 8 (SDR) / 10 (HDR)
     public ColorSpaceType ColorSpace { get; init; }
     public Format SupportedFormat { get; init; }
     public string AdapterName { get; init; } = "";
@@ -140,6 +141,7 @@ public static class DisplayEnumerator
                             Height = desc.DesktopCoordinates.Bottom - desc.DesktopCoordinates.Top,
                             IsPrimary = IsMonitorPrimary(desc.Monitor),
                             IsHdr = isHdr,
+                            BitsPerColor = (int)desc1.BitsPerColor,
                             ColorSpace = cs,
                             SupportedFormat = fmt,
                             AdapterName = adapterDesc.Description

@@ -3,21 +3,23 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$OutputDir = "publish\TrueToneCap-v0.1.1-beta"
+    [string]$OutputDir = "publish\TrueToneCap-v0.1.2-beta"
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "╔══════════════════════════════════╗"
-Write-Host "║  TrueToneCap v0.1 Beta 发布脚本 ║"
+Write-Host "║  TrueToneCap v0.1.2 Beta 发布脚本 ║"
 Write-Host "╚══════════════════════════════════╝"
 Write-Host ""
 
 # ── 1. Clean & Build ──
 Write-Host "[1/4] 编译 Release..."
 Push-Location $RepoRoot
+$oldEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 taskkill /F /IM TrueToneCap.exe 2>$null
+$ErrorActionPreference = $oldEAP
 Remove-Item -Recurse -Force $OutputDir -ErrorAction SilentlyContinue
 
 dotnet publish src\TrueToneCap.App\TrueToneCap.App.csproj `
@@ -54,12 +56,15 @@ if ($xbfFiles) {
 # ── 4. Embed Windows App Runtime MSIX ──
 Write-Host "[4/4] 嵌入 Windows App Runtime..."
 $NuGetRoot = "$env:USERPROFILE\.nuget\packages"
-$SdkDir = Get-ChildItem "$NuGetRoot\microsoft.windowsappsdk" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-$MsixDir = "$($SdkDir.FullName)\tools\MSIX\$Runtime"
+# 使用项目引用的具体版本：Microsoft.WindowsAppSDK 1.6.250205002
+$SdkVersion = "1.6.250205002"
+$SdkDir = "$NuGetRoot\microsoft.windowsappsdk\$SdkVersion"
+# MSIX 目录使用 win10-x64（而非 win-x64）
+$MsixDir = "$SdkDir\tools\MSIX\win10-x64"
 if (Test-Path $MsixDir) {
     Copy-Item "$MsixDir\*.msix" $OutputDir -Force
     Copy-Item "$MsixDir\MSIX.inventory" $OutputDir -Force
-    Write-Host "   $((Get-ChildItem "$MsixDir\*.msix").Count) MSIX packages"
+    Write-Host "   $((Get-ChildItem "$MsixDir\*.msix").Count) MSIX packages (v$SdkVersion)"
 } else {
     Write-Warning "   MSIX not found at $MsixDir"
 }

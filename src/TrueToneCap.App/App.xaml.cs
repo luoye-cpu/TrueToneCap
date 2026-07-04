@@ -53,12 +53,21 @@ public partial class App : Application
         // 提升进程优先级以减少截图延迟
         try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High; } catch { }
 
-        var window = new MainWindow();
-        try
+        // ── 解析命令行参数 ──
+        bool isAutostart = Environment.GetCommandLineArgs().Any(a =>
+            a.Equals("--autostart", StringComparison.OrdinalIgnoreCase));
+
+        var window = new MainWindow(isAutostart);
+
+        if (!isAutostart)
         {
-            window.AppWindow.Resize(new Windows.Graphics.SizeInt32(600, 820));
+            try
+            {
+                window.AppWindow.Resize(new Windows.Graphics.SizeInt32(600, 820));
+            }
+            catch { }
+            window.Activate();
         }
-        catch { }
-        window.Activate();
+        // 开机启动：不显示窗口，由 MainWindow 构造函数中自动缩放到托盘
     }
 }

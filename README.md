@@ -1,6 +1,6 @@
 # 真色截图（TrueToneCap）— HDR现代化截图工具 / HDR Modern Screenshot Tool
 
-> **v0.1.1 Beta** · Windows 11 24H2+ · C# 13 · WinUI 3 · .NET 10 · DXGI/DirectX
+> **v0.1.2 Beta** · Windows 11 24H2+ · C# 13 · WinUI 3 · .NET 10 · DXGI/DirectX
 
 <br/>
 
@@ -8,7 +8,7 @@
 
 **中文** — TrueToneCap 是一把为像素而生的手术刀。HDR 显示器早已普及，截图工具却仍停留在 SDR 时代——TrueToneCap 走了另一条路：从 DXGI 底层直接捕获 Float16 浮点帧缓冲，完整保留每一尼特的光照信息，再通过 GPU 着色器将 HDR 优雅地映射到人眼可视范围。框选、标注、OCR、翻译——全部在按下快捷键后的全屏覆盖层上实时完成，无需弹窗，无需跳转。导出格式涵盖 PNG（数学无损）、JPEG Gain Map（Ultra HDR 兼容）、AVIF、JPEG XL 等。翻译引擎内置有道 + Google 多端点自动降级，LLM 后端可按需接入。
 
-这是 0.1 测试版，功能在快速迭代中。欢迎反馈。 / This is v0.1 beta — rapidly iterating. Feedback welcome.
+这是 0.1.2 测试版，功能在快速迭代中。欢迎反馈。 / This is v0.1.2 beta — rapidly iterating. Feedback welcome.
 
 ---
 
@@ -29,7 +29,7 @@
 
 ### Installation / 安装运行
 
-1. Download `TrueToneCap-v0.1.1-beta-win-x64.zip`, extract to any folder / 下载 zip 并解压到任意目录
+1. Download `TrueToneCap-v0.1.2-beta-win-x64.zip`, extract to any folder / 下载 zip 并解压到任意目录
 2. Double-click `TrueToneCap.exe` / 双击 `TrueToneCap.exe`
 
 > **🎉 Zero dependencies / 零依赖开箱即用**：.NET 10 runtime + Windows App Runtime 1.6 are embedded in the app directory and auto-deployed on first launch. No manual installation needed. / .NET 10 运行时 + Windows App Runtime 1.6 均已嵌入程序目录, 首次启动时自动部署, 无需手动安装。
@@ -115,6 +115,17 @@ TrueToneCap/
 ---
 
 ## Changelog / 版本日志
+
+### v0.1.2 Beta — 2026-07-04
+
+- 🔤 全局字体切换为 **HarmonyOS Sans SC (鸿蒙黑体)**，回落链：微软雅黑 → Segoe UI
+- 🚀 **开机静默托盘启动** — 注册表 `--autostart` 参数独立启动流程，不显示窗口
+- 🎨 **Gain Map 增益图模式选择** — RGB 彩色增益图（色彩精度最高）/ 灰度增益图（体积更小）
+- 🎯 **ICC 检测逻辑修正** — 独立于 sRGB 描述文本，任意 >500 字节 ICC 即视为自定义并默认启用烘焙
+- 🖥️ **高色深显示器输出位深保护** — AVIF 10-bit / JPEG XL 16-bit / PNG 16-bit 自动匹配防止条带效应
+- 🔧 AVIF 色度采样 4:2:0/4:2:2/4:4:4 选择器 + libaom 后端自动应用
+- 🔧 修复 WinUI 3 `Window` 无 `FontFamily` 属性导致 XAML 编译器静默失败 — 改用隐式 Style
+- 🔧 `ColorProfileProvider` WCS 失败时返回 `null` 而非伪造 sRGB ICC
 
 ### v0.1.1 Beta — 2026-07-04
 

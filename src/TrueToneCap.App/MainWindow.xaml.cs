@@ -25,7 +25,7 @@ public sealed partial class MainWindow : Window
     private TrayIconManager? _trayIcon;
     private readonly List<(OutputFormat Format, string Label)> _formats;
 
-    public MainWindow()
+    public MainWindow(bool isAutostart = false)
     {
         this.InitializeComponent();
 
@@ -53,6 +53,13 @@ public sealed partial class MainWindow : Window
 
         // 开机自启动状态同步
         StartupManager.IsEnabled = _settings.AutoStart;
+
+        // ── 开机静默启动：直接缩小到托盘，不显示窗口 ──
+        if (isAutostart)
+        {
+            _trayIcon.MinimizeToTray();
+            // 窗口已隐藏，但仍需运行能力检测（确保后续截图正常）
+        }
 
         // ── 异步延迟检测（不阻塞窗口显示） ──
         DispatcherQueue.TryEnqueue(() =>
@@ -112,7 +119,12 @@ public sealed partial class MainWindow : Window
         {
             HdrSwitch.IsEnabled = sysHdr;
             HdrSwitch.IsOn = _settings.HdrEnabled;
-            var hdrText = sysHdr ? "✅ HDR 已启用" : "⚠ HDR 未开启（已禁用）";
+            // 获取显示器位深
+            var displays = DisplayEnumerator.EnumerateDisplays();
+            int bitDepth = displays.FirstOrDefault(d => d.IsHdr)?.BitsPerColor
+                ?? displays.FirstOrDefault()?.BitsPerColor ?? 8;
+            _settings.DisplayBitDepth = bitDepth;
+            var hdrText = sysHdr ? $"✅ HDR 已启用 ({bitDepth}-bit)" : "⚠ HDR 未开启（已禁用）";
             var acmText = sysAcm ? " | ACM 已启用" : "";
             HdrHintTxt.Text = hdrText + acmText;
 
@@ -149,8 +161,8 @@ public sealed partial class MainWindow : Window
     {
         if (hdr) return 5;                     // HDR → BT.2020
         if (acm) return 0;                     // ACM → 跟随系统动态管理
-        if (customIcc) return 0;               // ICC 校色 → 跟随系统（由 ICC profile 决定色域）
-        return 0;                               // 默认 → 跟随系统
+        if (customIcc) return 0;               // 自定义 ICC 校色 → 跟随系统（ICC profile 决定色域映射）
+        return 0;                               // 默认 → 跟随系统（sRGB 由系统管理）
     }
 
     /// <summary>静默保存设置（不更新 UI 控件值，直接序列化 _settings）。</summary>
@@ -202,10 +214,10 @@ public sealed partial class MainWindow : Window
         MinimizeTrayChk.IsChecked = _settings.MinimizeToTray;
         AvifPngSuffixChk.IsChecked = _settings.AvifPngSuffix;
         AvifBackendCbo.SelectedIndex = Math.Clamp(_settings.AvifBackendIndex, 0, 3);
+        if (AvifChromaCbo is not null) SetComboByTag(AvifChromaCbo, _settings.AvifChroma);
         RecordQualitySld.Value = _settings.RecordQuality;
-        ArchiveChk.IsChecked = _settings.ArchiveEnabled;
-        SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode);
-        ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed;
+        if (ArchiveChk is not null) ArchiveChk.IsChecked = _settings.ArchiveEnabled;
+        if (ArchiveModeCbo is not null) { SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode); ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed; }
 
         // LLM 设置
         UseLlmChk.IsChecked = _settings.UseCustomLlm;
@@ -215,6 +227,8 @@ public sealed partial class MainWindow : Window
         LlmPromptTxt.Text = _settings.LlmSystemPrompt;
         SetComboByTag(TargetLangCbo, _settings.TargetLanguage);
         SetComboByTag(OcrLangCbo, _settings.OcrLanguage);
+        // Gain Map 模式
+        if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
     }
 
     /// <summary>检测系统显示状态：HDR 是否启用、ACM 是否启用。</summary>
@@ -263,13 +277,17 @@ public sealed partial class MainWindow : Window
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.MinimizeToTray = MinimizeTrayChk.IsChecked == true;
             _settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;
+            // Gain Map 模式
+            if (GainMapModeCbo is not null)
+                _settings.GainMapMode = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Rgb";
             _settings.AvifBackendIndex = AvifBackendCbo.SelectedIndex;
+            _settings.AvifChroma = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420";
             _settings.RecordQuality = RecordQualitySld.Value;
             _settings.AnimAvifBackendIndex = 0;
-            _settings.ArchiveEnabled = ArchiveChk.IsChecked == true;
-            _settings.ArchiveMode = (ArchiveModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
-            _settings.AcmeDetected = _settings.AcmeDetected;  // 保持 ACM 检测结果
-            _settings.FirstRun = false;                        // 用户手动保存 = 不再是首次运行
+            _settings.ArchiveEnabled = ArchiveChk?.IsChecked == true;
+            _settings.ArchiveMode = (ArchiveModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
+            _settings.AcmeDetected = _settings.AcmeDetected;
+            _settings.FirstRun = false;
 
             // LLM 设置
             _settings.UseCustomLlm = UseLlmChk.IsChecked == true;
@@ -280,13 +298,18 @@ public sealed partial class MainWindow : Window
             _settings.TargetLanguage = (TargetLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
             _settings.OcrLanguage = (OcrLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
 
-            var dir = Path.GetDirectoryName(GetSettingsPath())!;
-            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(GetSettingsPath(),
-                JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true }));
+            // 序列化到 JSON
+            string json = JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true });
+            string path = GetSettingsPath();
+            string? dir = Path.GetDirectoryName(path);
+            if (dir is not null && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+            File.WriteAllText(path, json);
 
-            StartupManager.IsEnabled = _settings.AutoStart;
-            _trayIcon?.RegisterCaptureHotkey(_settings.Hotkey);
+            // 热键 + 自启同步
+            try { StartupManager.IsEnabled = _settings.AutoStart; } catch { }
+            try { _trayIcon?.RegisterCaptureHotkey(_settings.Hotkey); } catch { }
+
             StatusTxt.Text = "✅ 设置已保存";
         }
         catch (Exception ex) { StatusTxt.Text = "❌ 保存失败: " + ex.Message; }
@@ -355,6 +378,15 @@ public sealed partial class MainWindow : Window
         bool isAvif = format == OutputFormat.AVIF;
         AvifPngSuffixChk.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
         AvifBackendPanel.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
+        if (AvifChromaPanel is not null)
+        {
+            bool isLibAom = isAvif && (AvifBackendCbo.SelectedItem as ComboBoxItem)?.Tag as string == "LibAom";
+            AvifChromaPanel.Visibility = isLibAom ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // JPEG Gain Map 增益图模式选择（仅当格式为 JPEG_GAINMAP 时显示）
+        if (GainMapModePanel is not null)
+            GainMapModePanel.Visibility = format == OutputFormat.JPEG_GAINMAP ? Visibility.Visible : Visibility.Collapsed;
 
         // AVIF + NVENC/QSV 不支持 CRF=0 无损，限制最小值为 1（必须在设置 Value 之前）
         if (isAvif)
@@ -373,7 +405,13 @@ public sealed partial class MainWindow : Window
         QualityTxt.Visibility = precise ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void OnAvifBackendChanged(object sender, SelectionChangedEventArgs e) => UpdateQualityPanel();
+    private void OnAvifBackendChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateQualityPanel();
+        bool isLibAom = (AvifBackendCbo.SelectedItem as ComboBoxItem)?.Tag as string == "LibAom";
+        if (AvifChromaPanel is not null)
+            AvifChromaPanel.Visibility = isLibAom ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     private void OnArchiveChanged(object sender, RoutedEventArgs e)
         => ArchiveModePanel.Visibility = ArchiveChk.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
@@ -432,7 +470,7 @@ public sealed partial class MainWindow : Window
         ColorCbo.SelectedIndex = _settings.ColorSpaceIndex;
     }
 
-    /// <summary>检测当前显示器是否使用非默认的自定义 ICC 配置文件。</summary>
+    /// <summary>检测当前显示器是否使用自定义 ICC 配置文件（独立于 sRGB 判断）。</summary>
     private static bool DetectCustomIccProfile()
     {
         try
@@ -441,15 +479,10 @@ public sealed partial class MainWindow : Window
             foreach (var d in displays)
             {
                 var icc = ColorProfileProvider.GetDisplayIccProfile(d.MonitorHandle);
-                if (icc is not null && icc.Length > 500) // 大于 500 字节通常为真实 ICC
-                {
-                    // 尝试解析 ICC 看是否为非 sRGB 自定义配置文件
-                    var desc = ColorProfileProvider.GetIccDescription(icc);
-                    if (!string.IsNullOrEmpty(desc) &&
-                        !desc.Contains("sRGB", StringComparison.OrdinalIgnoreCase) &&
-                        !desc.Contains("IEC61966", StringComparison.OrdinalIgnoreCase))
-                        return true;
-                }
+                // 任何 > 500 字节的真实 ICC 配置文件均视为自定义 ICC
+                // 原因：工厂校准/用户校色/系统默认 ICC 都应触发烘焙以保证色彩准确
+                if (icc is not null && icc.Length > 500)
+                    return true;
             }
         }
         catch { }
@@ -494,6 +527,9 @@ public sealed partial class MainWindow : Window
             {
                 Format = format, Quality = (float)QualitySld.Value, HdrOutput = false,
                 AvifBackend = avifBackend, AvifPngSuffix = avifPngSuffix,
+                AvifChroma = _settings.AvifChroma,
+                DisplayBitDepth = _settings.DisplayBitDepth,
+                GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
                 ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
             };
             var outDir = PathTxt.Text;
@@ -682,10 +718,9 @@ public sealed partial class MainWindow : Window
                     break;
             }
 
-            // 截图完成 → 缩回托盘（OCR/翻译因弹窗不缩回）
+            // 截图完成 → 仅保存/复制时缩回托盘
             if (MinimizeTrayChk.IsChecked == true
-                && action is not SelectionOverlay.ActionResult.Ocr
-                && action is not SelectionOverlay.ActionResult.Translate)
+                && action is SelectionOverlay.ActionResult.Confirm or SelectionOverlay.ActionResult.Copy)
                 DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
         };
     }
@@ -904,6 +939,8 @@ public sealed partial class MainWindow : Window
                     HdrOutput = actualHdr, IccProfile = icc, Metadata = meta,
                     PreferGpuEncode = true, AvifBackend = avifBackend,
                     AvifPngSuffix = avifPngSuffix,
+                    AvifChroma = _settings.AvifChroma,
+                    GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
                     ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
                 };
                 var encoder = EncoderFactory.Create(format);
@@ -924,9 +961,7 @@ public sealed partial class MainWindow : Window
             sw.Stop();
             string status = wasHdr ? $"✅ HDR 已保存 ({sw.ElapsedMilliseconds}ms)" : $"✅ 已保存 ({sw.ElapsedMilliseconds}ms)";
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = status);
-            // 全屏截图后自动缩回托盘
-            if (MinimizeTrayChk.IsChecked == true)
-                DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
+            // 「捕获现在」不自动缩回托盘（仅截图热键/按钮触发时才缩回）
         }
         catch (Exception ex)
         {
@@ -1067,6 +1102,7 @@ internal sealed class AppSettingsData
     public bool MinimizeToTray { get; set; } = true;
     public bool AvifPngSuffix { get; set; }
     public int AvifBackendIndex { get; set; }
+    public string AvifChroma { get; set; } = "420"; // 420 / 422 / 444
     public double RecordQuality { get; set; } = 80;
     public int AnimAvifBackendIndex { get; set; }
 
@@ -1088,5 +1124,8 @@ internal sealed class AppSettingsData
     public bool FirstRun { get; set; } = true;
     public bool NvencAvailable { get; set; }
     public bool QsvAvailable { get; set; }
+    public int DisplayBitDepth { get; set; } = 8;
+    /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>
+    public string GainMapMode { get; set; } = "Rgb"; // Rgb / Gray
 
 }

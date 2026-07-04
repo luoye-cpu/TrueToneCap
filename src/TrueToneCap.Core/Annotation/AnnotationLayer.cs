@@ -193,7 +193,7 @@ public sealed class TextLayer : AnnotationLayer
     public float X { get; set; }
     public float Y { get; set; }
     public float FontSize { get; set; } = 16f;
-    public string FontFamily { get; set; } = "Microsoft YaHei";
+    public string FontFamily { get; set; } = "HarmonyOS Sans SC";
     public Color4 TextColor { get; set; } = new(1, 1, 1, 1);
     public Color4 BackgroundColor { get; set; } = new(0, 0, 0, 0.6f);
     public float Padding { get; set; } = 6f;
