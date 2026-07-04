@@ -19,6 +19,16 @@
                         <Grid ColumnDefinitions="120,*,50,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
                         <Grid ColumnDefinitions="120,*,50"><TextBlock Text="保存路径" VerticalAlignment="Center"/><TextBox x:Name="PathTxt" Grid.Column="1"/><Button Grid.Column="2" Content="..." Click="OnBrowsePath" Width="40" Margin="4,0,0,0"/></Grid>
                         <Grid ColumnDefinitions="120,*"><TextBlock Text="文件名前缀" VerticalAlignment="Center"/><TextBox x:Name="PrefixTxt" Grid.Column="1"/></Grid>
+                        <!-- 归档 -->
+                        <CheckBox x:Name="ArchiveChk" Content="启用文件归档（在保存目录下按日期创建子目录）" Checked="OnArchiveChanged" Unchecked="OnArchiveChanged"/>
+                        <Grid x:Name="ArchiveModePanel" ColumnDefinitions="120,*" Visibility="Collapsed">
+                            <TextBlock Text="归档方式" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="ArchiveModeCbo" Grid.Column="1">
+                                <ComboBoxItem Tag="Year">按年 (2026)</ComboBoxItem>
+                                <ComboBoxItem Tag="Month" IsSelected="True">按月 (2026-07)</ComboBoxItem>
+                                <ComboBoxItem Tag="Day">按日 (2026-07-04)</ComboBoxItem>
+                            </ComboBox>
+                        </Grid>
                         <CheckBox x:Name="AvifPngSuffixChk" Content="为 AVIF 文件添加 .png 后缀" Visibility="Collapsed"/>
                         <Grid x:Name="AvifBackendPanel" ColumnDefinitions="120,*" Visibility="Collapsed">
                             <TextBlock Text="AVIF 后端" VerticalAlignment="Center"/>
@@ -77,7 +87,7 @@
                         <Grid ColumnDefinitions="120,*"><TextBlock Text="最大时长" VerticalAlignment="Center"/>
                             <ComboBox x:Name="MaxDurationCbo" Grid.Column="1"><ComboBoxItem>15 秒</ComboBoxItem><ComboBoxItem IsSelected="True">30 秒</ComboBoxItem><ComboBoxItem>60 秒</ComboBoxItem><ComboBoxItem>120 秒</ComboBoxItem></ComboBox>
                         </Grid>
-                        <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1"/></Grid>
+                        <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1" Minimum="0" Maximum="100"/></Grid>
                     </StackPanel>
                 </Border>
                 <!-- AI 翻译 -->

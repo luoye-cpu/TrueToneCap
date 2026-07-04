@@ -97,8 +97,12 @@ public sealed partial class SelectionOverlay : Window
         this.Activated += (_, _) =>
         {
             _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh, SWP_SHOWWINDOW);
+            // 获取 DPI 缩放：主路径 GetDpiForWindow，回落 XamlRoot.RasterizationScale
             uint dpi = GetDpiForWindow(hwnd);
-            _dpiScale = dpi > 0 ? dpi / 96.0 : 1.0;
+            if (dpi > 0)
+                _dpiScale = dpi / 96.0;
+            else
+                _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
             System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2}");
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
             if (!_bgRendered) { _bgRendered = true; RenderDesktopBackground(desktopPixels, vw, vh); }
@@ -160,26 +164,67 @@ public sealed partial class SelectionOverlay : Window
     private static extern short GetAsyncKeyState(int vKey);
     private static bool IsCtrlPressed() => (GetAsyncKeyState(0x11) & 0x8000) != 0;
 
-    // ═══════════════════════════════════════
-    //  选区方法
-    // ═══════════════════════════════════════
+    /// <summary>SafeDPI helper — defends against Activated not firing.</summary>
+    private double GetSafeDpiScale()
+    {
+        if (_dpiScale <= 0.01)
+            _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
+        if (_dpiScale <= 0.01)
+            _dpiScale = 1.0;
+        return _dpiScale;
+    }
+
+    // ---- Selection methods ----
+
+    /// <summary>在选区四边绘制蓝色细线 + 尺寸标签。</summary>
+    private void DrawSelectionLines(double x, double y, double w, double h, string sizeText)
+    {
+        // 四条边线
+        SelLineTop.Visibility = Visibility.Visible;
+        SelLineTop.Width = w;
+        SelLineTop.Margin = new Thickness(x, y, 0, 0);
+
+        SelLineBottom.Visibility = Visibility.Visible;
+        SelLineBottom.Width = w;
+        SelLineBottom.Margin = new Thickness(x, y + h - 1.5, 0, 0);
+
+        SelLineLeft.Visibility = Visibility.Visible;
+        SelLineLeft.Height = h;
+        SelLineLeft.Margin = new Thickness(x, y, 0, 0);
+
+        SelLineRight.Visibility = Visibility.Visible;
+        SelLineRight.Height = h;
+        SelLineRight.Margin = new Thickness(x + w - 1.5, y, 0, 0);
+
+        // 尺寸标签
+        SizeLabel.Text = sizeText;
+        SizeLabelBorder.Visibility = Visibility.Visible;
+        SizeLabelBorder.Margin = new Thickness(x + (w - 60) / 2, y - 22, 0, 0);
+    }
+
+    /// <summary>隐藏选区线条。</summary>
+    private void HideSelectionLines()
+    {
+        SelLineTop.Visibility = Visibility.Collapsed;
+        SelLineBottom.Visibility = Visibility.Collapsed;
+        SelLineLeft.Visibility = Visibility.Collapsed;
+        SelLineRight.Visibility = Visibility.Collapsed;
+        SizeLabelBorder.Visibility = Visibility.Collapsed;
+    }
 
     private void SelectFullScreen()
     {
         SelectedRect = new RectInt32(_vx, _vy, _vw, _vh);
         _selectionComplete = true;
 
-        double effW = _vw / _dpiScale, effH = _vh / _dpiScale;
+        double scale = GetSafeDpiScale();
+        double effW = _vw / scale, effH = _vh / scale;
         _selEffX1 = 0; _selEffY1 = 0; _selEffW = effW; _selEffH = effH;
 
         DimOverlay.Visibility = Visibility.Collapsed;
         MaskGrid.Visibility = Visibility.Collapsed;
 
-        SelectionBorder.Visibility = Visibility.Visible;
-        SelectionBorder.Width = effW;
-        SelectionBorder.Height = effH;
-        SelectionBorder.Margin = new Thickness(0);
-        SizeLabel.Text = $"{_vw} × {_vh}";
+        DrawSelectionLines(0, 0, effW, effH, $"{_vw} × {_vh}");
 
         PositionToolbarAt(effW - 460, effH - 55);
         HintText.Visibility = Visibility.Collapsed;
@@ -191,11 +236,12 @@ public sealed partial class SelectionOverlay : Window
         double w = x2 - x1, h = y2 - y1;
         _selEffX1 = x1; _selEffY1 = y1; _selEffW = w; _selEffH = h;
 
+        double scale = GetSafeDpiScale();
         SelectedRect = new RectInt32(
-            _vx + (int)(x1 * _dpiScale),
-            _vy + (int)(y1 * _dpiScale),
-            (int)(w * _dpiScale),
-            (int)(h * _dpiScale));
+            _vx + (int)(x1 * scale),
+            _vy + (int)(y1 * scale),
+            (int)(w * scale),
+            (int)(h * scale));
         _selectionComplete = true;
 
         DimOverlay.Visibility = Visibility.Collapsed;
@@ -205,11 +251,7 @@ public sealed partial class SelectionOverlay : Window
         MaskRight.Width = RootGrid.ActualWidth - x2;
         MaskBottom.Height = RootGrid.ActualHeight - y2;
 
-        SelectionBorder.Visibility = Visibility.Visible;
-        SelectionBorder.Width = w;
-        SelectionBorder.Height = h;
-        SelectionBorder.Margin = new Thickness(x1, y1, 0, 0);
-        SizeLabel.Text = $"{(int)(w * _dpiScale)} × {(int)(h * _dpiScale)}";
+        DrawSelectionLines(x1, y1, w, h, $"{(int)(w * scale)} × {(int)(h * scale)}");
 
         PositionToolbarNearSelection(x1, y1, x2, y2);
         HintText.Visibility = Visibility.Collapsed;
@@ -218,7 +260,8 @@ public sealed partial class SelectionOverlay : Window
 
     private void PositionToolbarAt(double tx, double ty)
     {
-        double effW = _vw / _dpiScale, effH = _vh / _dpiScale;
+        double scale = GetSafeDpiScale();
+        double effW = _vw / scale, effH = _vh / scale;
         tx = Math.Max(0, Math.Min(tx, effW - 460));
         ty = Math.Max(0, Math.Min(ty, effH - 50));
         Toolbar.Margin = new Thickness(tx, ty, 0, 0);
@@ -227,7 +270,7 @@ public sealed partial class SelectionOverlay : Window
 
     private void PositionToolbarNearSelection(double x1, double y1, double x2, double y2)
     {
-        double effH = _vh / _dpiScale;
+        double effH = _vh / GetSafeDpiScale();
         double tx = x2 - 460, ty = y2 + 5;
         if (ty + 45 > effH) ty = y1 - 50;
         if (ty < 0) ty = y2 - 50;
@@ -254,7 +297,7 @@ public sealed partial class SelectionOverlay : Window
             Toolbar.Visibility = Visibility.Collapsed;
             AnnotationToolbar.Visibility = Visibility.Collapsed;
             AnnotationCanvas.Visibility = Visibility.Collapsed;
-            SelectionBorder.Visibility = Visibility.Collapsed;
+            HideSelectionLines();
             MaskGrid.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex) { HintText.Text = $"⚠ 背景渲染失败: {ex.Message}"; HintText.Visibility = Visibility.Visible; }
@@ -309,10 +352,7 @@ public sealed partial class SelectionOverlay : Window
         MaskRight.Width = RootGrid.ActualWidth - x2;
         MaskBottom.Height = RootGrid.ActualHeight - y2;
 
-        SelectionBorder.Visibility = Visibility.Visible;
-        SelectionBorder.Width = w; SelectionBorder.Height = h;
-        SelectionBorder.Margin = new Thickness(x1, y1, 0, 0);
-        SizeLabel.Text = $"{(int)(w * _dpiScale)} × {(int)(h * _dpiScale)}";
+        DrawSelectionLines(x1, y1, w, h, $"{(int)(w * GetSafeDpiScale())} × {(int)(h * GetSafeDpiScale())}");
         Toolbar.Visibility = Visibility.Collapsed;
     }
 
@@ -349,7 +389,7 @@ public sealed partial class SelectionOverlay : Window
         DimOverlay.Visibility = Visibility.Visible;
         MaskGrid.Visibility = Visibility.Collapsed;
         MaskLeft.Width = MaskTop.Height = MaskRight.Width = MaskBottom.Height = 0;
-        SelectionBorder.Visibility = Visibility.Collapsed;
+        HideSelectionLines();
         Toolbar.Visibility = Visibility.Collapsed;
         AnnotationToolbar.Visibility = Visibility.Collapsed;
         HintText.Visibility = Visibility.Visible;
@@ -411,14 +451,14 @@ public sealed partial class SelectionOverlay : Window
 
     private void PositionAnnotationToolbar()
     {
-        // 放在选区右下角外侧
-        double effH = _vh / _dpiScale;
+        double scale = GetSafeDpiScale();
+        double effH = _vh / scale;
         double tx = _selEffX1 + _selEffW - 434;
         double ty = _selEffY1 + _selEffH + 5;
         if (ty + 45 > effH) ty = _selEffY1 - 50;
         if (ty < 0) ty = _selEffY1 + _selEffH - 50;
         if (tx < 0) tx = _selEffX1 + 5;
-        tx = Math.Max(0, Math.Min(tx, (_vw / _dpiScale) - 440));
+        tx = Math.Max(0, Math.Min(tx, (_vw / scale) - 440));
         AnnotationToolbar.Margin = new Thickness(tx, ty, 0, 0);
     }
 

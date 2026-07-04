@@ -3,7 +3,7 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$OutputDir = "publish\TrueToneCap-v0.1-beta"
+    [string]$OutputDir = "publish\TrueToneCap-v0.1.1-beta"
 )
 
 $ErrorActionPreference = "Stop"

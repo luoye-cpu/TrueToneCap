@@ -5,10 +5,30 @@ namespace TrueToneCap.App;
 
 public partial class App : Application
 {
+    private static Mutex? s_mutex;
+
     [DllImport("user32.dll")] static extern int MessageBoxW(nint h, string text, string caption, uint type);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(nint hWnd);
+    [DllImport("user32.dll")] private static extern nint FindWindowW(string? lpClassName, string lpWindowName);
 
     public App()
     {
+        // ── 单实例检测 ──
+        s_mutex = new Mutex(true, @"Global\TrueToneCap_SingleInstance", out bool createdNew);
+        if (!createdNew)
+        {
+            // 已有实例运行 → 尝试激活已有窗口
+            try
+            {
+                nint hwnd = FindWindowW(null, "TrueToneCap 设置");
+                if (hwnd != nint.Zero) SetForegroundWindow(hwnd);
+            }
+            catch { }
+            s_mutex.Dispose();
+            Environment.Exit(0);
+            return;
+        }
+
         this.InitializeComponent();
         this.UnhandledException += (s, e) =>
         {

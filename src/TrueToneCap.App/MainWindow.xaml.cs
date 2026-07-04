@@ -203,6 +203,9 @@ public sealed partial class MainWindow : Window
         AvifPngSuffixChk.IsChecked = _settings.AvifPngSuffix;
         AvifBackendCbo.SelectedIndex = Math.Clamp(_settings.AvifBackendIndex, 0, 3);
         RecordQualitySld.Value = _settings.RecordQuality;
+        ArchiveChk.IsChecked = _settings.ArchiveEnabled;
+        SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode);
+        ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed;
 
         // LLM 设置
         UseLlmChk.IsChecked = _settings.UseCustomLlm;
@@ -263,6 +266,8 @@ public sealed partial class MainWindow : Window
             _settings.AvifBackendIndex = AvifBackendCbo.SelectedIndex;
             _settings.RecordQuality = RecordQualitySld.Value;
             _settings.AnimAvifBackendIndex = 0;
+            _settings.ArchiveEnabled = ArchiveChk.IsChecked == true;
+            _settings.ArchiveMode = (ArchiveModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
             _settings.AcmeDetected = _settings.AcmeDetected;  // 保持 ACM 检测结果
             _settings.FirstRun = false;                        // 用户手动保存 = 不再是首次运行
 
@@ -287,8 +292,33 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { StatusTxt.Text = "❌ 保存失败: " + ex.Message; }
     }
 
-    private static string GetSettingsPath() => Path.Combine(
-        AppContext.BaseDirectory, "TrueToneCap.settings.json");
+    private static string GetSettingsPath()
+    {
+        // 优先保存在 EXE 同目录，若无写权限则回落 AppData
+        string exeDir = AppContext.BaseDirectory;
+        string exePath = Path.Combine(exeDir, "TrueToneCap.settings.json");
+
+        // 检查是否可写
+        try
+        {
+            if (Directory.Exists(exeDir))
+            {
+                // 尝试创建/写入测试
+                var testPath = Path.Combine(exeDir, ".write_test");
+                File.WriteAllText(testPath, "test");
+                File.Delete(testPath);
+                return exePath;
+            }
+        }
+        catch { }
+
+        // 回落：AppData
+        string appData = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "TrueToneCap");
+        Directory.CreateDirectory(appData);
+        return Path.Combine(appData, "TrueToneCap.settings.json");
+    }
 
     // ── 浏览文件夹 ──
 
@@ -320,26 +350,49 @@ public sealed partial class MainWindow : Window
         QualitySld.LargeChange = 0.5;
         bool precise = format is OutputFormat.JPEG_LI or OutputFormat.JPEG_XL;
         QualitySld.StepFrequency = precise ? 0.1 : 1.0;
-        QualitySld.Value = def;
-        QualityLbl.Text = encoder.GetQualityDescription((float)def);
-        QualityTxt.Text = def.ToString("F1");
-        QualityTxt.Visibility = precise ? Visibility.Visible : Visibility.Collapsed;
         QualitySld.IsEnabled = format != OutputFormat.PNG;
 
         bool isAvif = format == OutputFormat.AVIF;
         AvifPngSuffixChk.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
         AvifBackendPanel.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
 
-        // AVIF + NVENC/QSV 不支持 CRF=0 无损，限制最小值为 1
+        // AVIF + NVENC/QSV 不支持 CRF=0 无损，限制最小值为 1（必须在设置 Value 之前）
         if (isAvif)
         {
-            int backendIdx = AvifBackendCbo.SelectedIndex; // 0=Auto,1=libaom,2=QSV,3=NVENC
+            int backendIdx = AvifBackendCbo.SelectedIndex;
             if (backendIdx is 2 or 3 || (backendIdx == 0 && (_settings.NvencAvailable || _settings.QsvAvailable)))
                 QualitySld.Minimum = Math.Max(min, 1.0);
         }
+
+        // Quality 优先使用已保存值（在有效范围内），否则用默认值
+        double savedQ = _settings.Quality;
+        double useQ = (savedQ >= QualitySld.Minimum && savedQ <= QualitySld.Maximum) ? savedQ : def;
+        QualitySld.Value = useQ;
+        QualityLbl.Text = encoder.GetQualityDescription((float)useQ);
+        QualityTxt.Text = useQ.ToString("F1");
+        QualityTxt.Visibility = precise ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnAvifBackendChanged(object sender, SelectionChangedEventArgs e) => UpdateQualityPanel();
+
+    private void OnArchiveChanged(object sender, RoutedEventArgs e)
+        => ArchiveModePanel.Visibility = ArchiveChk.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>根据归档模式生成子目录路径。</summary>
+    private string GetArchivePath(string baseDir)
+    {
+        var now = DateTime.Now;
+        string mode = _settings.ArchiveMode;
+        string sub = mode switch
+        {
+            "Year" => now.ToString("yyyy"),
+            "Day" => now.ToString("yyyy-MM-dd"),
+            _ => now.ToString("yyyy-MM"), // Month (default)
+        };
+        string full = Path.Combine(baseDir, sub);
+        Directory.CreateDirectory(full);
+        return full;
+    }
 
     private void OnQualityChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
@@ -445,6 +498,11 @@ public sealed partial class MainWindow : Window
             };
             var outDir = PathTxt.Text;
             if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
+
+            // 归档子目录
+            if (_settings.ArchiveEnabled)
+                outDir = GetArchivePath(outDir);
+
             var ext = format switch { OutputFormat.JPEG_LI => ".jpg", OutputFormat.JPEG_GAINMAP => ".jpg", OutputFormat.JPEG_XL => ".jxl", OutputFormat.AVIF => ".avif", OutputFormat.WebP => ".webp", OutputFormat.BMP => ".bmp", _ => ".png" };
             if (format == OutputFormat.AVIF && avifPngSuffix) ext += ".png";
             var path = Path.Combine(outDir, $"{PrefixTxt.Text}{DateTime.Now:yyyyMMdd_HHmmssfff}{ext}");
@@ -779,6 +837,9 @@ public sealed partial class MainWindow : Window
         var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
         var quality = (float)QualitySld.Value;
         var outDir = PathTxt.Text;
+        // 归档子目录
+        if (_settings.ArchiveEnabled)
+            outDir = GetArchivePath(outDir);
         var prefix = PrefixTxt.Text;
         var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
         var avifBackend = AvifBackendCbo.SelectedIndex switch { 1 => AvifEncoderBackend.LibAom, 2 => AvifEncoderBackend.Nvenc, _ => AvifEncoderBackend.Auto };
@@ -879,6 +940,9 @@ public sealed partial class MainWindow : Window
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        // 自动保存设置（无论最小化到托盘还是真正关闭）
+        try { SaveSettings(); } catch { }
+
         if (MinimizeTrayChk.IsChecked == true)
         {
             args.Handled = true;
@@ -1005,6 +1069,10 @@ internal sealed class AppSettingsData
     public int AvifBackendIndex { get; set; }
     public double RecordQuality { get; set; } = 80;
     public int AnimAvifBackendIndex { get; set; }
+
+    // 归档设置
+    public bool ArchiveEnabled { get; set; }
+    public string ArchiveMode { get; set; } = "Month"; // Year / Month / Day
 
     // LLM / 翻译设置
     public bool UseCustomLlm { get; set; }

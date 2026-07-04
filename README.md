@@ -1,6 +1,6 @@
 # 真色截图（TrueToneCap）— HDR现代化截图工具 / HDR Modern Screenshot Tool
 
-> **v0.1 Beta** · Windows 11 24H2+ · C# 13 · WinUI 3 · .NET 10 · DXGI/DirectX
+> **v0.1.1 Beta** · Windows 11 24H2+ · C# 13 · WinUI 3 · .NET 10 · DXGI/DirectX
 
 <br/>
 
@@ -29,7 +29,7 @@
 
 ### Installation / 安装运行
 
-1. Download `TrueToneCap-v0.1-beta-win-x64.zip`, extract to any folder / 下载 zip 并解压到任意目录
+1. Download `TrueToneCap-v0.1.1-beta-win-x64.zip`, extract to any folder / 下载 zip 并解压到任意目录
 2. Double-click `TrueToneCap.exe` / 双击 `TrueToneCap.exe`
 
 > **🎉 Zero dependencies / 零依赖开箱即用**：.NET 10 runtime + Windows App Runtime 1.6 are embedded in the app directory and auto-deployed on first launch. No manual installation needed. / .NET 10 运行时 + Windows App Runtime 1.6 均已嵌入程序目录, 首次启动时自动部署, 无需手动安装。
@@ -115,6 +115,22 @@ TrueToneCap/
 ---
 
 ## Changelog / 版本日志
+
+### v0.1.1 Beta — 2026-07-04
+
+- 🖼️ 新增 **JPEG Gain Map (Ultra HDR)** 输出格式 — Gray/RGB 双模增益图 + MPF 封装
+- 📁 新增 **文件归档**选项 — 按年/月/日自动创建子目录
+- 🔧 修复双击 exe 启动崩溃 — 自动复制 PRI/XBF 资源 + MSIX 框架嵌入
+- 🔧 修复 DPI 缩放下选区蓝线与实际范围不匹配
+- 🔧 修复录屏质量滑块范围缺失导致启动闪退
+- 🔧 修复质量设置重启后丢失
+- 🔧 防止多实例同时运行
+- 🔧 配置文件自动检测 EXE 目录写入权限，无权限时回落 AppData
+- 🎨 选区蓝色方框改为四边细线 + 浮动尺寸标签
+- 🌐 翻译引擎新增有道（国内首选）+ Google 多端点自动降级
+- 🖊️ 标注功能集成到全屏覆盖层，无需弹窗
+- 📋 剪贴板改为 `SetStorageItems` 文件粘贴（兼容微信/QQ）
+- 🎯 窗口关闭时自动保存设置
 
 ### v0.1 Beta — 2026-07-04
 

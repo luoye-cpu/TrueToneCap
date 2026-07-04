@@ -19,15 +19,22 @@
             <Border x:Name="MaskRight" Background="#66000000" IsHitTestVisible="False" HorizontalAlignment="Right"/>
         </Grid>
 
-        <Border x:Name="SelectionBorder" 
-                BorderBrush="#FF4488FF" BorderThickness="2"
-                Visibility="Collapsed"
-                IsHitTestVisible="False">
-            <Border Background="#FF4488FF" CornerRadius="3"
-                    HorizontalAlignment="Center" VerticalAlignment="Top"
-                    Padding="6,2" Margin="0,-24,0,0">
-                <TextBlock x:Name="SizeLabel" FontSize="11" Foreground="White" Text="0 x 0"/>
-            </Border>
+        <!-- 选区四边蓝色细线（取代边框） -->
+        <Rectangle x:Name="SelLineTop"    Fill="#FF4488FF" Height="1.5" Visibility="Collapsed"
+                   IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+        <Rectangle x:Name="SelLineBottom" Fill="#FF4488FF" Height="1.5" Visibility="Collapsed"
+                   IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+        <Rectangle x:Name="SelLineLeft"   Fill="#FF4488FF" Width="1.5"  Visibility="Collapsed"
+                   IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+        <Rectangle x:Name="SelLineRight"  Fill="#FF4488FF" Width="1.5"  Visibility="Collapsed"
+                   IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+
+        <!-- 尺寸标签（选区上方居中） -->
+        <Border x:Name="SizeLabelBorder" Background="#FF4488FF" CornerRadius="3"
+                HorizontalAlignment="Left" VerticalAlignment="Top"
+                Visibility="Collapsed" IsHitTestVisible="False"
+                Padding="6,2">
+            <TextBlock x:Name="SizeLabel" FontSize="11" Foreground="White" Text="0 x 0"/>
         </Border>
 
         <!-- 标注画布（进入标注模式后置于选区之上，实时显示标注） -->
