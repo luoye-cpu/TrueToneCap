@@ -208,6 +208,7 @@ public static class LocaleManager
 
     // ── OCR 识别语言 ──
     public static string OlSystem => s_lang == AppLanguage.Chinese ? "跟随系统" : "Follow System";
+    public static string OlMixed => s_lang == AppLanguage.Chinese ? "中英混合" : "Chinese + English";
 
     // ── 归档模式 ──
     public static string ArchiveYear => s_lang == AppLanguage.Chinese ? "按年" : "By Year";

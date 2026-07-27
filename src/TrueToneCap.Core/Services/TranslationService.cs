@@ -1,4 +1,7 @@
 // TrueToneCap.Core/Services/TranslationService.cs
+// 多后端翻译服务：LLM (OpenAI 兼容) → 有道 → Google 自动降级
+// 支持: DeepSeek V4 Flash / GLM-4.7-Flash / GPT-4o-mini / GPT-4.1-mini / 任意 OpenAI 兼容端点
+
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -7,7 +10,7 @@ using System.Web;
 
 namespace TrueToneCap.Core.Services;
 
-/// <summary>翻译服务：多后端自动降级（有道 → Google → LLM），适应不同网络环境。</summary>
+/// <summary>翻译服务：LLM 优先 → 有道 → Google 自动降级。</summary>
 public class TranslationService
 {
     private readonly HttpClient _http;
@@ -15,7 +18,7 @@ public class TranslationService
 
     public TranslationService(LlmConfig config)
     {
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
         _config = config;
     }
 
@@ -25,9 +28,18 @@ public class TranslationService
     {
         if (string.IsNullOrWhiteSpace(text)) return text;
 
-        // 1. 自定义 LLM 优先
+        // 1. LLM 优先（已配置端点 + Key）
         if (_config.UseCustomLlm && !string.IsNullOrEmpty(_config.ApiEndpoint))
-            return await TranslateWithLlmAsync(text, targetLang, sourceLang, ct);
+        {
+            try
+            {
+                return await TranslateWithLlmAsync(text, targetLang, sourceLang, ct);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Translate] LLM 失败，降级到免费后端: {ex.Message}");
+            }
+        }
 
         // 2. 有道翻译（国内可用，免费，无需 API Key）
         var youdaoResult = await TryYoudaoAsync(text, targetLang, sourceLang, ct);
@@ -42,7 +54,7 @@ public class TranslationService
         // 4. 全部不可用
         throw new TranslationException(
             "所有翻译后端均不可用（可能是网络问题）。\n" +
-            "建议：在设置中开启自定义 LLM，填入 DeepSeek / OpenAI 兼容 API 地址。");
+            "建议：在设置中开启自定义 LLM，填入 DeepSeek / GLM / OpenAI 兼容 API 地址。");
     }
 
     // ═══════════════════════════════════════
@@ -92,12 +104,19 @@ public class TranslationService
                 };
 
                 using var content = new FormUrlEncodedContent(formData);
-                using var cts5 = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var cts5 = new CancellationTokenSource(TimeSpan.FromSeconds(8));
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, cts5.Token);
 
-                var response = await _http.PostAsync(
-                    "https://fanyi.youdao.com/translate_o?smartresult=dict&smartresult=rule",
-                    content, linked.Token);
+                var request = new HttpRequestMessage(HttpMethod.Post,
+                    "https://fanyi.youdao.com/translate_o?smartresult=dict&smartresult=rule")
+                {
+                    Content = content
+                };
+                request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+                request.Headers.Add("Referer", "https://fanyi.youdao.com/");
+                request.Headers.Add("Cookie", "OUTFOX_SEARCH_USER_ID=-1234567890@127.0.0.1");
+
+                var response = await _http.SendAsync(request, linked.Token);
 
                 var json = await response.Content.ReadAsStringAsync(linked.Token);
                 var result = ParseYoudaoResponse(json);
@@ -259,33 +278,44 @@ public class TranslationService
     }
 
     // ═══════════════════════════════════════
-    //  LLM 翻译 (OpenAI 兼容 API)
+    //  LLM 翻译 (OpenAI 兼容 API — 支持 DeepSeek/GLM/GPT 等)
     // ═══════════════════════════════════════
 
     private async Task<string> TranslateWithLlmAsync(string text, string targetLang,
         string? sourceLang, CancellationToken ct)
     {
         string sl = sourceLang ?? "auto-detect";
-        string systemPrompt = _config.SystemPrompt
-            ?? $"You are a professional translator. Translate the following text to {targetLang}. Only output the translation, no explanations.";
+        string systemPrompt = !string.IsNullOrWhiteSpace(_config.SystemPrompt)
+            ? _config.SystemPrompt
+            : $"You are a professional translator. Translate the following text to {targetLang}. Only output the translation, no explanations.";
+
+        string model = !string.IsNullOrWhiteSpace(_config.ModelName)
+            ? _config.ModelName
+            : "deepseek-chat";
+
+        // 构建端点 URL（确保以 /chat/completions 结尾）
+        string endpoint = _config.ApiEndpoint.TrimEnd('/');
+        if (!endpoint.EndsWith("/chat/completions"))
+            endpoint += "/chat/completions";
 
         var requestBody = new
         {
-            model = _config.ModelName ?? "gpt-4o-mini",
+            model,
             messages = new[]
             {
                 new { role = "system", content = systemPrompt },
                 new { role = "user", content = $"Translate from {sl} to {targetLang}:\n\n{text}" }
             },
             temperature = 0.3,
-            max_tokens = 2000
+            max_tokens = 4096
         };
 
-        var request = new HttpRequestMessage(HttpMethod.Post, _config.ApiEndpoint)
+        var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
             Content = JsonContent.Create(requestBody)
         };
-        request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");
+        if (!string.IsNullOrEmpty(_config.ApiKey))
+            request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");
 
         var response = await _http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
@@ -307,14 +337,56 @@ public class TranslationException : Exception
     public TranslationException(string message) : base(message) { }
 }
 
-/// <summary>LLM API 配置</summary>
+/// <summary>LLM API 配置（支持 OpenAI 兼容端点）。</summary>
 public class LlmConfig
 {
     public bool UseCustomLlm { get; set; }
     public string ApiEndpoint { get; set; } = "";
     public string ApiKey { get; set; } = "";
-    public string ModelName { get; set; } = "gpt-4o-mini";
+    public string ModelName { get; set; } = "deepseek-chat";
     public string SystemPrompt { get; set; } = "";
     public string SourceLanguage { get; set; } = "auto";
     public string TargetLanguage { get; set; } = "zh-CN";
+}
+
+/// <summary>预置 LLM 提供商端点（供 UI 下拉选择）。</summary>
+public static class LlmProviders
+{
+    public record ProviderInfo(string Name, string Endpoint, string DefaultModel, string PlaceholderKey);
+
+    public static readonly ProviderInfo[] All =
+    [
+        new("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "sk-..."),
+        new("DeepSeek (Flash)", "https://api.deepseek.com/v1", "deepseek-v4-flash", "sk-..."),
+        new("智谱 GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-4.7-flash", "your-api-key"),
+        new("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "AIza..."),
+        new("硅基流动", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-72B-Instruct", "sk-..."),
+        new("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini", "sk-..."),
+        new("OpenAI (4.1)", "https://api.openai.com/v1", "gpt-4.1-mini", "sk-..."),
+        new("阿里云百炼", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-turbo", "sk-..."),
+        new("Moonshot", "https://api.moonshot.cn/v1", "moonshot-v1-8k", "sk-..."),
+        new("自定义", "", "", ""),
+    ];
+
+    /// <summary>所有可用模型名称（供 UI 下拉）。</summary>
+    public static readonly (string Tag, string Label)[] Models =
+    [
+        ("deepseek-chat", "DeepSeek V3"),
+        ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ("glm-4.7-flash", "GLM-4.7 Flash (智谱)"),
+        ("glm-4-flash", "GLM-4 Flash (智谱)"),
+        ("gemini-2.0-flash", "Gemini 2.0 Flash (Google)"),
+        ("gemini-2.5-flash", "Gemini 2.5 Flash (Google)"),
+        ("gemini-2.5-pro", "Gemini 2.5 Pro (Google)"),
+        ("Qwen/Qwen2.5-72B-Instruct", "Qwen2.5-72B (硅基流动)"),
+        ("deepseek-ai/DeepSeek-V3", "DeepSeek V3 (硅基流动)"),
+        ("deepseek-ai/DeepSeek-R1", "DeepSeek R1 (硅基流动)"),
+        ("gpt-4o-mini", "GPT-4o mini"),
+        ("gpt-4.1-mini", "GPT-4.1 mini"),
+        ("gpt-4.1-nano", "GPT-4.1 nano"),
+        ("qwen-turbo", "Qwen Turbo (阿里)"),
+        ("qwen-plus", "Qwen Plus (阿里)"),
+        ("moonshot-v1-8k", "Moonshot V1 8K"),
+        ("custom", "自定义模型"),
+    ];
 }

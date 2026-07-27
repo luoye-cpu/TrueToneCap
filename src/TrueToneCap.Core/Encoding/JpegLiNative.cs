@@ -74,8 +74,18 @@ public sealed unsafe class JpegLiNative : IDisposable
         var chunk = new byte[65536];
         while (true)
         {
+            JxlEncoderStatus status;
             fixed (byte* p = chunk)
-            { byte* o = p; nuint a = 65536; var s = Jxl.JxlEncoderProcessOutput(_encoder, &o, &a); int w = 65536 - (int)a; if (w > 0) outBuf.AddRange(chunk.AsSpan(0, w).ToArray()); if (s != JxlEncoderStatus.JXL_ENC_SUCCESS) break; }
+            {
+                byte* o = p;
+                nuint avail = 65536;
+                status = Jxl.JxlEncoderProcessOutput(_encoder, &o, &avail);
+                int written = 65536 - (int)avail;
+                if (written > 0) outBuf.AddRange(chunk.AsSpan(0, written).ToArray());
+            }
+            // JXL_ENC_SUCCESS = 编码完成; JXL_ENC_NEED_MORE_OUTPUT = 缓冲区满需继续
+            if (status == JxlEncoderStatus.JXL_ENC_SUCCESS) break;
+            if (status != JxlEncoderStatus.JXL_ENC_NEED_MORE_OUTPUT) break; // 错误
         }
         return outBuf.ToArray();
     }

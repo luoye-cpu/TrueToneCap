@@ -1,10 +1,12 @@
 // TrueToneCap.Test/CorePipelineTests.cs
-// 核心管线单元测试 — PixelOps / ToneMapper / ColorProfileProvider
+// 核心管线单元测试 — PixelOps / ToneMapper / ColorProfileProvider / GamutMapper / Annotation / Encoders
 // 运行: dotnet run --project src/TrueToneCap.Test -- --unit-tests
 
 using TrueToneCap.Core;
 using TrueToneCap.Core.Processing;
 using TrueToneCap.Core.ColorManagement;
+using TrueToneCap.Core.Annotation;
+using TrueToneCap.Core.Encoding;
 
 namespace TrueToneCap.Test;
 
@@ -39,6 +41,27 @@ public static class CorePipelineTests
         Test_SrgbIcc_ValidHeader();
         Test_SrgbIcc_MinimumSize();
         Test_SrgbIcc_Cached();
+
+        // PixelOps 扩展
+        Test_DownsampleToGray_Dimensions();
+        Test_DownsampleToGray_UniformColor();
+        Test_ComputeEdgeProjections_FlatImage();
+        Test_ComputeEdgeProjections_EdgeDetection();
+
+        // GamutMapper
+        Test_GamutMapper_HdrToSRgb_OutputRange();
+        Test_GamutMapper_HdrToSRgb_BlackPreserved();
+        Test_GamutMapper_MapToSRgb_NullIcc_Passthrough();
+
+        // AnnotationManager
+        Test_AnnotationManager_AddLayer();
+        Test_AnnotationManager_UndoRedo();
+        Test_AnnotationManager_RemoveLayer();
+
+        // FormatEncoders
+        Test_EncoderRegistry_AllFormatsRegistered();
+        Test_EncoderRegistry_QualityRanges();
+        Test_EncodingSettings_Defaults();
 
         Console.WriteLine($"\n══════════════════════════════════════");
         Console.WriteLine($"  结果: {_passed} 通过, {_failed} 失败");
@@ -226,6 +249,208 @@ public static class CorePipelineTests
         var icc2 = ColorProfileProvider.GetDefaultSRgbIcc();
         bool ok = ReferenceEquals(icc1, icc2); // 缓存应返回同一实例
         Assert("sRGB ICC: 缓存返回同一实例", ok);
+    }
+
+    // ═══════════════════════════════════════
+    //  PixelOps 扩展测试
+    // ═══════════════════════════════════════
+
+    static void Test_DownsampleToGray_Dimensions()
+    {
+        // 验证降采样输出尺寸正确
+        var bgra = new byte[640 * 480 * 4];
+        new Random(7).NextBytes(bgra);
+        var gray = PixelOps.DownsampleToGraySimd(bgra, 640, 480, 160, 120);
+        Assert($"DownsampleToGray: 输出尺寸 {gray.Length} == {160 * 120}", gray.Length == 160 * 120);
+    }
+
+    static void Test_DownsampleToGray_UniformColor()
+    {
+        // 纯白 BGRA → 灰度应接近 255
+        int w = 100, h = 100;
+        var bgra = new byte[w * h * 4];
+        for (int i = 0; i < bgra.Length; i += 4)
+        { bgra[i] = 255; bgra[i + 1] = 255; bgra[i + 2] = 255; bgra[i + 3] = 255; }
+        var gray = PixelOps.DownsampleToGraySimd(bgra, w, h, 10, 10);
+        bool ok = gray.All(v => v >= 250); // 允许微小舍入误差
+        Assert("DownsampleToGray: 纯白 → 灰度≈255", ok);
+    }
+
+    static void Test_ComputeEdgeProjections_FlatImage()
+    {
+        // 平坦图像（无边缘）→ 梯度投影应全为 0
+        int w = 64, h = 64;
+        var gray = new byte[w * h];
+        Array.Fill(gray, (byte)128);
+        var hEdges = new float[h];
+        var vEdges = new float[w];
+        PixelOps.ComputeEdgeProjectionsSimd(gray, w, h, hEdges, vEdges);
+        bool ok = hEdges.All(v => v == 0f) && vEdges.All(v => v == 0f);
+        Assert("ComputeEdgeProjections: 平坦图像 → 零梯度", ok);
+    }
+
+    static void Test_ComputeEdgeProjections_EdgeDetection()
+    {
+        // 左半黑右半白 → 垂直边缘在 x=32
+        // hEdges[y] = 水平投影 (检测 x 方向梯度) → 每行都有大值
+        // vEdges[x] = 垂直投影 (检测 y 方向梯度) → 应为 0 (无 y 方向变化)
+        int w = 64, h = 64;
+        var gray = new byte[w * h];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                gray[y * w + x] = x < 32 ? (byte)0 : (byte)255;
+        var hEdges = new float[h];
+        var vEdges = new float[w];
+        PixelOps.ComputeEdgeProjectionsSimd(gray, w, h, hEdges, vEdges);
+        // hEdges 应全部 > 0 (每行在 x=32 处有 255 的跳变, 归一化后 ≈ 255/64 ≈ 3.98)
+        // vEdges 应全部 == 0 (列内无变化)
+        bool ok = hEdges.All(v => v > 3f) && vEdges.All(v => v == 0f);
+        Assert("ComputeEdgeProjections: 垂直边缘 → hEdges 大, vEdges 零", ok);
+    }
+
+    // ═══════════════════════════════════════
+    //  GamutMapper 测试
+    // ═══════════════════════════════════════
+
+    static void Test_GamutMapper_HdrToSRgb_OutputRange()
+    {
+        // HDR 输入 → SDR 输出所有值在 [0,255]
+        var rng = new Random(99);
+        int w = 32, h = 32;
+        var hdr = new float[w * h * 4];
+        for (int i = 0; i < hdr.Length; i += 4)
+        {
+            hdr[i] = (float)(rng.NextDouble() * 10);
+            hdr[i + 1] = (float)(rng.NextDouble() * 10);
+            hdr[i + 2] = (float)(rng.NextDouble() * 10);
+            hdr[i + 3] = 1f;
+        }
+        var p = new ToneMappingParams { Mode = ToneMapMode.Aces };
+        var sdr = GamutMapper.HdrToSRgb(hdr, w, h, p);
+        // 输出是 byte[]，天然在 [0,255]，验证长度正确
+        bool ok = sdr.Length == w * h * 4;
+        Assert($"GamutMapper.HdrToSRgb: 输出长度 {sdr.Length} == {w * h * 4}", ok);
+    }
+
+    static void Test_GamutMapper_HdrToSRgb_BlackPreserved()
+    {
+        // 纯黑 HDR → SDR 仍为黑
+        var hdr = new float[] { 0f, 0f, 0f, 1f };
+        var p = new ToneMappingParams { Mode = ToneMapMode.Hable };
+        var sdr = GamutMapper.HdrToSRgb(hdr, 1, 1, p);
+        bool ok = sdr[0] == 0 && sdr[1] == 0 && sdr[2] == 0;
+        Assert("GamutMapper.HdrToSRgb: 黑色保持黑色", ok);
+    }
+
+    static void Test_GamutMapper_MapToSRgb_NullIcc_Passthrough()
+    {
+        // 无 ICC → 直通，像素不变
+        var bgra = new byte[] { 10, 20, 30, 255, 40, 50, 60, 255 };
+        var (result, icc) = GamutMapper.MapToSRgb(bgra, 2, 1, null);
+        bool ok = ReferenceEquals(result, bgra) && icc is null;
+        Assert("GamutMapper.MapToSRgb: null ICC → 直通", ok);
+    }
+
+    // ═══════════════════════════════════════
+    //  AnnotationManager 测试
+    // ═══════════════════════════════════════
+
+    static void Test_AnnotationManager_AddLayer()
+    {
+        var mgr = new AnnotationManager();
+        var layer = new RectangleLayer
+        {
+            X = 10, Y = 10, Width = 90, Height = 90,
+            Style = new BrushStyle { StrokeColor = new Color4(1, 0, 0, 1), StrokeWidth = 2f }
+        };
+        mgr.AddLayer(layer);
+        bool ok = mgr.Layers.Count == 1 && mgr.Layers[0].Type == ShapeType.Rectangle;
+        Assert("AnnotationManager.AddLayer: 添加矩形图层", ok);
+    }
+
+    static void Test_AnnotationManager_UndoRedo()
+    {
+        var mgr = new AnnotationManager();
+        var layer = new EllipseLayer
+        {
+            CenterX = 25, CenterY = 25, RadiusX = 25, RadiusY = 25,
+            Style = new BrushStyle { StrokeColor = new Color4(0, 1, 0, 1), StrokeWidth = 3f }
+        };
+        mgr.AddLayer(layer);
+        Assert("AnnotationManager: 添加后 CanUndo=true", mgr.CanUndo);
+
+        mgr.Undo();
+        bool undone = mgr.Layers.Count == 0 && mgr.CanRedo;
+        Assert("AnnotationManager.Undo: 图层被移除 + CanRedo=true", undone);
+
+        mgr.Redo();
+        bool redone = mgr.Layers.Count == 1 && !mgr.CanRedo;
+        Assert("AnnotationManager.Redo: 图层恢复 + CanRedo=false", redone);
+    }
+
+    static void Test_AnnotationManager_RemoveLayer()
+    {
+        var mgr = new AnnotationManager();
+        var layer = new TextLayer
+        {
+            X = 5, Y = 5, Text = "测试文字", FontSize = 16f,
+            TextColor = new Color4(1, 1, 1, 1)
+        };
+        mgr.AddLayer(layer);
+        mgr.RemoveLayer(layer.Id);
+        bool ok = mgr.Layers.Count == 0;
+        Assert("AnnotationManager.RemoveLayer: 删除后图层为空", ok);
+
+        // 撤销删除
+        mgr.Undo();
+        Assert("AnnotationManager: 撤销删除后图层恢复", mgr.Layers.Count == 1);
+    }
+
+    // ═══════════════════════════════════════
+    //  FormatEncoders 测试
+    // ═══════════════════════════════════════
+
+    static void Test_EncoderRegistry_AllFormatsRegistered()
+    {
+        // 验证所有 OutputFormat 枚举值都能创建编码器
+        var formats = Enum.GetValues<OutputFormat>();
+        bool ok = true;
+        foreach (var f in formats)
+        {
+            try
+            {
+                var enc = EncoderFactory.Create(f);
+                if (enc is null) { ok = false; break; }
+            }
+            catch { ok = false; break; }
+        }
+        Assert($"EncoderFactory: 所有 {formats.Length} 种格式可创建编码器", ok);
+    }
+
+    static void Test_EncoderRegistry_QualityRanges()
+    {
+        // 验证编码器质量范围合法性 (min <= default <= max)
+        var formats = Enum.GetValues<OutputFormat>();
+        bool ok = true;
+        foreach (var f in formats)
+        {
+            var enc = EncoderFactory.Create(f);
+            var (min, max, def, _) = enc.GetQualityRange();
+            if (min > max || def < min || def > max) { ok = false; break; }
+        }
+        Assert("EncoderFactory: 所有编码器质量范围合法 (min≤default≤max)", ok);
+    }
+
+    static void Test_EncodingSettings_Defaults()
+    {
+        var s = new EncodingSettings();
+        bool ok = s.Format == OutputFormat.PNG
+            && s.Quality == 90f
+            && !s.HdrOutput
+            && s.AvifBackend == AvifEncoderBackend.Auto
+            && s.AvifChroma == "444"
+            && s.DisplayBitDepth == 8;
+        Assert("EncodingSettings: 默认值正确", ok);
     }
 
     // ═══════════════════════════════════════

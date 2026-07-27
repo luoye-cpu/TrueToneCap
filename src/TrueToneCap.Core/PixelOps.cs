@@ -1,6 +1,6 @@
 // TrueToneCap.Core/PixelOps.cs
 // 多 ISA 像素操作加速库
-// 支持: AVX2 | AVX-512 (VL+BW) | AVX10.1/10.2 | ARM64 NEON (预留)
+// 支持: AVX2 | AVX-512 (VL+BW) | AVX10.1/10.2 | ARM64 NEON
 // 策略: 运行时检测最优 ISA → 分层回退 → JIT 自动向量化 → 标量
 
 using System.Runtime.CompilerServices;
@@ -66,7 +66,7 @@ public static class PixelOps
     public static bool HasAvx10_512 => Vector512.IsHardwareAccelerated && HasAvx512Full;
 
     // ── ARM64 ──
-    /// <summary>ARM64 NEON (Snapdragon X, Apple M 系列) — 预留。</summary>
+    /// <summary>ARM64 NEON (Snapdragon X, Apple M 系列) — 已实现。</summary>
     public static bool HasNeon => AdvSimd.IsSupported;
     /// <summary>ARM64 SVE/SVE2 — 预留 (未来 .NET 支持)。</summary>
     public static bool HasSve => false; // .NET 10 暂无 SVE intrinsic
@@ -184,13 +184,31 @@ public static class PixelOps
             pixels[i] = 0xFF;
     }
 
-    /// <summary>ARM64 NEON Alpha 通道修复 (预留)。</summary>
-    private static void FixAlphaChannelNeon(byte[] pixels)
+    /// <summary>ARM64 NEON Alpha 通道修复 — 16 字节/轮 (4 像素)。</summary>
+    private static unsafe void FixAlphaChannelNeon(byte[] pixels)
     {
-        // 预留: AdvSimd.Or + AdvSimd.LoadVector128
-        // 当前回退到 JIT 自动向量化
-        for (int i = 3; i < pixels.Length; i += 4)
-            pixels[i] = 0xFF;
+        int len = pixels.Length;
+        // NEON 128-bit: 每轮处理 16 字节 = 4 个 BGRA 像素
+        // 掩码: 每 4 字节第 4 位为 0xFF，其余为 0x00
+        var alphaMask = Vector128.Create(0xFF000000u).AsByte();
+
+        fixed (byte* p = pixels)
+        {
+            byte* ptr = p;
+            byte* end = p + len - 15;
+
+            while (ptr <= end)
+            {
+                var v = AdvSimd.LoadVector128(ptr);
+                v = AdvSimd.Or(v, alphaMask);
+                AdvSimd.Store(ptr, v);
+                ptr += 16;
+            }
+
+            // 尾部标量处理
+            for (byte* tail = ptr; tail < p + len; tail += 4)
+                tail[3] = 0xFF;
+        }
     }
 
     // ═══════════════════════════════════════════════════════

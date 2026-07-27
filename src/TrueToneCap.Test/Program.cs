@@ -11,6 +11,12 @@ if (args.Contains("--unit-tests"))
     return TrueToneCap.Test.CorePipelineTests.RunAll();
 }
 
+// ── 编码集成测试入口 ──
+if (args.Contains("--encoding-tests"))
+{
+    return TrueToneCap.Test.EncodingIntegrationTests.RunAll();
+}
+
 Console.WriteLine("══════════════════════════════════════");
 Console.WriteLine("  TrueToneCap ONNX OCR 综合分析");
 Console.WriteLine("══════════════════════════════════════\n");

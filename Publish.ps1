@@ -3,14 +3,14 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$OutputDir = "publish\TrueToneCap-v0.1.5-beta"
+    [string]$OutputDir = "publish\TrueToneCap-v0.2.0-beta"
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "╔══════════════════════════════════╗"
-Write-Host "║  TrueToneCap v0.1.5 Beta 发布脚本 ║"
+Write-Host "║  TrueToneCap v0.2.0 Beta 发布脚本 ║"
 Write-Host "╚══════════════════════════════════╝"
 Write-Host ""
 
@@ -56,8 +56,8 @@ if ($xbfFiles) {
 # ── 4. Embed Windows App Runtime MSIX ──
 Write-Host "[4/4] 嵌入 Windows App Runtime..."
 $NuGetRoot = "$env:USERPROFILE\.nuget\packages"
-# 使用项目引用的具体版本：Microsoft.WindowsAppSDK 1.6.250205002
-$SdkVersion = "1.6.250205002"
+# 使用项目引用的具体版本：Microsoft.WindowsAppSDK 2.3.1
+$SdkVersion = "2.3.1"
 $SdkDir = "$NuGetRoot\microsoft.windowsappsdk\$SdkVersion"
 # MSIX 目录使用 win10-x64（而非 win-x64）
 $MsixDir = "$SdkDir\tools\MSIX\win10-x64"
