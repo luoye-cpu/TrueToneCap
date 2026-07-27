@@ -134,13 +134,12 @@ public sealed partial class MainWindow : Window
         ToastService.Register();
 
         // ── 初始化 OCR 引擎（后台加载 ONNX 模型，不阻塞窗口显示）──
+        // 模型目录自动解析: 应用内嵌 data/Models/ → 用户 %LOCALAPPDATA%
         try
         {
-            var modelDir = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "TrueToneCap", "onnx_models");
+            var modelDir = TrueToneCap.Core.Services.OnnxOcrEngine.ResolveModelDir();
             _ = Task.Run(() => MultiOcrService.Initialize(modelDir));
-            System.Diagnostics.Debug.WriteLine("[MainWindow] OCR 引擎初始化已后台启动");
+            System.Diagnostics.Debug.WriteLine($"[MainWindow] OCR 引擎初始化已后台启动, 模型目录: {modelDir}");
         }
         catch (Exception ex)
         {
@@ -272,7 +271,8 @@ public sealed partial class MainWindow : Window
         if (ArchiveModeCbo is not null) { SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode); ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed; }
 
         // LLM 设置
-        UseLlmChk.IsChecked = _settings.UseCustomLlm;
+        SetComboByTag(TranslationModeCbo, _settings.TranslationMode);
+        OnTranslationModeChanged(TranslationModeCbo, null!);
         LlmEndpointTxt.Text = _settings.LlmEndpoint;
         LlmApiKeyTxt.Text = _settings.LlmApiKey;
         LlmModelTxt.Text = _settings.LlmModel;
@@ -288,7 +288,7 @@ public sealed partial class MainWindow : Window
         MultiOcrService.ForceEngine = _settings.OcrEngineMode switch
         {
             "Gpu" => "DirectML",
-            "Cpu" => "ONNX PP-OCRv4-server (Cpu)",
+            "Cpu" => "PP-OCRv6 (Cpu",
             "Windows" => "Windows OCR",
             _ => null
         };
@@ -331,7 +331,8 @@ public sealed partial class MainWindow : Window
             _settings.Language = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh";
 
             // LLM 设置
-            _settings.UseCustomLlm = UseLlmChk.IsChecked == true;
+            _settings.TranslationMode = (TranslationModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Free";
+            _settings.UseCustomLlm = _settings.TranslationMode is "LLM" or "Vision";
             _settings.LlmEndpoint = LlmEndpointTxt.Text;
             _settings.LlmApiKey = LlmApiKeyTxt.Text;
             _settings.LlmModel = LlmModelTxt.Text;
@@ -803,42 +804,55 @@ public sealed partial class MainWindow : Window
 
             overlay.ActionCompleted += async (action, rect) =>
             {
-                if (action == SelectionOverlay.ActionResult.Cancel)
+                try
                 {
-                    DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
-                    return;
+                    if (action == SelectionOverlay.ActionResult.Cancel)
+                    {
+                        DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
+                        return;
+                    }
+
+                    // 优先使用标注合成后的像素
+                    var regionPixels = overlay.AnnotatedRegionPixels
+                        ?? ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy, rect);
+
+                    if (regionPixels is null)
+                    {
+                        DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 提取区域失败");
+                        return;
+                    }
+
+                    switch (action)
+                    {
+                        case SelectionOverlay.ActionResult.Confirm:
+                            await EncodeAndSaveAsync(regionPixels, rect.Width, rect.Height);
+                            break;
+                        case SelectionOverlay.ActionResult.Copy:
+                            await EncodeAndCopyAsync(regionPixels, rect.Width, rect.Height);
+                            break;
+                        case SelectionOverlay.ActionResult.Ocr:
+                            await CaptureAndOcrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
+                            break;
+                        case SelectionOverlay.ActionResult.Translate:
+                            await CaptureAndTranslateFromPixelsAsync(regionPixels, rect.Width, rect.Height);
+                            break;
+                    }
+
+                    // 截图完成 → 仅保存/复制时缩回托盘
+                    if (MinimizeTrayChk.IsChecked == true
+                        && action is SelectionOverlay.ActionResult.Confirm or SelectionOverlay.ActionResult.Copy)
+                        DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
                 }
-
-                // 优先使用标注合成后的像素
-                var regionPixels = overlay.AnnotatedRegionPixels
-                    ?? ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy, rect);
-
-                if (regionPixels is null)
+                catch (Exception ex)
                 {
-                    DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 提取区域失败");
-                    return;
+                    // ═══ async void 安全网：未捕获异常会直接终止进程 ═══
+                    System.Diagnostics.Debug.WriteLine($"[MainWindow] ActionCompleted 异常: {ex}");
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        StatusTxt.Text = $"❌ {ex.Message}";
+                        ToastService.ShowCaptureFailed(ex.Message);
+                    });
                 }
-
-                switch (action)
-                {
-                    case SelectionOverlay.ActionResult.Confirm:
-                        await EncodeAndSaveAsync(regionPixels, rect.Width, rect.Height);
-                        break;
-                    case SelectionOverlay.ActionResult.Copy:
-                        await EncodeAndCopyAsync(regionPixels, rect.Width, rect.Height);
-                        break;
-                    case SelectionOverlay.ActionResult.Ocr:
-                        await CaptureAndOcrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
-                        break;
-                    case SelectionOverlay.ActionResult.Translate:
-                        await CaptureAndTranslateFromPixelsAsync(regionPixels, rect.Width, rect.Height);
-                        break;
-                }
-
-                // 截图完成 → 仅保存/复制时缩回托盘
-                if (MinimizeTrayChk.IsChecked == true
-                    && action is SelectionOverlay.ActionResult.Confirm or SelectionOverlay.ActionResult.Copy)
-                    DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
             };
 
             overlay.ActionCompleted += (_, _) => Interlocked.Exchange(ref _isCapturing, 0);
@@ -1126,7 +1140,7 @@ public sealed partial class MainWindow : Window
         MultiOcrService.ForceEngine = tag switch
         {
             "Gpu" => "DirectML",
-            "Cpu" => "ONNX PP-OCRv4-server (Cpu)",
+            "Cpu" => "PP-OCRv6 (Cpu",
             "Windows" => "Windows OCR",
             _ => null  // "Auto" → 不强制, 自动降级
         };
@@ -1303,6 +1317,7 @@ public sealed partial class MainWindow : Window
         SetComboItemText(TargetLangCbo, "ja", LocaleManager.TlJapanese);
 
         SetComboItemText(OcrLangCbo, "", LocaleManager.OlSystem);
+        SetComboItemText(OcrLangCbo, "zh-en", LocaleManager.OlMixed);
         SetComboItemText(OcrLangCbo, "zh-Hans", LocaleManager.TlChinese);
         SetComboItemText(OcrLangCbo, "en-US", LocaleManager.TlEnglish);
 
@@ -1350,6 +1365,71 @@ public sealed partial class MainWindow : Window
 
     private void OnCaptureHotkeyRecordClick(object sender, RoutedEventArgs e)
         => StartHotkeyRecording(HotkeyTxt);
+
+    // ═══ LLM 提供商/模型切换 ═══
+    private void OnLlmProviderChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var tag = (LlmProviderCbo.SelectedItem as ComboBoxItem)?.Tag as string;
+        var (endpoint, model) = tag switch
+        {
+            "DeepSeek" => ("https://api.deepseek.com/v1", "deepseek-chat"),
+            "DeepSeek-Flash" => ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
+            "GLM" => ("https://open.bigmodel.cn/api/paas/v4", "glm-4.7-flash"),
+            "Gemini" => ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash"),
+            "SiliconFlow" => ("https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-72B-Instruct"),
+            "OpenAI" => ("https://api.openai.com/v1", "gpt-4o-mini"),
+            "Aliyun" => ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-turbo"),
+            "Moonshot" => ("https://api.moonshot.cn/v1", "moonshot-v1-8k"),
+            _ => ("", "")
+        };
+        if (tag != "Custom" && !string.IsNullOrEmpty(endpoint))
+        {
+            LlmEndpointTxt.Text = endpoint;
+            // 自动选中对应模型
+            foreach (ComboBoxItem item in LlmModelCbo.Items)
+            {
+                if ((item.Tag as string) == model) { LlmModelCbo.SelectedItem = item; break; }
+            }
+            LlmModelTxt.Text = model;
+        }
+    }
+
+    private void OnLlmModelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var tag = (LlmModelCbo.SelectedItem as ComboBoxItem)?.Tag as string;
+        if (tag != null && tag != "custom")
+            LlmModelTxt.Text = tag;
+    }
+
+    // ═══ 翻译模式切换 ═══
+    private void OnTranslationModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // 防止 XAML 初始化阶段控件尚未创建时崩溃
+        if (TranslationModeCbo is null) return;
+
+        var tag = (TranslationModeCbo.SelectedItem as ComboBoxItem)?.Tag as string;
+        bool showLlm = tag is "LLM" or "Vision";
+
+        if (LlmConfigCard is not null)
+            LlmConfigCard.Visibility = showLlm ? Visibility.Visible : Visibility.Collapsed;
+        if (FreeModeHint is not null)
+            FreeModeHint.Visibility = tag == "Free" ? Visibility.Visible : Visibility.Collapsed;
+
+        if (LlmModeHint is not null)
+        {
+            if (tag == "LLM")
+                LlmModeHint.Text = "OCR 识别文字后，通过 LLM API 翻译为高质量译文";
+            else if (tag == "Vision")
+                LlmModeHint.Text = "截图直接发送给视觉 LLM，一步完成识别+翻译（实验性，需支持 Vision 的模型）";
+        }
+
+        // 同步到设置
+        if (_settings is not null)
+        {
+            _settings.TranslationMode = tag ?? "Free";
+            _settings.UseCustomLlm = showLlm;
+        }
+    }
 
     private void OnRecordHotkeyClick(object sender, RoutedEventArgs e)
         => StartHotkeyRecording(RecordHotkeyTxt);
@@ -1604,9 +1684,10 @@ public sealed class AppSettingsData
 
     // LLM / 翻译设置
     public bool UseCustomLlm { get; set; }
+    public string TranslationMode { get; set; } = "Free"; // Free / LLM / Vision
     public string LlmEndpoint { get; set; } = "";
     public string LlmApiKey { get; set; } = "";
-    public string LlmModel { get; set; } = "gpt-4o-mini";
+    public string LlmModel { get; set; } = "deepseek-chat";
     public string LlmSystemPrompt { get; set; } = "";
     public string TargetLanguage { get; set; } = "zh-CN";
     public string OcrLanguage { get; set; } = "";

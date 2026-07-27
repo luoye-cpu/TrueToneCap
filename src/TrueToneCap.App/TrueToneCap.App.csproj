@@ -13,6 +13,7 @@
     <RootNamespace>TrueToneCap.App</RootNamespace>
     <AssemblyName>TrueToneCap</AssemblyName>
     <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationTitle>TrueToneCap</ApplicationTitle>
@@ -28,13 +29,14 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\TrueToneCap.Core\TrueToneCap.Core.csproj" />
   </ItemGroup>
 
-  <!-- 内嵌字体 + 数据文件 → 输出到 data/ -->
+  <!-- 内嵌字体 + 数据文件 + OCR 模型 → 输出到 data/ -->
   <ItemGroup>
     <Content Include="Fonts\**\*.ttf" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Fonts\" />
     <Content Include="Fonts\**\*.otf" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Fonts\" />
@@ -42,7 +44,15 @@
     <Content Include="Shaders\*.cso" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
     <Content Include="Shaders\*.ps1" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
     <Content Include="Models\*.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Models\" />
+    <!-- PP-OCRv6 ONNX 模型 (FP16, 内置分发) -->
+    <Content Include="Models\*.onnx" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Models\" />
   </ItemGroup>
+
+  <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发） -->
+  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\ToneMapping.hlsl;Shaders\MosaicEffect.hlsl;Shaders\FullscreenVS.hlsl" Outputs="Shaders\ToneMapping.hlsl.cso;Shaders\MosaicEffect.hlsl.cso;Shaders\FullscreenVS.hlsl.cso">
+    <Message Text="编译 HLSL 着色器..." Importance="high" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Shaders\CompileShaders.ps1&quot; -ShaderDir &quot;$(MSBuildProjectDirectory)\Shaders&quot; -OutputDir &quot;$(MSBuildProjectDirectory)\Shaders&quot;" />
+  </Target>
 
   <!-- Post-publish: 复制 PRI/XBF + 整理目录 -->
   <Target Name="CopyPriAndXbf" AfterTargets="Publish">

@@ -24,19 +24,19 @@
 
             <controls:NavigationView.MenuItems>
                 <controls:NavigationViewItem x:Name="NavOutput" Tag="Output">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE8B7;"/></controls:NavigationViewItem.Icon>
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE8B7;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
                 <controls:NavigationViewItem x:Name="NavColor" Tag="Color">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE790;"/></controls:NavigationViewItem.Icon>
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE790;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
                 <controls:NavigationViewItem x:Name="NavCapture" Tag="Capture">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE722;"/></controls:NavigationViewItem.Icon>
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE722;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
                 <controls:NavigationViewItem x:Name="NavAI" Tag="AI">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE774;"/></controls:NavigationViewItem.Icon>
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE774;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
                 <controls:NavigationViewItem x:Name="NavSystem" Tag="System">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE713;"/></controls:NavigationViewItem.Icon>
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
             </controls:NavigationView.MenuItems>
 
@@ -178,45 +178,126 @@
                     <!-- ── AI 翻译 ── -->
                     <StackPanel x:Name="PageAI" Spacing="16" Visibility="Collapsed">
                         <TextBlock Text="AI 翻译" FontSize="20" FontWeight="Bold"/>
+
+                        <!-- ═══ 卡片 1: OCR 文字识别 ═══ -->
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
-                                <CheckBox x:Name="UseLlmChk" Content="使用自定义 LLM 翻译"/>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="API 端点" VerticalAlignment="Center"/><TextBox x:Name="LlmEndpointTxt" Grid.Column="1" PlaceholderText="https://api.openai.com/v1"/></Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="API 密钥" VerticalAlignment="Center"/><TextBox x:Name="LlmApiKeyTxt" Grid.Column="1" PlaceholderText="sk-..."/></Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="模型" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="LlmModelCbo" Grid.Column="1">
-                                        <ComboBoxItem Tag="gpt-4o-mini">GPT-4o mini</ComboBoxItem><ComboBoxItem Tag="deepseek-chat">DeepSeek V3</ComboBoxItem>
-                                        <ComboBoxItem Tag="gpt-4.1-mini">GPT-4.1 mini</ComboBoxItem><ComboBoxItem Tag="custom">自定义</ComboBoxItem>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE8D4;" FontSize="16"/>
+                                    <TextBlock Text="OCR 文字识别" FontSize="14" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <TextBlock Text="截图后自动识别图中文字，支持 50+ 语言" FontSize="11"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="引擎" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="OcrEngineCbo" Grid.Column="1" SelectionChanged="OnOcrEngineChanged">
+                                        <ComboBoxItem Tag="Auto" IsSelected="True">自动 (GPU → CPU)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Gpu">DirectML GPU (推荐)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Cpu">ONNX CPU (兼容)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Windows">Windows OCR (系统)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="自定义模型" VerticalAlignment="Center"/><TextBox x:Name="LlmModelTxt" Grid.Column="1" PlaceholderText="gpt-4o-mini"/></Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="系统提示词" VerticalAlignment="Center"/><TextBox x:Name="LlmPromptTxt" Grid.Column="1" PlaceholderText="你是一个专业翻译..." AcceptsReturn="True" Height="60"/></Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="目标语言" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="TargetLangCbo" Grid.Column="1">
-                                        <ComboBoxItem Tag="zh-CN" IsSelected="True">中文</ComboBoxItem><ComboBoxItem Tag="en">English</ComboBoxItem><ComboBoxItem Tag="ja">日本語</ComboBoxItem>
-                                    </ComboBox>
-                                </Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="OCR 语言" VerticalAlignment="Center"/>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="识别语言" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="OcrLangCbo" Grid.Column="1">
-                                        <ComboBoxItem Tag="" IsSelected="True">跟随系统</ComboBoxItem><ComboBoxItem Tag="zh-Hans">中文</ComboBoxItem><ComboBoxItem Tag="en-US">English</ComboBoxItem>
+                                        <ComboBoxItem Tag="" IsSelected="True">自动 (PP-OCRv6 50语言)</ComboBoxItem>
+                                        <ComboBoxItem Tag="zh-en">中英混合 (Windows OCR)</ComboBoxItem>
+                                        <ComboBoxItem Tag="zh-Hans">中文 (Windows OCR)</ComboBoxItem>
+                                        <ComboBoxItem Tag="en-US">English (Windows OCR)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
+                                <TextBlock x:Name="OcrEngineStatus" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="100,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
 
-                        <!-- OCR 引擎设置 -->
+                        <!-- ═══ 卡片 2: 翻译模式 ═══ -->
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
-                                <TextBlock Text="OCR 引擎" FontSize="14" FontWeight="SemiBold"/>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="引擎" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="OcrEngineCbo" Grid.Column="1" SelectionChanged="OnOcrEngineChanged">
-                                        <ComboBoxItem Tag="Auto" IsSelected="True">自动 (GPU → Win → CPU)</ComboBoxItem>
-                                        <ComboBoxItem Tag="Gpu">ONNX GPU</ComboBoxItem>
-                                        <ComboBoxItem Tag="Windows">Windows OCR</ComboBoxItem>
-                                        <ComboBoxItem Tag="Cpu">ONNX CPU</ComboBoxItem>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE774;" FontSize="16"/>
+                                    <TextBlock Text="翻译模式" FontSize="14" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <TextBlock Text="选择翻译引擎，OCR 识别后的文字将被翻译为目标语言" FontSize="11"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="模式" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="TranslationModeCbo" Grid.Column="1" SelectionChanged="OnTranslationModeChanged">
+                                        <ComboBoxItem Tag="Free" IsSelected="True">免费翻译 (有道 / Google)</ComboBoxItem>
+                                        <ComboBoxItem Tag="LLM">LLM 翻译 (OCR → AI 翻译文字)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Vision">视觉翻译 (图片直传 AI，实验性)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <TextBlock x:Name="OcrEngineStatus" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="目标语言" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="TargetLangCbo" Grid.Column="1">
+                                        <ComboBoxItem Tag="zh-CN" IsSelected="True">中文 (简体)</ComboBoxItem>
+                                        <ComboBoxItem Tag="zh-TW">中文 (繁體)</ComboBoxItem>
+                                        <ComboBoxItem Tag="en">English</ComboBoxItem>
+                                        <ComboBoxItem Tag="ja">日本語</ComboBoxItem>
+                                        <ComboBoxItem Tag="ko">한국어</ComboBoxItem>
+                                        <ComboBoxItem Tag="fr">Français</ComboBoxItem>
+                                        <ComboBoxItem Tag="de">Deutsch</ComboBoxItem>
+                                        <ComboBoxItem Tag="es">Español</ComboBoxItem>
+                                        <ComboBoxItem Tag="ru">Русский</ComboBoxItem>
+                                        <ComboBoxItem Tag="pt">Português</ComboBoxItem>
+                                        <ComboBoxItem Tag="it">Italiano</ComboBoxItem>
+                                        <ComboBoxItem Tag="th">ไทย</ComboBoxItem>
+                                        <ComboBoxItem Tag="vi">Tiếng Việt</ComboBoxItem>
+                                        <ComboBoxItem Tag="ar">العربية</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <!-- 免费模式提示 -->
+                                <TextBlock x:Name="FreeModeHint" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           Text="自动降级：有道翻译 (国内) → Google 翻译 (海外)，无需 API Key" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- ═══ 卡片 3: LLM 配置（仅 LLM / Vision 模式可见）═══ -->
+                        <Border x:Name="LlmConfigCard" Padding="16" CornerRadius="8"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE946;" FontSize="16"/>
+                                    <TextBlock Text="LLM 配置" FontSize="14" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <TextBlock x:Name="LlmModeHint" FontSize="11"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           Text="OCR 识别文字后，通过 LLM API 翻译为高质量译文" TextWrapping="Wrap"/>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="提供商" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="LlmProviderCbo" Grid.Column="1" SelectionChanged="OnLlmProviderChanged">
+                                        <ComboBoxItem Tag="DeepSeek">DeepSeek</ComboBoxItem>
+                                        <ComboBoxItem Tag="DeepSeek-Flash">DeepSeek (V4 Flash)</ComboBoxItem>
+                                        <ComboBoxItem Tag="GLM">智谱 GLM</ComboBoxItem>
+                                        <ComboBoxItem Tag="Gemini">Google Gemini</ComboBoxItem>
+                                        <ComboBoxItem Tag="SiliconFlow">硅基流动</ComboBoxItem>
+                                        <ComboBoxItem Tag="OpenAI">OpenAI</ComboBoxItem>
+                                        <ComboBoxItem Tag="Aliyun">阿里云百炼</ComboBoxItem>
+                                        <ComboBoxItem Tag="Moonshot">Moonshot</ComboBoxItem>
+                                        <ComboBoxItem Tag="Custom" IsSelected="True">自定义</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="API 端点" VerticalAlignment="Center"/><TextBox x:Name="LlmEndpointTxt" Grid.Column="1" PlaceholderText="https://api.deepseek.com/v1"/></Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="API 密钥" VerticalAlignment="Center"/><TextBox x:Name="LlmApiKeyTxt" Grid.Column="1" PlaceholderText="sk-..."/></Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="模型" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="LlmModelCbo" Grid.Column="1" SelectionChanged="OnLlmModelChanged">
+                                        <ComboBoxItem Tag="deepseek-chat">DeepSeek V3</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek-v4-flash">DeepSeek V4 Flash</ComboBoxItem>
+                                        <ComboBoxItem Tag="glm-4.7-flash">GLM-4.7 Flash (智谱)</ComboBoxItem>
+                                        <ComboBoxItem Tag="glm-4-flash">GLM-4 Flash (智谱)</ComboBoxItem>
+                                        <ComboBoxItem Tag="gemini-2.0-flash">Gemini 2.0 Flash (Google)</ComboBoxItem>
+                                        <ComboBoxItem Tag="gemini-2.5-flash">Gemini 2.5 Flash (Google)</ComboBoxItem>
+                                        <ComboBoxItem Tag="gemini-2.5-pro">Gemini 2.5 Pro (Google)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Qwen/Qwen2.5-72B-Instruct">Qwen2.5-72B (硅基流动)</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek-ai/DeepSeek-V3">DeepSeek V3 (硅基流动)</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek-ai/DeepSeek-R1">DeepSeek R1 (硅基流动)</ComboBoxItem>
+                                        <ComboBoxItem Tag="gpt-4o-mini">GPT-4o mini</ComboBoxItem>
+                                        <ComboBoxItem Tag="gpt-4.1-mini">GPT-4.1 mini</ComboBoxItem>
+                                        <ComboBoxItem Tag="gpt-4.1-nano">GPT-4.1 nano</ComboBoxItem>
+                                        <ComboBoxItem Tag="qwen-turbo">Qwen Turbo (阿里)</ComboBoxItem>
+                                        <ComboBoxItem Tag="qwen-plus">Qwen Plus (阿里)</ComboBoxItem>
+                                        <ComboBoxItem Tag="moonshot-v1-8k">Moonshot V1 8K</ComboBoxItem>
+                                        <ComboBoxItem Tag="custom">自定义模型</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="自定义模型" VerticalAlignment="Center"/><TextBox x:Name="LlmModelTxt" Grid.Column="1" PlaceholderText="deepseek-chat"/></Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="提示词" VerticalAlignment="Top" Margin="0,6,0,0"/><TextBox x:Name="LlmPromptTxt" Grid.Column="1" PlaceholderText="留空使用默认翻译提示词..." AcceptsReturn="True" Height="52" TextWrapping="Wrap"/></Grid>
                             </StackPanel>
                         </Border>
                     </StackPanel>

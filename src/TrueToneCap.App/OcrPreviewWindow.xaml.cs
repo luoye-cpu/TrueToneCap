@@ -154,54 +154,125 @@ public sealed partial class OcrPreviewWindow : Window
         OverlayCanvas.Children.Clear();
         if (_ocr.Lines is null || _ocr.Lines.Count == 0 || OverlayCanvas.Width <= 0) return;
 
+        double canvasW = OverlayCanvas.Width, canvasH = OverlayCanvas.Height;
         double sx = ScaleX, sy = ScaleY;
+
+        // ═══ 第一层：整体标暗（轻度暗化，保留原图可见性）═══
+        var darkOverlay = new Border
+        {
+            Width = canvasW, Height = canvasH,
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(90, 0, 0, 0)),
+            IsHitTestVisible = false,
+        };
+        Canvas.SetLeft(darkOverlay, 0);
+        Canvas.SetTop(darkOverlay, 0);
+        OverlayCanvas.Children.Add(darkOverlay);
+
+        // ═══ 第二层：逐行渲染 ═══
         for (int i = 0; i < _ocr.Lines.Count; i++)
         {
             var line = _ocr.Lines[i];
-            var rect = LineRect(line); // 原图坐标
+            var rect = LineRect(line);
             if (rect.Width <= 0 || rect.Height <= 0) continue;
 
             double cx = rect.X * sx, cy = rect.Y * sy, cw = rect.Width * sx, ch = rect.Height * sy;
+            bool hasTranslation = _translatedLines is not null && i < _translatedLines.Count;
+            string translated = hasTranslation ? _translatedLines![i] : "";
 
-            var block = new Border
+            if (_showTranslation && hasTranslation)
             {
-                Width = Math.Max(1, cw), Height = Math.Max(1, ch),
-                CornerRadius = new CornerRadius(2),
-            };
-            Canvas.SetLeft(block, cx);
-            Canvas.SetTop(block, cy);
+                // ═══ 译文模式：条形覆盖块，刚好覆盖原文区域 ═══
+                var bar = new Border
+                {
+                    Width = Math.Max(1, cw), Height = Math.Max(1, ch),
+                    CornerRadius = new CornerRadius(2),
+                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(235, 15, 23, 42)), // 深色不透明底
+                    BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(120, 56, 189, 248)),
+                    BorderThickness = new Thickness(1),
+                };
+                Canvas.SetLeft(bar, cx);
+                Canvas.SetTop(bar, cy);
 
-            if (_showTranslation && _translatedLines is not null && i < _translatedLines.Count)
-            {
-                // 译文模式：浅蓝色背景 + 译文 Viewbox 缩放覆盖（点对点替换原字）
-                block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(230, 200, 230, 255)); // 浅蓝色背景
-                block.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(180, 68, 136, 255)); // 蓝色边框
-                block.BorderThickness = new Thickness(1);
-                var vb = new Viewbox { Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly, Margin = new Thickness(2, 0, 2, 0) };
+                // 译文文字：Viewbox 自适应缩放，刚好填满条形
+                var vb = new Viewbox
+                {
+                    Stretch = Stretch.Uniform,
+                    StretchDirection = StretchDirection.DownOnly,
+                    Margin = new Thickness(4, 0, 4, 0),
+                };
                 vb.Child = new TextBlock
                 {
-                    Text = _translatedLines[i],
-                    Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
+                    Text = translated,
+                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)), // 亮白文字
+                    FontWeight = Microsoft.UI.Text.FontWeights.Medium,
                     TextWrapping = TextWrapping.NoWrap,
                     VerticalAlignment = VerticalAlignment.Center,
                 };
-                block.Child = vb;
-                ToolTipService.SetToolTip(block, _translatedLines[i]);
+                bar.Child = vb;
+                ToolTipService.SetToolTip(bar, $"原文: {line.Text}\n译文: {translated}");
+
+                int idx = i;
+                bar.Tapped += (_, _) => CopyLine(idx);
+                OverlayCanvas.Children.Add(bar);
             }
             else
             {
-                // 原文模式：半透明高亮命中块，透出原字
-                block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(45, 255, 235, 59));
-                block.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(120, 255, 193, 7));
-                block.BorderThickness = new Thickness(1);
-                ToolTipService.SetToolTip(block, line.Text);
-            }
+                // ═══ 原文模式：透明边框标记 + 悬停显示译文预览 ═══
+                var block = new Border
+                {
+                    Width = Math.Max(1, cw), Height = Math.Max(1, ch),
+                    CornerRadius = new CornerRadius(2),
+                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0)),
+                    BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(160, 56, 189, 248)),
+                    BorderThickness = new Thickness(1),
+                };
+                Canvas.SetLeft(block, cx);
+                Canvas.SetTop(block, cy);
 
-            int idx = i;
-            block.PointerEntered += (_, _) => block.Opacity = 0.75;
-            block.PointerExited += (_, _) => block.Opacity = 1.0;
-            block.Tapped += (_, _) => CopyLine(idx);
-            OverlayCanvas.Children.Add(block);
+                // 悬停时：如果有译文，显示译文预览条；否则微亮
+                int idx = i;
+                TextBlock? hoverLabel = null;
+
+                block.PointerEntered += (_, _) =>
+                {
+                    block.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 56, 189, 248));
+                    if (hasTranslation && !string.IsNullOrEmpty(translated))
+                    {
+                        // 悬停显示译文预览条（覆盖在原文上方）
+                        block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(220, 15, 23, 42));
+                        if (hoverLabel is null)
+                        {
+                            hoverLabel = new TextBlock
+                            {
+                                Text = translated,
+                                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)),
+                                FontSize = Math.Max(10, ch * 0.7),
+                                TextWrapping = TextWrapping.NoWrap,
+                                TextTrimming = TextTrimming.CharacterEllipsis,
+                                VerticalAlignment = VerticalAlignment.Center,
+                                Margin = new Thickness(4, 0, 4, 0),
+                            };
+                            block.Child = hoverLabel;
+                        }
+                    }
+                    else
+                    {
+                        block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(30, 56, 189, 248));
+                    }
+                };
+                block.PointerExited += (_, _) =>
+                {
+                    block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0));
+                    block.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(160, 56, 189, 248));
+                    block.Child = null;
+                    hoverLabel = null;
+                };
+                block.Tapped += (_, _) => CopyLine(idx);
+
+                // 默认 ToolTip 显示原文
+                ToolTipService.SetToolTip(block, hasTranslation ? $"{line.Text} → {translated}" : line.Text);
+                OverlayCanvas.Children.Add(block);
+            }
         }
     }
 

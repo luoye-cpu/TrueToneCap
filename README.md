@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.1.5 Beta** · Windows 11 24H2+ · WinUI 3 · .NET 10 · DXGI
+> **v0.2.0 Beta** · Windows 11 24H2+ · WinUI 3 · .NET 10 · WGC
 
 TrueToneCap 是一把为像素而生的手术刀。
 
@@ -21,7 +21,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 ## Quick Start / 快速开始
 
-1. Download `TrueToneCap-v0.1.5-beta-win-x64.zip`, extract / 下载解压
+1. Download `TrueToneCap-v0.2.0-beta-win-x64.zip`, extract / 下载解压
 2. Run `TrueToneCap.exe` / 双击运行
 3. Press `Ctrl+Shift+S` to capture / 按快捷键截图
 
@@ -33,7 +33,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 | Feature | Detail |
 |---------|--------|
-| 📷 Capture / 捕获 | DXGI Desktop Duplication, Float16 HDR / BGRA8 SDR, GDI fallback |
+| 📷 Capture / 捕获 | WGC (Windows.Graphics.Capture), Float16 HDR / BGRA8 SDR, 池化零延迟 |
 | 🎨 Color / 色彩 | ICC detection & baking, BT.2020 / sRGB / Display P3, ACM |
 | ✏️ Annotate / 标注 | Rect, Ellipse, Arrow, Pen, Text, Mosaic — full-screen overlay |
 | 🖼️ Export / 导出 | PNG (lossless HDR) · JPEG Gain Map (Ultra HDR) · JPEG XL · AVIF (QSV/NVENC) · WebP · JPEG LI · BMP |
@@ -68,6 +68,15 @@ dotnet run --project src\TrueToneCap.App -c Release
 ---
 
 ## Changelog / 更新日志
+
+### v0.2.0 — 2026-07-28
+
+- 🏗️ DI: AppServices 重构为 Microsoft.Extensions.DependencyInjection 容器 / Refactored to DI container
+- 🧹 Cleanup: ToneMapper.cs 移除死代码 D3D11 占位符，转为纯静态 CPU 算法库 / Removed dead D3D11 placeholder code
+- 🐧 Platform: 新增 `Platform/` 抽象层 (ICaptureBackend / IGpuRenderer / IPlatformServices) 为 Linux 迁移预留 / Added platform abstraction for Linux migration
+- 📄 Docs: 新增 `docs/linux-migration-guide.md` 迁移指南 / Added Linux migration guide
+- 🔢 Version: 统一全项目版本引用至 v0.2.0 / Unified version references to v0.2.0
+- 📷 Capture: 捕获后端统一为 WGC (Windows.Graphics.Capture)，README 更新 / Unified capture backend to WGC
 
 ### v0.1.5 — 2026-07-05
 

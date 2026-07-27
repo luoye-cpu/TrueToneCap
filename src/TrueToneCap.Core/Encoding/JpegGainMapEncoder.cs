@@ -225,21 +225,31 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     }
 
     // ═══════════════════════════════════════
-    //  JPEG 编码 (JxlNet 内置 jpegli, 零外部依赖)
+    //  JPEG 编码 (Magick.NET — 输出真正的 JPEG 字节流, MPF 封装需要)
+    //  注意: JpegLiNative 输出 JXL 容器格式, 不适用于 MPF 封装
     // ═══════════════════════════════════════
 
     private static byte[] EncodeToJpegBytes(byte[] bgra, int w, int h, float distance)
     {
-        using var jpegli = new JpegLiNative();
-        return jpegli.Encode(bgra, w, h, distance);
+        // butteraugli 距离 → JPEG 质量百分比
+        uint quality = (uint)Math.Clamp((int)(100f - (distance - 0.5f) * 28f), 10, 100);
+        var ps = new PixelReadSettings((uint)w, (uint)h, StorageType.Char, PixelMapping.BGRA);
+        using var img = new MagickImage();
+        img.ReadPixels(bgra, ps);
+        img.Format = MagickFormat.Jpeg;
+        img.Quality = quality;
+        img.Settings.SetDefine(MagickFormat.Jpeg, "sampling-factor", "4:4:4");
+        img.Settings.SetDefine(MagickFormat.Jpeg, "dct", "float");
+        img.Settings.SetDefine(MagickFormat.Jpeg, "optimize-coding", "true");
+        return img.ToByteArray();
     }
 
     private static byte[] EncodeGainMapToJpegBytes(byte[] pixels, int w, int h,
         GainMapMode mode, int quality)
-        => EncodeGainMapWithJpegLi(pixels, w, h, mode);
+        => EncodeGainMapWithMagick(pixels, w, h, mode, quality);
 
-    /// <summary>jpegli 增益图编码（灰度或RGB）。</summary>
-    private static byte[] EncodeGainMapWithJpegLi(byte[] pixels, int w, int h, GainMapMode mode)
+    /// <summary>Magick.NET 增益图编码（灰度或RGB）→ 真正的 JPEG 字节流。</summary>
+    private static byte[] EncodeGainMapWithMagick(byte[] pixels, int w, int h, GainMapMode mode, int quality)
     {
         byte[] bgra = new byte[w * h * 4];
         if (mode == GainMapMode.Gray)
@@ -262,8 +272,12 @@ public sealed class JpegGainMapEncoder : ImageEncoder
                 bgra[off + 3] = 255;
             }
         }
-        using var jpegli = new JpegLiNative();
-        return jpegli.Encode(bgra, w, h, 1.5f);
+        var ps = new PixelReadSettings((uint)w, (uint)h, StorageType.Char, PixelMapping.BGRA);
+        using var img = new MagickImage();
+        img.ReadPixels(bgra, ps);
+        img.Format = MagickFormat.Jpeg;
+        img.Quality = (uint)Math.Clamp(quality, 1, 100);
+        return img.ToByteArray();
     }
 
     // ═══════════════════════════════════════

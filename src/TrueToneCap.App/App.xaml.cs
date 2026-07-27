@@ -80,9 +80,32 @@ public partial class App : Application
         });
 
         this.InitializeComponent();
+
+        // ── 安全加载 WinUI 主题资源（代码中 try-catch，避免 XAML 期间原生崩溃）──
+        try
+        {
+            Resources.MergedDictionaries.Add(new Microsoft.UI.Xaml.Controls.XamlControlsResources());
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] XamlControlsResources 加载失败 (非致命): {ex.Message}");
+        }
+
+        // ── 注册全局异常处理器 ──
         this.UnhandledException += (s, e) =>
         {
-            var msg = $"TrueToneCap 崩溃:\n\n{e.Exception?.Message}\n\n{e.Exception?.StackTrace}";
+            var msg = e.Exception?.Message ?? "";
+
+            // WinAppSDK 非打包模式已知非致命警告：主题资源 URI 解析失败
+            if (msg.Contains("themeresources.xaml", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Cannot locate resource", StringComparison.OrdinalIgnoreCase))
+            {
+                System.Diagnostics.Debug.WriteLine($"[App] 非致命 XAML 资源警告 (已忽略): {msg}");
+                e.Handled = true;
+                return;
+            }
+
+            var fullMsg = $"TrueToneCap 崩溃:\n\n{msg}\n\n{e.Exception?.StackTrace}";
             try
             {
                 var crashPath = Path.Combine(
@@ -90,10 +113,10 @@ public partial class App : Application
                     "TrueToneCap", "crash.log");
                 var dir = Path.GetDirectoryName(crashPath);
                 if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                File.WriteAllText(crashPath, msg);
+                File.WriteAllText(crashPath, fullMsg);
             }
             catch { }
-            try { MessageBoxW(0, msg, "TrueToneCap 错误", 0x10); } catch { }
+            try { MessageBoxW(0, fullMsg, "TrueToneCap 错误", 0x10); } catch { }
             e.Handled = true;
         };
     }

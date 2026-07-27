@@ -58,9 +58,5 @@ public sealed class CaptureResult : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        // HdrPixels/SdrPixels 由 GC 管理，无需显式释放
     }
-
-    public override string ToString() =>
-        $"CaptureResult: {Width}x{Height} {(IsHdr ? "HDR(Float16)" : "SDR(BGRA8)")} {CaptureTimeMs}ms";
 }

@@ -250,16 +250,18 @@ ACM（Auto Color Management）开启时自动禁用 ICC 烘焙。
 
 ```
 App.OnLaunched
-  └─ AppServices.Initialize()
-       ├─ LogService.InitializeFileLog()
-       ├─ SettingsService.Load()
-       ├─ CapabilityService (HDR/ACM/ICC/编码器检测)
-       ├─ CapturePipelineService (ICC + 编码调度)
-       ├─ WgcCaptureService (D3D11 设备 + 会话池)
-       └─ GpuToneMapper (着色器加载)
+  └─ AppServices.Initialize()  [Microsoft.Extensions.DependencyInjection]
+       ├─ ServiceCollection 注册
+       │   ├─ SettingsService (单例, 加载 JSON 配置)
+       │   ├─ CapabilityService (单例, HDR/ACM/ICC/编码器检测)
+       │   ├─ CapturePipelineService (单例, ICC + 编码调度)
+       │   ├─ WgcCaptureService (单例, 可选, D3D11 设备 + 会话池)
+       │   └─ GpuToneMapper (单例, 可选, 着色器加载)
+       └─ BuildServiceProvider()
 ```
 
-MainWindow 通过 `AppServices.*` 访问所有服务，不再本地持有。
+MainWindow 通过 `AppServices.*` 静态门面访问服务（底层为 IServiceProvider）。
+DI 容器自动管理 IDisposable 单例的生命周期（Shutdown 时统一释放）。
 
 ---
 

@@ -89,6 +89,9 @@ public sealed class WgcCaptureService : IDisposable
     private nint _deviceMonitor;
     private bool _disposed;
 
+    // ═══ D3D11 线程安全：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
+    private static readonly object s_d3dContextLock = new();
+
     // ═══ P0: 懒启动会话池 + 延迟自动停止 ═══
     // P3 修复: 使用 (HMONITOR, IsHdr) 元组 key，避免位或标记碰撞
     private readonly Dictionary<(nint Monitor, bool IsHdr), PooledSession> _sessionPool = [];
@@ -133,6 +136,7 @@ public sealed class WgcCaptureService : IDisposable
         private readonly object _frameLock = new();
         private readonly ManualResetEventSlim _firstFrameEvent = new(false);
         private volatile bool _hasFrame;
+        private volatile bool _disposed; // ═══ 防止 Dispose 后 FrameArrived 回调访问已释放资源 ═══
 
         // Staging 纹理复用
         private ID3D11Texture2D? _stagingTex;
@@ -191,12 +195,12 @@ public sealed class WgcCaptureService : IDisposable
 
         private void OnFrameArrived(Direct3D11CaptureFramePool sender, object? args)
         {
+            if (_disposed) return; // ═══ 防止 Dispose 后回调访问已释放资源 ═══
             try
             {
                 using var frame = sender.TryGetNextFrame();
-                if (frame is null)
+                if (frame is null || _disposed)
                 {
-                    Log($"[Pool] {_hmonitor:X}: FrameArrived 但 frame=null");
                     return;
                 }
 
@@ -287,77 +291,62 @@ public sealed class WgcCaptureService : IDisposable
 
         private byte[] ReadBytePixelsPooled(ID3D11Texture2D texture, int w, int h)
         {
-            var ctx = _d3dDevice.ImmediateContext;
-
-            // P2: 复用 staging 纹理
-            if (_stagingTex is null || _stagingW != w || _stagingH != h)
-            {
-                _stagingTex?.Dispose();
-                _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
-                {
-                    Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
-                    Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
-                    SampleDescription = new(1, 0),
-                    Usage = ResourceUsage.Staging,
-                    BindFlags = BindFlags.None,
-                    CPUAccessFlags = CpuAccessFlags.Read
-                });
-                _stagingW = w; _stagingH = h;
-            }
-
-            ctx.CopyResource(_stagingTex, texture);
-            var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-
             // P2: 复用像素缓冲区（避免 60fps 下每帧分配 33MB）
             int len = w * h * 4;
             if (_latestSdr is null || _latestSdr.Length != len)
                 _latestSdr = new byte[len];
             var pixels = _latestSdr;
 
-            unsafe
+            // ═══ D3D11 线程安全：所有 GPU 操作必须在锁内执行 ═══
+            lock (s_d3dContextLock)
             {
-                byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
-                int srcRowPitch = (int)mapped.RowPitch;
-                int dstStride = w * 4;
+                var ctx = _d3dDevice.ImmediateContext;
 
-                fixed (byte* dst = pixels)
+                // P2: 复用 staging 纹理
+                if (_stagingTex is null || _stagingW != w || _stagingH != h)
                 {
-                    for (int row = 0; row < h; row++)
+                    _stagingTex?.Dispose();
+                    _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                     {
-                        byte* srcRow = srcBase + row * srcRowPitch;
-                        byte* dstRow = dst + row * dstStride;
-                        Buffer.MemoryCopy(srcRow, dstRow, dstStride, dstStride);
+                        Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                        SampleDescription = new(1, 0),
+                        Usage = ResourceUsage.Staging,
+                        BindFlags = BindFlags.None,
+                        CPUAccessFlags = CpuAccessFlags.Read
+                    });
+                    _stagingW = w; _stagingH = h;
+                }
+
+                ctx.CopyResource(_stagingTex, texture);
+                var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+
+                unsafe
+                {
+                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                    int srcRowPitch = (int)mapped.RowPitch;
+                    int dstStride = w * 4;
+
+                    fixed (byte* dst = pixels)
+                    {
+                        for (int row = 0; row < h; row++)
+                        {
+                            byte* srcRow = srcBase + row * srcRowPitch;
+                            byte* dstRow = dst + row * dstStride;
+                            Buffer.MemoryCopy(srcRow, dstRow, dstStride, dstStride);
+                        }
                     }
                 }
+                ctx.Unmap(_stagingTex, 0);
             }
-            ctx.Unmap(_stagingTex, 0);
 
-            // Alpha 修复（WGC 输出 alpha 可能为 0）
+            // Alpha 修复（WGC 输出 alpha 可能为 0）— 纯 CPU 操作，无需锁
             TrueToneCap.Core.PixelOps.FixAlphaChannel(pixels);
             return pixels;
         }
 
         private float[] ReadFloatPixelsPooled(ID3D11Texture2D texture, int w, int h)
         {
-            var ctx = _d3dDevice.ImmediateContext;
-
-            if (_stagingTex is null || _stagingW != w || _stagingH != h)
-            {
-                _stagingTex?.Dispose();
-                _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
-                {
-                    Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
-                    Format = Vortice.DXGI.Format.R16G16B16A16_Float,
-                    SampleDescription = new(1, 0),
-                    Usage = ResourceUsage.Staging,
-                    BindFlags = BindFlags.None,
-                    CPUAccessFlags = CpuAccessFlags.Read
-                });
-                _stagingW = w; _stagingH = h;
-            }
-
-            ctx.CopyResource(_stagingTex, texture);
-            var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
             int pixelCount = w * h * 4;
 
             // P2: 复用像素缓冲区（避免 60fps 下每帧分配 132MB）
@@ -365,32 +354,58 @@ public sealed class WgcCaptureService : IDisposable
                 _latestHdr = new float[pixelCount];
             var pixels = _latestHdr;
 
-            unsafe
+            // ═══ D3D11 线程安全：所有 GPU 操作必须在锁内执行 ═══
+            lock (s_d3dContextLock)
             {
-                byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
-                int srcRowPitch = (int)mapped.RowPitch;
-                int halfsPerRow = w * 4;
+                var ctx = _d3dDevice.ImmediateContext;
 
-                fixed (float* dst = pixels)
+                if (_stagingTex is null || _stagingW != w || _stagingH != h)
                 {
-                    for (int row = 0; row < h; row++)
+                    _stagingTex?.Dispose();
+                    _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                     {
-                        byte* srcRow = srcBase + row * srcRowPitch;
-                        float* dstRow = dst + row * w * 4;
-                        TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(srcRow, dstRow, halfsPerRow);
+                        Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                        Format = Vortice.DXGI.Format.R16G16B16A16_Float,
+                        SampleDescription = new(1, 0),
+                        Usage = ResourceUsage.Staging,
+                        BindFlags = BindFlags.None,
+                        CPUAccessFlags = CpuAccessFlags.Read
+                    });
+                    _stagingW = w; _stagingH = h;
+                }
+
+                ctx.CopyResource(_stagingTex, texture);
+                var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+
+                unsafe
+                {
+                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                    int srcRowPitch = (int)mapped.RowPitch;
+                    int halfsPerRow = w * 4;
+
+                    fixed (float* dst = pixels)
+                    {
+                        for (int row = 0; row < h; row++)
+                        {
+                            byte* srcRow = srcBase + row * srcRowPitch;
+                            float* dstRow = dst + row * w * 4;
+                            TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(srcRow, dstRow, halfsPerRow);
+                        }
                     }
                 }
+                ctx.Unmap(_stagingTex, 0);
             }
-            ctx.Unmap(_stagingTex, 0);
+
             return pixels;
         }
 
         public void Dispose()
         {
+            _disposed = true; // ═══ 先标记，阻止后续 FrameArrived 回调 ═══
             try { _session?.Dispose(); } catch { }
             try { _framePool?.Dispose(); } catch { }
             try { _winrtDevice?.Dispose(); } catch { }
-            try { _stagingTex?.Dispose(); } catch { }
+            lock (s_d3dContextLock) { try { _stagingTex?.Dispose(); } catch { } }
             _firstFrameEvent.Dispose();
         }
     }
@@ -399,7 +414,7 @@ public sealed class WgcCaptureService : IDisposable
     //  设备管理
     // ═══════════════════════════════════════
 
-    /// <summary>获取或创建 D3D11 设备。</summary>
+    /// <summary>获取或创建 D3D11 设备。线程安全（内部加锁）。</summary>
     public ID3D11Device GetOrCreateDevice(nint hmonitor)
     {
         if (_d3dDevice is not null && _deviceMonitor == hmonitor)
@@ -411,12 +426,12 @@ public sealed class WgcCaptureService : IDisposable
             }
             catch
             {
-                _d3dDevice?.Dispose();
+                lock (s_d3dContextLock) { _d3dDevice?.Dispose(); }
                 _d3dDevice = null;
             }
         }
 
-        _d3dDevice?.Dispose();
+        lock (s_d3dContextLock) { _d3dDevice?.Dispose(); }
         _d3dDevice = null;
         _deviceMonitor = hmonitor;
 

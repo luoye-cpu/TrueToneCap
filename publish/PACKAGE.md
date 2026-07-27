@@ -1,13 +1,13 @@
 # TrueToneCap 分发打包说明 / Distribution Packaging Guide
 
-> v0.1.5 Beta · 2026-07-05
+> v0.2.0 Beta · 2026-07-28
 
 ---
 
 ## 一、发布包结构 / Package Structure
 
 ```
-TrueToneCap-v0.1.5-beta-win-x64/
+TrueToneCap-v0.2.0-beta-win-x64/
 ├── TrueToneCap.exe              # 主程序入口
 ├── TrueToneCap.dll              # WinUI 3 应用层
 ├── TrueToneCap.Core.dll         # 核心引擎（捕获/编码/色彩/OCR）
@@ -78,8 +78,8 @@ TrueToneCap-v0.1.5-beta-win-x64/
 
 | 变体 | 文件名 | 大小 | 说明 |
 |------|--------|------|------|
-| **标准版** | `TrueToneCap-v0.1.5-beta-win-x64.zip` | ~470 MB | 包含 OCR 模型，开箱即用识字/翻译 |
-| **精简版** | `TrueToneCap-v0.1.5-beta-win-x64-lite.zip` | ~270 MB | 不含 OCR 模型，需联网下载或仅用 Windows OCR |
+| **标准版** | `TrueToneCap-v0.2.0-beta-win-x64.zip` | ~470 MB | 包含 OCR 模型，开箱即用识字/翻译 |
+| **精简版** | `TrueToneCap-v0.2.0-beta-win-x64-lite.zip` | ~270 MB | 不含 OCR 模型，需联网下载或仅用 Windows OCR |
 
 ### 制作方法
 
@@ -88,7 +88,7 @@ TrueToneCap-v0.1.5-beta-win-x64/
 .\Publish.ps1 -Configuration Release -Runtime win-x64
 
 # 2. 制作精简版（不含 Models/）
-$publishDir = "publish\TrueToneCap-v0.1.5-beta"
+$publishDir = "publish\TrueToneCap-v0.2.0-beta"
 Copy-Item $publishDir "publish\TrueToneCap-v0.1.5-beta-lite" -Recurse
 Remove-Item "publish\TrueToneCap-v0.1.5-beta-lite\Models" -Recurse -Force
 
