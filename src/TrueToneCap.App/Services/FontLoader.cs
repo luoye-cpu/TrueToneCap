@@ -25,10 +25,10 @@ public static class FontLoader
     /// </summary>
     public static void LoadBundledFonts()
     {
-        string fontsDir = Path.Combine(AppContext.BaseDirectory, "Fonts");
+        string fontsDir = Path.Combine(AppContext.BaseDirectory, "data", "Fonts");
         if (!Directory.Exists(fontsDir))
         {
-            System.Diagnostics.Debug.WriteLine($"[FontLoader] 字体目录不存在: {fontsDir}");
+            LogService.Warn("FontLoader", $"字体目录不存在: {fontsDir}");
             return;
         }
 
@@ -38,7 +38,7 @@ public static class FontLoader
             LoadFontFile(file);
 
         if (_loadedFonts.Count > 0)
-            System.Diagnostics.Debug.WriteLine($"[FontLoader] 已加载 {_loadedFonts.Count} 个内嵌字体");
+            LogService.Info("FontLoader", $"已加载 {_loadedFonts.Count} 个内嵌字体");
     }
 
     private static void LoadFontFile(string path)
@@ -47,11 +47,11 @@ public static class FontLoader
         if (result > 0)
         {
             _loadedFonts.Add(path);
-            System.Diagnostics.Debug.WriteLine($"[FontLoader] ✓ {Path.GetFileName(path)}");
+            LogService.Debug("FontLoader", $"✓ {Path.GetFileName(path)}");
         }
         else
         {
-            System.Diagnostics.Debug.WriteLine($"[FontLoader] ✗ 加载失败: {Path.GetFileName(path)} (err={Marshal.GetLastWin32Error()})");
+            LogService.Warn("FontLoader", $"✗ 加载失败: {Path.GetFileName(path)} (err={Marshal.GetLastWin32Error()})");
         }
     }
 

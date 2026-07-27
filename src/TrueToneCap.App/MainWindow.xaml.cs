@@ -16,6 +16,7 @@ using TrueToneCap.Core.Processing;
 using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Metadata;
 using TrueToneCap.App.Services;
+using TrueToneCap.App.Models;
 using TrueToneCap.Core.Services;
 using Vortice.Direct3D11;
 using Vortice.Direct3D;
@@ -24,12 +25,16 @@ namespace TrueToneCap.App;
 
 public sealed partial class MainWindow : Window
 {
-    private AppSettingsData _settings = new();
+    private AppSettingsData _settings => AppServices.Settings.Current;
     private TrayIconManager? _trayIcon;
     private readonly List<(OutputFormat Format, string Label)> _formats;
     private volatile int _isCapturing; // 0=idle, 1=busy (防重入)
     private bool _isExiting;           // 托盘退出标志（跳过最小化）
     private TextBox? _recordingTarget; // 正在录制的快捷键输入框
+
+    // ── 通过 AppServices 访问共享服务（不再本地持有）──
+    private WgcCaptureService? _wgcService => AppServices.Wgc;
+    private GpuToneMapper? _gpuToneMapper => AppServices.GpuToneMapper;
 
     public MainWindow(bool isAutostart = false)
     {
@@ -100,6 +105,9 @@ public sealed partial class MainWindow : Window
         _trayIcon.OnExitApp = () => _isExiting = true;
         _trayIcon.RegisterCaptureHotkey(_settings.Hotkey);
 
+        // ── 子类化窗口过程以处理托盘消息 ──
+        SubclassWindowForTray(hwnd);
+
         // 开机自启动状态同步
         try { StartupManager.IsEnabled = _settings.AutoStart; }
         catch (Exception ex) { System.Diagnostics.Trace.WriteLine($"[MainWindow] 开机启动注册失败: {ex.Message}"); }
@@ -117,9 +125,36 @@ public sealed partial class MainWindow : Window
             _ = RunCapabilityDetectionAsync();
         });
 
+        // ── WGC/GPU 管线已由 AppServices.Initialize() 在 App 启动时完成 ──
+        // 仅在 UI 线程预热 WGC 会话池（WGC 需要 STA 消息泵才能收到帧）
+        if (_wgcService is not null)
+            DispatcherQueue.TryEnqueue(() => _wgcService.WarmupSessions());
+
+        // ── 注册 Toast 通知 ──
+        ToastService.Register();
+
+        // ── 初始化 OCR 引擎（后台加载 ONNX 模型，不阻塞窗口显示）──
+        try
+        {
+            var modelDir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "TrueToneCap", "onnx_models");
+            _ = Task.Run(() => MultiOcrService.Initialize(modelDir));
+            System.Diagnostics.Debug.WriteLine("[MainWindow] OCR 引擎初始化已后台启动");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MainWindow] OCR 初始化失败: {ex.Message}");
+        }
+
+        // ── 应用初始语言 ──
+        var initLang = _settings.Language == "en" ? AppLanguage.English : AppLanguage.Chinese;
+        LocaleManager.SetLanguage(initLang);
+
         _uiReady = true;
 
-        // ── 默认显示第一页（输出设置）──
+        // ── 应用本地化文本 + 显示第一页 ──
+        ApplyLocale();
         MainNav.SelectedItem = MainNav.MenuItems[0];
         PageOutput.Visibility = Visibility.Visible;
     }
@@ -141,56 +176,44 @@ public sealed partial class MainWindow : Window
     /// <summary>一次性检测所有系统能力（HDR/ACM/ICC/色彩空间），更新 UI 和设置。</summary>
     private async Task DetectAndApplySystemCapabilitiesAsync()
     {
-        var (sysHdr, sysAcm) = DetectSystemDisplayState();
-        bool customIcc = false;
-        try
-        {
-            customIcc = await Task.Run(DetectCustomIccProfile).WaitAsync(TimeSpan.FromSeconds(3));
-        }
-        catch { }
+        var cap = await AppServices.Capability.DetectAllAsync();
+        _settings.AcmeDetected = cap.SystemAcm;
+        _settings.NvencAvailable = cap.NvencAvailable;
+        _settings.QsvAvailable = cap.QsvAvailable;
+        _settings.DisplayBitDepth = cap.DisplayBitDepth;
 
-        // AVIF 硬件编码器实测（独立模块 AvifHardwareProbe）
-        try
-        {
-            var probe = await Task.Run(() => AvifHardwareProbe.Result).WaitAsync(TimeSpan.FromSeconds(10));
-            _settings.NvencAvailable = probe.NvencAvailable;
-            _settings.QsvAvailable = probe.QsvAvailable;
-        }
-        catch { /* 超时 = 全部不可用 */ }
+        // ACM 优先：ACM 开启时禁用 ICC 烘焙（避免双重色彩管理）
+        if (cap.SystemAcm && _settings.IccBakeEnabled)
+            _settings.IccBakeEnabled = false;
 
-        _settings.AcmeDetected = sysAcm;
-        bool firstRun = _settings.FirstRun;
-
-        if (firstRun)
+        if (_settings.FirstRun)
         {
             _settings.FirstRun = false;
-            _settings.HdrEnabled = sysHdr;
-            _settings.IccBakeEnabled = customIcc;        // 有自定义 ICC 时默认启用烘焙
-            _settings.ColorSpaceIndex = DetectBestColorSpace(sysHdr, sysAcm, customIcc);
-            SaveSettingsQuiet();
+            _settings.HdrEnabled = cap.SystemHdr;
+            _settings.IccBakeEnabled = cap.IccBakeAvailable;
+            _settings.ColorSpaceIndex = CapabilityService.DetectBestColorSpace(
+                cap.SystemHdr, cap.SystemAcm, cap.CustomIcc);
+            AppServices.Settings.SaveQuiet();
         }
 
         // 更新 UI
         DispatcherQueue.TryEnqueue(() =>
         {
-            HdrSwitch.IsEnabled = sysHdr;
+            HdrSwitch.IsEnabled = cap.SystemHdr;
             HdrSwitch.IsOn = _settings.HdrEnabled;
-            // 获取显示器位深
-            var displays = DisplayEnumerator.EnumerateDisplays();
-            int bitDepth = displays.FirstOrDefault(d => d.IsHdr)?.BitsPerColor
-                ?? displays.FirstOrDefault()?.BitsPerColor ?? 8;
-            _settings.DisplayBitDepth = bitDepth;
-            var hdrText = sysHdr ? $"✅ HDR 已启用 ({bitDepth}-bit)" : "⚠ HDR 未开启（已禁用）";
-            var acmText = sysAcm ? " | ACM 已启用" : "";
+            var hdrText = cap.SystemHdr ? $"✅ HDR 已启用 ({cap.DisplayBitDepth}-bit)" : "⚠ HDR 未开启（已禁用）";
+            var acmText = cap.SystemAcm ? " | ACM 已启用（系统管理色彩）" : "";
             HdrHintTxt.Text = hdrText + acmText;
 
-            IccBakeSwitch.IsEnabled = customIcc;
+            IccBakeSwitch.IsEnabled = cap.IccBakeAvailable;
             IccBakeSwitch.IsOn = _settings.IccBakeEnabled;
-            IccHintTxt.Text = customIcc
-                ? "检测到自定义 ICC 校色文件，可启用烘焙"
-                : "未检测到自定义 ICC 文件（系统使用默认 sRGB），烘焙不可用";
+            if (cap.SystemAcm)
+                IccHintTxt.Text = "ACM 已启用 — Windows 自动管理显示器色彩，ICC 烘焙已禁用。";
+            else if (cap.CustomIcc)
+                IccHintTxt.Text = $"检测到校色 ICC → 自动烘焙到 {ColorProfileProvider.GetColorSpaceDisplayName(GetSelectedColorSpaceTag())}";
+            else
+                IccHintTxt.Text = "未检测到校色 ICC；sRGB 目标不嵌入，非 sRGB 嵌入标准 ICC";
 
-            // GPU 编码器可用性标记
             UpdateAvifBackendLabels();
         });
     }
@@ -212,40 +235,15 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>根据 HDR/ACM/ICC 状态决定最佳色彩空间默认值。</summary>
-    private static int DetectBestColorSpace(bool hdr, bool acm, bool customIcc)
-    {
-        if (hdr) return 5;                     // HDR → BT.2020
-        if (acm) return 0;                     // ACM → 跟随系统动态管理
-        if (customIcc) return 0;               // 自定义 ICC 校色 → 跟随系统（ICC profile 决定色域映射）
-        return 0;                               // 默认 → 跟随系统（sRGB 由系统管理）
-    }
-
     /// <summary>静默保存设置（不更新 UI 控件值，直接序列化 _settings）。</summary>
-    private void SaveSettingsQuiet()
-    {
-        try
-        {
-            File.WriteAllText(GetSettingsPath(),
-                JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true }));
-        }
-        catch { }
-    }
+    private void SaveSettingsQuiet() => AppServices.Settings.SaveQuiet();
 
     // ── 设置 ──
 
     private void LoadSettings()
     {
-        try
-        {
-            var path = GetSettingsPath();
-            if (File.Exists(path))
-            {
-                var json = File.ReadAllText(path);
-                _settings = JsonSerializer.Deserialize<AppSettingsData>(json) ?? new();
-            }
-        }
-        catch { _settings = new AppSettingsData(); }
+        // 设置已由 AppServices.Initialize() → SettingsService.Load() 加载
+        // 此处无需重复加载
     }
 
     /// <summary>将 _settings 中的值应用到 UI 控件。</summary>
@@ -283,6 +281,8 @@ public sealed partial class MainWindow : Window
         SetComboByTag(OcrLangCbo, _settings.OcrLanguage);
         SetComboByTag(OcrEngineCbo, _settings.OcrEngineMode);
         SetComboByTag(ThemeCbo, _settings.ThemeMode);
+        SetComboByTag(LanguageCbo, _settings.Language);
+        DetectAndShowSourceGamut();
         // 主题已在 App.OnLaunched 中初始化，此处仅恢复 ComboBox 选中项
         // Apply engine mode immediately
         MultiOcrService.ForceEngine = _settings.OcrEngineMode switch
@@ -294,29 +294,6 @@ public sealed partial class MainWindow : Window
         };
         // Gain Map 模式
         if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
-    }
-
-    /// <summary>检测系统显示状态：HDR 是否启用、ACM 是否启用。</summary>
-    private static (bool hdr, bool acm) DetectSystemDisplayState()
-    {
-        bool hdr = false, acm = false;
-        try
-        {
-            var displays = DisplayEnumerator.EnumerateDisplays();
-            hdr = displays.Any(d => d.IsHdr);
-
-            // ACM 检测：Windows 11 24H2+ 通过注册表
-            // HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\ICM\AcmeEnabled
-            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows NT\CurrentVersion\ICM");
-            if (key is not null)
-            {
-                var val = key.GetValue("AcmeEnabled");
-                acm = val is int i && i != 0;
-            }
-        }
-        catch { }
-        return (hdr, acm);
     }
 
     private static void SetComboByTag(ComboBox cbo, string tag)
@@ -342,17 +319,16 @@ public sealed partial class MainWindow : Window
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.MinimizeToTray = MinimizeTrayChk.IsChecked == true;
             _settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;
-            // Gain Map 模式
             if (GainMapModeCbo is not null)
                 _settings.GainMapMode = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Rgb";
             _settings.AvifBackendIndex = AvifBackendCbo.SelectedIndex;
-            _settings.AvifChroma = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420";
+            _settings.AvifChroma = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
             _settings.RecordQuality = RecordQualitySld.Value;
             _settings.AnimAvifBackendIndex = 0;
             _settings.ArchiveEnabled = ArchiveChk?.IsChecked == true;
             _settings.ArchiveMode = (ArchiveModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
-            _settings.AcmeDetected = _settings.AcmeDetected;
             _settings.FirstRun = false;
+            _settings.Language = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh";
 
             // LLM 设置
             _settings.UseCustomLlm = UseLlmChk.IsChecked == true;
@@ -363,13 +339,8 @@ public sealed partial class MainWindow : Window
             _settings.TargetLanguage = (TargetLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
             _settings.OcrLanguage = (OcrLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
 
-            // 序列化到 JSON
-            string json = JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true });
-            string path = GetSettingsPath();
-            string? dir = Path.GetDirectoryName(path);
-            if (dir is not null && !Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-            File.WriteAllText(path, json);
+            // 通过 SettingsService 持久化
+            AppServices.Settings.Save();
 
             // 热键 + 自启同步
             try { StartupManager.IsEnabled = _settings.AutoStart; } catch { }
@@ -378,12 +349,6 @@ public sealed partial class MainWindow : Window
             StatusTxt.Text = "✅ 设置已保存";
         }
         catch (Exception ex) { StatusTxt.Text = "❌ 保存失败: " + ex.Message; }
-    }
-
-    private static string GetSettingsPath()
-    {
-        // 仅保存到 EXE 同目录
-        return Path.Combine(AppContext.BaseDirectory, "TrueToneCap.settings.json");
     }
 
     // ── 浏览文件夹 ──
@@ -418,20 +383,35 @@ public sealed partial class MainWindow : Window
         QualitySld.StepFrequency = precise ? 0.1 : 1.0;
         QualitySld.IsEnabled = format != OutputFormat.PNG;
 
-        bool isAvif = format == OutputFormat.AVIF;
-        AvifPngSuffixChk.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
-        AvifBackendPanel.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
-        if (AvifChromaPanel is not null)
+        // ── 格式专属提示 ──
+        FormatHintTxt.Text = format switch
         {
-            bool isLibAom = isAvif && (AvifBackendCbo.SelectedItem as ComboBoxItem)?.Tag as string == "LibAom";
-            AvifChromaPanel.Visibility = isLibAom ? Visibility.Visible : Visibility.Collapsed;
+            OutputFormat.PNG => "✅ 无损格式，支持 HDR (cICP Rec.2100 PQ)。截图首选。",
+            OutputFormat.JPEG_LI => "✅ Google jpegli 编码，butteraugli 距离控制质量。体积小，兼容性最佳。",
+            OutputFormat.JPEG_GAINMAP => "✅ Ultra HDR (ISO 21496-1)，兼容 JPEG。SDR/HDR 自适应。",
+            OutputFormat.JPEG_XL => "✅ 新一代格式，Modular 模式对截图极优。支持 HDR。",
+            OutputFormat.AVIF => "✅ 先进格式，支持 HDR + 硬件加速编码。默认 4:4:4。",
+            OutputFormat.WebP => "⚠ 仅 SDR 8-bit。适合简单分享场景。",
+            OutputFormat.BMP => "⚠ 无压缩 BMP。仅限特殊用途。",
+            _ => ""
+        };
+
+        // ── AVIF 专属选项卡片 ──
+        bool isAvif = format == OutputFormat.AVIF;
+        AvifOptionsCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
+
+        // ── GainMap 专属选项卡片 ──
+        bool isGainMap = format == OutputFormat.JPEG_GAINMAP;
+        GainMapOptionsCard.Visibility = isGainMap ? Visibility.Visible : Visibility.Collapsed;
+        if (isGainMap)
+        {
+            var gmTag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Rgb";
+            GainMapHintTxt.Text = gmTag == "Gray"
+                ? "灰度增益：仅编码亮度差，体积最小。黑白文字/图标场景推荐。"
+                : "RGB 增益：三通道独立编码，色彩还原最准确。彩色截图推荐。";
         }
 
-        // JPEG Gain Map 增益图模式选择（仅当格式为 JPEG_GAINMAP 时显示）
-        if (GainMapModePanel is not null)
-            GainMapModePanel.Visibility = format == OutputFormat.JPEG_GAINMAP ? Visibility.Visible : Visibility.Collapsed;
-
-        // AVIF + NVENC/QSV 不支持 CRF=0 无损，限制最小值为 1（必须在设置 Value 之前）
+        // AVIF + NVENC/QSV 不支持 CRF=0 无损
         if (isAvif)
         {
             int backendIdx = AvifBackendCbo.SelectedIndex;
@@ -439,7 +419,7 @@ public sealed partial class MainWindow : Window
                 QualitySld.Minimum = Math.Max(min, 1.0);
         }
 
-        // Quality 优先使用已保存值（在有效范围内），否则用默认值
+        // Quality 优先使用已保存值
         double savedQ = _settings.Quality;
         double useQ = (savedQ >= QualitySld.Minimum && savedQ <= QualitySld.Maximum) ? savedQ : def;
         QualitySld.Value = useQ;
@@ -451,9 +431,14 @@ public sealed partial class MainWindow : Window
     private void OnAvifBackendChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateQualityPanel();
-        bool isLibAom = (AvifBackendCbo.SelectedItem as ComboBoxItem)?.Tag as string == "LibAom";
-        if (AvifChromaPanel is not null)
-            AvifChromaPanel.Visibility = isLibAom ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnGainMapModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var tag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Rgb";
+        GainMapHintTxt.Text = tag == "Gray"
+            ? "灰度增益：仅编码亮度差，体积最小。黑白文字/图标场景推荐。"
+            : "RGB 增益：三通道独立编码，色彩还原最准确。彩色截图推荐。";
     }
 
     private void OnArchiveChanged(object sender, RoutedEventArgs e)
@@ -507,53 +492,101 @@ public sealed partial class MainWindow : Window
     private void OnHdrToggled(object sender, RoutedEventArgs e)
     {
         _settings.HdrEnabled = HdrSwitch.IsOn;
-        // 用户手动切 HDR → 建议同步色彩空间
-        if (HdrSwitch.IsOn) _settings.ColorSpaceIndex = 5; // HDR → BT.2020
-        else _settings.ColorSpaceIndex = 0;                // SDR → 跟随系统
+        if (HdrSwitch.IsOn) _settings.ColorSpaceIndex = 5;
+        else _settings.ColorSpaceIndex = 0;
         ColorCbo.SelectedIndex = _settings.ColorSpaceIndex;
     }
 
-    /// <summary>检测当前显示器是否使用自定义 ICC 配置文件（独立于 sRGB 判断）。</summary>
-    private static bool DetectCustomIccProfile()
+    private void OnColorSpaceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_settings.AcmeDetected)
+        {
+            IccHintTxt.Text = "ACM 已启用 — Windows 自动管理显示器色彩，ICC 烘焙已禁用。";
+            return;
+        }
+        if (IccBakeSwitch.IsEnabled)
+        {
+            var tag = GetSelectedColorSpaceTag();
+            bool isSRgb = tag is "System" or "sRGB";
+            IccHintTxt.Text = isSRgb
+                ? "烘焙目标: sRGB（不嵌入 ICC，sRGB 是通用默认）"
+                : $"烘焙目标: {ColorProfileProvider.GetColorSpaceDisplayName(tag)}（将嵌入标准 ICC）";
+        }
+        UpdateGamutMappingUI();
+    }
+
+    /// <summary>检测当前显示器色域并显示在 UI 中。</summary>
+    private void DetectAndShowSourceGamut()
     {
         try
         {
             var displays = DisplayEnumerator.EnumerateDisplays();
-            foreach (var d in displays)
+            var primary = displays.FirstOrDefault(d => d.IsPrimary) ?? displays.FirstOrDefault();
+            if (primary is not null)
             {
-                var icc = ColorProfileProvider.GetDisplayIccProfile(d.MonitorHandle);
-                // 任何 > 500 字节的真实 ICC 配置文件均视为自定义 ICC
-                // 原因：工厂校准/用户校色/系统默认 ICC 都应触发烘焙以保证色彩准确
-                if (icc is not null && icc.Length > 500)
-                    return true;
+                string csName = primary.ColorSpace switch
+                {
+                    global::Vortice.DXGI.ColorSpaceType s when (int)s == 12 => "HDR (BT.2020/PQ)",
+                    _ => primary.IsHdr ? "HDR (BT.2020)" : $"SDR ({primary.BitsPerColor}bit)",
+                };
+                SourceGamutTxt.Text = csName;
+            }
+            else
+            {
+                SourceGamutTxt.Text = "sRGB (默认)";
             }
         }
-        catch { }
-        return false;
+        catch
+        {
+            SourceGamutTxt.Text = "sRGB (默认)";
+        }
+    }
+
+    /// <summary>更新色域映射 UI。</summary>
+    private void UpdateGamutMappingUI()
+    {
+        var sourceTag = SourceGamutTxt.Text;
+        var targetTag = (ColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "System";
+
+        string targetName = targetTag switch
+        {
+            "System" => sourceTag.Contains("HDR") ? "sRGB" : sourceTag,
+            "sRGB" => "sRGB",
+            "DisplayP3" => "Display P3",
+            "DCI_P3" => "DCI-P3",
+            "AdobeRGB" => "Adobe RGB",
+            "BT2020" => "BT.2020",
+            _ => "sRGB"
+        };
+        TargetGamutTxt.Text = targetName;
+
+        bool sourceIsWide = sourceTag.Contains("HDR") || sourceTag.Contains("P3") || sourceTag.Contains("BT.2020");
+        bool needsMapping = targetTag != "System" || sourceIsWide;
+        MappingArrow.Text = needsMapping ? "→ ACES 缩限到" : "→ 直通（同色域）";
+        GamutMapHintTxt.Text = needsMapping
+            ? $"ACES 影视标准：{sourceTag} → {targetName}，Perceptual 感知缩限"
+            : "当前显示器色域与目标一致，无需转换。";
     }
 
     // ── 编码辅助（仅在最终保存/复制时触发）──
 
-    /// <summary>获取当前显示器 ICC + 如果启用烘焙则预先烘焙像素。</summary>
-    private byte[]? PreparePixelsWithIccBake(byte[] bgra, int w, int h)
+    /// <summary>ICC 色彩管理（简化模型）：
+    /// OFF: 不做任何色彩处理
+    /// <summary>从 ColorCbo 获取当前选择的色彩空间标签。</summary>
+    private string GetSelectedColorSpaceTag()
     {
-        if (!IccBakeSwitch.IsOn) return bgra;
         try
         {
-            var cursorMonitor = DisplayEnumerator.GetMonitorUnderCursor();
-            var icc = ColorProfileProvider.GetDisplayIccProfile(cursorMonitor);
-            if (icc is not null && icc.Length > 500)
-            {
-                var baked = ColorProfileProvider.BakeIccToSrgb(bgra, w, h, icc);
-                if (baked is not null) return baked;
-            }
+            if (ColorCbo.SelectedItem is ComboBoxItem item && item.Tag is string tag)
+                return tag;
         }
         catch { }
-        return bgra;
+        return "System";
     }
 
     private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             if (bgra is null || bgra.Length != w * h * 4)
@@ -561,40 +594,53 @@ public sealed partial class MainWindow : Window
                 DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 像素数据无效");
                 return;
             }
-            bgra = PreparePixelsWithIccBake(bgra, w, h) ?? bgra;
+
             var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
             var encoder = EncoderFactory.Create(format);
-            var avifBackend = AvifBackendCbo.SelectedIndex switch { 1 => AvifEncoderBackend.LibAom, 2 => AvifEncoderBackend.Qsv, 3 => AvifEncoderBackend.Nvenc, _ => AvifEncoderBackend.Auto };
-            var avifPngSuffix = AvifPngSuffixChk.IsChecked == true;
-            var settings = new EncodingSettings
+            var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
+            var settings = BuildEncodingSettings(format, hdrOutput, null);
+            var outDir = GetEffectiveOutputDir();
+            var path = BuildOutputPath(format, outDir);
+
+            // ── 全部重操作移到后台线程：ICC 烘焙 + BGRA→scRGB + 编码 ──
+            var iccBakeEnabled = IccBakeSwitch.IsOn;
+            var colorSpaceTag = GetSelectedColorSpaceTag();
+
+            await Task.Run(() =>
             {
-                Format = format, Quality = (float)QualitySld.Value, HdrOutput = _settings.HdrEnabled,
-                AvifBackend = avifBackend, AvifPngSuffix = avifPngSuffix,
-                AvifChroma = _settings.AvifChroma,
-                DisplayBitDepth = _settings.DisplayBitDepth,
-                GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
-                ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
-            };
-            var outDir = PathTxt.Text;
-            if (string.IsNullOrWhiteSpace(outDir))
-                outDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "TrueToneCap");
-            if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
+                // ICC 烘焙（委托给 CapturePipelineService）
+                var (pixels, iccProfile) = CapturePipelineService.PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
+                if (iccProfile is not null)
+                    settings.IccProfile = iccProfile;
 
-            // 归档子目录
-            if (_settings.ArchiveEnabled)
-                outDir = GetArchivePath(outDir);
+                if (hdrOutput && encoder.SupportsHdr)
+                {
+                    var hdrFrame = new HdrFrameData
+                    {
+                        Pixels = BgraToScrgbLinear(pixels, w, h),
+                        Width = w, Height = h,
+                        IccProfile = settings.IccProfile
+                    };
+                    encoder.EncodeAsync(hdrFrame, settings, path).GetAwaiter().GetResult();
+                }
+                else
+                {
+                    encoder.EncodeSdrAsync(pixels, w, h, settings, path).GetAwaiter().GetResult();
+                }
+            });
 
-            var ext = format switch { OutputFormat.JPEG_LI => ".jpg", OutputFormat.JPEG_GAINMAP => ".jpg", OutputFormat.JPEG_XL => ".jxl", OutputFormat.AVIF => ".avif", OutputFormat.WebP => ".webp", OutputFormat.BMP => ".bmp", _ => ".png" };
-            if (format == OutputFormat.AVIF && avifPngSuffix) ext += ".png";
-            var path = Path.Combine(outDir, $"{PrefixTxt.Text}{DateTime.Now:yyyyMMdd_HHmmssfff}{ext}");
-            await Task.Run(() => encoder.EncodeSdrAsync(bgra, w, h, settings, path));
+            sw.Stop();
 
-            // 将输出文件复制到剪贴板（可在资源管理器/微信/QQ 粘贴）
-            await CopyFileToClipboardAsync(path);
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                await CopyFileToClipboardAsync(path);
+                ToastService.ShowCaptureSuccess(path, sw.ElapsedMilliseconds);
+            });
         }
         catch (Exception ex)
         {
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ 保存失败: {ex.Message}");
+            ToastService.ShowCaptureFailed(ex.Message);
         }
     }
 
@@ -619,16 +665,23 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            bgra = PreparePixelsWithIccBake(bgra, w, h) ?? bgra;
-            // 编码为 PNG 到临时文件用于剪贴板
-            var encoder = EncoderFactory.Create(OutputFormat.PNG);
-            var settings = new EncodingSettings
-            {
-                Format = OutputFormat.PNG, Quality = 100, HdrOutput = false,
-                ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
-            };
             var tmpPath = Path.Combine(Path.GetTempPath(), $"ttc_clip_{Guid.NewGuid():N}.png");
-            await Task.Run(() => encoder.EncodeSdrAsync(bgra, w, h, settings, tmpPath));
+
+            // ── ICC 烘焙 + 编码全部移到后台线程 ──
+            var iccBakeEnabled = IccBakeSwitch.IsOn;
+            var colorSpaceTag = GetSelectedColorSpaceTag();
+
+            await Task.Run(() =>
+            {
+                var (pixels, _) = CapturePipelineService.PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
+                var encoder = EncoderFactory.Create(OutputFormat.PNG);
+                var settings = new EncodingSettings
+                {
+                    Format = OutputFormat.PNG, Quality = 100, HdrOutput = false,
+                    ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
+                };
+                encoder.EncodeSdrAsync(pixels, w, h, settings, tmpPath).GetAwaiter().GetResult();
+            });
 
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(tmpPath);
             var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
@@ -642,51 +695,11 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // ── 选区动作（零编码延迟：原始像素直接传递）──
+    // ── 选区动作 ──
 
-    // ── 选区截图（QQ 风格） ──
+    // ── 选区截图（QQ 风格，WGC 多显示器拼接）──
 
-    [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
-    private const int SM_XVIRTUALSCREEN = 76, SM_YVIRTUALSCREEN = 77;
-    private const int SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79;
-
-    /// <summary>捕获整个虚拟桌面（所有显示器）。超过 4096 时自动分块拼接。</summary>
-    private static byte[]? CaptureFullVirtualDesktop()
-    {
-        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-        if (vw <= 0 || vh <= 0) return null;
-
-        const int maxDim = 4096;
-
-        if (vw <= maxDim && vh <= maxDim)
-            return CaptureViaGdi(vx, vy, vw, vh);
-
-        // 分块拼接
-        var full = new byte[vw * vh * 4];
-        for (int tileY = 0; tileY < vh; tileY += maxDim)
-        {
-            int tileH = Math.Min(maxDim, vh - tileY);
-            for (int tileX = 0; tileX < vw; tileX += maxDim)
-            {
-                int tileW = Math.Min(maxDim, vw - tileX);
-                var tile = CaptureViaGdi(vx + tileX, vy + tileY, tileW, tileH);
-                if (tile is null) return null;
-                int fullStride = vw * 4, tileStride = tileW * 4;
-                for (int row = 0; row < tileH; row++)
-                {
-                    Buffer.BlockCopy(tile, row * tileStride, full, ((tileY + row) * fullStride) + (tileX * 4), tileStride);
-                }
-            }
-        }
-        return full;
-    }
-
-    /// <summary>从预捕获桌面像素中提取区域。（原地、零拷贝语义）</summary>
+    /// <summary>从预捕获桌面像素中提取区域。</summary>
     private static byte[]? ExtractRegionFromDesktop(byte[] full, int fullW, int fullH,
         int vx, int vy, RectInt32 screenRect)
     {
@@ -696,7 +709,7 @@ public sealed partial class MainWindow : Window
         int rh = screenRect.Height;
 
         if (rx < 0 || ry < 0 || rx + rw > fullW || ry + rh > fullH)
-            return null; // 越界
+            return null;
 
         var result = new byte[rw * rh * 4];
         int srcStride = fullW * 4;
@@ -710,9 +723,9 @@ public sealed partial class MainWindow : Window
         return result;
     }
 
-    private void StartSelectionCapture()
+    private async void StartSelectionCapture()
     {
-        // ── 防重入：截图进行中时忽略热键 ──
+        // ── 防重入 ──
         if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0)
         {
             System.Diagnostics.Trace.WriteLine("[MainWindow] 截图已在进行中，忽略重复触发");
@@ -721,22 +734,72 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            StatusTxt.Text = "📷 捕获桌面...";
+            StatusTxt.Text = "📷 WGC 捕获桌面...";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-            var desktopPixels = CaptureFullVirtualDesktop();
-            if (desktopPixels is null || desktopPixels.Length != vw * vh * 4)
+            // ── 使用 WGC 捕获所有显示器并拼接 ──
+            if (_wgcService is null)
             {
-                DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 桌面捕获失败");
+                DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 捕获服务未初始化");
                 return;
             }
 
+            // 获取虚拟桌面坐标
+            var displays = DisplayEnumerator.EnumerateDisplays();
+            int vx = displays.Count > 0 ? displays.Min(d => d.X) : 0;
+            int vy = displays.Count > 0 ? displays.Min(d => d.Y) : 0;
+            int vw = displays.Count > 0 ? displays.Max(d => d.X + d.Width) - vx : 1920;
+            int vh = displays.Count > 0 ? displays.Max(d => d.Y + d.Height) - vy : 1080;
+
+            // WGC 多显示器拼接捕获
+            CaptureResult captureResult;
+            try
+            {
+                captureResult = await _wgcService.CaptureAllMonitorsAsync(new WgcCaptureConfig
+                {
+                    FrameTimeoutMs = 3000
+                });
+            }
+            catch (Exception ex)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    StatusTxt.Text = $"❌ WGC 捕获失败: {ex.Message}";
+                    ToastService.ShowCaptureFailed(ex.Message);
+                });
+                return;
+            }
+
+            var desktopPixels = captureResult.SdrPixels;
+            if (desktopPixels is null || desktopPixels.Length != vw * vh * 4)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    StatusTxt.Text = "❌ 桌面捕获数据无效";
+                    ToastService.ShowCaptureFailed("桌面捕获数据无效");
+                });
+                return;
+            }
+
+            sw.Stop();
+            System.Diagnostics.Debug.WriteLine(
+                $"[⏱ 端到端] 阶段1-WGC捕获: {captureResult.Width}x{captureResult.Height} {sw.ElapsedMilliseconds}ms");
+
+            // 阶段2: 创建选区覆盖层
+            sw.Restart();
             var overlay = new SelectionOverlay(desktopPixels, vx, vy, vw, vh);
             overlay.Activate();
+
+            // 测量覆盖层首次渲染（监听 Activated）
+            var overlayReady = new TaskCompletionSource<bool>();
+            overlay.Activated += (_, _) =>
+            {
+                sw.Stop();
+                System.Diagnostics.Debug.WriteLine($"[⏱ 端到端] 阶段2-覆盖层激活: {sw.ElapsedMilliseconds}ms");
+                System.Diagnostics.Debug.WriteLine($"[⏱ 端到端] 总耗时(热键→覆盖层可见): {sw.ElapsedMilliseconds + (sw.ElapsedMilliseconds > 0 ? 0 : 0)}ms");
+                overlayReady.TrySetResult(true);
+            };
+            _ = Task.Run(async () => { await Task.Delay(1000); overlayReady.TrySetResult(false); });
 
             overlay.ActionCompleted += async (action, rect) =>
             {
@@ -746,7 +809,7 @@ public sealed partial class MainWindow : Window
                     return;
                 }
 
-                // 优先使用标注合成后的像素（标注已在覆盖层内完成）
+                // 优先使用标注合成后的像素
                 var regionPixels = overlay.AnnotatedRegionPixels
                     ?? ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy, rect);
 
@@ -778,8 +841,15 @@ public sealed partial class MainWindow : Window
                     DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
             };
 
-            // ── 截图完成 / 取消时释放锁 ──
             overlay.ActionCompleted += (_, _) => Interlocked.Exchange(ref _isCapturing, 0);
+        }
+        catch (Exception ex)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                StatusTxt.Text = $"❌ {ex.Message}";
+                ToastService.ShowCaptureFailed(ex.Message);
+            });
         }
         finally { Interlocked.Exchange(ref _isCapturing, 0); }
     }
@@ -789,56 +859,76 @@ public sealed partial class MainWindow : Window
         StatusTxt.Text = "📝 文字提取中...";
         try
         {
+            // 确保 OCR 引擎已初始化（首次使用或后台未完成时）
+            MultiOcrService.Initialize(System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "TrueToneCap", "onnx_models"));
+
             var ocrLang = _settings.OcrLanguage;
             var result = await MultiOcrService.RecognizeAsync(pixels, w, h, string.IsNullOrEmpty(ocrLang) ? null : ocrLang);
 
             if (!string.IsNullOrEmpty(result.Error))
-                StatusTxt.Text = $"❌ OCR: {result.Error}";
-            else if (string.IsNullOrWhiteSpace(result.Text))
-                StatusTxt.Text = "📝 未检测到文字";
-            else
-                DispatcherQueue.TryEnqueue(async () =>
-                {
-                    try { await ShowOcrResultAsync(result.Text); }
-                    catch (Exception ex) { StatusTxt.Text = $"❌ {ex.Message}"; }
-                });
+            { StatusTxt.Text = $"❌ OCR: {result.Error}"; return; }
+            if (string.IsNullOrWhiteSpace(result.Text) || (result.Lines is null or { Count: 0 }))
+            { StatusTxt.Text = "📝 未检测到文字"; return; }
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                OpenOcrPreviewWindow(pixels, w, h, result, autoTranslate: false);
+                StatusTxt.Text = "📝 已打开文字预览窗口";
+            });
         }
         catch (Exception ex) { StatusTxt.Text = $"❌ {ex.Message}"; }
     }
 
     private async Task CaptureAndTranslateFromPixelsAsync(byte[] pixels, int w, int h)
     {
-        StatusTxt.Text = "🌐 翻译中...";
+        StatusTxt.Text = "🌐 识别并翻译中...";
         try
         {
+            // 确保 OCR 引擎已初始化
+            MultiOcrService.Initialize(System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "TrueToneCap", "onnx_models"));
+
             var ocrLang = _settings.OcrLanguage;
             var ocrResult = await MultiOcrService.RecognizeAsync(pixels, w, h, string.IsNullOrEmpty(ocrLang) ? null : ocrLang);
 
-            if (!string.IsNullOrEmpty(ocrResult.Error) || string.IsNullOrWhiteSpace(ocrResult.Text))
+            if (!string.IsNullOrEmpty(ocrResult.Error) || string.IsNullOrWhiteSpace(ocrResult.Text) || (ocrResult.Lines is null or { Count: 0 }))
             {
                 StatusTxt.Text = string.IsNullOrEmpty(ocrResult.Error) ? "📝 未检测到文字" : $"❌ {ocrResult.Error}";
                 return;
             }
 
-            var config = new LlmConfig
+            DispatcherQueue.TryEnqueue(() =>
             {
-                UseCustomLlm = _settings.UseCustomLlm,
-                ApiEndpoint = _settings.LlmEndpoint,
-                ApiKey = _settings.LlmApiKey,
-                ModelName = _settings.LlmModel,
-                SystemPrompt = _settings.LlmSystemPrompt,
-                TargetLanguage = _settings.TargetLanguage
-            };
-            var translator = new TranslationService(config);
-            var translated = await translator.TranslateAsync(ocrResult.Text, _settings.TargetLanguage);
-
-            DispatcherQueue.TryEnqueue(async () =>
-            {
-                try { await ShowTranslationResultAsync(ocrResult.Text, translated); }
-                catch (Exception ex) { StatusTxt.Text = $"❌ {ex.Message}"; }
+                OpenOcrPreviewWindow(pixels, w, h, ocrResult, autoTranslate: true);
+                StatusTxt.Text = "🌐 已打开翻译预览窗口";
             });
         }
         catch (Exception ex) { StatusTxt.Text = $"❌ {ex.Message}"; }
+    }
+
+    /// <summary>打开 OCR/翻译独立预览窗口（截图 + 文字点对点覆盖）。</summary>
+    private void OpenOcrPreviewWindow(byte[] pixels, int w, int h, OcrResult ocr, bool autoTranslate)
+    {
+        var cfg = new LlmConfig
+        {
+            UseCustomLlm = _settings.UseCustomLlm,
+            ApiEndpoint = _settings.LlmEndpoint,
+            ApiKey = _settings.LlmApiKey,
+            ModelName = _settings.LlmModel,
+            SystemPrompt = _settings.LlmSystemPrompt,
+            TargetLanguage = _settings.TargetLanguage
+        };
+        var win = new OcrPreviewWindow(pixels, w, h, ocr, cfg, autoTranslate)
+        {
+            SaveHandler = async (pixels, w, h) =>
+            {
+                await EncodeAndSaveAsync(pixels, w, h);
+            }
+        };
+        win.Activate();
     }
 
     private async Task ShowOcrResultAsync(string text)
@@ -888,165 +978,138 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>GDI 捕获指定屏幕坐标区域。w/h 超过 4096 会自动分块。供外部（OnCaptureNow SDR 路径）使用。</summary>
+    [Obsolete("已迁移至 WGC。保留仅供向后兼容。")]
     public static byte[]? CaptureViaGdiStatic(int x, int y, int w, int h)
     {
-        const int maxDim = 4096;
-        if (w <= maxDim && h <= maxDim)
-            return CaptureViaGdi(x, y, w, h);
-
-        // 分块
-        var full = new byte[w * h * 4];
-        for (int ty = 0; ty < h; ty += maxDim)
-        {
-            int th = Math.Min(maxDim, h - ty);
-            for (int tx = 0; tx < w; tx += maxDim)
-            {
-                int tw = Math.Min(maxDim, w - tx);
-                var tile = CaptureViaGdi(x + tx, y + ty, tw, th);
-                if (tile is null) return null;
-                int fStride = w * 4, tStride = tw * 4;
-                for (int row = 0; row < th; row++)
-                {
-                    Buffer.BlockCopy(tile, row * tStride, full, ((ty + row) * fStride) + (tx * 4), tStride);
-                }
-            }
-        }
-        return full;
+        return CaptureViaGdi(x, y, w, h, true);
     }
-
-    /// <summary>GDI 捕获指定屏幕坐标区域（单块，<=4096）。</summary>
-    private static byte[]? CaptureRegionBytes(int x, int y, int w, int h)
-        => CaptureViaGdi(x, y, w, h);
 
     // ── 截图按钮（选区模式） ──
 
     private void OnCaptureBtn(object sender, RoutedEventArgs e) => StartSelectionCapture();
 
+    /// <summary>"捕获现在" — WGC 单显示器全屏捕获。</summary>
     private async void OnCaptureNow(object sender, RoutedEventArgs e)
     {
-        // ── 防重入 ──
         if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0) return;
-        StatusTxt.Text = "📷 截图中...";
+        StatusTxt.Text = "📷 WGC 截图中...";
         CaptureBtn.IsEnabled = false;
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
-        var quality = (float)QualitySld.Value;
-        var outDir = PathTxt.Text;
-        if (string.IsNullOrWhiteSpace(outDir))
-            outDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "TrueToneCap");
-        // 归档子目录
-        if (_settings.ArchiveEnabled)
-            outDir = GetArchivePath(outDir);
-        var prefix = PrefixTxt.Text;
-        var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
-        var avifBackend = AvifBackendCbo.SelectedIndex switch { 1 => AvifEncoderBackend.LibAom, 2 => AvifEncoderBackend.Qsv, 3 => AvifEncoderBackend.Nvenc, _ => AvifEncoderBackend.Auto };
-        var avifPngSuffix = AvifPngSuffixChk.IsChecked == true;
-        var showPreview = PreviewChk.IsChecked == true;
-
         try
         {
-            // ── 使用显式 STA 线程（WinRT Windows.Graphics.Capture 需要 STA）──
-            var tcs = new TaskCompletionSource<(string?, bool)>();
-            var captureThread = new Thread(() =>
+            if (_wgcService is null)
             {
-                try
-                {
-                    Thread.CurrentThread.Priority = ThreadPriority.Highest;
+                StatusTxt.Text = "❌ 捕获服务未初始化";
+                return;
+            }
 
-                using var device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
-                var cursorMonitor = DisplayEnumerator.GetMonitorUnderCursor();
-                var displayInfo = DisplayEnumerator.FindDisplayByMonitor(cursorMonitor);
-                if (displayInfo is null) throw new InvalidOperationException("找不到当前显示器");
+            var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
+            var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
+            var outDir = GetEffectiveOutputDir();
 
-                bool actualHdr = hdrOutput;
-                float[]? hdrPixels = null;
-                byte[]? sdrBytes = null;
-                int fw = displayInfo.Width, fh = displayInfo.Height;
-                byte[]? icc = null;
-
-                if (actualHdr)
-                {
-                    // ── 原生 HDR: Windows.Graphics.Capture (WinRT) ──
-                    using var winrtCap = new WinRtScreenCapture(device, cursorMonitor);
-                    if (!winrtCap.Initialize())
-                        throw new InvalidOperationException("HDR 输出失败: Windows.Graphics.Capture 初始化不成功");
-                    var hdrFrame = winrtCap.TryAcquireNextFrameAsync(2000).GetAwaiter().GetResult();
-                    if (hdrFrame is null)
-                        throw new InvalidOperationException("HDR 输出失败: 获取 HDR 帧超时");
-                    fw = hdrFrame.Width; fh = hdrFrame.Height;
-                    hdrPixels = hdrFrame.GetFloatPixelsAsync().GetAwaiter().GetResult();
-                    bool allZero = true;
-                    for (int i = 0; i < Math.Min(hdrPixels.Length, 400); i++)
-                    { if (hdrPixels[i] != 0f) { allZero = false; break; } }
-                    if (allZero)
-                        throw new InvalidOperationException("HDR 输出失败: WinRT 返回全零 Float16 帧");
-                }
-                else
-                {
-                    // ── SDR: DXGI + GDI 回退 ──
-                    using (var capture = ScreenCapture.CreateForMonitor(cursorMonitor, forceSdr: true))
-                    using (var frame = capture.TryAcquireNextFrame(500))
-                    {
-                        if (frame is null) throw new TimeoutException("截图超时");
-                        fw = frame.Width; fh = frame.Height;
-                        icc = ColorProfileProvider.GetDisplayIccProfile(displayInfo.MonitorHandle);
-                        sdrBytes = frame.IsHdr
-                            ? CaptureViaGdiStatic(displayInfo.X, displayInfo.Y, fw, fh)
-                            : frame.GetBytePixelsAsync().GetAwaiter().GetResult();
-                        if (sdrBytes is null) throw new InvalidOperationException("SDR 截图失败");
-                    }
-                }
-
-                // 编码
-                var meta = MetadataCollector.Collect(displayInfo, null!);
-                var settings = new EncodingSettings
-                {
-                    Format = format, Quality = quality,
-                    HdrOutput = actualHdr, IccProfile = icc, Metadata = meta,
-                    PreferGpuEncode = true, AvifBackend = avifBackend,
-                    AvifPngSuffix = avifPngSuffix,
-                    AvifChroma = _settings.AvifChroma,
-                    DisplayBitDepth = _settings.DisplayBitDepth,
-                    GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
-                    ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
-                };
-                var encoder = EncoderFactory.Create(format);
-
-                if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
-                var ext = format switch { OutputFormat.JPEG_LI => ".jpg", OutputFormat.JPEG_GAINMAP => ".jpg", OutputFormat.JPEG_XL => ".jxl", OutputFormat.AVIF => ".avif", OutputFormat.WebP => ".webp", OutputFormat.BMP => ".bmp", _ => ".png" };
-                if (format == OutputFormat.AVIF && avifPngSuffix) ext += ".png";
-                var fullPath = Path.Combine(outDir, $"{prefix}{DateTime.Now:yyyyMMdd_HHmmssfff}{ext}");
-
-                if (hdrPixels is not null)
-                    encoder.EncodeAsync(new HdrFrameData { Pixels = hdrPixels, Width = fw, Height = fh, IccProfile = icc }, settings, fullPath).GetAwaiter().GetResult();
-                else
-                    encoder.EncodeSdrAsync(sdrBytes!, fw, fh, settings, fullPath).GetAwaiter().GetResult();
-
-                tcs.SetResult((fullPath, actualHdr));
-                }
-                catch (Exception ex)
-                {
-                    tcs.TrySetException(ex);
-                }
+            // ── WGC 单显示器捕获 ──
+            var captureResult = await _wgcService.CaptureMonitorAsync(new WgcCaptureConfig
+            {
+                PreferHdr = hdrOutput,
+                FrameTimeoutMs = 3000
             });
-            captureThread.SetApartmentState(ApartmentState.STA);
-            captureThread.IsBackground = true;
-            captureThread.Start();
 
-            var (resultPath, wasHdr) = await tcs.Task;
+            bool actualHdr = captureResult.IsHdr;
+            int fw = captureResult.Width, fh = captureResult.Height;
+
+            // ── 编码保存 ──
+            var meta = captureResult.SourceDisplay is not null
+                ? MetadataCollector.Collect(captureResult.SourceDisplay)
+                : null;
+
+            var settings = BuildEncodingSettings(format, actualHdr, meta);
+            settings.IccProfile ??= captureResult.IccProfile;
+
+            var encoder = EncoderFactory.Create(format);
+            var fullPath = BuildOutputPath(format, outDir);
+
+            if (actualHdr && captureResult.HdrPixels is not null)
+            {
+                await Task.Run(() =>
+                    encoder.EncodeAsync(new HdrFrameData
+                    {
+                        Pixels = captureResult.HdrPixels,
+                        Width = fw, Height = fh,
+                        IccProfile = captureResult.IccProfile,
+                        Metadata = meta
+                    }, settings, fullPath));
+            }
+            else
+            {
+                var sdrPixels = captureResult.SdrPixels ?? captureResult.GetDisplayPixels();
+                if (sdrPixels is null) throw new InvalidOperationException("无法获取显示像素");
+                await Task.Run(() => encoder.EncodeSdrAsync(sdrPixels, fw, fh, settings, fullPath));
+            }
 
             sw.Stop();
-            string status = wasHdr ? $"✅ HDR 已保存 ({sw.ElapsedMilliseconds}ms)" : $"✅ 已保存 ({sw.ElapsedMilliseconds}ms)";
+            await CopyFileToClipboardAsync(fullPath);
+            string status = actualHdr
+                ? $"✅ HDR 已保存 ({sw.ElapsedMilliseconds}ms)"
+                : $"✅ 已保存 ({sw.ElapsedMilliseconds}ms)";
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = status);
-            // 「捕获现在」不自动缩回托盘（仅截图热键/按钮触发时才缩回）
+            ToastService.ShowCaptureSuccess(fullPath, sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
             sw.Stop();
-            StatusTxt.Text = $"❌ {ex.Message}";
+            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ {ex.Message}");
+            ToastService.ShowCaptureFailed(ex.Message);
         }
         finally { CaptureBtn.IsEnabled = true; Interlocked.Exchange(ref _isCapturing, 0); }
+    }
+
+    /// <summary>获取有效的输出目录（含归档子目录）。</summary>
+    private string GetEffectiveOutputDir()
+    {
+        var outDir = PathTxt.Text;
+        if (string.IsNullOrWhiteSpace(outDir))
+            outDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "TrueToneCap");
+        if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
+        if (_settings.ArchiveEnabled) outDir = GetArchivePath(outDir);
+        return outDir;
+    }
+
+    /// <summary>构建编码设置。</summary>
+    private EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta)
+    {
+        var avifBackend = AvifBackendCbo.SelectedIndex switch
+        { 1 => AvifEncoderBackend.LibAom, 2 => AvifEncoderBackend.Qsv, 3 => AvifEncoderBackend.Nvenc, _ => AvifEncoderBackend.Auto };
+        return new EncodingSettings
+        {
+            Format = format,
+            Quality = (float)QualitySld.Value,
+            HdrOutput = hdrOutput,
+            AvifBackend = avifBackend,
+            AvifPngSuffix = AvifPngSuffixChk.IsChecked == true,
+            AvifChroma = _settings.AvifChroma,
+            DisplayBitDepth = _settings.DisplayBitDepth,
+            GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
+            Metadata = meta,
+            PreferGpuEncode = true,
+            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
+        };
+    }
+    private string BuildOutputPath(OutputFormat format, string outDir)
+    {
+        var avifPngSuffix = AvifPngSuffixChk.IsChecked == true;
+        var ext = format switch
+        {
+            OutputFormat.JPEG_LI => ".jpg",
+            OutputFormat.JPEG_GAINMAP => ".jpg",
+            OutputFormat.JPEG_XL => ".jxl",
+            OutputFormat.AVIF => ".avif",
+            OutputFormat.WebP => ".webp",
+            OutputFormat.BMP => ".bmp",
+            _ => ".png"
+        };
+        if (format == OutputFormat.AVIF && avifPngSuffix) ext += ".png";
+        return Path.Combine(outDir, $"{PrefixTxt.Text}{DateTime.Now:yyyyMMdd_HHmmssfff}{ext}");
     }
 
     // ── 快捷键录制 ──
@@ -1119,6 +1182,157 @@ public sealed partial class MainWindow : Window
         try { SaveSettingsQuiet(); } catch { }
     }
 
+    private void OnLanguageChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        var tag = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh";
+        var lang = tag == "en" ? AppLanguage.English : AppLanguage.Chinese;
+        LocaleManager.SetLanguage(lang);
+        _settings.Language = tag;
+        ApplyLocale();
+        UpdateQualityPanel();
+        try { SaveSettingsQuiet(); } catch { }
+    }
+
+    /// <summary>将本地化文本应用到所有 UI 元素（标签 + 下拉选项）。</summary>
+    private void ApplyLocale()
+    {
+        var l = LocaleManager.CurrentLanguage == AppLanguage.English ? "en" : "zh";
+
+        // ── 标签 ──
+        BrandTagline.Text = LocaleManager.CurrentLanguage == AppLanguage.English ? "HDR Screenshot Tool" : "HDR 截图工具";
+
+        NavOutput.Content = LocaleManager.NavOutput;
+        NavColor.Content = LocaleManager.NavColor;
+        NavCapture.Content = LocaleManager.NavCapture;
+        NavAI.Content = LocaleManager.NavAI;
+        NavSystem.Content = LocaleManager.NavSystem;
+
+        PageOutputTitle.Text = LocaleManager.PageOutput;
+        BasicOutputTitle.Text = LocaleManager.BasicOutput;
+        AvifOptionsTitle.Text = LocaleManager.AvifOptions;
+        GainMapOptionsTitle.Text = LocaleManager.GainMapOptions;
+        GainMapOptionsDesc.Text = LocaleManager.GainMapDesc;
+        GainMapModeLabelTxt.Text = LocaleManager.GainMapModeLabel;
+        AvifPngSuffixChk.Content = LocaleManager.AvifPngSuffix;
+
+        PageColorTitle.Text = LocaleManager.PageColor;
+        ColorSpaceLabel.Text = LocaleManager.ColorSpace;
+        GamutMapTitle.Text = LocaleManager.GamutMapTitle;
+        SourceGamutLabel.Text = LocaleManager.SourceGamut;
+        IccStrategyHintTxt.Text = LocaleManager.IccStrategy;
+
+        PageCaptureTitle.Text = LocaleManager.PageCapture;
+        PreviewChk.Content = LocaleManager.PreviewThumb;
+
+        PageSystemTitle.Text = LocaleManager.PageSystem;
+        AppearanceTitle.Text = LocaleManager.Appearance;
+        BehaviorTitle.Text = LocaleManager.Behavior;
+        AutoStartChk.Content = LocaleManager.AutoStart;
+        MinimizeTrayChk.Content = LocaleManager.MinimizeTray;
+
+        StatusTxt.Text = LocaleManager.Ready;
+        CaptureBtn.Content = LocaleManager.AreaCapture;
+        SaveSettingsBtn.Content = LocaleManager.SaveSettings;
+
+        // ── 格式下拉（重建列表保留选中项） ──
+        int fmtIdx = FormatCbo.SelectedIndex;
+        var fmtLabels = new[]
+        {
+            LocaleManager.FmtPng, LocaleManager.FmtJpegGainMap, LocaleManager.FmtJpegLi,
+            LocaleManager.FmtJpegXl, LocaleManager.FmtAvif, LocaleManager.FmtWebP, LocaleManager.FmtBmp
+        };
+        FormatCbo.ItemsSource = fmtLabels.ToList();
+        FormatCbo.SelectedIndex = Math.Clamp(fmtIdx, 0, fmtLabels.Length - 1);
+
+        // ── 硬编码 ComboBox Items：按 Tag 匹配更新 Content ──
+        SetComboItemText(AvifBackendCbo, "Auto", LocaleManager.AvifAuto);
+        SetComboItemText(AvifBackendCbo, "LibAom", LocaleManager.AvifLibAom);
+        SetComboItemText(AvifBackendCbo, "Qsv", LocaleManager.AvifQsv);
+        SetComboItemText(AvifBackendCbo, "Nvenc", LocaleManager.AvifNvenc);
+
+        SetComboItemText(AvifChromaCbo, "444", LocaleManager.AvifChroma444);
+        SetComboItemText(AvifChromaCbo, "422", LocaleManager.AvifChroma422);
+        SetComboItemText(AvifChromaCbo, "420", LocaleManager.AvifChroma420);
+
+        SetComboItemText(GainMapModeCbo, "Rgb", LocaleManager.GmRgb);
+        SetComboItemText(GainMapModeCbo, "Gray", LocaleManager.GmGray);
+
+        SetComboItemText(ColorCbo, "System", LocaleManager.CsSystem);
+        SetComboItemText(ColorCbo, "sRGB", LocaleManager.CsSRgb);
+        SetComboItemText(ColorCbo, "DisplayP3", LocaleManager.CsDisplayP3);
+        SetComboItemText(ColorCbo, "DCI_P3", LocaleManager.CsDciP3);
+        SetComboItemText(ColorCbo, "AdobeRGB", LocaleManager.CsAdobeRgb);
+        SetComboItemText(ColorCbo, "BT2020", LocaleManager.CsBT2020);
+
+        SetComboItemText(AnimFormatCbo, "GIF", LocaleManager.AnimGif);
+        SetComboItemText(AnimFormatCbo, "APNG", LocaleManager.AnimApng);
+        SetComboItemText(AnimFormatCbo, "AVIF", LocaleManager.AnimAvif);
+
+        SetComboItemText(RecordFpsCbo, "10", "10 fps");    // FPS values are universal
+        SetComboItemText(RecordFpsCbo, "15", "15 fps");
+        SetComboItemText(RecordFpsCbo, "20", "20 fps");
+        SetComboItemText(RecordFpsCbo, "30", "30 fps");
+
+        SetComboItemText(MaxDurationCbo, "15", LocaleManager.Dur15);
+        SetComboItemText(MaxDurationCbo, "30", LocaleManager.Dur30);
+        SetComboItemText(MaxDurationCbo, "60", LocaleManager.Dur60);
+        SetComboItemText(MaxDurationCbo, "120", LocaleManager.Dur120);
+
+        SetComboItemText(ThemeCbo, "Default", LocaleManager.ThemeDefault);
+        SetComboItemText(ThemeCbo, "Light", LocaleManager.ThemeLight);
+        SetComboItemText(ThemeCbo, "Dark", LocaleManager.ThemeDark);
+        SetComboItemText(ThemeCbo, "OLED", LocaleManager.ThemeOled);
+
+        // LanguageCbo: "zh" ↔ "Chinese", "en" ↔ "English"
+        SetComboItemText(LanguageCbo, "zh", LocaleManager.LangChinese);
+        SetComboItemText(LanguageCbo, "en", LocaleManager.LangEnglish);
+
+        SetComboItemText(OcrEngineCbo, "Auto", LocaleManager.OcrAuto);
+        SetComboItemText(OcrEngineCbo, "Gpu", LocaleManager.OcrGpu);
+        SetComboItemText(OcrEngineCbo, "Windows", LocaleManager.OcrWindows);
+        SetComboItemText(OcrEngineCbo, "Cpu", LocaleManager.OcrCpu);
+
+        SetComboItemText(LlmModelCbo, "gpt-4o-mini", LocaleManager.LlmGpt4oMini);
+        SetComboItemText(LlmModelCbo, "deepseek-chat", LocaleManager.LlmDeepSeek);
+        SetComboItemText(LlmModelCbo, "gpt-4.1-mini", LocaleManager.LlmGpt41Mini);
+        SetComboItemText(LlmModelCbo, "custom", LocaleManager.LlmCustom);
+
+        SetComboItemText(TargetLangCbo, "zh-CN", LocaleManager.TlChinese);
+        SetComboItemText(TargetLangCbo, "en", LocaleManager.TlEnglish);
+        SetComboItemText(TargetLangCbo, "ja", LocaleManager.TlJapanese);
+
+        SetComboItemText(OcrLangCbo, "", LocaleManager.OlSystem);
+        SetComboItemText(OcrLangCbo, "zh-Hans", LocaleManager.TlChinese);
+        SetComboItemText(OcrLangCbo, "en-US", LocaleManager.TlEnglish);
+
+        // 归档模式
+        if (ArchiveModeCbo is not null)
+        {
+            SetComboItemText(ArchiveModeCbo, "Year", LocaleManager.ArchiveYear);
+            SetComboItemText(ArchiveModeCbo, "Month", LocaleManager.ArchiveMonth);
+            SetComboItemText(ArchiveModeCbo, "Day", LocaleManager.ArchiveDay);
+        }
+
+        // ── 更新色域映射 UI ──
+        DetectAndShowSourceGamut();
+        UpdateGamutMappingUI();
+    }
+
+    /// <summary>根据 Tag 查找 ComboBoxItem 并更新其文本内容。</summary>
+    private static void SetComboItemText(ComboBox cbo, string tag, string text)
+    {
+        if (cbo is null) return;
+        foreach (ComboBoxItem item in cbo.Items)
+        {
+            if (item.Tag is string t && t == tag)
+            {
+                item.Content = text;
+                return;
+            }
+        }
+    }
+
     private void UpdateOcrEngineStatus()
     {
         if (OcrEngineStatus is null) return;
@@ -1151,7 +1365,7 @@ public sealed partial class MainWindow : Window
     private void OnHotkeyRecordKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
         if (_recordingTarget is null) return;
-        if (sender != _recordingTarget) return;
+        if (!ReferenceEquals(sender, _recordingTarget)) return;
 
         // 忽略单独的修饰键按下
         var key = e.Key;
@@ -1242,57 +1456,15 @@ public sealed partial class MainWindow : Window
 
     private void OnSaveSettings(object sender, RoutedEventArgs e) => SaveSettings();
 
-    // ── HDR 辅助: BGRA → scRGB linear ──
+    // ── sRGB 辅助（保留用于色彩管理）──
 
     private static float[] BgraToScrgbLinear(byte[] bgra, int w, int h)
-    {
-        int pixelCount = w * h;
-        var linear = new float[pixelCount * 4];
-        Parallel.For(0, pixelCount, pi =>
-        {
-            int i = pi * 4;
-            float b = SRgbToLinear(bgra[i] / 255f);
-            float g = SRgbToLinear(bgra[i + 1] / 255f);
-            float r = SRgbToLinear(bgra[i + 2] / 255f);
-            float a = bgra[i + 3] / 255f;
-            linear[i] = r;
-            linear[i + 1] = g;
-            linear[i + 2] = b;
-            linear[i + 3] = a;
-        });
-        return linear;
-    }
+        => TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(bgra, w, h);
 
-    private static float SRgbToLinear(float c)
-        => c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
+    // ── GDI 捕获（已过时，仅保留作为最终回退，不推荐使用）──
 
-    // ── GDI 回退 ──
-
-    [DllImport("user32.dll")] private static extern nint GetDC(nint hWnd);
-    [DllImport("user32.dll")] private static extern int ReleaseDC(nint hWnd, nint hDC);
-    [DllImport("gdi32.dll")] private static extern bool BitBlt(nint hdcD, int xD, int yD, int w, int h, nint hdcS, int xS, int yS, uint rop);
-    [DllImport("gdi32.dll")] private static extern nint CreateCompatibleDC(nint hdc);
-    [DllImport("gdi32.dll")] private static extern nint CreateCompatibleBitmap(nint hdc, int w, int h);
-    [DllImport("gdi32.dll")] private static extern nint SelectObject(nint hdc, nint h);
-    [DllImport("gdi32.dll")] private static extern bool DeleteDC(nint hdc);
-    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint h);
-    [DllImport("gdi32.dll")] private static extern int GetDIBits(nint hdc, nint hbmp, uint start, uint cLines, byte[]? lpBits, ref BITMAPINFO lpbmi, uint usage);
-
-    [DllImport("user32.dll")] private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    private const uint SWP_HIDEWINDOW = 0x0080;
-    private const uint SWP_SHOWWINDOW = 0x0040;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFOHEADER { public uint biSize; public int biWidth, biHeight; public ushort biPlanes, biBitCount; public uint biCompression, biSizeImage; public int biXPelsPerMeter, biYPelsPerMeter; public uint biClrUsed, biClrImportant; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; }
-
-    private const uint SRCCOPY = 0x00CC0020;
-    private const uint DIB_RGB_COLORS = 0;
-    private const uint BI_RGB = 0;
-
-    private static byte[]? CaptureViaGdi(int x, int y, int w, int h)
+    [Obsolete("已迁移至 WGC。保留仅供向后兼容。")]
+    private static byte[]? CaptureViaGdi(int x, int y, int w, int h, bool fixAlpha = true)
     {
         nint hdcScreen = 0, hdcMem = 0, hBitmap = 0, hOld = 0;
         try
@@ -1318,11 +1490,11 @@ public sealed partial class MainWindow : Window
             };
             GetDIBits(hdcMem, hBitmap, 0, (uint)h, bytes, ref bi, DIB_RGB_COLORS);
 
-            // ── 关键修复: GetDIBits 在部分 GPU 上将 Alpha 填充为 0x00 ──
-            // 导致 SoftwareBitmap(Bgra8, Premultiplied) → 全透明 → 白色窗口背景透出
-            for (int i = 3; i < bytes.Length; i += 4)
-                bytes[i] = 0xFF;
-
+            if (fixAlpha)
+            {
+                for (int i = 3; i < bytes.Length; i += 4)
+                    bytes[i] = 0xFF;
+            }
             return bytes;
         }
         catch { return null; }
@@ -1333,6 +1505,54 @@ public sealed partial class MainWindow : Window
             if (hdcMem != 0) DeleteDC(hdcMem);
             if (hdcScreen != 0) ReleaseDC(0, hdcScreen);
         }
+    }
+
+    // GDI P/Invoke（仅保留作为最终回退）
+    [DllImport("user32.dll")] private static extern nint GetDC(nint hWnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(nint hWnd, nint hDC);
+    [DllImport("gdi32.dll")] private static extern bool BitBlt(nint hdcD, int xD, int yD, int w, int h, nint hdcS, int xS, int yS, uint rop);
+    [DllImport("gdi32.dll")] private static extern nint CreateCompatibleDC(nint hdc);
+    [DllImport("gdi32.dll")] private static extern nint CreateCompatibleBitmap(nint hdc, int w, int h);
+    [DllImport("gdi32.dll")] private static extern nint SelectObject(nint hdc, nint h);
+    [DllImport("gdi32.dll")] private static extern bool DeleteDC(nint hdc);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint h);
+    [DllImport("gdi32.dll")] private static extern int GetDIBits(nint hdc, nint hbmp, uint start, uint cLines, byte[]? lpBits, ref BITMAPINFO lpbmi, uint usage);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFOHEADER { public uint biSize; public int biWidth, biHeight; public ushort biPlanes, biBitCount; public uint biCompression, biSizeImage; public int biXPelsPerMeter, biYPelsPerMeter; public uint biClrUsed, biClrImportant; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; }
+
+    private const uint SRCCOPY = 0x00CC0020;
+    private const uint DIB_RGB_COLORS = 0;
+    private const uint BI_RGB = 0;
+
+    // ── Win32 窗口子类化（托盘消息处理）──
+    [DllImport("user32.dll")]
+    private static extern nint SetWindowLongPtrW(nint hWnd, int nIndex, nint dwNewLong);
+    [DllImport("user32.dll")]
+    private static extern nint CallWindowProcW(nint lpPrevWndFunc, nint hWnd, uint msg, nint wParam, nint lParam);
+    private const int GWLP_WNDPROC = -4;
+
+    private nint _originalWndProc;
+    private Win32WndProc? _wndProcDelegate;
+
+    private delegate nint Win32WndProc(nint hWnd, uint msg, nint wParam, nint lParam);
+
+    private void SubclassWindowForTray(nint hwnd)
+    {
+        _wndProcDelegate = WndProcHook;
+        _originalWndProc = SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+            Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
+    }
+
+    private nint WndProcHook(nint hWnd, uint msg, nint wParam, nint lParam)
+    {
+        // 统一消息转发：托盘 + 热键（避免双重子类化冲突）
+        _trayIcon?.HandleTrayMessage(msg, lParam);
+        HotkeyManager.HandleHotKeyMessage(msg, wParam);
+        return CallWindowProcW(_originalWndProc, hWnd, msg, wParam, lParam);
     }
 }
 
@@ -1358,7 +1578,7 @@ public static class FontHelper
     }
 }
 
-internal sealed class AppSettingsData
+public sealed class AppSettingsData
 {
     public int FormatIndex { get; set; }
     public double Quality { get; set; } = 80;
@@ -1374,7 +1594,7 @@ internal sealed class AppSettingsData
     public bool MinimizeToTray { get; set; } = true;
     public bool AvifPngSuffix { get; set; }
     public int AvifBackendIndex { get; set; }
-    public string AvifChroma { get; set; } = "420"; // 420 / 422 / 444
+    public string AvifChroma { get; set; } = "444"; // 444 / 422 / 420 (截图推荐444)
     public double RecordQuality { get; set; } = 80;
     public int AnimAvifBackendIndex { get; set; }
 
@@ -1398,7 +1618,9 @@ internal sealed class AppSettingsData
     public bool QsvAvailable { get; set; }
     public int DisplayBitDepth { get; set; } = 8;
     /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>
-    public string GainMapMode { get; set; } = "Rgb"; // Rgb / Gray
+    public string GainMapMode { get; set; } = "Rgb";
+    /// <summary>界面语言: zh=中文, en=English。</summary>
+    public string Language { get; set; } = "zh"; // Rgb / Gray
     /// <summary>OCR 引擎选择: Auto / Gpu / Windows / Cpu。</summary>
     public string OcrEngineMode { get; set; } = "Auto";
     /// <summary>主题模式: Default / Light / Dark / OLED。</summary>

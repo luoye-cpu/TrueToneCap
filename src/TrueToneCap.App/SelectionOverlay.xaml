@@ -9,14 +9,19 @@
         <Image x:Name="DesktopImage" Stretch="Fill" IsHitTestVisible="False"/>
 
         <!-- 半透明覆盖层：等待用户单击或框选 -->
-        <Border x:Name="DimOverlay" Background="#66000000" IsHitTestVisible="False"/>
+        <Border x:Name="DimOverlay" Background="#660080FF" IsHitTestVisible="False"/>
+
+        <!-- ═══════ 自动识别区域提示层 ═══════ -->
+        <Canvas x:Name="RegionHintCanvas" Background="Transparent"
+                HorizontalAlignment="Left" VerticalAlignment="Top"
+                Visibility="Visible" IsHitTestVisible="False"/>
 
         <!-- 选区外遮罩 -->
         <Grid x:Name="MaskGrid" IsHitTestVisible="False">
-            <Border x:Name="MaskTop" Background="#66000000" IsHitTestVisible="False" VerticalAlignment="Top"/>
-            <Border x:Name="MaskBottom" Background="#66000000" IsHitTestVisible="False" VerticalAlignment="Bottom"/>
-            <Border x:Name="MaskLeft" Background="#66000000" IsHitTestVisible="False" HorizontalAlignment="Left"/>
-            <Border x:Name="MaskRight" Background="#66000000" IsHitTestVisible="False" HorizontalAlignment="Right"/>
+            <Border x:Name="MaskTop" Background="#660080FF" IsHitTestVisible="False" VerticalAlignment="Top"/>
+            <Border x:Name="MaskBottom" Background="#660080FF" IsHitTestVisible="False" VerticalAlignment="Bottom"/>
+            <Border x:Name="MaskLeft" Background="#660080FF" IsHitTestVisible="False" HorizontalAlignment="Left"/>
+            <Border x:Name="MaskRight" Background="#660080FF" IsHitTestVisible="False" HorizontalAlignment="Right"/>
         </Grid>
 
         <!-- 选区四边蓝色细线（取代边框） -->

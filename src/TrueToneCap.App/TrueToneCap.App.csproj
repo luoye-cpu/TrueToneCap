@@ -3,9 +3,12 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
     <LangVersion>13</LangVersion>
     <Nullable>enable</Nullable>
+    <Platform>x64</Platform>
+    <PlatformTarget>x64</PlatformTarget>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TrueToneCap.App</RootNamespace>
     <AssemblyName>TrueToneCap</AssemblyName>
@@ -15,44 +18,68 @@
     <ApplicationTitle>TrueToneCap</ApplicationTitle>
     <ApplicationId>com.trueonecap.app</ApplicationId>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.1.5</Version>
-    <AssemblyVersion>0.1.5.0</AssemblyVersion>
-    <FileVersion>0.1.5.0</FileVersion>
+    <Version>0.2.0-beta</Version>
+    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <FileVersion>0.2.0.0</FileVersion>
+    <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
+    <NoWarn>$(NoWarn);MSB3884</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250205002" />
-    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.1" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\TrueToneCap.Core\TrueToneCap.Core.csproj" />
   </ItemGroup>
 
+  <!-- 内嵌字体 + 数据文件 → 输出到 data/ -->
   <ItemGroup>
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+    <Content Include="Fonts\**\*.ttf" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Fonts\" />
+    <Content Include="Fonts\**\*.otf" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Fonts\" />
+    <Content Include="Shaders\*.hlsl" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
+    <Content Include="Shaders\*.cso" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
+    <Content Include="Shaders\*.ps1" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
+    <Content Include="Models\*.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Models\" />
   </ItemGroup>
 
-  <!-- 内嵌字体: 将 Fonts/ 目录中的所有 .ttf/.otf 作为内容复制到输出 -->
-  <ItemGroup>
-    <Content Include="Fonts\**\*.ttf" CopyToOutputDirectory="PreserveNewest" Visible="false" />
-    <Content Include="Fonts\**\*.otf" CopyToOutputDirectory="PreserveNewest" Visible="false" />
-  </ItemGroup>
-
-  <!-- 字体安装说明 (README) -->
-  <ItemGroup>
-    <Content Include="Fonts\README_FONTS.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" />
-  </ItemGroup>
-
-  <!-- Post-publish: copy PRI (compiled XAML resources) and XBF (binary XAML) to output -->
+  <!-- Post-publish: 复制 PRI/XBF + 整理目录 -->
   <Target Name="CopyPriAndXbf" AfterTargets="Publish">
     <ItemGroup>
-      <_PriFiles Include="$(OutputPath)TrueToneCap.pri" />
+      <!-- WinAppSDK 2.x: 应用级 PRI 可能不再生成（资源合并到 WindowsAppRuntime.pri） -->
+      <_PriFiles Include="$(OutputPath)TrueToneCap.pri" Condition="Exists('$(OutputPath)TrueToneCap.pri')" />
       <_XbfFiles Include="$(OutputPath)*.xbf" />
     </ItemGroup>
-    <Copy SourceFiles="@(_PriFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(_XbfFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
-    <Message Text="[TrueToneCap] Copied PRI and XBF resources to publish output" Importance="high" />
+    <Copy SourceFiles="@(_PriFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(_PriFiles)' != ''" />
+    <Copy SourceFiles="@(_XbfFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(_XbfFiles)' != ''" />
+
+    <!-- 创建 data/ 子目录 -->
+    <MakeDir Directories="$(PublishDir)data" />
+
+    <!-- 移动 .pdb 调试符号到 data/ -->
+    <ItemGroup>
+      <_PdbFiles Include="$(PublishDir)*.pdb" />
+    </ItemGroup>
+    <Move SourceFiles="@(_PdbFiles)" DestinationFolder="$(PublishDir)data\" />
+
+    <!-- 移动遗留的根目录 Fonts/ Models/ Shaders/ 到 data/ (兼容旧构建) -->
+    <ItemGroup>
+      <_LegacyFonts Include="$(PublishDir)Fonts\**\*" Condition="Exists('$(PublishDir)Fonts')" />
+      <_LegacyModels Include="$(PublishDir)Models\**\*" Condition="Exists('$(PublishDir)Models')" />
+      <_LegacyShaders Include="$(PublishDir)Shaders\**\*" Condition="Exists('$(PublishDir)Shaders')" />
+    </ItemGroup>
+    <Move SourceFiles="@(_LegacyFonts)" DestinationFolder="$(PublishDir)data\Fonts\" Condition="'@(_LegacyFonts)' != ''" />
+    <Move SourceFiles="@(_LegacyModels)" DestinationFolder="$(PublishDir)data\Models\" Condition="'@(_LegacyModels)' != ''" />
+    <Move SourceFiles="@(_LegacyShaders)" DestinationFolder="$(PublishDir)data\Shaders\" Condition="'@(_LegacyShaders)' != ''" />
+    <RemoveDir Directories="$(PublishDir)Fonts" Condition="Exists('$(PublishDir)Fonts')" />
+    <RemoveDir Directories="$(PublishDir)Models" Condition="Exists('$(PublishDir)Models')" />
+    <RemoveDir Directories="$(PublishDir)Shaders" Condition="Exists('$(PublishDir)Shaders')" />
+
+    <!-- Native/ 死目录清理 -->
+    <RemoveDir Directories="$(PublishDir)Native" Condition="Exists('$(PublishDir)Native')" />
+
+    <Message Text="[TrueToneCap] ✅ 目录整理完成" Importance="high" />
   </Target>
 
 </Project>

@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Media;
 using System.Runtime.InteropServices;
 using TrueToneCap.App.Services;
 using TrueToneCap.Core.Services;
+using TrueToneCap.Core.Encoding;
 
 namespace TrueToneCap.App;
 
@@ -70,6 +71,13 @@ public partial class App : Application
 
         // ── 初始化 OCR 引擎（纯内嵌 ONNX + Windows，零外部依赖）──
         _ = Task.Run(() => { try { MultiOcrService.Initialize(); } catch { } });
+
+        // ── 初始化 jpegli 编码器（jxl.dll）──
+        _ = Task.Run(() =>
+        {
+            try { JpegLiNative.Initialize(); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[App] jpegli 初始化失败: {ex.Message}"); }
+        });
 
         this.InitializeComponent();
         this.UnhandledException += (s, e) =>
@@ -152,6 +160,9 @@ public partial class App : Application
     {
         // 提升进程优先级以减少截图延迟
         try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High; } catch { }
+
+        // ── 初始化应用服务（Settings / Capability / Pipeline / WGC / GPU）──
+        AppServices.Initialize();
 
         // ── 使用构造函数中已设置的 _currentTheme（RequestedTheme 已在此之前设置）──
         var initTheme = _currentTheme;

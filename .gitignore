@@ -40,9 +40,13 @@ NuGet.Config
 *.appxsym
 *.eappxsym
 
-# ── Shader Compilation ──
-shaders/*.cso
-shaders/*.dxbc
+# ── Shader Compilation (keep .hlsl source, ignore compiled) ──
+*.cso
+*.dxbc
+
+# ── Publish Output (keep PACKAGE.md) ──
+publish/*
+!publish/PACKAGE.md
 
 # ── OS junk ──
 .DS_Store
@@ -80,6 +84,3 @@ TestResults/
 
 # ── TrueToneCap specific ──
 TrueToneCap.settings.json
-publish/
-# Keep shader source, discard compiled
-shaders/Compiled/

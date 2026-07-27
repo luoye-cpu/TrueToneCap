@@ -5,6 +5,12 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
+// ── 单元测试入口 ──
+if (args.Contains("--unit-tests"))
+{
+    return TrueToneCap.Test.CorePipelineTests.RunAll();
+}
+
 Console.WriteLine("══════════════════════════════════════");
 Console.WriteLine("  TrueToneCap ONNX OCR 综合分析");
 Console.WriteLine("══════════════════════════════════════\n");
@@ -91,8 +97,8 @@ void RunFullBench(string epLabel, OnnxExecutionProvider provider)
 }
 
 var providers = new[] {
-    ("2. CPU 推理", OnnxExecutionProvider.Cpu),
-    ("3. GPU (DirectML) 推理", OnnxExecutionProvider.DirectML),
+    ("2. DirectML 推理 (GPU)", OnnxExecutionProvider.DirectML),
+    ("3. CPU 推理", OnnxExecutionProvider.Cpu),
 };
 
 foreach (var (label, ep) in providers)
@@ -113,3 +119,4 @@ foreach (var ep in new[] { OnnxExecutionProvider.Cpu, OnnxExecutionProvider.Dire
 Console.WriteLine("\n══════════════════════════════════════");
 Console.WriteLine("  测试完成");
 Console.WriteLine("══════════════════════════════════════");
+return 0;

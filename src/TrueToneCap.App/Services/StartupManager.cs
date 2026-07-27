@@ -22,7 +22,7 @@ public static class StartupManager
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartupManager] 读取注册表失败: {ex.Message}");
+                LogService.Warn("StartupManager", $"读取注册表失败: {ex.Message}");
                 return false;
             }
         }
@@ -40,7 +40,7 @@ public static class StartupManager
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartupManager] 写入注册表失败: {ex.Message}");
+                LogService.Warn("StartupManager", $"写入注册表失败: {ex.Message}");
             }
         }
     }

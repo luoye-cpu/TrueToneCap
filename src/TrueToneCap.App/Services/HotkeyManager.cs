@@ -1,6 +1,6 @@
 // TrueToneCap.App/Services/HotkeyManager.cs
 // 全局热键管理（基于 Win32 RegisterHotKey + 冲突检测 + 回退）
-// 窗口子类化仅执行一次，委托用 GCHandle 防止 GC 回收 → 消除闪退
+// 不再子类化窗口 — 由 MainWindow.WndProcHook 统一转发 WM_HOTKEY
 
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
@@ -13,59 +13,40 @@ public static class HotkeyManager
     private static nint _hwnd;
     private static int _hotkeyId = -1;
     private static Action? _callback;
-    private static WndProcDelegate? _wp;
-    private static nint _origWp;
-    private static GCHandle _wpHandle;      // 防止委托被 GC 回收
     private static string _lastRegisteredHotkey = "";
-    private static bool _subclassed;         // 窗口是否已子类化
-
-    private delegate nint WndProcDelegate(nint h, uint m, nint w, nint l);
 
     private const uint WM_HOTKEY = 0x0312;
     private const uint MOD_ALT = 1, MOD_CONTROL = 2, MOD_SHIFT = 4, MOD_WIN = 8, MOD_NOREPEAT = 0x4000;
 
     [DllImport("user32.dll")] static extern bool RegisterHotKey(nint h, int id, uint mods, uint vk);
     [DllImport("user32.dll")] static extern bool UnregisterHotKey(nint h, int id);
-    [DllImport("user32.dll", SetLastError = true)] static extern nint SetWindowLongPtrW(nint h, int i, nint v);
-    [DllImport("user32.dll", SetLastError = true)] static extern nint CallWindowProcW(nint p, nint h, uint m, nint w, nint l);
-
-    private static nint Hook(nint h, uint m, nint w, nint l)
-    {
-        if (m == WM_HOTKEY && (int)w == _hotkeyId)
-            _callback?.Invoke();
-        return CallWindowProcW(_origWp, h, m, w, l);
-    }
 
     /// <summary>已注册的热键字符串（空表示注册失败）。</summary>
     public static string RegisteredHotkey => _lastRegisteredHotkey;
 
-    /// <summary>注册全局热键。窗口子类化仅首次执行。</summary>
+    /// <summary>WM_HOTKEY 消息 ID（供 WndProcHook 转发）。</summary>
+    public const uint WM_HOTKEY_MSG = WM_HOTKEY;
+
+    /// <summary>处理 WM_HOTKEY 消息。由 MainWindow.WndProcHook 调用。</summary>
+    public static bool HandleHotKeyMessage(uint msg, nint wParam)
+    {
+        if (msg == WM_HOTKEY && (int)wParam == _hotkeyId)
+        {
+            _callback?.Invoke();
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>注册全局热键（不再子类化窗口）。</summary>
     public static bool Register(Window window, string hotkey, Action callback)
     {
-        // 先注销旧热键（不注销窗口子类化）
+        // 先注销旧热键
         UnregisterHotkeyOnly();
 
         _hwnd = WindowNative.GetWindowHandle(window);
         _callback = callback;
         _hotkeyId = 9001;
-
-        // ── 窗口子类化：仅首次执行（委托用 GCHandle 钉住，防止 GC 回收 → 闪退）──
-        if (!_subclassed)
-        {
-            _wp = Hook;
-            _wpHandle = GCHandle.Alloc(_wp);          // 钉住委托
-            _origWp = SetWindowLongPtrW(_hwnd, -4, Marshal.GetFunctionPointerForDelegate(_wp));
-            if (_origWp == nint.Zero)
-            {
-                // 子类化失败：释放 GCHandle 并标记为未子类化
-                System.Diagnostics.Debug.WriteLine($"[HotkeyManager] 窗口子类化失败 (err={Marshal.GetLastWin32Error()})");
-                if (_wpHandle.IsAllocated) _wpHandle.Free();
-                _wp = null;
-                _lastRegisteredHotkey = "";
-                return false;
-            }
-            _subclassed = true;
-        }
 
         // 首先尝试用户首选热键
         if (TryRegister(hotkey))
@@ -93,22 +74,22 @@ public static class HotkeyManager
             UnregisterHotKey(_hwnd, _hotkeyId + 1);
         else
         {
-            System.Diagnostics.Debug.WriteLine($"[HotkeyManager] 冲突: {hotkey} (err={Marshal.GetLastWin32Error()})");
+            LogService.Warn("HotkeyManager", $"冲突: {hotkey} (err={Marshal.GetLastWin32Error()})");
             return false;
         }
 
         if (!RegisterHotKey(_hwnd, _hotkeyId, mods | MOD_NOREPEAT, vk))
         {
-            System.Diagnostics.Debug.WriteLine($"[HotkeyManager] 注册失败: {hotkey}");
+            LogService.Error("HotkeyManager", $"注册失败: {hotkey}");
             return false;
         }
 
         _lastRegisteredHotkey = hotkey;
-        System.Diagnostics.Debug.WriteLine($"[HotkeyManager] 已注册: {hotkey}");
+        LogService.Info("HotkeyManager", $"已注册: {hotkey}");
         return true;
     }
 
-    /// <summary>仅注销 Win32 热键，保留窗口子类化。</summary>
+    /// <summary>仅注销 Win32 热键。</summary>
     private static void UnregisterHotkeyOnly()
     {
         if (_hotkeyId >= 0 && _hwnd != 0)
@@ -120,13 +101,10 @@ public static class HotkeyManager
         _lastRegisteredHotkey = "";
     }
 
-    /// <summary>完全注销（热键 + 释放 GCHandle）。应在窗口销毁时调用。</summary>
+    /// <summary>完全注销。</summary>
     public static void Unregister()
     {
         UnregisterHotkeyOnly();
-        if (_wpHandle.IsAllocated)
-            _wpHandle.Free();
-        _subclassed = false;
     }
 
     private static bool ParseHotkey(string s, out uint mods, out uint vk)

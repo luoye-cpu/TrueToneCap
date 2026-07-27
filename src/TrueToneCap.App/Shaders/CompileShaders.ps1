@@ -37,6 +37,11 @@ $shaders = @(
         Input  = "MosaicEffect.hlsl"
         Entry  = "main"
         Profile = "ps_6_0"
+    },
+    @{
+        Input  = "FullscreenVS.hlsl"
+        Entry  = "main"
+        Profile = "vs_6_0"
     }
 )
 

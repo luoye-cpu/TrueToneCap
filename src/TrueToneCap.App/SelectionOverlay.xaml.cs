@@ -11,6 +11,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using WinRT.Interop;
 using TrueToneCap.Core.Annotation;
+using TrueToneCap.Core.Detection;
 using TrueToneCap.App.Services;
 
 namespace TrueToneCap.App;
@@ -22,6 +23,12 @@ public sealed partial class SelectionOverlay : Window
     private bool _isDragging;
     private bool _isClick;
     private bool _selectionComplete;
+    private bool _finished; // 防止 ActionCompleted 双重触发
+
+    // ── 自动识别区域 ──
+    private List<DetectedRegion> _detectedRegions = [];
+    private int _hoveredRegionIndex = -1;
+    private readonly List<Border> _regionHintElements = [];
 
     // ── 标注状态 ──
     private bool _isAnnotating;
@@ -127,7 +134,14 @@ public sealed partial class SelectionOverlay : Window
                 _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
             System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2}");
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
-            if (!_bgRendered) { _bgRendered = true; RenderDesktopBackground(desktopPixels, vw, vh); }
+            if (!_bgRendered)
+            {
+                _bgRendered = true;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                RenderDesktopBackground(desktopPixels, vw, vh);
+                System.Diagnostics.Debug.WriteLine($"[⏱ Overlay] 背景渲染: {sw.ElapsedMilliseconds}ms");
+                DetectAndRenderRegions();
+            }
         };
 
         try { appWindow.MoveAndResize(new RectInt32(vx, vy, vw, vh)); }
@@ -274,10 +288,11 @@ public sealed partial class SelectionOverlay : Window
 
         DimOverlay.Visibility = Visibility.Collapsed;
         MaskGrid.Visibility = Visibility.Visible;
-        MaskLeft.Width = x1;
-        MaskTop.Height = y1;
-        MaskRight.Width = RootGrid.ActualWidth - x2;
-        MaskBottom.Height = RootGrid.ActualHeight - y2;
+        // 钳制遮罩尺寸为非负，防止布局未完成(ActualWidth=0)或坐标越界导致负值/NaN → WinRT set_Width 崩溃
+        MaskLeft.Width = Math.Max(0, x1);
+        MaskTop.Height = Math.Max(0, y1);
+        MaskRight.Width = Math.Max(0, RootGrid.ActualWidth - x2);
+        MaskBottom.Height = Math.Max(0, RootGrid.ActualHeight - y2);
 
         DrawSelectionLines(x1, y1, w, h, $"{(int)(w * scale)} × {(int)(h * scale)}");
 
@@ -364,9 +379,38 @@ public sealed partial class SelectionOverlay : Window
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (!_isDragging || _selectionComplete || _isAnnotating) return;
+        if (_selectionComplete || _isAnnotating) return;
         var pt = e.GetCurrentPoint(RootGrid).Position;
+
+        // ── 智能窗口框选：鼠标自由移动时实时高亮检测到的窗口区域 ──
+        if (!_isDragging && _detectedRegions.Count > 0)
+        {
+            UpdateRegionHover(pt.X, pt.Y);
+            // 悬停到区域时更新提示文字
+            if (_hoveredRegionIndex >= 0)
+            {
+                var r = _detectedRegions[_hoveredRegionIndex];
+                HintText.Text = $"🪟 {r.Title ?? "窗口"} ({r.Width}×{r.Height})  单击选中  |  拖拽自定义框选  |  Esc 取消";
+                HintText.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                HintText.Text = "单击 = 全屏  |  拖拽 = 框选  |  悬停窗口 = 智能选中  |  Esc = 取消";
+                HintText.Visibility = Visibility.Visible;
+            }
+            return;
+        }
+
+        if (!_isDragging) return;
+
         if (Math.Abs(pt.X - _startPoint.X) > 3 || Math.Abs(pt.Y - _startPoint.Y) > 3) _isClick = false;
+
+        // ── 拖拽中但尚未移动超过阈值：仍高亮区域 ──
+        if (_isClick && _detectedRegions.Count > 0)
+        {
+            UpdateRegionHover(pt.X, pt.Y);
+        }
+
         if (_isClick) return;
 
         double x1 = Math.Min(_startPoint.X, pt.X), y1 = Math.Min(_startPoint.Y, pt.Y);
@@ -374,11 +418,15 @@ public sealed partial class SelectionOverlay : Window
         double w = x2 - x1, h = y2 - y1;
         if (w < 2 || h < 2) return;
 
+        // 开始拖拽 → 隐藏区域提示
+        ClearRegionHints();
+        HintText.Visibility = Visibility.Collapsed;
+
         DimOverlay.Visibility = Visibility.Collapsed;
         MaskGrid.Visibility = Visibility.Visible;
-        MaskLeft.Width = x1; MaskTop.Height = y1;
-        MaskRight.Width = RootGrid.ActualWidth - x2;
-        MaskBottom.Height = RootGrid.ActualHeight - y2;
+        MaskLeft.Width = Math.Max(0, x1); MaskTop.Height = Math.Max(0, y1);
+        MaskRight.Width = Math.Max(0, RootGrid.ActualWidth - x2);
+        MaskBottom.Height = Math.Max(0, RootGrid.ActualHeight - y2);
 
         DrawSelectionLines(x1, y1, w, h, $"{(int)(w * GetSafeDpiScale())} × {(int)(h * GetSafeDpiScale())}");
         Toolbar.Visibility = Visibility.Collapsed;
@@ -390,7 +438,17 @@ public sealed partial class SelectionOverlay : Window
         _isDragging = false;
         RootGrid.ReleasePointerCapture(e.Pointer);
 
-        if (_isClick) { SelectFullScreen(); return; }
+        // ── 单击：优先磁吸到识别区域 ──
+        if (_isClick)
+        {
+            if (_hoveredRegionIndex >= 0 && _hoveredRegionIndex < _detectedRegions.Count)
+            {
+                SelectDetectedRegion(_detectedRegions[_hoveredRegionIndex]);
+                return;
+            }
+            SelectFullScreen();
+            return;
+        }
 
         var pt = e.GetCurrentPoint(RootGrid).Position;
         int x1 = (int)Math.Min(_startPoint.X, pt.X), y1 = (int)Math.Min(_startPoint.Y, pt.Y);
@@ -425,6 +483,9 @@ public sealed partial class SelectionOverlay : Window
 
     private void Finish(ActionResult result)
     {
+        if (_finished) return; // 防止双重触发
+        _finished = true;
+
         // 标注模式下先退出标注
         if (_isAnnotating) ExitAnnotationMode();
 
@@ -438,7 +499,9 @@ public sealed partial class SelectionOverlay : Window
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
-        if (!_selectionComplete) ActionCompleted?.Invoke(ActionResult.Cancel, default);
+        // 仅当 Finish 未被调用时（如系统强制关闭窗口）才触发 Cancel
+        if (!_finished && !_selectionComplete)
+            ActionCompleted?.Invoke(ActionResult.Cancel, default);
     }
 
     // ═══════════════════════════════════════
@@ -715,6 +778,142 @@ public sealed partial class SelectionOverlay : Window
     {
         while (child != null) { if (child == parent) return true; child = VisualTreeHelper.GetParent(child); }
         return false;
+    }
+
+    // ═══════════════════════════════════════
+    //  自动识别区域 (A+B)
+    // ═══════════════════════════════════════
+
+    /// <summary>后台检测并渲染区域提示。</summary>
+    private async void DetectAndRenderRegions()
+    {
+        try
+        {
+            _detectedRegions = await Task.Run(() =>
+                RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh));
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                RenderRegionHints();
+                int uia = _detectedRegions.Count(r => r.Source == RegionSource.Uia);
+                int edge = _detectedRegions.Count(r => r.Source == RegionSource.Edge);
+                System.Diagnostics.Debug.WriteLine(
+                    $"[SelectionOverlay] 区域检测完成: {_detectedRegions.Count} 个区域 (UIA={uia}, Edge={edge})");
+                // 诊断落盘：确认边缘伪框已消除（正常桌面 Edge 应为 0）
+                try
+                {
+                    System.IO.File.AppendAllText(
+                        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "TrueToneCap_WGC.log"),
+                        $"{DateTime.Now:HH:mm:ss.fff} [Region] 检测完成 total={_detectedRegions.Count} UIA={uia} Edge={edge}\n");
+                }
+                catch { }
+            });
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] 区域检测失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>在 RegionHintCanvas 上渲染半透明区域提示。</summary>
+    private void RenderRegionHints()
+    {
+        ClearRegionHints();
+        double scale = GetSafeDpiScale();
+        if (scale <= 0.01) scale = 1.0;
+
+        foreach (var region in _detectedRegions)
+        {
+            double rx = (region.X - _vx) / scale;
+            double ry = (region.Y - _vy) / scale;
+            double rw = region.Width / scale;
+            double rh = region.Height / scale;
+
+            if (rw < 4 || rh < 4) continue;
+
+            var border = new Border
+            {
+                Width = rw, Height = rh,
+                BorderBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(80, 68, 136, 255)),
+                BorderThickness = new Thickness(1),
+                Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(15, 68, 136, 255)),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(border, rx);
+            Canvas.SetTop(border, ry);
+            RegionHintCanvas.Children.Add(border);
+            _regionHintElements.Add(border);
+        }
+    }
+
+    /// <summary>清除所有区域提示。</summary>
+    private void ClearRegionHints()
+    {
+        _hoveredRegionIndex = -1;
+        foreach (var el in _regionHintElements)
+            RegionHintCanvas.Children.Remove(el);
+        _regionHintElements.Clear();
+    }
+
+    /// <summary>根据鼠标位置更新悬停高亮。</summary>
+    private void UpdateRegionHover(double mouseX, double mouseY)
+    {
+        double scale = GetSafeDpiScale();
+        if (scale <= 0.01) scale = 1.0;
+
+        int newHover = -1;
+        for (int i = 0; i < _detectedRegions.Count; i++)
+        {
+            var r = _detectedRegions[i];
+            double rx = (r.X - _vx) / scale;
+            double ry = (r.Y - _vy) / scale;
+            double rw = r.Width / scale;
+            double rh = r.Height / scale;
+
+            // 检测鼠标是否在区域内（留 4px 边距便于点击）
+            if (mouseX >= rx - 2 && mouseX <= rx + rw + 2 &&
+                mouseY >= ry - 2 && mouseY <= ry + rh + 2)
+            {
+                newHover = i;
+                break;
+            }
+        }
+
+        if (newHover == _hoveredRegionIndex) return;
+
+        // 重置旧高亮
+        if (_hoveredRegionIndex >= 0 && _hoveredRegionIndex < _regionHintElements.Count)
+        {
+            var old = _regionHintElements[_hoveredRegionIndex];
+            old.BorderBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(80, 68, 136, 255));
+            old.BorderThickness = new Thickness(1);
+            old.Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(15, 68, 136, 255));
+        }
+
+        // 设置新高亮
+        _hoveredRegionIndex = newHover;
+        if (newHover >= 0 && newHover < _regionHintElements.Count)
+        {
+            var cur = _regionHintElements[newHover];
+            cur.BorderBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(220, 68, 136, 255));
+            cur.BorderThickness = new Thickness(2);
+            cur.Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(50, 68, 136, 255));
+        }
+    }
+
+    /// <summary>选中一个自动识别的区域。</summary>
+    private void SelectDetectedRegion(DetectedRegion region)
+    {
+        double scale = GetSafeDpiScale();
+        if (scale <= 0.01) scale = 1.0;
+
+        double rx = (region.X - _vx) / scale;
+        double ry = (region.Y - _vy) / scale;
+        double rw = region.Width / scale;
+        double rh = region.Height / scale;
+
+        ClearRegionHints();
+        ApplyCustomSelection(rx, ry, rx + rw, ry + rh);
     }
 }
 

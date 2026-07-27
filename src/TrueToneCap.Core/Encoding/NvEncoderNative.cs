@@ -1,6 +1,6 @@
 // TrueToneCap.Core/Encoding/NvEncoderNative.cs
-// NVENC 原生 SDK — P/Invoke nvEncodeAPI64.dll (NVIDIA 驱动自带，零依赖)
-// D3D11 纹理直接输入，无需 CUDA 上下文
+// NVENC 原生 SDK — P/Invoke nvEncodeAPI64.dll (NVIDIA 驱动自带)
+// 支持: AV1 (RTX 40+), HEVC (GTX 10+), D3D11 纹理直通
 
 using System.Runtime.InteropServices;
 using Vortice.Direct3D11;
@@ -17,18 +17,39 @@ public sealed unsafe class NvEncoderNative : IDisposable
     private const uint NV_ENC_PIC_FLAG_FORCEINTRA = 0x01;
     private const uint NV_ENC_PIC_FLAG_EOS = 0x02;
 
+    // ── 支持的 SDK 版本 (NVENCAPI_VERSION = MAJOR | (MINOR << 24)) ──
+    // SDK 13.1: 13 | (1 << 24) = 0x0100000D  (Blackwell, driver 570+, latest)
+    // SDK 13.0: 13 | (0 << 24) = 0x0000000D  (Blackwell)
+    // SDK 12.2: 12 | (2 << 24) = 0x0200000C  (Ada Lovelace)
+    // SDK 12.1: 12 | (1 << 24) = 0x0100000C
+    // SDK 12.0: 12 | (0 << 24) = 0x0000000C
+    // SDK 11.1: 11 | (1 << 24) = 0x0100000B
+    // SDK 11.0: 11 | (0 << 24) = 0x0000000B
+    // 参考: FFmpeg nv-codec-headers/include/ffnvcodec/nvEncodeAPI.h
+    private static readonly uint[] s_sdkVersions = [
+        0x0100000D,  // SDK 13.1 (Blackwell, driver 570+)
+        0x0000000D,  // SDK 13.0 (Blackwell)
+        0x0200000C,  // SDK 12.2 (Ada)
+        0x0100000C,  // SDK 12.1
+        0x0000000C,  // SDK 12.0
+        0x0100000B,  // SDK 11.1
+        0x0000000B,  // SDK 11.0
+    ];
+
     // ── GUIDs ──
     internal static readonly Guid CodecAv1 = new(0x4E2599F1, 0x8A4F, 0x4D3A, 0xA5, 0x1A, 0xDD, 0x81, 0x80, 0x00, 0x9E, 0x06);
     private static readonly Guid CodecHevc = new(0x8AEDB2E3, 0x5A8E, 0x4EFC, 0x8E, 0xC4, 0x03, 0xAC, 0x94, 0xDE, 0x6F, 0x56);
     private static readonly Guid PresetP1 = new(0x61C29E14, 0x6AB9, 0x4B2E, 0x9A, 0x3F, 0xC9, 0x13, 0xE8, 0x92, 0xD0, 0x9D);
 
     private readonly nint _dll;
-    private readonly nint _funcTable; // NV_ENCODE_API_FUNCTION_LIST*
-    private nint _encoder;            // NV_ENC_HANDLE
+    private readonly nint _funcTable;
+    private nint _encoder;
     private readonly ID3D11Device _d3dDevice;
     private bool _disposed;
+    private uint _activeVersion;
 
-    public static bool IsAvailable
+    /// <summary>仅检查 DLL 存在性 (轻量)。</summary>
+    public static bool IsDllPresent
     {
         get
         {
@@ -37,113 +58,182 @@ public sealed unsafe class NvEncoderNative : IDisposable
         }
     }
 
+    /// <summary>完整可用性检查：DLL 存在 + 能创建设备。</summary>
+    public static bool IsAvailable
+    {
+        get
+        {
+            if (!IsDllPresent) return false;
+            try
+            {
+                var device = D3D11.D3D11CreateDevice(Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+                using var nv = new NvEncoderNative(device);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[NVENC] IsAvailable 探测失败: {ex.Message}");
+                return false;
+            }
+        }
+    }
+
+    /// <summary>探测驱动支持的最高 API 版本。</summary>
+    public static uint ProbeApiVersion()
+    {
+        nint dll = 0;
+        try
+        {
+            dll = NativeLibrary.Load("nvEncodeAPI64.dll");
+            var createFn = NativeLibrary.GetExport(dll, "NvEncodeAPICreateInstance");
+            var create = Marshal.GetDelegateForFunctionPointer<CreateInstanceDelegate>(createFn);
+            var table = Marshal.AllocHGlobal(512);
+            try
+            {
+                foreach (uint ver in s_sdkVersions)
+                {
+                    new Span<byte>((void*)table, 512).Clear();
+                    *(uint*)table = ver;
+                    int hr = create(table);
+                    if (hr == NVENC_SUCCESS)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[NVENC] ProbeApiVersion: {ver>>16 & 0xFF}.{ver>>8 & 0xFF}");
+                        return ver;
+                    }
+                }
+            }
+            finally { Marshal.FreeHGlobal(table); }
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[NVENC] ProbeApiVersion 失败: {ex.Message}"); }
+        finally { if (dll != 0) NativeLibrary.Free(dll); }
+        return 0;
+    }
+
     public NvEncoderNative(ID3D11Device d3dDevice)
     {
         _d3dDevice = d3dDevice;
         _dll = NativeLibrary.Load("nvEncodeAPI64.dll");
+        var diag = (string msg) => { System.Diagnostics.Debug.WriteLine(msg); Console.WriteLine(msg); };
+        diag($"[NVENC] DLL 已加载");
 
         var createFn = NativeLibrary.GetExport(_dll, "NvEncodeAPICreateInstance");
         var create = Marshal.GetDelegateForFunctionPointer<CreateInstanceDelegate>(createFn);
 
-        // 函数表 ~58 指针 = 464 字节 + version header
         _funcTable = Marshal.AllocHGlobal(512);
-        new Span<byte>((void*)_funcTable, 512).Clear();
-        *(uint*)_funcTable = 0x000C0000; // SDK 12.0
+        bool created = false;
+        int lastHr = -1;
 
-        int hr = create(_funcTable);
-        if (hr != NVENC_SUCCESS)
-            throw new InvalidOperationException($"NVENC 初始化失败: 0x{hr:X8}");
+        foreach (uint ver in s_sdkVersions)
+        {
+            new Span<byte>((void*)_funcTable, 512).Clear();
+            *(uint*)_funcTable = ver;
+            int hr = create(_funcTable);
+            System.Diagnostics.Debug.WriteLine($"[NVENC]   SDK {ver>>16 & 0xFF}.{ver>>8 & 0xFF:00}: hr=0x{hr:X8} {(hr == NVENC_SUCCESS ? "✓" : "✗")}");
+            if (hr == NVENC_SUCCESS)
+            {
+                _activeVersion = ver;
+                created = true;
+                diag($"[NVENC] ✅ CreateInstance OK (SDK {ver>>16 & 0xFF}.{ver>>8 & 0xFF})");
+                break;
+            }
+            lastHr = hr;
+        }
 
-        // 打开 D3D11 编码会话
-        var openFn = Marshal.GetDelegateForFunctionPointer<OpenSessionFn>(
-            GetFuncPtr(35)); // NvEncOpenEncodeSessionEx
+        if (!created)
+            throw new InvalidOperationException(
+                $"[NVENC] 所有 SDK 版本探测失败 (最后 hr=0x{lastHr:X8})。驱动可能不支持 NVENC。");
+
+        var openFn = Marshal.GetDelegateForFunctionPointer<OpenSessionFn>(GetFuncPtr(29));
         nint enc = 0;
-        var guid = NvEncoderNative.CodecAv1; // 使用 internal 副本
-        hr = openFn(_funcTable, &guid, NV_ENC_DEVICE_TYPE_DIRECTX, _d3dDevice.NativePointer, &enc);
-        if (hr != NVENC_SUCCESS)
-            throw new InvalidOperationException($"NVENC D3D11 会话失败: 0x{hr:X8}");
+
+        // NvEncOpenEncodeSessionEx 需要 NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS 结构体
+        byte* osp = stackalloc byte[1024];
+        new Span<byte>(osp, 1024).Clear();
+        // NVENCAPI_STRUCT_VERSION(1) = NVENCAPI_VERSION | (1 << 16) | (0x7 << 28)
+        *(uint*)osp = _activeVersion | (1u << 16) | (0x7u << 28);
+        *(uint*)(osp + 4) = NV_ENC_DEVICE_TYPE_DIRECTX;
+        *(nint*)(osp + 8) = _d3dDevice.NativePointer;
+        *(uint*)(osp + 24) = _activeVersion;
+
+        int hr2 = openFn((nint)osp, &enc);
+        if (hr2 != NVENC_SUCCESS)
+            throw new InvalidOperationException($"[NVENC] OpenEncodeSessionEx 失败: 0x{hr2:X8}");
+        diag("[NVENC] ✅ 编码会话 OK (AV1)");
+
         _encoder = enc;
     }
 
     // ═══════════ 编码 ═══════════
 
-    /// <summary>将 BGRA 像素编码为 AV1 比特流。</summary>
     public byte[] EncodeAv1(byte[] bgra, int w, int h, int qp)
         => EncodeRaw(bgra, w, h, qp, CodecAv1);
 
-    /// <summary>将 BGRA 像素编码为 HEVC 比特流。</summary>
     public byte[] EncodeHevc(byte[] bgra, int w, int h, int qp)
         => EncodeRaw(bgra, w, h, qp, CodecHevc);
 
     private byte[] EncodeRaw(byte[] bgra, int w, int h, int qp, Guid codec)
     {
-        var initFn = Marshal.GetDelegateForFunctionPointer<InitEncoderFn>(GetFuncPtr(13));
-        var createBufFn = Marshal.GetDelegateForFunctionPointer<CreateBitstreamFn>(GetFuncPtr(17));
-        var encFn = Marshal.GetDelegateForFunctionPointer<EncodePictureFn>(GetFuncPtr(19));
-        var lockFn = Marshal.GetDelegateForFunctionPointer<LockBitstreamFn>(GetFuncPtr(20));
-        var unlockFn = Marshal.GetDelegateForFunctionPointer<UnlockBitstreamFn>(GetFuncPtr(21));
+        var initFn = Marshal.GetDelegateForFunctionPointer<InitEncoderFn>(GetFuncPtr(11)); // NvEncInitializeEncoder
+        var createBufFn = Marshal.GetDelegateForFunctionPointer<CreateBitstreamFn>(GetFuncPtr(14)); // NvEncCreateBitstreamBuffer
+        var encFn = Marshal.GetDelegateForFunctionPointer<EncodePictureFn>(GetFuncPtr(16)); // NvEncEncodePicture
+        var lockFn = Marshal.GetDelegateForFunctionPointer<LockBitstreamFn>(GetFuncPtr(17)); // NvEncLockBitstream
+        var unlockFn = Marshal.GetDelegateForFunctionPointer<UnlockBitstreamFn>(GetFuncPtr(18)); // NvEncUnlockBitstream
 
-        // ── 1. 初始化编码器 ──
-        int paramSize = 256 + 512; // NV_ENC_INITIALIZE_PARAMS + NV_ENC_CONFIG
+        int paramSize = 256 + 512;
         byte* p = stackalloc byte[paramSize];
         new Span<byte>(p, paramSize).Clear();
 
-        *(uint*)(p + 0) = 0x000C0000; // version
+        *(uint*)(p + 0) = _activeVersion;
         var preset = PresetP1;
         Buffer.MemoryCopy(&codec, p + 8, 16, 16);
         Buffer.MemoryCopy(&preset, p + 24, 16, 16);
         *(uint*)(p + 40) = (uint)w; *(uint*)(p + 44) = (uint)h;
         *(uint*)(p + 48) = (uint)w; *(uint*)(p + 52) = (uint)h;
-        *(uint*)(p + 56) = 1; *(uint*)(p + 60) = 1; // framerate
-        *(nint*)(p + 96) = (nint)(p + 256); // encodeConfig 指针
+        *(uint*)(p + 56) = 1; *(uint*)(p + 60) = 1;
+        *(nint*)(p + 96) = (nint)(p + 256);
+        *(uint*)(p + 128) = 5; // UHQ Tuning (NV_ENC_TUNING_INFO_ULTRA_HIGH_QUALITY, Blackwell SDK 13.0+)
 
-        // NV_ENC_CONFIG @ offset 256
-        *(uint*)(p + 256) = 0x000C0000;
-        *(uint*)(p + 256 + 20) = (uint)w;       // gopLength
-        *(uint*)(p + 256 + 24) = 1;             // frameIntervalP
-        *(uint*)(p + 256 + 120) = (uint)qp;     // QP
-        *(uint*)(p + 256 + 140) = (uint)qp;     // QP I-frame
+        *(uint*)(p + 256) = _activeVersion;
+        *(uint*)(p + 256 + 20) = (uint)w;
+        *(uint*)(p + 256 + 24) = 1;
+        *(uint*)(p + 256 + 120) = (uint)qp;
+        *(uint*)(p + 256 + 140) = (uint)qp;
 
         int hr = initFn(_encoder, (nint)p);
-        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"NVENC Init: 0x{hr:X8}");
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] InitEncoder: 0x{hr:X8}");
 
-        // ── 2. 创建输入缓冲区 ──
         int bufSize = w * h * 4;
         byte* ib = stackalloc byte[64];
         new Span<byte>(ib, 64).Clear();
-        *(uint*)ib = 0x000C0000;
+        *(uint*)ib = _activeVersion;
         *(uint*)(ib + 4) = (uint)bufSize;
         nint inputBuf = 0;
-        hr = GetFuncDelegate<CreateInputBufferFn>(GetFuncPtr(15))(_encoder, (nint)ib, &inputBuf);
-        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"NVENC CreateInputBuf: 0x{hr:X8}");
+        hr = GetFuncDelegate<CreateInputBufferFn>(GetFuncPtr(12))(_encoder, (nint)ib, &inputBuf); // NvEncCreateInputBuffer
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] CreateInputBuf: 0x{hr:X8}");
 
-        // ── 3. 写入像素到输入缓冲区 ──
         byte* lb = stackalloc byte[64];
         new Span<byte>(lb, 64).Clear();
-        *(uint*)lb = 0x000C0000;
+        *(uint*)lb = _activeVersion;
         *(nint*)(lb + 8) = inputBuf;
-        hr = GetFuncDelegate<LockInputBufferFn>(GetFuncPtr(22))(_encoder, (nint)lb);
-        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"NVENC LockInput: 0x{hr:X8}");
+        hr = GetFuncDelegate<LockInputBufferFn>(GetFuncPtr(19))(_encoder, (nint)lb); // NvEncLockInputBuffer
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] LockInput: 0x{hr:X8}");
         nint srcData = *(nint*)(lb + 16);
         int srcPitch = *(int*)(lb + 24);
-        // 复制 BGRA: 逐行
         for (int y = 0; y < h; y++)
             Marshal.Copy(bgra, y * w * 4, srcData + y * srcPitch, w * 4);
-        GetFuncDelegate<UnlockInputBufferFn>(GetFuncPtr(23))(_encoder, (nint)lb);
+        GetFuncDelegate<UnlockInputBufferFn>(GetFuncPtr(20))(_encoder, (nint)lb); // NvEncUnlockInputBuffer
 
-        // ── 4. 创建比特流缓冲区 ──
         byte* bb = stackalloc byte[32];
         new Span<byte>(bb, 32).Clear();
-        *(uint*)bb = 0x000C0000;
+        *(uint*)bb = _activeVersion;
         *(uint*)(bb + 4) = (uint)(bufSize * 2);
         nint bsBuf = 0;
         hr = createBufFn(_encoder, (nint)bb, &bsBuf);
-        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"NVENC CreateBS: 0x{hr:X8}");
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] CreateBitstream: 0x{hr:X8}");
 
-        // ── 5. 编码一帧 ──
         byte* pic = stackalloc byte[128];
         new Span<byte>(pic, 128).Clear();
-        *(uint*)pic = 0x000C0000;
+        *(uint*)pic = _activeVersion;
         *(uint*)(pic + 4) = (uint)w; *(uint*)(pic + 8) = (uint)h;
         *(uint*)(pic + 12) = (uint)srcPitch;
         *(uint*)(pic + 16) = NV_ENC_PIC_FLAG_FORCEINTRA | NV_ENC_PIC_FLAG_EOS;
@@ -151,15 +241,14 @@ public sealed unsafe class NvEncoderNative : IDisposable
         *(nint*)(pic + 48) = bsBuf;
         *(uint*)(pic + 72) = NV_ENC_BUFFER_FORMAT_ARGB10;
         hr = encFn(_encoder, (nint)pic);
-        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"NVENC Encode: 0x{hr:X8}");
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] EncodePicture: 0x{hr:X8}");
 
-        // ── 6. 读取比特流 ──
         byte* lk = stackalloc byte[64];
         new Span<byte>(lk, 64).Clear();
-        *(uint*)lk = 0x000C0000;
+        *(uint*)lk = _activeVersion;
         *(nint*)(lk + 8) = bsBuf;
         hr = lockFn(_encoder, (nint)lk);
-        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"NVENC LockBS: 0x{hr:X8}");
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] LockBitstream: 0x{hr:X8}");
         int bsSize = *(int*)(lk + 24);
         nint bsData = *(nint*)(lk + 16);
         var result = new byte[bsSize];
@@ -169,14 +258,12 @@ public sealed unsafe class NvEncoderNative : IDisposable
         return result;
     }
 
-    // ═══════════ 辅助 ═══════════
-
     private nint GetFuncPtr(int idx) => *(nint*)(_funcTable + 8 + idx * 8);
     private static T GetFuncDelegate<T>(nint ptr) where T : Delegate
         => Marshal.GetDelegateForFunctionPointer<T>(ptr);
 
     private delegate int CreateInstanceDelegate(nint funcList);
-    private delegate int OpenSessionFn(nint fnList, Guid* guid, uint type, nint device, nint* enc);
+    private delegate int OpenSessionFn(nint params_, nint* encoder);
     private delegate int InitEncoderFn(nint enc, nint p);
     private delegate int CreateInputBufferFn(nint enc, nint p, nint* buf);
     private delegate int LockInputBufferFn(nint enc, nint p);
@@ -189,7 +276,7 @@ public sealed unsafe class NvEncoderNative : IDisposable
     public void Dispose()
     {
         if (_disposed) return; _disposed = true;
-        if (_encoder != 0) GetFuncDelegate<DestroyEncoderFn>(GetFuncPtr(14))(_encoder);
+        if (_encoder != 0) GetFuncDelegate<DestroyEncoderFn>(GetFuncPtr(27))(_encoder); // NvEncDestroyEncoder
         if (_funcTable != 0) Marshal.FreeHGlobal(_funcTable);
         if (_dll != 0) NativeLibrary.Free(_dll);
     }
@@ -203,15 +290,13 @@ public static class IvfWriter
     {
         using var fs = File.Create(path);
         using var bw = new System.IO.BinaryWriter(fs);
-        // IVF header
-        bw.Write((short)0x4649); bw.Write((short)0x5649); // "DKIF"
-        bw.Write((short)0); bw.Write((short)32);          // version, header len
-        bw.Write(0x41563031);                               // "AV01"
+        bw.Write((short)0x4649); bw.Write((short)0x5649); // DKIF
+        bw.Write((short)0); bw.Write((short)32);
+        bw.Write(0x41563031); // AV01
         bw.Write((short)w); bw.Write((short)h);
-        bw.Write(1u); bw.Write(1u);                        // fps
-        bw.Write(1u); bw.Write(0u);                        // frame count, reserved
-        // Frame
-        bw.Write((uint)av1Bs.Length); bw.Write(0L);        // size, timestamp
+        bw.Write(1u); bw.Write(1u);
+        bw.Write(1u); bw.Write(0u);
+        bw.Write((uint)av1Bs.Length); bw.Write(0L);
         bw.Write(av1Bs);
     }
 }

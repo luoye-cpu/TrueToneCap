@@ -43,7 +43,7 @@
         </Grid>
 
         <!-- 画布区域（图片+标注层居中对齐） -->
-        <Border Grid.Row="1" Background="#40000000">
+        <Border Grid.Row="1" Background="#400000FF">
             <Grid x:Name="CanvasGrid" Background="Transparent">
                 <Image x:Name="PreviewImage" Stretch="Uniform"
                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
