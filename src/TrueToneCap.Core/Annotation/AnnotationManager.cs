@@ -87,7 +87,9 @@ public sealed class AnnotationManager
     {
         var layer = _layers.FirstOrDefault(l => l.Id == layerId);
         if (layer == null) return;
-        var cmd = new RemoveLayerCommand(this, layer.Clone());
+        // 直接存储原始引用（已从列表移除，不会被外部修改）
+        // 修复: Clone() 会生成新 Guid，导致 DoRemoveLayer 找不到目标
+        var cmd = new RemoveLayerCommand(this, layer);
         ExecuteCommand(cmd);
     }
 

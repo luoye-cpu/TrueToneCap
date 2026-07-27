@@ -1,7 +1,7 @@
 // TrueToneCap.Core/Services/MultiOcrService.cs
-// 多引擎 OCR 路由器（纯内嵌，零外部依赖）
-// 默认优先级: ONNX DirectML(GPU) → Windows OCR → ONNX CPU
-// 可通过 ForceEngine 手动指定单个引擎
+// 多引擎 OCR 路由器 — PP-OCRv6 专属
+// 默认降级链: ONNX DirectML (GPU, FP16) → ONNX CPU (FP16)
+// Windows OCR 默认不启用，仅在用户手动选择 ForceEngine="Windows OCR" 时使用
 
 using System.Diagnostics;
 
@@ -13,8 +13,11 @@ public static class MultiOcrService
     private static bool _initialized;
     private static string _modelDir = "";
 
-    /// <summary>手动指定的引擎名称（null = 自动降级）。</summary>
+    /// <summary>手动指定的引擎名称（null = 自动降级）。设为 "Windows OCR" 可启用系统 OCR。</summary>
     public static string? ForceEngine { get; set; }
+
+    /// <summary>是否将 Windows OCR 加入降级链（默认 false，仅手动选择时启用）。</summary>
+    public static bool EnableWindowsOcrFallback { get; set; } = false;
 
     public static IReadOnlyList<IOcrEngine> Engines => _engines;
 
@@ -32,37 +35,42 @@ public static class MultiOcrService
         _initialized = true;
         _modelDir = modelDir ?? "";
 
-        Console.WriteLine($"[OCR] 初始化多引擎 OCR 服务，模型目录: {_modelDir}");
+        Debug.WriteLine($"[OCR] 初始化 PP-OCRv6 medium 引擎，模型目录: {_modelDir}");
 
-        // 1️⃣ ONNX DirectML Server (GPU, 高精度)
-        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.DirectML, modelDir), "DirectML"); } catch (Exception ex) { Console.WriteLine($"[OCR] DirectML 初始化异常: {ex.Message}"); }
-        // 2️⃣ ONNX CPU Server (CPU, 高精度)
-        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.Cpu, modelDir), "CPU"); } catch (Exception ex) { Console.WriteLine($"[OCR] CPU 初始化异常: {ex.Message}"); }
-        // 3️⃣ Windows OCR (兜底)
+        // 1️⃣ ONNX PP-OCRv6 DirectML (GPU, FP16 原生加速)
+        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.DirectML, modelDir), "DirectML"); }
+        catch (Exception ex) { Debug.WriteLine($"[OCR] DirectML 初始化异常: {ex.Message}"); }
+
+        // 2️⃣ ONNX PP-OCRv6 CPU (FP16 模型, FP32 计算)
+        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.Cpu, modelDir), "CPU"); }
+        catch (Exception ex) { Debug.WriteLine($"[OCR] CPU 初始化异常: {ex.Message}"); }
+
+        // 3️⃣ Windows OCR (默认不加入降级链，仅注册用户手动选择)
         _engines.Add(new WindowsOcrEngine());
-        Console.WriteLine("[OCR] Windows OCR 已就绪");
+        Debug.WriteLine("[OCR] Windows OCR 已注册 (默认不启用，需手动选择)");
 
-        Console.WriteLine($"[OCR] 共 {_engines.Count} 个可用引擎: {string.Join(", ", _engines.Select(e => e.Info.Name))}");
+        Debug.WriteLine($"[OCR] 共 {_engines.Count} 个引擎: {string.Join(", ", _engines.Select(e => e.Info.Name))}");
     }
 
     private static void TryAdd(Func<IOcrEngine> factory, string label)
     {
-        Console.WriteLine($"[OCR] 初始化 {label} 引擎...");
+        Debug.WriteLine($"[OCR] 初始化 {label} 引擎...");
         var engine = factory();
         if (engine.Info.IsAvailable)
         {
             _engines.Add(engine);
-            Console.WriteLine($"[OCR] {label} 引擎就绪: {engine.Info.Name}");
+            Debug.WriteLine($"[OCR] {label} 引擎就绪: {engine.Info.Name}");
         }
         else
         {
-            Console.WriteLine($"[OCR] {label} 引擎不可用");
+            Debug.WriteLine($"[OCR] {label} 引擎不可用");
         }
     }
 
     /// <summary>
     /// 按优先级获取降级引擎列表:
-    /// 1) 手动指定 → 2) GPU → 3) Windows → 4) CPU
+    /// 1) 手动指定 → 2) GPU (DirectML) → 3) CPU
+    /// Windows OCR 仅在 ForceEngine 或 EnableWindowsOcrFallback 时参与
     /// </summary>
     private static List<IOcrEngine> GetPriorityEngines()
     {
@@ -73,14 +81,22 @@ public static class MultiOcrService
             if (forced is not null) return [forced];
         }
 
-        // 默认降级链: GPU → Windows → CPU
+        // 默认降级链: GPU → CPU (不含 Windows OCR)
         var ordered = new List<IOcrEngine>();
-        AddIfAvailable(ordered, "ONNX PP-OCRv4-server (DirectML)");   // GPU
-        AddIfAvailable(ordered, "Windows OCR");                        // Windows
-        AddIfAvailable(ordered, "ONNX PP-OCRv4-server (Cpu)");        // CPU
-        // 补齐未匹配的引擎
+        AddIfAvailable(ordered, "PP-OCRv6 (DirectML");   // GPU FP16
+        AddIfAvailable(ordered, "PP-OCRv6 (Cpu");         // CPU FP16
+
+        // 仅在显式启用时加入 Windows OCR
+        if (EnableWindowsOcrFallback)
+            AddIfAvailable(ordered, "Windows OCR");
+
+        // 补齐未匹配的 ONNX 引擎（不含 Windows OCR，除非已启用）
         foreach (var eng in _engines)
-            if (!ordered.Contains(eng)) ordered.Add(eng);
+        {
+            if (ordered.Contains(eng)) continue;
+            if (eng.Info.Name.Contains("Windows OCR") && !EnableWindowsOcrFallback) continue;
+            ordered.Add(eng);
+        }
         return ordered;
     }
 
@@ -118,9 +134,10 @@ public static class MultiOcrService
     }
 }
 
+/// <summary>Windows OCR 引擎（默认不参与降级链，仅用户手动选择时使用）。</summary>
 internal sealed class WindowsOcrEngine : IOcrEngine
 {
-    public OcrEngineInfo Info => new("Windows OCR", OcrEngineMode.Cpu, true);
+    public OcrEngineInfo Info => new("Windows OCR", OcrEngineMode.Cpu, true, Version: "System");
     public async Task<OcrResult> RecognizeAsync(byte[] bgra, int w, int h,
         string? lang = null, CancellationToken ct = default)
         => await OcrService.ExtractTextAsync(bgra, w, h, lang, ct);

@@ -33,6 +33,11 @@
                 <Setter Property="FontFamily" Value="Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif" />
             </Style>
 
+            <!-- FontIcon 必须使用 Segoe MDL2 Assets，否则图标字形无法渲染 -->
+            <Style TargetType="FontIcon">
+                <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            </Style>
+
             <!-- 应用级主题色 -->
             <SolidColorBrush x:Key="AccentBrush" Color="#FF0078D4"/>
         </ResourceDictionary>

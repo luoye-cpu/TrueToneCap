@@ -1,10 +1,8 @@
 // TrueToneCap.Core/Processing/ToneMapper.cs
-// GPU 色调映射管线：HLSL 着色器 → D3D11 计算 → Direct2D 绘制
+// CPU 色调映射算法库 — Reinhard / Hable / ACES + sRGB gamma + 融合内核
+// GPU 路径见 GpuToneMapper.cs（HLSL + D3D11）
 
 using System.Threading.Tasks;
-using Vortice.Direct3D;
-using Vortice.Direct3D11;
-using Vortice.DXGI;
 
 namespace TrueToneCap.Core.Processing;
 
@@ -24,29 +22,9 @@ public record struct ToneMappingParams(
     float DisplayMaxNits = 1000f
 );
 
-/// <summary>GPU 色调映射器 — 将 HDR scRGB 转换为 SDR sRGB 用于预览。</summary>
-public sealed class ToneMapper : IDisposable
+/// <summary>CPU 色调映射算法集 — 将 HDR scRGB 转换为 SDR sRGB。</summary>
+public static class ToneMapper
 {
-    private readonly ID3D11Device _device;
-    private ID3D11VertexShader? _vertexShader = null;
-    private ID3D11PixelShader? _pixelShader = null;
-    private ID3D11Buffer? _constantBuffer = null;
-    private ID3D11SamplerState? _sampler = null;
-    private bool _disposed;
-
-    // 预编译的 HLSL 字节码（嵌入资源或运行时编译）
-    private static readonly byte[] VertexShaderBytecode =
-    [
-        0x44, 0x58, 0x42, 0x43, // "DXBC" 占位符 — 实际运行时编译
-    ];
-
-    public ToneMapper(ID3D11Device device)
-    {
-        _device = device;
-        // 对于生产环境，应使用 dxc 预编译 .cso 文件
-        // 此处展示运行时编译路径（需要 Vortice.Direct3D.Compiler 包）
-        // CompileAndCreateShaders();
-    }
 
     // ────────────── CPU 回退路径（无需 GPU 编译时使用） ──────────────
 
@@ -240,15 +218,5 @@ public sealed class ToneMapper : IDisposable
     {
         c = Math.Clamp(c, 0f, 1f);
         return c <= 0.0031308f ? 12.92f * c : 1.055f * MathF.Pow(c, 1.0f / 2.4f) - 0.055f;
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        _vertexShader?.Dispose();
-        _pixelShader?.Dispose();
-        _constantBuffer?.Dispose();
-        _sampler?.Dispose();
     }
 }
