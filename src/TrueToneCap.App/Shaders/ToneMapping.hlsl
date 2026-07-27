@@ -54,8 +54,10 @@ float3 HableToneMap(float3 hdr)
 // ── 线性 → sRGB Gamma ──
 float3 LinearToSRGB(float3 c)
 {
-    // 使用 select 避免分支
-    return (c <= 0.0031308f) ? (12.92f * c) : (1.055f * pow(c, 1.0f / 2.4f) - 0.055f);
+    // DXC 要求向量条件使用 select() 而非三元运算符
+    float3 low = 12.92f * c;
+    float3 high = 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;
+    return select(c <= 0.0031308f, low, high);
 }
 
 // ── 主入口 ──
@@ -64,14 +66,14 @@ PSOutput main(PSInput input)
     float4 hdrColor = InputTexture.Sample(LinearSampler, input.uv);
 
     // 曝光调整
-    float3 linear = hdrColor.rgb * exp2(Exposure);
+    float3 exposed = hdrColor.rgb * exp2(Exposure);
 
     // 色调映射
     float3 mapped;
     if (ToneMapMode == 0)
-        mapped = ReinhardToneMap(linear);
+        mapped = ReinhardToneMap(exposed);
     else
-        mapped = HableToneMap(linear);
+        mapped = HableToneMap(exposed);
 
     // Gamma 编码到 sRGB
     float3 srgb = LinearToSRGB(saturate(mapped));

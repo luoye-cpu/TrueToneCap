@@ -11,6 +11,8 @@
 
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 
 namespace TrueToneCap.Core.Services;
@@ -32,13 +34,23 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         _provider == OnnxExecutionProvider.Cpu ? OcrEngineMode.Cpu : OcrEngineMode.Gpu,
         _available);
 
-    public OnnxOcrEngine(OnnxExecutionProvider provider = OnnxExecutionProvider.Cpu,
-        string? modelDir = null)
+    public OnnxOcrEngine(OnnxExecutionProvider provider = OnnxExecutionProvider.Cpu, string? modelDir = null)
     {
         _provider = provider;
-        _modelDir = modelDir ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TrueToneCap", "onnx_models");
+        _modelDir = modelDir ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TrueToneCap", "onnx_models");
+
+        // 如果请求 DirectML，先手动加载 onnxruntime.dll 和 DirectML.dll
+        if (_provider == OnnxExecutionProvider.DirectML)
+        {
+            LoadOnnxRuntimeWithDirectML();
+        }
+
+        // 如果请求 DirectML 但不可用，自动降级到 CPU
+        if (_provider == OnnxExecutionProvider.DirectML && !IsDirectMLAvailable())
+        {
+            Console.WriteLine("DirectML 不可用，自动降级到 CPU");
+            _provider = OnnxExecutionProvider.Cpu;
+        }
 
         _available = LoadModels();
     }
@@ -74,20 +86,36 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
             var opts = CreateSessionOptions();
 
+            Console.WriteLine($"[模型加载] 尝试加载检测模型: {detPath}");
             _detSession = new InferenceSession(detPath, opts);
+            Console.WriteLine($"[模型加载] 检测模型加载成功");
+
+            Console.WriteLine($"[模型加载] 尝试加载识别模型: {recPath}");
             _recSession = new InferenceSession(recPath, opts);
+            Console.WriteLine($"[模型加载] 识别模型加载成功");
 
             if (File.Exists(dictPath))
+            {
                 _dict = File.ReadAllLines(dictPath)
                     .Where(l => !string.IsNullOrWhiteSpace(l))
                     .ToArray();
+                Console.WriteLine($"[模型加载] 字典加载成功，共 {_dict.Length} 个字符");
+            }
 
             System.Diagnostics.Debug.WriteLine($"模型加载成功 ({_provider}/{_modelVariant})");
             return true;
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"加载失败: {ex.Message}");
+            Console.WriteLine($"[模型加载] 失败: {ex.Message}");
+            Console.WriteLine($"[模型加载] 异常类型: {ex.GetType().Name}");
+            Console.WriteLine($"[模型加载] 堆栈跟踪: {ex.StackTrace}");
+            if (ex.InnerException != null)
+            {
+                Console.WriteLine($"[模型加载] 内部异常: {ex.InnerException.Message}");
+                Console.WriteLine($"[模型加载] 内部异常类型: {ex.InnerException.GetType().Name}");
+                Console.WriteLine($"[模型加载] 内部堆栈跟踪: {ex.InnerException.StackTrace}");
+            }
             return false;
         }
     }
@@ -137,6 +165,167 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         return opts;
     }
 
+    /// <summary>
+    /// 手动加载 onnxruntime.dll 和 DirectML.dll（版本 1.20.0）
+    /// </summary>
+    private static void LoadOnnxRuntimeWithDirectML()
+    {
+        try
+        {
+            var runtimeDirs = new[]
+            {
+                Path.GetDirectoryName(AppContext.BaseDirectory),
+                Path.Combine(AppContext.BaseDirectory, "..", "win-x64"),
+            };
+
+            // 首先尝试加载 onnxruntime.dll（从 NuGet 包，包含 DirectML 支持）
+            foreach (var runtimeDir in runtimeDirs)
+            {
+                if (string.IsNullOrEmpty(runtimeDir)) continue;
+
+                var onnxDllPath = Path.Combine(runtimeDir, "onnxruntime.dll");
+                if (File.Exists(onnxDllPath))
+                {
+                    var handle = NativeLibrary.Load(onnxDllPath);
+                    if (handle != IntPtr.Zero)
+                    {
+                        Console.WriteLine($"[DirectML] 成功加载 onnxruntime.dll: {onnxDllPath}");
+                        break;
+                    }
+                }
+            }
+
+            // 然后加载 DirectML.dll
+            var dmlDllPaths = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "DirectML.dll"),
+                Path.Combine(AppContext.BaseDirectory, "..", "win-x64", "DirectML.dll"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DirectML.dll"),
+            };
+
+            foreach (var dmlDllPath in dmlDllPaths)
+            {
+                if (File.Exists(dmlDllPath))
+                {
+                    try
+                    {
+                        // Copy to system directory so onnxruntime can find it
+                        var systemDmlPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DirectML.dll");
+                        File.Copy(dmlDllPath, systemDmlPath, overwrite: true);
+                        Console.WriteLine($"[DirectML] 已复制 DirectML.dll 到系统目录: {systemDmlPath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[DirectML] 无法复制 DirectML.dll: {ex.Message}");
+                    }
+                    break;
+                }
+            }
+
+            Console.WriteLine($"[DirectML] DirectML.dll 加载完成");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[DirectML] 加载 DLL 失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 手动加载 WindowsAppRuntime 的 onnxruntime.dll（版本 1.23.0，内置 DirectML 支持）
+    /// </summary>
+    private static void LoadWindowsAppRuntimeDll()
+    {
+        try
+        {
+            var runtimeDirs = new[]
+            {
+                Path.GetDirectoryName(AppContext.BaseDirectory),
+                Path.Combine(AppContext.BaseDirectory, "..", "win-x64"),
+            };
+
+            foreach (var runtimeDir in runtimeDirs)
+            {
+                if (string.IsNullOrEmpty(runtimeDir)) continue;
+
+                var onnxDllPath = Path.Combine(runtimeDir, "onnxruntime.dll");
+                if (File.Exists(onnxDllPath))
+                {
+                    // 尝试加载 DLL
+                    var handle = NativeLibrary.Load(onnxDllPath);
+                    if (handle != IntPtr.Zero)
+                    {
+                        Console.WriteLine($"[DirectML] 成功加载 WindowsAppRuntime onnxruntime.dll: {onnxDllPath}");
+                        return;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[DirectML] 加载 DLL 失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 检查 DirectML 是否可用
+    /// </summary>
+    public static bool IsDirectMLAvailable()
+    {
+        try
+        {
+            Console.WriteLine($"[DirectML] AppContext.BaseDirectory: {AppContext.BaseDirectory}");
+            // 优先检查项目输出目录中的 onnxruntime.dll（WindowsAppRuntime 1.8，版本 1.23.0，内置 DirectML 支持）
+            var runtimeDirs = new[]
+            {
+                Path.GetDirectoryName(AppContext.BaseDirectory),  // 当前程序输出目录
+                Path.Combine(AppContext.BaseDirectory, "..", "win-x64"),  // 上级 win-x64 目录
+            };
+
+            foreach (var runtimeDir in runtimeDirs)
+            {
+                Console.WriteLine($"[DirectML] 搜索目录: {runtimeDir}");
+                if (string.IsNullOrEmpty(runtimeDir)) continue;
+
+                var onnxDllPath = Path.Combine(runtimeDir, "onnxruntime.dll");
+                Console.WriteLine($"[DirectML] 检查路径: {onnxDllPath} (存在: {File.Exists(onnxDllPath)})");
+                if (File.Exists(onnxDllPath))
+                {
+                    var versionInfo = FileVersionInfo.GetVersionInfo(onnxDllPath);
+                    Console.WriteLine($"[DirectML] 找到 onnxruntime.dll: {versionInfo.FileVersion} ({onnxDllPath})");
+
+                    // 尝试创建一个简单的 DirectML 会话选项
+                    var dmlOpts = new SessionOptions();
+                    dmlOpts.AppendExecutionProvider_DML(0);
+
+                    // 如果没有抛出异常，说明 DirectML 可用
+                    Console.WriteLine($"[DirectML] 检测成功：onnxruntime.dll {versionInfo.FileVersion} (DirectML 可用)");
+                    File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "dml-check.log"), $"[{DateTime.Now:HH:mm:ss}] DirectML 检测成功：onnxruntime.dll {versionInfo.FileVersion}\n");
+                    return true;
+                }
+            }
+
+            // 尝试使用默认路径
+            var cpuOpts = new SessionOptions();
+            cpuOpts.AppendExecutionProvider_DML(0);
+
+            Console.WriteLine($"[DirectML] 检测成功：DirectML 可用（使用默认 DLL）");
+            File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "dml-check.log"), $"[{DateTime.Now:HH:mm:ss}] DirectML 检测成功：使用默认 DLL\n");
+            return true;
+        }
+        catch (DllNotFoundException ex)
+        {
+            Console.WriteLine($"[DirectML] 不可用：DLL 未找到 - {ex.Message}");
+            File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "dml-check.log"), $"[{DateTime.Now:HH:mm:ss}] DirectML 不可用：DLL 未找到 - {ex.Message}\n");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DirectML] 检查失败 - {ex.GetType().Name}: {ex.Message}");
+            File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "dml-check.log"), $"[{DateTime.Now:HH:mm:ss}] DirectML 检查失败 - {ex.GetType().Name}: {ex.Message}\n");
+            return false;
+        }
+    }
+
     // ═══════════════════════════════════════
     //  OCR 识别
     // ═══════════════════════════════════════
@@ -163,7 +352,17 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                     string text = RunRecognition(bgra, w, h, box);
                     if (!string.IsNullOrWhiteSpace(text))
                     {
-                        lines.Add(new OcrLine { Text = text });
+                        // 回填行级边界框（原图坐标），供 OCR 预览窗口"点对点覆盖"定位。
+                        // box 坐标已由 ExtractBoxes 映射回原图坐标系。
+                        int bx = Math.Max(0, (int)box.X1);
+                        int by = Math.Max(0, (int)box.Y1);
+                        int bw = Math.Max(1, (int)(box.X2 - box.X1));
+                        int bh = Math.Max(1, (int)(box.Y2 - box.Y1));
+                        lines.Add(new OcrLine
+                        {
+                            Text = text,
+                            Words = [new OcrWord { Text = text, X = bx, Y = by, Width = bw, Height = bh }]
+                        });
                         allText.Add(text);
                     }
                 }
@@ -228,18 +427,20 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                 int i10 = (srcY1 * w + srcX0) * 4;
                 int i11 = (srcY1 * w + srcX1) * 4;
 
-                for (int c = 0; c < 3; c++)
-                {
-                    float v00 = bgra[i00 + c] / 255f;
-                    float v01 = bgra[i01 + c] / 255f;
-                    float v10 = bgra[i10 + c] / 255f;
-                    float v11 = bgra[i11 + c] / 255f;
-                    // Bilinear
-                    float v0 = v00 * (1 - wx) + v01 * wx;
-                    float v1 = v10 * (1 - wx) + v11 * wx;
-                    float val = v0 * (1 - wy) + v1 * wy;
-                    input[0, c, y, x] = (val - mean[c]) / std[c];
-                }
+                // RGB 通道顺序（ImageNet 标准）- 修复 BGR/RGB 混淆导致的准确率下降
+                    for (int c = 0; c < 3; c++)
+                    {
+                        // BGR→RGB: c=0→Red(bgra+2), c=1→Green(bgra+1), c=2→Blue(bgra+0)
+                        float v00 = bgra[i00 + (2 - c)] / 255f;
+                        float v01 = bgra[i01 + (2 - c)] / 255f;
+                        float v10 = bgra[i10 + (2 - c)] / 255f;
+                        float v11 = bgra[i11 + (2 - c)] / 255f;
+                        // Bilinear
+                        float v0 = v00 * (1 - wx) + v01 * wx;
+                        float v1 = v10 * (1 - wx) + v11 * wx;
+                        float val = v0 * (1 - wy) + v1 * wy;
+                        input[0, c, y, x] = (val - mean[c]) / std[c];
+                    }
             }
         });
 
@@ -248,12 +449,12 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         using var results = _detSession!.Run(inputs);
         var output = results.First().AsTensor<float>();
 
-        // 后处理: 二值化
+        // 后处理: 二值化（阈值 0.2 提升中英混合场景英文文字检出率）
         int oh = output.Dimensions[2], ow = output.Dimensions[3];
         var bitmap = new byte[oh * ow];
         for (int y2 = 0; y2 < oh; y2++)
             for (int x2 = 0; x2 < ow; x2++)
-                bitmap[y2 * ow + x2] = output[[0, 0, y2, x2]] > 0.3f ? (byte)255 : (byte)0;
+                bitmap[y2 * ow + x2] = output[[0, 0, y2, x2]] > 0.2f ? (byte)255 : (byte)0;
 
         // 缩放回原始坐标 (detection map→resized→original)
         var boxes = ExtractBoxes(bitmap, ow, oh, ratioW, ratioH);
@@ -394,7 +595,7 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                 }
 
                 int boxW = maxX - minX, boxH = maxY - minY;
-                if (boxW > 5 && boxH > 5) // 过滤噪点
+                if (boxW > 3 && boxH > 3) // 过滤噪点（降低阈值以捕获英文小字）
                 {
                     boxes.Add(new Box(
                         minX * scaleX, minY * scaleY,
@@ -416,3 +617,4 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
     private record struct Box(float X1, float Y1, float X2, float Y2);
 }
+

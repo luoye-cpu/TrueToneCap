@@ -11,7 +11,7 @@ public static class MultiOcrService
 {
     private static readonly List<IOcrEngine> _engines = [];
     private static bool _initialized;
-    private static string _modelDir;
+    private static string _modelDir = "";
 
     /// <summary>手动指定的引擎名称（null = 自动降级）。</summary>
     public static string? ForceEngine { get; set; }
@@ -30,31 +30,33 @@ public static class MultiOcrService
     {
         if (_initialized) return;
         _initialized = true;
-        _modelDir = modelDir;
+        _modelDir = modelDir ?? "";
+
+        Console.WriteLine($"[OCR] 初始化多引擎 OCR 服务，模型目录: {_modelDir}");
 
         // 1️⃣ ONNX DirectML Server (GPU, 高精度)
-        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.DirectML, modelDir), "DirectML"); } catch (Exception ex) { Debug.WriteLine($"[OCR] DirectML 初始化异常: {ex.Message}"); }
+        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.DirectML, modelDir), "DirectML"); } catch (Exception ex) { Console.WriteLine($"[OCR] DirectML 初始化异常: {ex.Message}"); }
         // 2️⃣ ONNX CPU Server (CPU, 高精度)
-        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.Cpu, modelDir), "CPU"); } catch (Exception ex) { Debug.WriteLine($"[OCR] CPU 初始化异常: {ex.Message}"); }
+        try { TryAdd(() => new OnnxOcrEngine(OnnxExecutionProvider.Cpu, modelDir), "CPU"); } catch (Exception ex) { Console.WriteLine($"[OCR] CPU 初始化异常: {ex.Message}"); }
         // 3️⃣ Windows OCR (兜底)
         _engines.Add(new WindowsOcrEngine());
-        Debug.WriteLine("[OCR] Windows OCR 已就绪");
+        Console.WriteLine("[OCR] Windows OCR 已就绪");
 
-        Debug.WriteLine($"[OCR] 共 {_engines.Count} 个可用引擎: {string.Join(", ", _engines.Select(e => e.Info.Name))}");
+        Console.WriteLine($"[OCR] 共 {_engines.Count} 个可用引擎: {string.Join(", ", _engines.Select(e => e.Info.Name))}");
     }
 
     private static void TryAdd(Func<IOcrEngine> factory, string label)
     {
-        Debug.WriteLine($"[OCR] 初始化 {label} 引擎...");
+        Console.WriteLine($"[OCR] 初始化 {label} 引擎...");
         var engine = factory();
         if (engine.Info.IsAvailable)
         {
             _engines.Add(engine);
-            Debug.WriteLine($"[OCR] {label} 引擎就绪: {engine.Info.Name}");
+            Console.WriteLine($"[OCR] {label} 引擎就绪: {engine.Info.Name}");
         }
         else
         {
-            Debug.WriteLine($"[OCR] {label} 引擎不可用");
+            Console.WriteLine($"[OCR] {label} 引擎不可用");
         }
     }
 

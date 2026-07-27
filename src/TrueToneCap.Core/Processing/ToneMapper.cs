@@ -28,10 +28,10 @@ public record struct ToneMappingParams(
 public sealed class ToneMapper : IDisposable
 {
     private readonly ID3D11Device _device;
-    private readonly ID3D11VertexShader? _vertexShader;
-    private readonly ID3D11PixelShader? _pixelShader;
-    private readonly ID3D11Buffer? _constantBuffer;
-    private readonly ID3D11SamplerState? _sampler;
+    private ID3D11VertexShader? _vertexShader = null;
+    private ID3D11PixelShader? _pixelShader = null;
+    private ID3D11Buffer? _constantBuffer = null;
+    private ID3D11SamplerState? _sampler = null;
     private bool _disposed;
 
     // 预编译的 HLSL 字节码（嵌入资源或运行时编译）
@@ -173,28 +173,73 @@ public sealed class ToneMapper : IDisposable
         }
     }
 
-    /// <summary>将 float HDR 像素转换为 byte BGRA sRGB 像素（与 D3D11 BGRA8 兼容）。</summary>
+    /// <summary>将 float HDR 像素转换为 byte BGRA sRGB 像素（与 D3D11 BGRA8 兼容）。
+    /// P1 优化: 融合内核 — 直接从源数组读取，逐像素完成色调映射 + gamma + swizzle，
+    /// 避免 132MB (4K) 中间 float 数组拷贝。</summary>
     public static byte[] FloatToSRgbBytes(float[] hdrPixels, int width, int height,
         ToneMappingParams toneParams)
     {
-        var pixels = new float[hdrPixels.Length];
-        Array.Copy(hdrPixels, pixels, pixels.Length);
-
-        ApplyToneMapping(pixels, width, height, toneParams);
-        LinearToSRgb(pixels);
-
         var bytes = new byte[width * height * 4];
         int pixelCount = width * height;
+        float evScale = MathF.Pow(2.0f, toneParams.Exposure);
+
         Parallel.For(0, pixelCount, pi =>
         {
             int i = pi * 4;
+            float r = hdrPixels[i] * evScale;
+            float g = hdrPixels[i + 1] * evScale;
+            float b = hdrPixels[i + 2] * evScale;
+            float a = hdrPixels[i + 3];
+
+            // 色调映射（融合，无需中间数组）
+            switch (toneParams.Mode)
+            {
+                case ToneMapMode.Reinhard:
+                {
+                    float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    float mappedLum = lum / (1.0f + lum);
+                    if (lum > 0.0001f)
+                    {
+                        float scale = mappedLum / lum;
+                        r = Math.Clamp(r * scale, 0f, 1f);
+                        g = Math.Clamp(g * scale, 0f, 1f);
+                        b = Math.Clamp(b * scale, 0f, 1f);
+                    }
+                    else { r = g = b = 0f; }
+                    break;
+                }
+                case ToneMapMode.Hable:
+                    r = HableCurve(r, 11.2f);
+                    g = HableCurve(g, 11.2f);
+                    b = HableCurve(b, 11.2f);
+                    break;
+                case ToneMapMode.Aces:
+                    r = AcesCurve(r);
+                    g = AcesCurve(g);
+                    b = AcesCurve(b);
+                    break;
+            }
+
+            // sRGB gamma 编码（融合）
+            r = LinearToSRgbScalar(r);
+            g = LinearToSRgbScalar(g);
+            b = LinearToSRgbScalar(b);
+            a = Math.Clamp(a, 0f, 1f);
+
             // Swizzle: Float RGBA → Byte BGRA (D3D11 BGRA8 格式)
-            bytes[i]     = (byte)Math.Clamp((int)(pixels[i + 2] * 255f + 0.5f), 0, 255);
-            bytes[i + 1] = (byte)Math.Clamp((int)(pixels[i + 1] * 255f + 0.5f), 0, 255);
-            bytes[i + 2] = (byte)Math.Clamp((int)(pixels[i]     * 255f + 0.5f), 0, 255);
-            bytes[i + 3] = (byte)Math.Clamp((int)(pixels[i + 3] * 255f + 0.5f), 0, 255);
+            bytes[i]     = (byte)Math.Clamp((int)(b * 255f + 0.5f), 0, 255);
+            bytes[i + 1] = (byte)Math.Clamp((int)(g * 255f + 0.5f), 0, 255);
+            bytes[i + 2] = (byte)Math.Clamp((int)(r * 255f + 0.5f), 0, 255);
+            bytes[i + 3] = (byte)Math.Clamp((int)(a * 255f + 0.5f), 0, 255);
         });
         return bytes;
+    }
+
+    /// <summary>标量 sRGB gamma（用于融合内核内部）。</summary>
+    private static float LinearToSRgbScalar(float c)
+    {
+        c = Math.Clamp(c, 0f, 1f);
+        return c <= 0.0031308f ? 12.92f * c : 1.055f * MathF.Pow(c, 1.0f / 2.4f) - 0.055f;
     }
 
     public void Dispose()

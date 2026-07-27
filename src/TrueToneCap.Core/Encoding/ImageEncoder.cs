@@ -17,7 +17,7 @@ public sealed class EncodingSettings
     /// <summary>是否为 AVIF 文件添加 .png 后缀（兼容不支持 .avif 的软件）。</summary>
     public bool AvifPngSuffix { get; set; }
     /// <summary>AVIF 色度采样: 420 / 422 / 444。默认 420。</summary>
-    public string AvifChroma { get; set; } = "420";
+    public string AvifChroma { get; set; } = "444";
     /// <summary>显示器位深 (8/10 bit)，用于匹配输出精度。</summary>
     public int DisplayBitDepth { get; set; } = 8;
     /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>

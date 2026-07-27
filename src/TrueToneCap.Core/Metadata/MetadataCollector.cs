@@ -11,7 +11,7 @@ namespace TrueToneCap.Core.Metadata;
 public static class MetadataCollector
 {
     /// <summary>收集当前环境元数据。</summary>
-    public static Encoding.ImageMetadata Collect(DisplayInfo? display = null, CapturedFrame? frame = null)
+    public static Encoding.ImageMetadata Collect(DisplayInfo? display = null)
     {
         var meta = new Encoding.ImageMetadata
         {

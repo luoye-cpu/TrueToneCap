@@ -27,6 +27,21 @@ public static class OcrService
             if (!string.IsNullOrEmpty(result2.Text) &&
                 (string.IsNullOrEmpty(result1.Text) || result2.Text.Length > result1.Text.Length))
             {
+                // 预处理若改变了尺寸（如 ScaleUp 2x），坐标处于放大坐标系，
+                // 必须按比例归一化回原图坐标，否则 OCR 预览窗口的"点对点覆盖"会对不齐。
+                if (preprocessed.Width != width || preprocessed.Height != height)
+                {
+                    float sx = (float)width / preprocessed.Width;
+                    float sy = (float)height / preprocessed.Height;
+                    foreach (var line in result2.Lines)
+                        foreach (var word in line.Words)
+                        {
+                            word.X = (int)(word.X * sx);
+                            word.Y = (int)(word.Y * sy);
+                            word.Width = (int)Math.Max(1, word.Width * sx);
+                            word.Height = (int)Math.Max(1, word.Height * sy);
+                        }
+                }
                 result2.Mode = preprocessed.Mode.ToString();
                 return result2;
             }

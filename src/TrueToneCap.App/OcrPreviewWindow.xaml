@@ -1,0 +1,64 @@
+<Window x:Class="TrueToneCap.App.OcrPreviewWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="TrueToneCap 文字识别"
+    Closed="OnClosed">
+
+    <Grid x:Name="RootGrid" RowDefinitions="Auto,*,Auto">
+        <!-- 工具栏 -->
+        <Grid Grid.Row="0" Padding="8" Background="{ThemeResource CardBackgroundFillColorDefault}">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+                <ToggleButton x:Name="ModeToggle" Content="显示译文" Width="84" Height="34"
+                              Checked="OnModeToggleChanged" Unchecked="OnModeToggleChanged"
+                              ToolTipService.ToolTip="在原文高亮 / 译文覆盖 之间切换"/>
+                <Button x:Name="TranslateBtn" Width="70" Height="34" Click="OnTranslateClick"
+                        ToolTipService.ToolTip="翻译识别到的文字">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE909;" FontSize="14"/>
+                        <TextBlock Text="翻译" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Rectangle Width="1" Fill="{ThemeResource TextFillColorSecondaryBrush}" Margin="6,4"/>
+                <Button Width="84" Height="34" Click="OnCopyAllClick"
+                        ToolTipService.ToolTip="复制当前显示的全部文字">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE8C8;" FontSize="14"/>
+                        <TextBlock Text="复制全部" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button Width="64" Height="34" Click="OnSaveClick"
+                        ToolTipService.ToolTip="按主界面设置保存截图到文件">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE8FB;" FontSize="14"/>
+                        <TextBlock Text="保存" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button Width="64" Height="34" Click="OnCloseClick"
+                        ToolTipService.ToolTip="关闭窗口 (Esc)">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE10A;" FontSize="14"/>
+                        <TextBlock Text="关闭" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- 画布：截图 + 文字覆盖层（居中对齐，Stretch=Uniform 保证点对点） -->
+        <Border Grid.Row="1" Background="#400000FF">
+            <Grid x:Name="CanvasGrid" Background="Transparent">
+                <Image x:Name="PreviewImage" Stretch="Uniform"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <Canvas x:Name="OverlayCanvas" Background="Transparent"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        IsHitTestVisible="True"/>
+            </Grid>
+        </Border>
+
+        <!-- 底部状态 -->
+        <Grid Grid.Row="2" Padding="8" Background="{ThemeResource CardBackgroundFillColorDefault}">
+            <TextBlock x:Name="InfoTxt" Text="点击任意文字块可复制该行；切换“显示译文”查看翻译覆盖。"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"/>
+        </Grid>
+    </Grid>
+</Window>

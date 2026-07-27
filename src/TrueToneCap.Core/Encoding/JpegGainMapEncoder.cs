@@ -56,8 +56,14 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     public override async Task EncodeSdrAsync(byte[] sdrPixels, int width, int height,
         EncodingSettings settings, string outputPath, CancellationToken ct = default)
     {
-        // SDR 源无 HDR 信息 → 直接输出 JPEG LI
-        await H.SaveSdr(sdrPixels, width, height, outputPath, MagickFormat.Jpeg, settings, ct);
+        // GainMap SDR 回退: 使用 jpegli 输出标准 JPEG
+        await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            using var jpegli = new JpegLiNative();
+            var jpegBytes = jpegli.Encode(sdrPixels, width, height, settings.Quality);
+            File.WriteAllBytes(outputPath, jpegBytes);
+        }, ct);
     }
 
     // ═══════════════════════════════════════
@@ -67,45 +73,48 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     private async Task EncodeGainMapAsync(HdrFrameData frame, EncodingSettings settings,
         string outputPath, CancellationToken ct)
     {
+        // 整体 30s 硬超时保护
+        using var hardCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        hardCts.CancelAfter(TimeSpan.FromSeconds(30));
+
         await Task.Run(() =>
         {
-            ct.ThrowIfCancellationRequested();
+            var token = hardCts.Token;
+            token.ThrowIfCancellationRequested();
             int w = frame.Width, h = frame.Height;
             int pixelCount = w * h;
 
-            // ── 1. Tone Map HDR → SDR (sRGB gamma, BGRA bytes) ──
+            // ── 1. Tone Map HDR → SDR ──
             byte[] sdrBgra = ToneMapper.FloatToSRgbBytes(frame.Pixels, w, h, settings.ToneMappingParams);
+            token.ThrowIfCancellationRequested();
 
-            // 同时获取线性 SDR 用于增益比计算
             float[] sdrLinear = new float[pixelCount * 4];
             Array.Copy(frame.Pixels, sdrLinear, frame.Pixels.Length);
             ToneMapper.ApplyToneMapping(sdrLinear, w, h, settings.ToneMappingParams);
+            token.ThrowIfCancellationRequested();
 
-            // ── 2. 编码 Base JPEG (JPEG LI quality) ──
+            // ── 2. 编码 Base JPEG ──
             byte[] baseJpegBytes = EncodeToJpegBytes(sdrBgra, w, h, settings.Quality);
-            ct.ThrowIfCancellationRequested();
+            token.ThrowIfCancellationRequested();
 
             // ── 3. 计算增益图 ──
             byte[] gainMapPixels = ComputeGainMap(frame.Pixels, sdrLinear, w, h, GainMapMode);
-            ct.ThrowIfCancellationRequested();
+            token.ThrowIfCancellationRequested();
 
-            // ── 4. 编码增益图 JPEG ──
-            int gmW = GainMapMode == GainMapMode.Gray ? w : w;
-            int gmH = h;
-            // 增益图缩小为 1/4 分辨率（Google Ultra HDR 推荐）
+            // ── 4. 增益图缩放 + 编码 ──
             byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, GainMapMode, out int gmSW, out int gmSH);
             byte[] gainMapJpegBytes = EncodeGainMapToJpegBytes(gainMapScaled, gmSW, gmSH,
                 GainMapMode, GainMapJpegQuality);
-            ct.ThrowIfCancellationRequested();
+            token.ThrowIfCancellationRequested();
 
-            // ── 5. MPF 封装 + XMP 元数据 → 输出文件 ──
+            // ── 5. MPF 封装 ──
             WriteJpegGainMapFile(baseJpegBytes, gainMapJpegBytes, w, h, gmSW, gmSH,
                 GainMapMode, outputPath);
 
             System.Diagnostics.Debug.WriteLine(
                 $"[GainMap] 输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({GainMapMode}), " +
                 $"Base={baseJpegBytes.Length / 1024}KB, GainMap={gainMapJpegBytes.Length / 1024}KB");
-        }, ct);
+        }, hardCts.Token);
     }
 
     // ═══════════════════════════════════════
@@ -171,11 +180,17 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     //  增益图缩放（1/4 分辨率降采样）
     // ═══════════════════════════════════════
 
+    /// <summary>
+    /// 增益图降采样为 1/4 分辨率（Google Ultra HDR 规范）。
+    /// 使用 ceiling 除法确保不丢失右/下边缘像素。
+    /// 例: 1921×1081 → 481×271 (最后列/行只平均余数像素)。
+    /// </summary>
     private static byte[] RescaleGainMap(byte[] src, int w, int h, GainMapMode mode,
         out int outW, out int outH)
     {
-        int oW = Math.Max(1, w / 4);
-        int oH = Math.Max(1, h / 4);
+        // Ceiling 除法: (w+3)/4 确保覆盖所有源像素
+        int oW = (w + 3) / 4;
+        int oH = (h + 3) / 4;
         outW = oW; outH = oH;
         int channels = mode == GainMapMode.Gray ? 1 : 3;
         byte[] dst = new byte[outW * outH * channels];
@@ -186,11 +201,13 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             {
                 int sx = dx * 4;
                 int sy = dy * 4;
+                int ex = Math.Min(sx + 4, w);
+                int ey = Math.Min(sy + 4, h);
                 int count = 0;
                 float[] sum = new float[channels];
 
-                for (int y = sy; y < Math.Min(sy + 4, h); y++)
-                for (int x = sx; x < Math.Min(sx + 4, w); x++)
+                for (int y = sy; y < ey; y++)
+                for (int x = sx; x < ex; x++)
                 {
                     int si = y * w * channels + x * channels;
                     for (int c = 0; c < channels; c++)
@@ -208,58 +225,45 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     }
 
     // ═══════════════════════════════════════
-    //  JPEG 编码辅助
+    //  JPEG 编码 (JxlNet 内置 jpegli, 零外部依赖)
     // ═══════════════════════════════════════
 
     private static byte[] EncodeToJpegBytes(byte[] bgra, int w, int h, float distance)
     {
-        var ps = new PixelReadSettings((uint)w, (uint)h, StorageType.Char, PixelMapping.BGRA);
-        using var img = new MagickImage();
-        img.ReadPixels(bgra, ps);
-        img.Format = MagickFormat.Jpeg;
-        // butteraugli distance → JPEG quality
-        int jpegQ = (int)Math.Clamp(100 - (distance - 0.5f) * 20, 70, 100);
-        img.Quality = (uint)jpegQ;
-        // JPEG LI 增强选项
-        img.Settings.SetDefine(MagickFormat.Jpeg, "dct", "float");
-        return img.ToByteArray(MagickFormat.Jpeg);
+        using var jpegli = new JpegLiNative();
+        return jpegli.Encode(bgra, w, h, distance);
     }
 
     private static byte[] EncodeGainMapToJpegBytes(byte[] pixels, int w, int h,
         GainMapMode mode, int quality)
+        => EncodeGainMapWithJpegLi(pixels, w, h, mode);
+
+    /// <summary>jpegli 增益图编码（灰度或RGB）。</summary>
+    private static byte[] EncodeGainMapWithJpegLi(byte[] pixels, int w, int h, GainMapMode mode)
     {
+        byte[] bgra = new byte[w * h * 4];
         if (mode == GainMapMode.Gray)
         {
-            // 灰度 JPEG：单通道 8-bit 数据
-            using var img = new MagickImage();
-            // 灰度图：将单通道数据复制到 RGB（Magick.NET 不支持直接读灰度 raw）
-            byte[] rgbGray = new byte[w * h * 3];
             for (int i = 0; i < w * h; i++)
             {
                 byte v = pixels[i];
-                rgbGray[i * 3] = v;
-                rgbGray[i * 3 + 1] = v;
-                rgbGray[i * 3 + 2] = v;
+                int off = i * 4;
+                bgra[off] = v; bgra[off + 1] = v; bgra[off + 2] = v; bgra[off + 3] = 255;
             }
-            var ps = new PixelReadSettings((uint)w, (uint)h, StorageType.Char, PixelMapping.RGB);
-            img.ReadPixels(rgbGray, ps);
-            img.Format = MagickFormat.Jpeg;
-            img.Quality = (uint)Math.Clamp(quality, 1, 100);
-            img.ColorSpace = ColorSpace.Gray;
-            return img.ToByteArray(MagickFormat.Jpeg);
         }
         else
         {
-            // RGB 增益图 → 3 通道独立编码为 JPEG
-            byte[] rgb = new byte[w * h * 3];
-            Buffer.BlockCopy(pixels, 0, rgb, 0, rgb.Length);
-            var ps = new PixelReadSettings((uint)w, (uint)h, StorageType.Char, PixelMapping.RGB);
-            using var img = new MagickImage();
-            img.ReadPixels(rgb, ps);
-            img.Format = MagickFormat.Jpeg;
-            img.Quality = (uint)Math.Clamp(quality, 1, 100);
-            return img.ToByteArray(MagickFormat.Jpeg);
+            for (int i = 0; i < w * h; i++)
+            {
+                int off = i * 4;
+                bgra[off] = pixels[i * 3 + 2];     // B
+                bgra[off + 1] = pixels[i * 3 + 1]; // G
+                bgra[off + 2] = pixels[i * 3];     // R
+                bgra[off + 3] = 255;
+            }
         }
+        using var jpegli = new JpegLiNative();
+        return jpegli.Encode(bgra, w, h, 1.5f);
     }
 
     // ═══════════════════════════════════════

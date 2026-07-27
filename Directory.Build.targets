@@ -1,0 +1,43 @@
+<Project>
+  <!-- ═══ SDK 10.0.302 兼容修复 ═══
+       .NET SDK 10.0.302 缺少 AppxPackage DLL，
+       覆盖 WindowsAppSDK MrtCore.PriGen.targets 中依赖这些 DLL 的目标。
+       对非打包构建（Debug/开发）无功能影响。
+       发布时删除此文件或使用 Publish.ps1。 -->
+
+  <PropertyGroup>
+    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <ShouldComputeInputPris>false</ShouldComputeInputPris>
+  </PropertyGroup>
+
+  <!-- 覆盖所有使用 AppxPackage/Pri.Tasks 的目标 -->
+  <Target Name="_ExpandPriFiles" />
+  <Target Name="_ExpandProjectPriFile" />
+  <Target Name="CopyLocalFilesOutputGroup" Returns="@(CopyLocalFilesOutputGroupOutput)" />
+  <Target Name="_GenerateProjectPriFile" />
+  <Target Name="_GenerateProjectPriFileCore" />
+  <Target Name="_GenerateProjectPriConfigurationFiles" />
+  <Target Name="_GeneratePrisForPortableLibraries" />
+  <Target Name="_GetPriFilesFromPayload" />
+  <Target Name="_ComputeInputPriFiles" />
+  <Target Name="AddPriPayloadFilesToCopyToOutputDirectoryItems" />
+  <Target Name="_CalculateInputsForGenerateProjectPriFileCore" />
+  <Target Name="_CreateProjectPriFileItem" />
+  <Target Name="_AddFileReadsAndFileWritesForProjectPri" />
+  <Target Name="GetMrtPackagingOutputs" Returns="" />
+  <Target Name="_GetPackageFileExtensions" />
+  <Target Name="_CalculateXbfSupport" />
+  <Target Name="_GetDefaultResourceLanguage" />
+  <Target Name="_GetPackageArchitecture" />
+  <Target Name="_GetProjectArchitecture" />
+  <Target Name="_GetRecursiveProjectArchitecture" />
+  <Target Name="GetOptionalProjectOutputs" Returns="" />
+  <Target Name="_DeleteAppxOutputFolderIfNecessary" />
+  <Target Name="_GetSdkToolPaths" />
+  <Target Name="_GetSdkToolsPathsFromSdk" />
+  <Target Name="_GetSdkToolsPathsFromPackage" />
+  <Target Name="_BeforeBeforeRebuild" />
+  <Target Name="_SetPortablePriProperties" />
+  <Target Name="BeforeGenerateProjectPriFile" />
+  <Target Name="AfterGenerateProjectPriFile" />
+</Project>
