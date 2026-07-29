@@ -70,6 +70,7 @@ public sealed class CapabilityService
         {
             var displays = DisplayEnumerator.EnumerateDisplays();
             hdr = displays.Any(d => d.IsHdr);
+            LogService.Info("Capability", $"显示器枚举: {displays.Count} 个, HDR={hdr}");
 
             using var key = Registry.CurrentUser.OpenSubKey(
                 @"Software\Microsoft\Windows NT\CurrentVersion\ICM");
@@ -78,8 +79,12 @@ public sealed class CapabilityService
                 var val = key.GetValue("AcmeEnabled");
                 acm = val is int i && i != 0;
             }
+            LogService.Info("Capability", $"ACM 检测: {(acm ? "启用" : "未启用")}");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            LogService.Warn("Capability", $"显示状态检测异常: {ex.Message}");
+        }
         return (hdr, acm);
     }
 
@@ -93,10 +98,17 @@ public sealed class CapabilityService
             {
                 var icc = ColorProfileProvider.GetDisplayIccProfile(d.MonitorHandle);
                 if (ColorProfileProvider.IsNonStandardIcc(icc))
+                {
+                    LogService.Info("Capability", $"显示器 {d.Name} 使用自定义 ICC ({icc?.Length ?? 0} bytes)");
                     return true;
+                }
             }
+            LogService.Info("Capability", "所有显示器均使用系统默认 ICC");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            LogService.Warn("Capability", $"ICC 检测异常: {ex.Message}");
+        }
         return false;
     }
 

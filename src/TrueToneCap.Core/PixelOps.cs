@@ -142,7 +142,7 @@ public static class PixelOps
                     ptr += 64;
                 }
 
-                for (byte* tail = ptr; tail < p + len; tail += 4)
+                for (byte* tail = ptr; tail <= p + len - 4; tail += 4)
                     tail[3] = 0xFF;
             }
             return;
@@ -166,7 +166,7 @@ public static class PixelOps
                     ptr += 32;
                 }
 
-                for (byte* tail = ptr; tail < p + len; tail += 4)
+                for (byte* tail = ptr; tail <= p + len - 4; tail += 4)
                     tail[3] = 0xFF;
             }
             return;
@@ -346,7 +346,7 @@ public static class PixelOps
                     }
                 }
 
-                gray[dy * dw + dx] = (byte)(sum / (cnt * 1000));
+                gray[dy * dw + dx] = (byte)(sum / ((long)cnt * 1000));
             }
         });
 

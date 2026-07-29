@@ -182,8 +182,8 @@ public sealed unsafe class MftEncoderNative : IDisposable
                 if (y % 2 == 0 && x % 2 == 0)
                 {
                     int uvIdx = uvOff + (y / 2) * w + (x & ~1);
-                    nv12[uvIdx] = (byte)Math.Clamp((-38 * r - 74 * g + 112 * b + 128) >> 8 + 128, 0, 255);     // U
-                    nv12[uvIdx + 1] = (byte)Math.Clamp((112 * r - 94 * g - 18 * b + 128) >> 8 + 128, 0, 255);   // V
+                    nv12[uvIdx] = (byte)Math.Clamp(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128, 0, 255);     // U
+                    nv12[uvIdx + 1] = (byte)Math.Clamp(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128, 0, 255);   // V
                 }
             }
         }

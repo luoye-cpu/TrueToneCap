@@ -7,15 +7,6 @@ using System.Runtime.InteropServices;
 
 namespace TrueToneCap.Core.Platform;
 
-/// <summary>当前运行平台。</summary>
-public enum RuntimePlatform
-{
-    Windows,
-    LinuxX64,
-    LinuxArm64,
-    Unknown
-}
-
 /// <summary>
 /// 平台工厂 — 提供当前平台的抽象实现。
 /// 迁移策略: Windows 实现保持现有代码路径，Linux 实现逐步填充。

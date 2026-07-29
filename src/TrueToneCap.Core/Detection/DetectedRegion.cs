@@ -26,6 +26,9 @@ public sealed class DetectedRegion
     /// <summary>面积（Width × Height）。</summary>
     public int Area => Width * Height;
 
+    /// <summary>缩略图像素数据（BGRA 8-bit, 120×80），UI 预览用。</summary>
+    public byte[]? ThumbnailPixels { get; init; }
+
     /// <summary>在虚拟桌面坐标系下的矩形。</summary>
     public System.Drawing.Rectangle Rect => new(X, Y, Width, Height);
 

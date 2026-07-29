@@ -55,7 +55,15 @@ public static class ColorProfileProvider
                 Task.Run(() =>
                 {
                     var profile = GetIccProfileFromWcs(name);
-                    s_iccCache[name] = profile;
+                    if (profile is not null)
+                    {
+                        s_iccCache[name] = profile;
+                    }
+                    else
+                    {
+                        // 修复: 失败时不永久缓存 null，允许后续重试
+                        s_asyncCache.TryRemove(name, out _);
+                    }
                     return profile;
                 }));
         }
@@ -70,6 +78,29 @@ public static class ColorProfileProvider
     {
         s_iccCache.Clear();
         s_asyncCache.Clear();
+    }
+
+    /// <summary>
+    /// 改进3: 预热所有已连接显示器的 ICC 缓存。
+    /// 在应用启动或显示器配置变更后调用，确保截图时 ICC 已就绪，
+    /// 避免多显示器切换时首次截图因缓存未命中而跳过 ICC 烘焙。
+    /// </summary>
+    /// <param name="monitorHandles">所有显示器的 HMONITOR 句柄。</param>
+    public static void PrewarmAllDisplays(IEnumerable<nint> monitorHandles)
+    {
+        foreach (var handle in monitorHandles)
+        {
+            try
+            {
+                var monitorName = GetMonitorName(handle);
+                if (string.IsNullOrEmpty(monitorName)) continue;
+                if (s_iccCache.ContainsKey(monitorName)) continue;
+
+                // 后台异步获取，不阻塞调用线程
+                _ = GetDisplayIccProfileAsync(handle);
+            }
+            catch { /* 单个显示器失败不影响其他 */ }
+        }
     }
 
     // ═══ sRGB ICC 缓存（完整配置文件，仅加载一次）═══
@@ -115,14 +146,11 @@ public static class ColorProfileProvider
     /// <summary>构建最小但有效的 sRGB ICC 配置文件 (v2.1)。</summary>
     private static byte[] BuildValidSRgbIcc()
     {
-        // 使用 Magick.NET 内置的 sRGB 配置文件（完整有效）
+        // 使用 IccStore 生成的 sRGB ICC（完整有效）
         try
         {
-            using var img = new ImageMagick.MagickImage();
-            img.ColorSpace = ImageMagick.ColorSpace.sRGB;
-            var profile = img.GetColorProfile();
-            if (profile?.ToByteArray() is { Length: > 128 } bytes)
-                return bytes;
+            var bytes = Encoding.IccStore.SRGB;
+            if (bytes.Length > 128) return bytes;
         }
         catch { /* 回退到手写最小 ICC */ }
 
@@ -386,8 +414,8 @@ public static class ColorProfileProvider
         return null;
     }
 
-    /// <summary>使用 Magick.NET + ACES 感知意图将 BGRA 像素从源 ICC 烘焙到目标色彩空间。
-    /// 影视标准 ACES 系统：Perceptual 意图，视觉效果最优。</summary>
+    /// <summary>将 BGRA 像素从源 ICC 色彩空间转换到目标色彩空间（像素级矩阵转换）。
+    /// 对矩阵型 ICC (显示器 profile) 使用 3×3 矩阵转换；无法解析时回退到像素直通。</summary>
     public static (byte[]? pixels, byte[]? targetIcc) BakeIccToTarget(
         byte[] bgra, int w, int h, byte[] sourceIcc, string targetColorSpace)
     {
@@ -401,23 +429,57 @@ public static class ColorProfileProvider
                 if (targetIcc is null) return (null, null);
             }
 
-            var ps = new ImageMagick.PixelReadSettings((uint)w, (uint)h,
-                ImageMagick.StorageType.Char, ImageMagick.PixelMapping.BGRA);
-            using var img = new ImageMagick.MagickImage();
-            img.ReadPixels(bgra, ps);
-            img.SetProfile(new ImageMagick.ColorProfile(sourceIcc));
+            // 如果源和目标相同（都是 sRGB），无需转换
+            if (targetColorSpace.Equals("sRGB", StringComparison.OrdinalIgnoreCase) && IsSrgbProfile(sourceIcc))
+            {
+                return (bgra, null); // sRGB 目标不嵌入 ICC
+            }
 
-            // ACES 标准：Perceptual 感知渲染意图
-            img.RenderingIntent = ImageMagick.RenderingIntent.Perceptual;
-            img.TransformColorSpace(new ImageMagick.ColorProfile(targetIcc));
+            // 尝试从源 ICC 提取 RGB→XYZ 矩阵
+            var srcMatrix = ExtractRgbToXyzMatrix(sourceIcc);
+            var dstMatrix = GetTargetXyzToRgbMatrix(targetColorSpace);
 
-            var nativePixels = img.ToByteArray(ImageMagick.MagickFormat.Bgra);
-            var result = new byte[w * h * 4];
-            System.Buffer.BlockCopy(nativePixels, 0, result, 0, result.Length);
+            if (srcMatrix is null || dstMatrix is null)
+            {
+                // 无法解析矩阵 → 像素直通 + 嵌入目标 ICC（查看器负责转换）
+                System.Diagnostics.Debug.WriteLine(
+                    $"[ICC] 矩阵解析失败，像素直通: {w}x{h}, 目标={targetColorSpace}");
+                return (bgra, targetIcc);
+            }
+
+            // 计算组合矩阵: src_RGB → XYZ → dst_RGB
+            var combined = MultiplyMatrices(dstMatrix, srcMatrix);
+
+            // 检查是否为单位矩阵（源≈目标），跳过转换
+            if (IsIdentityMatrix(combined))
+                return (bgra, targetColorSpace.Equals("sRGB", StringComparison.OrdinalIgnoreCase) ? null : targetIcc);
+
+            // 执行像素级色彩转换
+            var converted = new byte[bgra.Length];
+            int pixelCount = w * h;
+            System.Threading.Tasks.Parallel.For(0, pixelCount, i =>
+            {
+                int idx = i * 4;
+                // BGRA → linear RGB (去 sRGB gamma)
+                float bLin = SrgbEotf(bgra[idx] / 255f);
+                float gLin = SrgbEotf(bgra[idx + 1] / 255f);
+                float rLin = SrgbEotf(bgra[idx + 2] / 255f);
+
+                // 矩阵转换 (RGB → XYZ → RGB)
+                float rOut = combined[0] * rLin + combined[1] * gLin + combined[2] * bLin;
+                float gOut = combined[3] * rLin + combined[4] * gLin + combined[5] * bLin;
+                float bOut = combined[6] * rLin + combined[7] * gLin + combined[8] * bLin;
+
+                // 应用目标 gamma + 量化
+                converted[idx]     = (byte)Math.Clamp((int)(SrgbOetf(bOut) * 255f + 0.5f), 0, 255);
+                converted[idx + 1] = (byte)Math.Clamp((int)(SrgbOetf(gOut) * 255f + 0.5f), 0, 255);
+                converted[idx + 2] = (byte)Math.Clamp((int)(SrgbOetf(rOut) * 255f + 0.5f), 0, 255);
+                converted[idx + 3] = bgra[idx + 3]; // Alpha 直通
+            });
 
             System.Diagnostics.Debug.WriteLine(
-                $"[ICC] ACES 烘焙: {w}x{h}, {sourceIcc.Length}B → {targetColorSpace}");
-            return (result, targetIcc);
+                $"[ICC] 像素转换完成: {w}x{h}, 目标={targetColorSpace}");
+            return (converted, targetColorSpace.Equals("sRGB", StringComparison.OrdinalIgnoreCase) ? null : targetIcc);
         }
         catch (Exception ex)
         {
@@ -426,25 +488,156 @@ public static class ColorProfileProvider
         }
     }
 
+    // ── 色彩转换辅助方法 ──
+
+    /// <summary>sRGB EOTF (gamma 解码): [0,1] gamma → [0,1] linear</summary>
+    private static float SrgbEotf(float v)
+    {
+        return v <= 0.04045f ? v / 12.92f : MathF.Pow((v + 0.055f) / 1.055f, 2.4f);
+    }
+
+    /// <summary>sRGB OETF (gamma 编码): [0,1] linear → [0,1] gamma</summary>
+    private static float SrgbOetf(float v)
+    {
+        v = Math.Clamp(v, 0f, 1f);
+        return v <= 0.0031308f ? v * 12.92f : 1.055f * MathF.Pow(v, 1f / 2.4f) - 0.055f;
+    }
+
+    /// <summary>从 ICC profile 提取 RGB→XYZ 3×3 矩阵 (rXYZ + gXYZ + bXYZ tags)。</summary>
+    private static float[]? ExtractRgbToXyzMatrix(byte[] icc)
+    {
+        try
+        {
+            if (icc.Length < 132) return null;
+            // ICC header: tag count at offset 128
+            int tagCount = ReadBE32(icc, 128);
+            if (tagCount <= 0 || tagCount > 200) return null;
+
+            float rX = 0, rY = 0, rZ = 0;
+            float gX = 0, gY = 0, gZ = 0;
+            float bX = 0, bY = 0, bZ = 0;
+            bool hasR = false, hasG = false, hasB = false;
+
+            for (int i = 0; i < tagCount; i++)
+            {
+                int entryOff = 132 + i * 12;
+                if (entryOff + 12 > icc.Length) break;
+                uint sig = (uint)ReadBE32(icc, entryOff);
+                int offset = ReadBE32(icc, entryOff + 4);
+                int size = ReadBE32(icc, entryOff + 8);
+
+                if (offset + size > icc.Length || size < 20) continue;
+
+                // XYZ type: 'XYZ ' (0x58595A20)
+                uint typeSig = (uint)ReadBE32(icc, offset);
+                if (typeSig != 0x58595A20u) continue;
+
+                // s15Fixed16 值从 offset+8 开始
+                float x = ReadS15F16(icc, offset + 8);
+                float y = ReadS15F16(icc, offset + 12);
+                float z = ReadS15F16(icc, offset + 16);
+
+                if (sig == 0x7258595Au) { rX = x; rY = y; rZ = z; hasR = true; }      // 'rXYZ'
+                else if (sig == 0x6758595Au) { gX = x; gY = y; gZ = z; hasG = true; }  // 'gXYZ'
+                else if (sig == 0x6258595Au) { bX = x; bY = y; bZ = z; hasB = true; }  // 'bXYZ'
+            }
+
+            if (!hasR || !hasG || !hasB) return null;
+
+            // 矩阵列: [R→X, G→X, B→X; R→Y, G→Y, B→Y; R→Z, G→Z, B→Z]
+            return new float[] { rX, gX, bX, rY, gY, bY, rZ, gZ, bZ };
+        }
+        catch { return null; }
+    }
+
+    /// <summary>获取目标色彩空间的 XYZ→RGB 逆矩阵。</summary>
+    private static float[]? GetTargetXyzToRgbMatrix(string colorSpace)
+    {
+        // 返回 XYZ→RGB 矩阵 (3×3, row-major)
+        return colorSpace.ToUpperInvariant() switch
+        {
+            "SRGB" or "" => new float[] // sRGB / BT.709 XYZ→RGB (D65)
+            {
+                 3.2404542f, -1.5371385f, -0.4985314f,
+                -0.9692660f,  1.8760108f,  0.0415560f,
+                 0.0556434f, -0.2040259f,  1.0572252f
+            },
+            "P3" or "DISPLAY P3" or "DCI-P3" => new float[] // Display P3 XYZ→RGB (D65)
+            {
+                 2.4934969f, -0.9313836f, -0.4027108f,
+                -0.8294890f,  1.7626641f,  0.0236247f,
+                 0.0358458f, -0.0761724f,  0.9568845f
+            },
+            "ADOBERGB" or "ADOBE RGB" => new float[] // Adobe RGB (1998) XYZ→RGB (D65)
+            {
+                 2.0413690f, -0.5649464f, -0.3446944f,
+                -0.9692660f,  1.8760108f,  0.0415560f,
+                 0.0134474f, -0.1183897f,  1.0154096f
+            },
+            "BT2020" or "BT.2020" or "REC2020" => new float[] // BT.2020 XYZ→RGB (D65)
+            {
+                 1.7166512f, -0.3556708f, -0.2533663f,
+                -0.6666844f,  1.6164812f,  0.0157685f,
+                 0.0176399f, -0.0427706f,  0.9421031f
+            },
+            _ => null
+        };
+    }
+
+    /// <summary>3×3 矩阵乘法 (row-major): result = A × B</summary>
+    private static float[] MultiplyMatrices(float[] a, float[] b)
+    {
+        var r = new float[9];
+        for (int row = 0; row < 3; row++)
+            for (int col = 0; col < 3; col++)
+                r[row * 3 + col] = a[row * 3] * b[col] + a[row * 3 + 1] * b[3 + col] + a[row * 3 + 2] * b[6 + col];
+        return r;
+    }
+
+    private static bool IsIdentityMatrix(float[] m)
+    {
+        const float eps = 0.001f;
+        return MathF.Abs(m[0] - 1f) < eps && MathF.Abs(m[1]) < eps && MathF.Abs(m[2]) < eps &&
+               MathF.Abs(m[3]) < eps && MathF.Abs(m[4] - 1f) < eps && MathF.Abs(m[5]) < eps &&
+               MathF.Abs(m[6]) < eps && MathF.Abs(m[7]) < eps && MathF.Abs(m[8] - 1f) < eps;
+    }
+
+    private static bool IsSrgbProfile(byte[] icc)
+    {
+        var srcMatrix = ExtractRgbToXyzMatrix(icc);
+        if (srcMatrix is null) return false;
+        // sRGB 的 rXYZ ≈ (0.4360, 0.2225, 0.0139)
+        return MathF.Abs(srcMatrix[0] - 0.4360f) < 0.01f &&
+               MathF.Abs(srcMatrix[3] - 0.2225f) < 0.01f;
+    }
+
+    private static float ReadS15F16(byte[] data, int offset)
+    {
+        int raw = ReadBE32(data, offset);
+        return raw / 65536f;
+    }
+
     /// <summary>获取标准色彩空间 ICC Profile。</summary>
     public static byte[]? GetStandardIccProfile(string colorSpace)
     {
         try
         {
-            // Magick.NET 内置 profiles
+            // IccStore 生成的标准 profiles
             if (colorSpace == "sRGB")
-                return ImageMagick.ColorProfiles.SRGB.ToByteArray();
+                return Encoding.IccStore.SRGB;
             if (colorSpace == "AdobeRGB")
-                return ImageMagick.ColorProfiles.AdobeRGB1998.ToByteArray();
+                return Encoding.IccStore.AdobeRGB1998;
 
-            // 自定义生成的 ICC v2 profiles (Display P3, BT.2020)
+            // ═══ Display P3 / BT.2020: 基于 sRGB 模板修改 primaries ═══
+            // IccProfileBuilder 生成的最小 ICC (504B) 被 ImageMagick 视为无效并剥离
+            // 改用 sRGB 模板 (3144B) 修改 rXYZ/gXYZ/bXYZ + desc，确保 ImageMagick 接受
             if (colorSpace == "DisplayP3" || colorSpace == "DCI_P3")
-                return IccProfileBuilder.Generate(IccPrimaries.DisplayP3, IccTransferCurve.Gamma22);
+                return PatchSrgbPrimaries(IccPrimaries.DisplayP3, "Display P3");
             if (colorSpace == "BT2020")
-                return IccProfileBuilder.Generate(IccPrimaries.BT2020, IccTransferCurve.Gamma22);
+                return PatchSrgbPrimaries(IccPrimaries.BT2020, "BT.2020");
 
             // 默认 sRGB
-            return ImageMagick.ColorProfiles.SRGB.ToByteArray();
+            return Encoding.IccStore.SRGB;
         }
         catch (Exception ex)
         {
@@ -452,6 +645,65 @@ public static class ColorProfileProvider
             return null;
         }
     }
+
+    /// <summary>基于 sRGB ICC 模板修改 primaries 生成自定义色彩空间 ICC。
+    /// 保留 sRGB 的完整 tag 结构（TRC、wtpt 等），仅替换 rXYZ/gXYZ/bXYZ 和 desc。</summary>
+    private static byte[]? PatchSrgbPrimaries(IccPrimaries p, string name)
+    {
+        var template = Encoding.IccStore.SRGB;
+        if (template is null || template.Length < 132) return null;
+
+        var icc = (byte[])template.Clone();
+
+        // 解析 tag table（offset 128: tag count, 之后每 12 字节一个 tag entry）
+        int tagCount = ReadBE32(icc, 128);
+        int tagTableStart = 132;
+
+        // 计算新 primaries 的 XYZ 值（D50 适应）
+        var (rX, rY, rZ) = IccProfileBuilder.XyToXyzPublic(p.Rx, p.Ry);
+        var (gX, gY, gZ) = IccProfileBuilder.XyToXyzPublic(p.Gx, p.Gy);
+        var (bX, bY, bZ) = IccProfileBuilder.XyToXyzPublic(p.Bx, p.By);
+
+        // 遍历 tag table，找到 rXYZ/gXYZ/bXYZ/desc 并修改
+        for (int i = 0; i < tagCount; i++)
+        {
+            int entry = tagTableStart + i * 12;
+            uint sig = (uint)ReadBE32(icc, entry);
+            int dataOff = ReadBE32(icc, entry + 4);
+            int dataLen = ReadBE32(icc, entry + 8);
+
+            if (sig == 0x7258595Au && dataLen >= 20) // rXYZ
+                WriteXyzData(icc, dataOff, rX, rY, rZ);
+            else if (sig == 0x6758595Au && dataLen >= 20) // gXYZ
+                WriteXyzData(icc, dataOff, gX, gY, gZ);
+            else if (sig == 0x6258595Au && dataLen >= 20) // bXYZ
+                WriteXyzData(icc, dataOff, bX, bY, bZ);
+            else if (sig == 0x64657363u && dataLen >= 12) // desc
+            {
+                // 覆写 desc 字符串（保留 tag 类型签名和长度字段）
+                var nameBytes = System.Text.Encoding.ASCII.GetBytes(name + "\0");
+                int maxLen = Math.Min(nameBytes.Length, dataLen - 12);
+                // desc tag: [4B type][4B reserved][4B count][string...]
+                WriteBE32(icc, dataOff + 8, (uint)(maxLen));
+                Array.Clear(icc, dataOff + 12, dataLen - 12);
+                Array.Copy(nameBytes, 0, icc, dataOff + 12, maxLen);
+            }
+        }
+
+        return icc;
+    }
+
+    private static void WriteXyzData(byte[] icc, int offset, float x, float y, float z)
+    {
+        // XYZ type: [4B 'XYZ '][4B reserved][4B X][4B Y][4B Z] (s15Fixed16)
+        WriteS15F16At(icc, offset + 8, x);
+        WriteS15F16At(icc, offset + 12, y);
+        WriteS15F16At(icc, offset + 16, z);
+    }
+
+    private static int ReadBE32(byte[] buf, int off) => (buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3];
+    private static void WriteBE32(byte[] buf, int off, uint v) { buf[off] = (byte)(v >> 24); buf[off + 1] = (byte)(v >> 16); buf[off + 2] = (byte)(v >> 8); buf[off + 3] = (byte)v; }
+    private static void WriteS15F16At(byte[] buf, int off, float v) => WriteBE32(buf, off, (uint)(int)Math.Round(v * 65536f));
 
     /// <summary>将色彩空间标签映射到标准名称。</summary>
     public static string MapColorSpaceTag(string tag) => tag switch
@@ -551,8 +803,12 @@ public static class ColorSpaceConverter
 // ═══════════════════════════════════════
 
 /// <summary>ICC 色域原色 (CIE xy)。</summary>
-internal readonly record struct IccPrimaries(float Rx, float Ry, float Gx, float Gy, float Bx, float By)
+public readonly record struct IccPrimaries(float Rx, float Ry, float Gx, float Gy, float Bx, float By)
 {
+    /// <summary>sRGB / BT.709 原色。</summary>
+    public static readonly IccPrimaries SRGB = new(0.6400f, 0.3300f, 0.3000f, 0.6000f, 0.1500f, 0.0600f);
+    /// <summary>Adobe RGB (1998) 原色。</summary>
+    public static readonly IccPrimaries AdobeRGB = new(0.6400f, 0.3300f, 0.2100f, 0.7100f, 0.1500f, 0.0600f);
     public static readonly IccPrimaries DisplayP3 = new(0.6800f, 0.3200f, 0.2650f, 0.6900f, 0.1500f, 0.0600f);
     public static readonly IccPrimaries BT2020 = new(0.7080f, 0.2920f, 0.1700f, 0.7970f, 0.1310f, 0.0460f);
 
@@ -560,10 +816,10 @@ internal readonly record struct IccPrimaries(float Rx, float Ry, float Gx, float
 }
 
 /// <summary>ICC 传输曲线类型。</summary>
-internal enum IccTransferCurve { Srgb, Linear, Gamma22 }
+public enum IccTransferCurve { Srgb, Linear, Gamma22 }
 
 /// <summary>ICC v2 Profile 构建器。</summary>
-internal static class IccProfileBuilder
+public static class IccProfileBuilder
 {
     public static byte[] Generate(IccPrimaries p, IccTransferCurve curve)
     {
@@ -580,12 +836,13 @@ internal static class IccProfileBuilder
         var trc = MakeTrcTag();
         string descStr = $"TrueToneCap {p}";
         var descTag = MakeDescTag(descStr);
+        var cprtTag = MakeTextTag("Public Domain");
 
         var tags = new (uint sig, byte[] data)[]
         {
             (0x7258595Au, rXyz), (0x6758595Au, gXyz), (0x6258595Au, bXyz),
             (0x72545243u, trc), (0x67545243u, trc), (0x62545243u, trc),
-            (0x77747074u, wtpt), (0x64657363u, descTag),
+            (0x77747074u, wtpt), (0x64657363u, descTag), (0x63707274u, cprtTag),
         };
 
         int headerSize = 128, tagTableSize = 4 + tags.Length * 12;
@@ -624,7 +881,9 @@ internal static class IccProfileBuilder
     private static byte[] MakeTrcTag()
     { var b = new byte[20]; WriteBE(b, 0, 0x70617261u); WriteBE(b, 8, (ushort)0); WriteS15F16(b, 12, 2.2f); return b; }
     private static byte[] MakeDescTag(string s)
-    { var d = System.Text.Encoding.ASCII.GetBytes(s + "\0"); var b = new byte[8 + d.Length]; WriteBE(b, 0, 0x64657363u); Array.Copy(d, 0, b, 8, d.Length); return b; }
+    { var d = System.Text.Encoding.ASCII.GetBytes(s + "\0"); var b = new byte[12 + d.Length]; WriteBE(b, 0, 0x64657363u); WriteBE(b, 8, (uint)d.Length); Array.Copy(d, 0, b, 12, d.Length); return b; }
+    private static byte[] MakeTextTag(string s)
+    { var d = System.Text.Encoding.ASCII.GetBytes(s + "\0"); var b = new byte[8 + d.Length]; WriteBE(b, 0, 0x74657874u); Array.Copy(d, 0, b, 8, d.Length); return b; }
 
     private static void WriteBE(byte[] buf, int offset, uint v) { buf[offset] = (byte)(v >> 24); buf[offset + 1] = (byte)(v >> 16); buf[offset + 2] = (byte)(v >> 8); buf[offset + 3] = (byte)v; }
     private static void WriteBE(byte[] buf, int offset, ushort v) { buf[offset] = (byte)(v >> 8); buf[offset + 1] = (byte)v; }
@@ -634,4 +893,6 @@ internal static class IccProfileBuilder
     private static void WriteBE(System.IO.BinaryWriter w, ushort v) { w.Write((byte)(v >> 8)); w.Write((byte)v); }
     private static void WriteS15F16(System.IO.BinaryWriter w, float v) { WriteBE(w, (uint)(int)Math.Round(v * 65536f)); }
     private static (float X, float Y, float Z) XyToXyz(float x, float y) { if (y == 0) return (0, 0, 0); float Y = 1; float X = x * Y / y; float Z = (1 - x - y) * Y / y; return (X, Y, Z); }
+    /// <summary>公开版本：供 PatchSrgbPrimaries 使用。</summary>
+    public static (float X, float Y, float Z) XyToXyzPublic(float x, float y) => XyToXyz(x, y);
 }
