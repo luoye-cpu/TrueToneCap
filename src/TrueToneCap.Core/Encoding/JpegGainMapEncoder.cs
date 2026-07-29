@@ -46,7 +46,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         if (!settings.HdrOutput)
         {
             // SDR 模式：回退为普通 JPEG LI
-            var sdr = H.ToSdr(frame, settings);
+            var sdr = FormatHelper.ToSdr(frame, settings);
             await EncodeSdrAsync(sdr, frame.Width, frame.Height, settings, outputPath, ct);
             return;
         }

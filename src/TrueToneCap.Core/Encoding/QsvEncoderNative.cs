@@ -152,8 +152,8 @@ public sealed unsafe class QsvEncoderNative : IDisposable
                 if (x % 2 == 0 && y % 2 == 0)
                 {
                     int uvOff = aw * ah + (y / 2) * aw + (x & ~1);
-                    nv12[uvOff] = (byte)((-38 * r - 74 * g + 112 * b + 128) >> 8);
-                    nv12[uvOff + 1] = (byte)((112 * r - 94 * g - 18 * b + 128) >> 8);
+                    nv12[uvOff] = (byte)Math.Clamp(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128, 0, 255);     // U
+                    nv12[uvOff + 1] = (byte)Math.Clamp(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128, 0, 255);   // V
                 }
             }
         }

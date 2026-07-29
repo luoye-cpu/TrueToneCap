@@ -120,7 +120,7 @@ public static class DisplayEnumerator
 
                         // 判断 HDR: DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 = 12
                         var cs = desc1.ColorSpace;
-                        bool isHdr = (int)cs == 12; // HDR10 / ST.2084
+                        bool isHdr = (int)cs == 12 || (int)cs == 9; // HDR10/ST.2084 or HLG
                         Format fmt = Format.B8G8R8A8_UNorm;
 
                         // 尝试 Float16 检测
@@ -174,3 +174,4 @@ public static class DisplayEnumerator
         return GetMonitorInfoW(hMonitor, ref info) && (info.Flags & MONITORINFOF_PRIMARY) != 0;
     }
 }
+

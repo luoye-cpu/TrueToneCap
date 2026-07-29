@@ -71,7 +71,7 @@ public sealed class CapturePipelineService
             3 => AvifEncoderBackend.Nvenc,
             _ => AvifEncoderBackend.Auto
         };
-        return new EncodingSettings
+        var settings = new EncodingSettings
         {
             Format = format,
             Quality = (float)s.Quality,
@@ -85,6 +85,9 @@ public sealed class CapturePipelineService
             PreferGpuEncode = true,
             ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
         };
+
+        LogService.Info("Pipeline", $"编码设置: {format} HDR={hdrOutput} 质量={s.Quality:F1} AVIF后端={avifBackend} 色度={s.AvifChroma}");
+        return settings;
     }
 
     /// <summary>构建输出文件路径。</summary>

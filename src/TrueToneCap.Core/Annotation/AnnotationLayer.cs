@@ -60,6 +60,76 @@ public abstract class AnnotationLayer
 
     public abstract AnnotationLayer Clone();
     public abstract RectF GetBounds();
+
+    // ────────────── 工厂方法 ──────────────
+
+    public static AnnotationLayer CreateRectangle(float x, float y, float w, float h, string color, float strokeWidth = 2f) => new RectangleLayer
+    {
+        X = x, Y = y, Width = w, Height = h,
+        Style = new BrushStyle { StrokeColor = ParseColor(color), StrokeWidth = strokeWidth, IsFillEnabled = false }
+    };
+
+    public static AnnotationLayer CreateEllipse(float cx, float cy, float rx, float ry, string color, float strokeWidth = 2f) => new EllipseLayer
+    {
+        CenterX = cx, CenterY = cy, RadiusX = rx, RadiusY = ry,
+        Style = new BrushStyle { StrokeColor = ParseColor(color), StrokeWidth = strokeWidth, IsFillEnabled = false }
+    };
+
+    public static AnnotationLayer CreateArrow(float x1, float y1, float x2, float y2, string color, float strokeWidth = 2f) => new ArrowLayer
+    {
+        StartX = x1, StartY = y1, EndX = x2, EndY = y2,
+        Style = new BrushStyle { StrokeColor = ParseColor(color), StrokeWidth = strokeWidth }
+    };
+
+    public static AnnotationLayer CreateText(float x, float y, string text, string color, float fontSize = 16f) => new TextLayer
+    {
+        X = x, Y = y, Text = text, FontSize = fontSize,
+        TextColor = ParseColor(color, 1f)
+    };
+
+    public static AnnotationLayer CreateNumber(float x, float y, int number, string color, float fontSize = 20f) => new TextLayer
+    {
+        X = x, Y = y, Text = number.ToString(), FontSize = fontSize,
+        TextColor = ParseColor(color, 1f)
+    };
+
+    public static AnnotationLayer CreateBlur(float x, float y, float w, float h, float radius = 10f) => new RectangleLayer
+    {
+        X = x, Y = y, Width = w, Height = h, Type = ShapeType.Highlight,
+        Style = new BrushStyle { IsFillEnabled = false, IsStrokeEnabled = false }
+    };
+
+    public static AnnotationLayer CreateMosaic(float x, float y, float w, float h, int blockSize = 8) => new RectangleLayer
+    {
+        X = x, Y = y, Width = w, Height = h, Type = ShapeType.Mosaic,
+        Style = new BrushStyle { IsFillEnabled = false, IsStrokeEnabled = false }
+    };
+
+    public static AnnotationLayer CreateFreehand((float x, float y)[] points, string color, float strokeWidth = 3f) => new FreehandLayer
+    {
+        Points = [.. points.Select(p => new Vector2(p.x, p.y))],
+        Style = new BrushStyle { StrokeColor = ParseColor(color), StrokeWidth = strokeWidth, IsFillEnabled = false }
+    };
+
+    private static Color4 ParseColor(string hex, float alpha = 1f)
+    {
+        if (hex.StartsWith('#'))
+        {
+            if (hex.Length == 7)
+                return new Color4(
+                    int.Parse(hex[1..3], System.Globalization.NumberStyles.HexNumber) / 255f,
+                    int.Parse(hex[3..5], System.Globalization.NumberStyles.HexNumber) / 255f,
+                    int.Parse(hex[5..7], System.Globalization.NumberStyles.HexNumber) / 255f,
+                    alpha);
+            if (hex.Length == 9)
+                return new Color4(
+                    int.Parse(hex[1..3], System.Globalization.NumberStyles.HexNumber) / 255f,
+                    int.Parse(hex[3..5], System.Globalization.NumberStyles.HexNumber) / 255f,
+                    int.Parse(hex[5..7], System.Globalization.NumberStyles.HexNumber) / 255f,
+                    int.Parse(hex[7..9], System.Globalization.NumberStyles.HexNumber) / 255f);
+        }
+        return new Color4(1, 0, 0, alpha); // 默认红色
+    }
 }
 
 /// <summary>笔刷样式。</summary>

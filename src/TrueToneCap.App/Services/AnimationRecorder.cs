@@ -1,10 +1,9 @@
 // TrueToneCap.App/Services/AnimationRecorder.cs
-// 动图录制引擎 — 基于 WGC + Magick.NET
+// 动图录制引擎 — 基于 WGC + ffmpeg (动图编码)
 // P0 修复: 有界帧缓冲防 OOM + 共享 WgcCaptureService 单例 + PeriodicTimer 精确帧定时
 
 using System.Collections.Concurrent;
 using System.Threading.Channels;
-using ImageMagick;
 using TrueToneCap.Core.Capture;
 
 namespace TrueToneCap.App.Services;
@@ -20,6 +19,10 @@ public sealed class RecordingConfig
     public int Quality { get; set; } = 80;
     public string OutputPath { get; set; } = "";
     public int DisplayIndex { get; set; }
+
+    // ═══ ICC 色彩管理（动图录制时每个帧先经过 ICC 烘焙再编码）═══
+    public bool IccBakeEnabled { get; set; }
+    public string ColorSpaceTag { get; set; } = "System";
 }
 
 public enum RecordingState { Idle, Recording, Encoding, Completed, Cancelled, Error }
@@ -196,30 +199,90 @@ public sealed class AnimationRecorder : IDisposable
                 return;
             }
 
-            using var col = new MagickImageCollection();
+            // ═══ 动图编码：通过 ffmpeg 进程调用 ═══
             int encoded = 0;
+            var tmpDir = Path.Combine(Path.GetTempPath(), $"ttc_anim_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(tmpDir);
 
+            try
+            {
+// 写入临时 PNG 帧序列（每个帧先经过 ICC 色彩管理）
             for (int i = 0; i < _encodedFrames.Count; i++)
             {
                 var (px, w, h) = _encodedFrames[i];
-                var rs = new MagickReadSettings { Width = (uint)w, Height = (uint)h, Format = MagickFormat.Bgra };
-                var img = new MagickImage(px, rs);
-                img.AnimationDelay = (uint)delay;
-                img.Quality = (uint)_config.Quality;
-                col.Add(img);
-                encoded++;
-                Report();
+                var framePath = Path.Combine(tmpDir, $"frame_{i:D5}.png");
+
+                // ═══ ICC 色彩管理：烘焙到目标色域 ═══
+                var (bakedPixels, _) = CapturePipelineService.PreparePixelsWithIcc(
+                    px, w, h, _config.IccBakeEnabled, _config.ColorSpaceTag);
+                TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(bakedPixels, w, h, framePath, 8);
+                    encoded++;
+                    Report();
+                }
+
+                // ffmpeg 编码动图
+                var (fmt, ext) = _config.OutputFormat switch
+                {
+                    AnimationFormat.AnimatedWebP => ("webp", ".webp"),
+                    AnimationFormat.AnimatedPNG => ("apng", ".png"),
+                    AnimationFormat.GIF => ("gif", ".gif"),
+                    _ => ("webp", ".webp")
+                };
+
+                if (!path.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                    path = Path.ChangeExtension(path, ext);
+
+                var fps = _config.FrameRate;
+                var quality = _config.Quality;
+                string args = fmt switch
+                {
+                    "webp" => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -c:v libwebp -quality {quality} -loop 0 \"{path}\"",
+                    "apng" => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -plays 0 -f apng \"{path}\"",
+                    "gif" => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -vf \"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{path}\"",
+                    _ => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -c:v libwebp -quality {quality} -loop 0 \"{path}\""
+                };
+
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = $"-y {args}",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var proc = System.Diagnostics.Process.Start(psi);
+                if (proc is not null)
+                {
+                    // 修复死锁: 必须异步读取 stderr，ffmpeg 输出大量日志到 stderr
+                    var stderrTask = proc.StandardError.ReadToEndAsync();
+                    proc.StandardOutput.ReadToEnd();
+                    if (!proc.WaitForExit(120_000))
+                    {
+                        proc.Kill();
+                        LogService.Warn("AnimationRecorder", "ffmpeg 超时 (120s)，已终止");
+                    }
+                    stderrTask.GetAwaiter().GetResult();
+                }
+
+                if (proc?.ExitCode != 0 || !File.Exists(path))
+                {
+                    // ffmpeg 不可用时回退：保存第一帧为 PNG（带 ICC 色彩管理）
+                    var fallbackPath = Path.ChangeExtension(path, ".png");
+                    var (px0, w0, h0) = _encodedFrames[0];
+                    var (bakedPixels, _) = CapturePipelineService.PreparePixelsWithIcc(
+                        px0, w0, h0, _config.IccBakeEnabled, _config.ColorSpaceTag);
+                    TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 8);
+                    path = fallbackPath;
+                    LogService.Warn("AnimationRecorder", "ffmpeg 不可用，回退为单帧 PNG");
+                }
+            }
+            finally
+            {
+                try { Directory.Delete(tmpDir, true); } catch { }
             }
 
-            var fmt = _config.OutputFormat switch
-            {
-                AnimationFormat.AnimatedWebP => MagickFormat.WebP,
-                AnimationFormat.AnimatedPNG => MagickFormat.APng,
-                AnimationFormat.AnimatedAVIF => MagickFormat.Avif,
-                AnimationFormat.GIF => MagickFormat.Gif,
-                _ => MagickFormat.WebP
-            };
-            col.Write(path, fmt);
             _config.OutputPath = path;
             _state = RecordingState.Completed;
             LogService.Info("AnimationRecorder", $"编码完成: {encoded} 帧 → {path} (丢弃 {_framesDropped} 帧)");

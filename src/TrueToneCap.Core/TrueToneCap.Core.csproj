@@ -17,4 +17,9 @@
     <PackageReference Include="Magick.NET-Q16-HDRI-AnyCPU" Version="14.15.0" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
   </ItemGroup>
+  <!-- 嵌入原生工具链 (avifenc.exe / cwebp.exe) 作为嵌入资源 -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\avifenc.exe" Visible="false" />
+    <EmbeddedResource Include="Resources\cwebp.exe" Visible="false" />
+  </ItemGroup>
 </Project>
