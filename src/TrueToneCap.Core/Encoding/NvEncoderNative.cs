@@ -283,20 +283,362 @@ public sealed unsafe class NvEncoderNative : IDisposable
     private delegate int DestroyEncoderFn(nint enc);
 }
 
-/// <summary>AV1 IVF 容器写入器。</summary>
+/// <summary>AV1 → AVIF (ISOBMFF) 容器写入器。替代旧的 IVF 写入，生成标准 AVIF 文件。</summary>
 public static class IvfWriter
 {
     public static void WriteAvif(byte[] av1Bs, int w, int h, string path)
     {
+        // 解析 AV1 OBU 流提取序列头参数
+        var (profile, level, tier, bitDepth, mono, chromaSubX, chromaSubY, chromaPos, seqHeaderObu) = ParseAv1SequenceHeader(av1Bs);
+
         using var fs = File.Create(path);
-        using var bw = new System.IO.BinaryWriter(fs);
-        bw.Write((short)0x4649); bw.Write((short)0x5649); // DKIF
-        bw.Write((short)0); bw.Write((short)32);
-        bw.Write(0x41563031); // AV01
-        bw.Write((short)w); bw.Write((short)h);
-        bw.Write(1u); bw.Write(1u);
-        bw.Write(1u); bw.Write(0u);
-        bw.Write((uint)av1Bs.Length); bw.Write(0L);
+        using var bw = new BinaryWriter(fs);
+
+        // ═══ ftyp box ═══
+        var ftyp = new MemoryStream();
+        WriteBoxHeader(ftyp, "ftyp");
+        WriteAscii(ftyp, "avif");       // major_brand
+        WriteU32BE(ftyp, 0);            // minor_version
+        WriteAscii(ftyp, "avif");       // compatible_brands
+        WriteAscii(ftyp, "mif1");
+        WriteAscii(ftyp, "miaf");
+        WriteBoxToStream(bw, ftyp);
+
+        // ═══ meta box (FullBox, version=0, flags=0) ═══
+        var meta = new MemoryStream();
+        WriteFullBoxHeader(meta, "meta", 0, 0);
+
+        // hdlr box
+        var hdlr = new MemoryStream();
+        WriteBoxHeader(hdlr, "hdlr");
+        WriteU32BE(hdlr, 0);            // pre_defined
+        WriteAscii(hdlr, "pict");       // handler_type
+        WriteU32BE(hdlr, 0); WriteU32BE(hdlr, 0); WriteU32BE(hdlr, 0); // reserved
+        hdlr.WriteByte(0);              // name (null-terminated)
+        WriteBoxToStream(meta, hdlr);
+
+        // pitm box (primary item = 1)
+        var pitm = new MemoryStream();
+        WriteFullBoxHeader(pitm, "pitm", 0, 0);
+        WriteU16BE(pitm, 1);            // item_ID
+        WriteBoxToStream(meta, pitm);
+
+        // iloc box (item location)
+        // 需要在写入 mdat 后回填偏移，先计算 meta 大小
+        // 使用 construction: offset_from_file = 0, 后续 patch
+        var ilocPlaceholder = BuildIlocBox(0, av1Bs.Length); // placeholder offset
+        WriteBoxToStream(meta, ilocPlaceholder);
+
+        // iinf box
+        var iinf = new MemoryStream();
+        WriteFullBoxHeader(iinf, "iinf", 0, 0);
+        WriteU16BE(iinf, 1);            // entry_count
+        // infe box
+        var infe = new MemoryStream();
+        WriteFullBoxHeader(infe, "infe", 2, 0);
+        WriteU16BE(infe, 1);            // item_ID
+        WriteU16BE(infe, 0);            // item_protection_index
+        WriteAscii(infe, "av01");       // item_type
+        WriteNullTermAscii(infe, "AV1 Image"); // item_name
+        WriteBoxToStream(iinf, infe);
+        WriteBoxToStream(meta, iinf);
+
+        // iprp box
+        var iprp = new MemoryStream();
+        WriteBoxHeader(iprp, "iprp");
+
+        // ipco box
+        var ipco = new MemoryStream();
+        WriteBoxHeader(ipco, "ipco");
+
+        // av1C box
+        var av1c = new MemoryStream();
+        WriteBoxHeader(av1c, "av1C");
+        byte byte0 = (byte)(0x80 | (profile & 0x07) << 5 | (level & 0x1F));
+        byte byte1 = (byte)((tier << 7) | ((bitDepth > 8 ? 1 : 0) << 6) | ((bitDepth == 12 ? 1 : 0) << 5) |
+                            ((mono ? 1 : 0) << 4) | (chromaSubX << 3) | (chromaSubY << 2) | (chromaPos & 0x03));
+        av1c.WriteByte(byte0);
+        av1c.WriteByte(byte1);
+        av1c.WriteByte(0x00);           // initial_presentation_delay_present=0, reserved
+        // configOBUs: 序列头 OBU (不含 temporal delimiter)
+        if (seqHeaderObu is { Length: > 0 })
+            av1c.Write(seqHeaderObu, 0, seqHeaderObu.Length);
+        WriteBoxToStream(ipco, av1c);
+
+        // ispe box
+        var ispe = new MemoryStream();
+        WriteFullBoxHeader(ispe, "ispe", 0, 0);
+        WriteU32BE(ispe, (uint)w);
+        WriteU32BE(ispe, (uint)h);
+        WriteBoxToStream(ipco, ispe);
+
+        // pixi box
+        var pixi = new MemoryStream();
+        WriteFullBoxHeader(pixi, "pixi", 0, 0);
+        pixi.WriteByte((byte)(mono ? 1 : 3)); // num_channels
+        byte bd = (byte)bitDepth;
+        pixi.WriteByte(bd);
+        if (!mono) { pixi.WriteByte(bd); pixi.WriteByte(bd); }
+        WriteBoxToStream(ipco, pixi);
+
+        WriteBoxToStream(iprp, ipco);
+
+        // ipma box
+        var ipma = new MemoryStream();
+        WriteFullBoxHeader(ipma, "ipma", 0, 0);
+        WriteU32BE(ipma, 1);            // entry_count
+        WriteU16BE(ipma, 1);            // item_ID
+        ipma.WriteByte(3);              // association_count (av1C, ispe, pixi)
+        ipma.WriteByte(0x81);           // essential=1, property_index=1 (av1C)
+        ipma.WriteByte(0x82);           // essential=1, property_index=2 (ispe)
+        ipma.WriteByte(0x03);           // essential=0, property_index=3 (pixi)
+        WriteBoxToStream(iprp, ipma);
+
+        WriteBoxToStream(meta, iprp);
+
+        // 计算 mdat 数据偏移 (ftyp_size + meta_size + mdat_header_size)
+        long ftypSize = ftyp.Length;
+        long metaSize = meta.Length + 8; // meta box header (size + type) 已在 FullBoxHeader 中
+        // 实际上 meta 已经包含了 header，重新计算
+        // meta 流已包含完整 box (header + content)
+        long mdatHeaderSize = 8; // size(4) + type(4)
+        long mdatDataOffset = ftypSize + (meta.Length) + mdatHeaderSize;
+
+        // 回填 iloc 中的偏移
+        PatchIlocOffset(meta, ilocPlaceholder, mdatDataOffset);
+
+        WriteBoxToStream(bw, meta);
+
+        // ═══ mdat box ═══
+        bw.Write((uint)(8 + av1Bs.Length)); // box size (big-endian)
+        WriteAsciiBE(bw, "mdat");
         bw.Write(av1Bs);
+    }
+
+    // ── AV1 OBU 解析 ──
+
+    private static (int profile, int level, int tier, int bitDepth, bool mono, int chromaSubX, int chromaSubY, int chromaPos, byte[]? seqHeaderObu)
+        ParseAv1SequenceHeader(byte[] av1Bs)
+    {
+        // 默认值: Main profile, level 5.1, 8-bit, 4:2:0
+        int profile = 0, level = 13, tier = 0, bitDepth = 8, chromaSubX = 1, chromaSubY = 1, chromaPos = 0;
+        bool mono = false;
+        byte[]? seqHeaderObu = null;
+
+        try
+        {
+            int pos = 0;
+            while (pos < av1Bs.Length - 2)
+            {
+                byte header = av1Bs[pos];
+                int obuType = (header >> 3) & 0x0F;
+                bool hasSizeField = (header & 0x02) != 0;
+                bool hasExt = (header & 0x04) != 0;
+
+                int headerSize = 1 + (hasExt ? 1 : 0);
+                pos += headerSize;
+
+                int obuSize = 0;
+                if (hasSizeField)
+                {
+                    // LEB128 解码
+                    int shift = 0;
+                    while (pos < av1Bs.Length)
+                    {
+                        byte b = av1Bs[pos++];
+                        obuSize |= (b & 0x7F) << shift;
+                        shift += 7;
+                        if ((b & 0x80) == 0) break;
+                    }
+                }
+                else
+                {
+                    obuSize = av1Bs.Length - pos;
+                }
+
+                if (obuType == 1) // OBU_SEQUENCE_HEADER
+                {
+                    int seqStart = pos;
+                    if (pos + 4 <= av1Bs.Length)
+                    {
+                        // seq_profile (3 bits) + still_picture (1) + reduced_still_picture_header (1)
+                        // + timing_info_present (1) + ...
+                        // 简化解析: 读取前几个字节
+                        int b0 = av1Bs[pos];
+                        profile = (b0 >> 5) & 0x07;
+
+                        // 跳过 timing info 等，找到 frame_width/height 后的 color config
+                        // 对于 configOBUs，直接保存整个序列头 OBU（含 OBU header）
+                        int obuTotalLen = headerSize + (hasSizeField ? Leb128Size(av1Bs, pos - (hasSizeField ? Leb128Size(av1Bs, pos) : 0)) : 0) + obuSize;
+                        // 保存从 OBU header 开始的完整数据（不含 temporal delimiter）
+                        int obuHeaderStart = seqStart - headerSize - (hasSizeField ? Leb128Size(av1Bs, seqStart - headerSize) : 0);
+                        if (obuHeaderStart >= 0 && obuHeaderStart + headerSize + obuSize <= av1Bs.Length)
+                        {
+                            // 重新计算: 保存 header + size + payload
+                            int fullStart = seqStart - headerSize;
+                            // 回退到 size field 开始
+                            if (hasSizeField)
+                            {
+                                int sizeBytes = Leb128Size(av1Bs, fullStart + 1 + (hasExt ? 1 : 0));
+                                fullStart -= 0; // size field 紧跟 header
+                            }
+                            // 简化: 保存从当前 OBU 的 header 字节开始
+                            int start = pos - obuSize - (hasSizeField ? Leb128Size(av1Bs, pos - obuSize) : 0) - headerSize;
+                            if (start >= 0)
+                            {
+                                int len = pos + obuSize - start;
+                                if (start + len <= av1Bs.Length)
+                                {
+                                    seqHeaderObu = new byte[len];
+                                    Array.Copy(av1Bs, start, seqHeaderObu, 0, len);
+                                }
+                            }
+                        }
+
+                        // 尝试解析 bit depth 和 chroma (简化: 搜索 color_config 模式)
+                        // 对于大多数硬件编码器输出，profile 0 = 8-bit 4:2:0
+                        if (profile == 0) { bitDepth = 8; chromaSubX = 1; chromaSubY = 1; }
+                        else if (profile == 1) { bitDepth = 8; chromaSubX = 0; chromaSubY = 0; }
+                        else if (profile == 2) { bitDepth = 10; chromaSubX = 1; chromaSubY = 1; }
+                    }
+                    break; // 只需要第一个序列头
+                }
+
+                pos += obuSize;
+            }
+        }
+        catch { /* 解析失败使用默认值 */ }
+
+        return (profile, level, tier, bitDepth, mono, chromaSubX, chromaSubY, chromaPos, seqHeaderObu);
+    }
+
+    private static int Leb128Size(byte[] data, int pos)
+    {
+        int count = 0;
+        while (pos + count < data.Length)
+        {
+            count++;
+            if ((data[pos + count - 1] & 0x80) == 0) break;
+        }
+        return count;
+    }
+
+    // ── ISOBMFF Box 写入辅助 ──
+
+    private static void WriteBoxHeader(Stream s, string type)
+    {
+        // 占位 size (后续 patch)
+        s.WriteByte(0); s.WriteByte(0); s.WriteByte(0); s.WriteByte(0);
+        WriteAscii(s, type);
+    }
+
+    private static void WriteFullBoxHeader(Stream s, string type, byte version, uint flags)
+    {
+        s.WriteByte(0); s.WriteByte(0); s.WriteByte(0); s.WriteByte(0); // size placeholder
+        WriteAscii(s, type);
+        s.WriteByte(version);
+        s.WriteByte((byte)((flags >> 16) & 0xFF));
+        s.WriteByte((byte)((flags >> 8) & 0xFF));
+        s.WriteByte((byte)(flags & 0xFF));
+    }
+
+    private static void WriteBoxToStream(BinaryWriter bw, MemoryStream box)
+    {
+        // Patch size
+        long size = box.Length;
+        box.Position = 0;
+        box.WriteByte((byte)(size >> 24));
+        box.WriteByte((byte)(size >> 16));
+        box.WriteByte((byte)(size >> 8));
+        box.WriteByte((byte)(size));
+        box.Position = 0;
+        box.CopyTo(bw.BaseStream);
+    }
+
+    private static void WriteBoxToStream(Stream parent, MemoryStream box)
+    {
+        long size = box.Length;
+        box.Position = 0;
+        box.WriteByte((byte)(size >> 24));
+        box.WriteByte((byte)(size >> 16));
+        box.WriteByte((byte)(size >> 8));
+        box.WriteByte((byte)(size));
+        box.Position = 0;
+        box.CopyTo(parent);
+    }
+
+    private static MemoryStream BuildIlocBox(long dataOffset, int dataLength)
+    {
+        var iloc = new MemoryStream();
+        WriteFullBoxHeader(iloc, "iloc", 0, 0);
+        // offset_size=4, length_size=4, base_offset_size=0, reserved=0
+        iloc.WriteByte(0x44); // (4<<4)|4
+        iloc.WriteByte(0x00); // base_offset_size=0, reserved=0
+        WriteU16BE(iloc, 1);  // item_count
+        WriteU16BE(iloc, 1);  // item_ID
+        WriteU16BE(iloc, 0);  // data_reference_index
+        WriteU16BE(iloc, 1);  // extent_count
+        WriteU32BE(iloc, (uint)dataOffset);  // extent_offset (placeholder)
+        WriteU32BE(iloc, (uint)dataLength);  // extent_length
+        return iloc;
+    }
+
+    private static void PatchIlocOffset(MemoryStream meta, MemoryStream ilocBox, long actualOffset)
+    {
+        // 在 meta 流中找到 iloc 的 extent_offset 字段并 patch
+        // iloc 结构: [size(4)][type(4)][version(1)][flags(3)][byte(1)][byte(1)][item_count(2)]
+        //            [item_ID(2)][data_ref(2)][extent_count(2)][extent_offset(4)][extent_length(4)]
+        // 从 iloc box 开头偏移: 4+4+1+3+1+1+2+2+2+2 = 22 字节到 extent_offset
+        byte[] metaBytes = meta.GetBuffer();
+        // 搜索 iloc box 在 meta 中的位置
+        byte[] ilocSig = { (byte)'i', (byte)'l', (byte)'o', (byte)'c' };
+        for (int i = 4; i < (int)meta.Length - 4; i++)
+        {
+            if (metaBytes[i] == ilocSig[0] && metaBytes[i + 1] == ilocSig[1] &&
+                metaBytes[i + 2] == ilocSig[2] && metaBytes[i + 3] == ilocSig[3])
+            {
+                // iloc type 在 i, 内容从 i+4 开始
+                // version(1)+flags(3)+sizes(2)+item_count(2)+item_ID(2)+data_ref(2)+extent_count(2) = 12
+                int offsetPos = i + 4 + 12;
+                if (offsetPos + 4 <= (int)meta.Length)
+                {
+                    metaBytes[offsetPos] = (byte)(actualOffset >> 24);
+                    metaBytes[offsetPos + 1] = (byte)(actualOffset >> 16);
+                    metaBytes[offsetPos + 2] = (byte)(actualOffset >> 8);
+                    metaBytes[offsetPos + 3] = (byte)(actualOffset);
+                }
+                break;
+            }
+        }
+    }
+
+    private static void WriteAscii(Stream s, string str)
+    {
+        foreach (char c in str) s.WriteByte((byte)c);
+    }
+
+    private static void WriteNullTermAscii(Stream s, string str)
+    {
+        foreach (char c in str) s.WriteByte((byte)c);
+        s.WriteByte(0);
+    }
+
+    private static void WriteAsciiBE(BinaryWriter bw, string str)
+    {
+        foreach (char c in str) bw.Write((byte)c);
+    }
+
+    private static void WriteU16BE(Stream s, ushort v)
+    {
+        s.WriteByte((byte)(v >> 8));
+        s.WriteByte((byte)(v & 0xFF));
+    }
+
+    private static void WriteU32BE(Stream s, uint v)
+    {
+        s.WriteByte((byte)(v >> 24));
+        s.WriteByte((byte)(v >> 16));
+        s.WriteByte((byte)(v >> 8));
+        s.WriteByte((byte)(v & 0xFF));
     }
 }

@@ -183,7 +183,8 @@ public partial class App : Application
     {
         // 提升进程优先级以减少截图延迟
         try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High; } catch { }
-
+        LogService.Info("App", $"TrueToneCap 启动 v0.2.0, OS={Environment.OSVersion}, 进程提升优先级=High");
+        LogService.Info("App", $"命令行: {string.Join(" ", Environment.GetCommandLineArgs())}");
         // ── 初始化应用服务（Settings / Capability / Pipeline / WGC / GPU）──
         AppServices.Initialize();
 
@@ -195,6 +196,8 @@ public partial class App : Application
             a.Equals("--autostart", StringComparison.OrdinalIgnoreCase));
 
         var window = new MainWindow(isAutostart);
+
+        LogService.Info("App", $"主窗口已创建, 自动启动={isAutostart}");
 
         // ── 显式设置窗口内容主题（Application.RequestedTheme 可能不被所有控件继承）──
         var effective = ResolveEffectiveTheme(initTheme);

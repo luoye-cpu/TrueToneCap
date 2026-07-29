@@ -243,6 +243,9 @@ public sealed class GpuToneMapper : IDisposable
 
     private byte[] ToneMapToSdrGpu(float[] hdrPixels, int width, int height, ToneMappingParams p)
     {
+        // 序列化所有 GPU 操作：纹理池 + ImmediateContext 非线程安全
+        lock (_poolLock)
+        {
         EnsurePooledTextures(width, height);
         var ctx = _device.ImmediateContext;
 
@@ -313,6 +316,7 @@ public sealed class GpuToneMapper : IDisposable
         ctx.Unmap(_pooledStagingTex!, 0);
 
         return result;
+        } // end lock (_poolLock)
     }
 
     [StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]

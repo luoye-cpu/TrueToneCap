@@ -84,7 +84,8 @@ public static class EncodingIntegrationTests
                 Format = fmt,
                 Quality = quality,
                 HdrOutput = false,
-                AvifChroma = "444",
+                ChromaSubsampling = "444",
+                OutputBitDepth = 8,
                 DisplayBitDepth = 8,
             };
 
@@ -133,7 +134,8 @@ public static class EncodingIntegrationTests
                 Format = fmt,
                 Quality = quality,
                 HdrOutput = true,
-                AvifChroma = "444",
+                ChromaSubsampling = "444",
+                OutputBitDepth = 10,
                 DisplayBitDepth = 10,
             };
 

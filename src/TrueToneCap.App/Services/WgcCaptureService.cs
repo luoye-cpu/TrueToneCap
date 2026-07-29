@@ -128,9 +128,11 @@ public sealed class WgcCaptureService : IDisposable
         private GraphicsCaptureSession? _session;
         private GraphicsCaptureItem? _item;
 
-        // 最新帧缓存（SDR）
+        // 最新帧缓存（SDR）— 双缓冲：写入缓冲区与发布缓冲区分离，消除竞态
         private byte[]? _latestSdr;
         private float[]? _latestHdr;
+        private byte[]? _writeBufferSdr;   // 生产者写入缓冲区（不与消费者共享）
+        private float[]? _writeBufferHdr;
         private int _width, _height;
         private long _frameTimestamp;
         private readonly object _frameLock = new();
@@ -225,6 +227,8 @@ public sealed class WgcCaptureService : IDisposable
                     var pixels = ReadFloatPixelsPooled(texture, w, h);
                     lock (_frameLock)
                     {
+                        // 双缓冲交换：旧发布缓冲变为下次写入缓冲，消除竞态
+                        _writeBufferHdr = _latestHdr;
                         _latestHdr = pixels;
                         _latestSdr = null;
                         _frameTimestamp = Environment.TickCount64;
@@ -235,6 +239,8 @@ public sealed class WgcCaptureService : IDisposable
                     var pixels = ReadBytePixelsPooled(texture, w, h);
                     lock (_frameLock)
                     {
+                        // 双缓冲交换：旧发布缓冲变为下次写入缓冲，消除竞态
+                        _writeBufferSdr = _latestSdr;
                         _latestSdr = pixels;
                         _latestHdr = null;
                         _frameTimestamp = Environment.TickCount64;
@@ -292,10 +298,11 @@ public sealed class WgcCaptureService : IDisposable
         private byte[] ReadBytePixelsPooled(ID3D11Texture2D texture, int w, int h)
         {
             // P2: 复用像素缓冲区（避免 60fps 下每帧分配 33MB）
+            // 修复竞态：使用独立写入缓冲区，不与消费者共享的 _latestSdr 冲突
             int len = w * h * 4;
-            if (_latestSdr is null || _latestSdr.Length != len)
-                _latestSdr = new byte[len];
-            var pixels = _latestSdr;
+            if (_writeBufferSdr is null || _writeBufferSdr.Length != len)
+                _writeBufferSdr = new byte[len];
+            var pixels = _writeBufferSdr;
 
             // ═══ D3D11 线程安全：所有 GPU 操作必须在锁内执行 ═══
             lock (s_d3dContextLock)
@@ -350,9 +357,10 @@ public sealed class WgcCaptureService : IDisposable
             int pixelCount = w * h * 4;
 
             // P2: 复用像素缓冲区（避免 60fps 下每帧分配 132MB）
-            if (_latestHdr is null || _latestHdr.Length != pixelCount)
-                _latestHdr = new float[pixelCount];
-            var pixels = _latestHdr;
+            // 修复竞态：使用独立写入缓冲区，不与消费者共享的 _latestHdr 冲突
+            if (_writeBufferHdr is null || _writeBufferHdr.Length != pixelCount)
+                _writeBufferHdr = new float[pixelCount];
+            var pixels = _writeBufferHdr;
 
             // ═══ D3D11 线程安全：所有 GPU 操作必须在锁内执行 ═══
             lock (s_d3dContextLock)
@@ -1144,9 +1152,8 @@ public sealed class WgcCaptureService : IDisposable
                 int hr = Marshal.QueryInterface(nativePtr, in dxgiGuid, out var dxgiPtr);
                 if (hr >= 0 && dxgiPtr != 0)
                 {
-                    var result = new IDXGISurface(dxgiPtr);
-                    Marshal.Release(dxgiPtr);
-                    return result;
+                    // 修复: 不再多余 Release — IDXGISurface 构造函数接管指针所有权
+                    return new IDXGISurface(dxgiPtr);
                 }
             }
             finally { Marshal.Release(nativePtr); }

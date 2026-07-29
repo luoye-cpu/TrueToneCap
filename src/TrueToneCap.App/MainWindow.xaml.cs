@@ -29,6 +29,7 @@ public sealed partial class MainWindow : Window
     private TrayIconManager? _trayIcon;
     private readonly List<(OutputFormat Format, string Label)> _formats;
     private volatile int _isCapturing; // 0=idle, 1=busy (防重入)
+    private CancellationTokenSource? _captureCts; // 截图/编码取消令牌
     private bool _isExiting;           // 托盘退出标志（跳过最小化）
     private TextBox? _recordingTarget; // 正在录制的快捷键输入框
 
@@ -151,6 +152,9 @@ public sealed partial class MainWindow : Window
         LocaleManager.SetLanguage(initLang);
 
         _uiReady = true;
+
+        // ── 订阅实时日志事件 ──
+        SubscribeLogEvents();
 
         // ── 应用本地化文本 + 显示第一页 ──
         ApplyLocale();
@@ -285,13 +289,11 @@ public sealed partial class MainWindow : Window
         DetectAndShowSourceGamut();
         // 主题已在 App.OnLaunched 中初始化，此处仅恢复 ComboBox 选中项
         // Apply engine mode immediately
-        MultiOcrService.ForceEngine = _settings.OcrEngineMode switch
+        if (Enum.TryParse<OcrEngineType>(_settings.OcrEngineMode, out var engineType))
         {
-            "Gpu" => "DirectML",
-            "Cpu" => "PP-OCRv6 (Cpu",
-            "Windows" => "Windows OCR",
-            _ => null
-        };
+            MultiOcrService.SelectedEngineType = engineType;
+        }
+        PopulateOcrLanguages();
         // Gain Map 模式
         if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
     }
@@ -588,6 +590,9 @@ public sealed partial class MainWindow : Window
     private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
+        _captureCts?.Cancel();
+        _captureCts = new CancellationTokenSource();
+        var ct = _captureCts.Token;
         try
         {
             if (bgra is null || bgra.Length != w * h * 4)
@@ -609,11 +614,13 @@ public sealed partial class MainWindow : Window
 
             await Task.Run(() =>
             {
+                ct.ThrowIfCancellationRequested();
                 // ICC 烘焙（委托给 CapturePipelineService）
                 var (pixels, iccProfile) = CapturePipelineService.PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
                 if (iccProfile is not null)
                     settings.IccProfile = iccProfile;
 
+                ct.ThrowIfCancellationRequested();
                 if (hdrOutput && encoder.SupportsHdr)
                 {
                     var hdrFrame = new HdrFrameData
@@ -622,13 +629,13 @@ public sealed partial class MainWindow : Window
                         Width = w, Height = h,
                         IccProfile = settings.IccProfile
                     };
-                    encoder.EncodeAsync(hdrFrame, settings, path).GetAwaiter().GetResult();
+                    encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
                 }
                 else
                 {
-                    encoder.EncodeSdrAsync(pixels, w, h, settings, path).GetAwaiter().GetResult();
+                    encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
                 }
-            });
+            }, ct);
 
             sw.Stop();
 
@@ -637,6 +644,10 @@ public sealed partial class MainWindow : Window
                 await CopyFileToClipboardAsync(path);
                 ToastService.ShowCaptureSuccess(path, sw.ElapsedMilliseconds);
             });
+        }
+        catch (OperationCanceledException)
+        {
+            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "⚠ 操作已取消");
         }
         catch (Exception ex)
         {
@@ -1006,6 +1017,9 @@ public sealed partial class MainWindow : Window
     private async void OnCaptureNow(object sender, RoutedEventArgs e)
     {
         if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0) return;
+        _captureCts?.Cancel();
+        _captureCts = new CancellationTokenSource();
+        var ct = _captureCts.Token;
         StatusTxt.Text = "📷 WGC 截图中...";
         CaptureBtn.IsEnabled = false;
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -1029,6 +1043,7 @@ public sealed partial class MainWindow : Window
                 FrameTimeoutMs = 3000
             });
 
+            ct.ThrowIfCancellationRequested();
             bool actualHdr = captureResult.IsHdr;
             int fw = captureResult.Width, fh = captureResult.Height;
 
@@ -1052,13 +1067,23 @@ public sealed partial class MainWindow : Window
                         Width = fw, Height = fh,
                         IccProfile = captureResult.IccProfile,
                         Metadata = meta
-                    }, settings, fullPath));
+                    }, settings, fullPath, ct), ct);
             }
             else
             {
                 var sdrPixels = captureResult.SdrPixels ?? captureResult.GetDisplayPixels();
                 if (sdrPixels is null) throw new InvalidOperationException("无法获取显示像素");
-                await Task.Run(() => encoder.EncodeSdrAsync(sdrPixels, fw, fh, settings, fullPath));
+
+                // 修复: SDR 路径添加 ICC 烘焙（与 EncodeAndSaveAsync 一致）
+                var iccBakeEnabled = IccBakeSwitch.IsOn;
+                var colorSpaceTag = GetSelectedColorSpaceTag();
+                var (bakedPixels, bakedIcc) = CapturePipelineService.PreparePixelsWithIcc(
+                    sdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag);
+                if (bakedIcc is not null)
+                    settings.IccProfile = bakedIcc;
+
+                ct.ThrowIfCancellationRequested();
+                await Task.Run(() => encoder.EncodeSdrAsync(bakedPixels, fw, fh, settings, fullPath, ct), ct);
             }
 
             sw.Stop();
@@ -1068,6 +1093,10 @@ public sealed partial class MainWindow : Window
                 : $"✅ 已保存 ({sw.ElapsedMilliseconds}ms)";
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = status);
             ToastService.ShowCaptureSuccess(fullPath, sw.ElapsedMilliseconds);
+        }
+        catch (OperationCanceledException)
+        {
+            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "⚠ 操作已取消");
         }
         catch (Exception ex)
         {
@@ -1102,6 +1131,8 @@ public sealed partial class MainWindow : Window
             AvifBackend = avifBackend,
             AvifPngSuffix = AvifPngSuffixChk.IsChecked == true,
             AvifChroma = _settings.AvifChroma,
+            ChromaSubsampling = _settings.AvifChroma,
+            OutputBitDepth = _settings.OutputBitDepth,
             DisplayBitDepth = _settings.DisplayBitDepth,
             GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
             Metadata = meta,
@@ -1133,18 +1164,17 @@ public sealed partial class MainWindow : Window
     private void OnOcrEngineChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_uiReady) return; // XAML 初始化期间忽略
-        var tag = (OcrEngineCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto";
+        var tag = (OcrEngineCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "OnnxGpu";
         _settings.OcrEngineMode = tag;
 
-        // 映射到 MultiOcrService 的强制引擎
-        MultiOcrService.ForceEngine = tag switch
+        // 直接设置选中的引擎，无自动降级
+        if (Enum.TryParse<OcrEngineType>(tag, out var engineType))
         {
-            "Gpu" => "DirectML",
-            "Cpu" => "PP-OCRv6 (Cpu",
-            "Windows" => "Windows OCR",
-            _ => null  // "Auto" → 不强制, 自动降级
-        };
+            MultiOcrService.SelectedEngineType = engineType;
+        }
 
+        // 切换引擎 → 刷新语言列表并重置为默认语言
+        PopulateOcrLanguages();
         UpdateOcrEngineStatus();
         try { SaveSettingsQuiet(); } catch { }
     }
@@ -1159,6 +1189,11 @@ public sealed partial class MainWindow : Window
         PageCapture.Visibility = tag == "Capture" ? Visibility.Visible : Visibility.Collapsed;
         PageAI.Visibility = tag == "AI" ? Visibility.Visible : Visibility.Collapsed;
         PageSystem.Visibility = tag == "System" ? Visibility.Visible : Visibility.Collapsed;
+        PageLog.Visibility = tag == "Log" ? Visibility.Visible : Visibility.Collapsed;
+
+        // 切到日志页时刷新
+        if (tag == "Log")
+            RefreshLogView();
 
         // 默认选中第一项
         if (!_uiReady && MainNav.SelectedItem is null)
@@ -1351,16 +1386,56 @@ public sealed partial class MainWindow : Window
     private void UpdateOcrEngineStatus()
     {
         if (OcrEngineStatus is null) return;
-        var sb = new System.Text.StringBuilder();
-        foreach (var eng in MultiOcrService.Engines)
+        var selected = MultiOcrService.SelectedEngine;
+        if (selected is not null)
         {
-            if (eng?.Info is null) continue;
-            sb.Append(eng.Info.IsAvailable ? "✅ " : "⚠️ ");
-            sb.Append(eng.Info.Name);
-            if (eng.Info.Version is not null) sb.Append($" v{eng.Info.Version}");
-            sb.Append("  ");
+            OcrEngineStatus.Text = selected.Info.IsAvailable
+                ? $"✅ 当前: {selected.Info.Name}"
+                : $"⚠️ {selected.Info.Name} 不可用";
         }
-        OcrEngineStatus.Text = sb.Length > 0 ? sb.ToString().Trim() : "OCR 引擎探测中...";
+        else
+        {
+            OcrEngineStatus.Text = "OCR 引擎探测中...";
+        }
+    }
+
+    /// <summary>根据当前选中的引擎刷新语言下拉列表。</summary>
+    private void PopulateOcrLanguages()
+    {
+        if (OcrLangCbo is null) return;
+        var languages = MultiOcrService.GetSupportedLanguages();
+        OcrLangCbo.Items.Clear();
+        foreach (var lang in languages)
+        {
+            OcrLangCbo.Items.Add(new ComboBoxItem
+            {
+                Tag = lang.Id,
+                Content = lang.DisplayName
+            });
+        }
+        // 恢复上次保存的语言，或设置默认语言
+        var savedLang = _settings?.OcrLanguage;
+        bool found = false;
+        if (!string.IsNullOrEmpty(savedLang))
+        {
+            foreach (ComboBoxItem item in OcrLangCbo.Items)
+            {
+                if ((string)item.Tag == savedLang) { item.IsSelected = true; found = true; break; }
+            }
+        }
+        if (!found && OcrLangCbo.Items.Count > 0)
+        {
+            ((ComboBoxItem)OcrLangCbo.Items[0]).IsSelected = true;
+        }
+    }
+
+    private void OnOcrLangChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        if (_settings is not null && OcrLangCbo.SelectedItem is ComboBoxItem item)
+        {
+            _settings.OcrLanguage = (string)item.Tag;
+        }
     }
 
     private void OnCaptureHotkeyRecordClick(object sender, RoutedEventArgs e)
@@ -1634,6 +1709,105 @@ public sealed partial class MainWindow : Window
         HotkeyManager.HandleHotKeyMessage(msg, wParam);
         return CallWindowProcW(_originalWndProc, hWnd, msg, wParam, lParam);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  运行日志面板
+    // ═══════════════════════════════════════════════════════════════
+
+    private string _logFilter = "All";
+    private string _logSearch = "";
+    private readonly List<LogEntry> _logEntries = [];
+
+    /// <summary>刷新日志列表视图。</summary>
+    private void RefreshLogView()
+    {
+        var all = LogService.GetUiEntries();
+        _logEntries.Clear();
+        _logEntries.AddRange(all);
+
+        ApplyLogFilter();
+        UpdateLogStatus();
+    }
+
+    private void ApplyLogFilter()
+    {
+        var filtered = _logEntries.AsEnumerable();
+
+        // 级别筛选
+        if (_logFilter != "All")
+        {
+            var level = _logFilter switch
+            {
+                "Info" => LogLevel.Info,
+                "Warning" => LogLevel.Warning,
+                "Error" => LogLevel.Error,
+                _ => (LogLevel?)null,
+            };
+            if (level.HasValue)
+                filtered = filtered.Where(e => e.Level == level.Value);
+        }
+
+        // 文本搜索
+        if (!string.IsNullOrEmpty(_logSearch))
+            filtered = filtered.Where(e =>
+                e.Message.Contains(_logSearch, StringComparison.OrdinalIgnoreCase) ||
+                e.Tag.Contains(_logSearch, StringComparison.OrdinalIgnoreCase));
+
+        LogListView.ItemsSource = filtered.ToList();
+    }
+
+    private void UpdateLogStatus()
+    {
+        if (LogStatusTxt is not null)
+            LogStatusTxt.Text = $"共 {LogService.GetUiEntries().Count} 条日志 | 目录: {LogService.LogDirectory}";
+    }
+
+    private void OnLogFilterChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _logFilter = (LogFilterCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "All";
+        ApplyLogFilter();
+    }
+
+    private void OnLogSearchChanged(object sender, TextChangedEventArgs e)
+    {
+        _logSearch = LogSearchTxt.Text;
+        ApplyLogFilter();
+    }
+
+    private void OnLogClear(object sender, RoutedEventArgs e)
+    {
+        LogListView.ItemsSource = null;
+        _logEntries.Clear();
+        if (LogStatusTxt is not null)
+            LogStatusTxt.Text = "日志已清空";
+    }
+
+    private void OnLogOpenDir(object sender, RoutedEventArgs e)
+    {
+        LogService.OpenLogDirectory();
+    }
+
+    /// <summary>订阅实时日志推送（在 InitializeComponent 后调用）。</summary>
+    private void SubscribeLogEvents()
+    {
+        LogService.OnLogEntry += entry =>
+        {
+            try
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    _logEntries.Add(entry);
+                    // 仅在日志页可见时刷新显示
+                    if (PageLog.Visibility == Visibility.Visible)
+                    {
+                        ApplyLogFilter();
+                        UpdateLogStatus();
+                    }
+                });
+            }
+            catch { }
+        };
+    }
 }
 
 // ── 字体工具：递归注入字体到所有控件 ──
@@ -1698,12 +1872,14 @@ public sealed class AppSettingsData
     public bool NvencAvailable { get; set; }
     public bool QsvAvailable { get; set; }
     public int DisplayBitDepth { get; set; } = 8;
+    /// <summary>输出位深 (8/10/12/16)，控制输出文件的位深度。默认 8。</summary>
+    public int OutputBitDepth { get; set; } = 8;
     /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>
     public string GainMapMode { get; set; } = "Rgb";
     /// <summary>界面语言: zh=中文, en=English。</summary>
     public string Language { get; set; } = "zh"; // Rgb / Gray
-    /// <summary>OCR 引擎选择: Auto / Gpu / Windows / Cpu。</summary>
-    public string OcrEngineMode { get; set; } = "Auto";
+    /// <summary>OCR 引擎选择: OnnxGpu / OnnxCpu / WindowsOcr。</summary>
+    public string OcrEngineMode { get; set; } = "OnnxGpu";
     /// <summary>主题模式: Default / Light / Dark / OLED。</summary>
     public string ThemeMode { get; set; } = "Default";
 

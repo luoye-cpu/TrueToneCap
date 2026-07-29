@@ -87,9 +87,10 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     private bool _available;
 
     public OcrEngineInfo Info => new(
-        $"ONNX PP-OCRv6 ({_provider}, FP16)",
+        $"PP-OCRv6 ({_provider}, FP16)",
         _provider == OnnxExecutionProvider.Cpu ? OcrEngineMode.Cpu : OcrEngineMode.Gpu,
         _available,
+        _provider == OnnxExecutionProvider.DirectML ? OcrEngineType.OnnxGpu : OcrEngineType.OnnxCpu,
         Version: "PP-OCRv6");
 
     public OnnxOcrEngine(OnnxExecutionProvider provider = OnnxExecutionProvider.Cpu,
@@ -306,11 +307,10 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                     }
                 }
 
-                var result = new OcrResultEx
+                var result = new OcrResult
                 {
                     Text = string.Join("\n", allText),
                     Lines = lines,
-                    EngineName = Info.Name
                 };
 
                 if (lines.Count == 0)

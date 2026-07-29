@@ -70,6 +70,7 @@ public sealed class AnnotationManager
     private int _nextZOrder;
 
     public IReadOnlyList<AnnotationLayer> Layers => _layers;
+    public int LayerCount => _layers.Count;
     public bool CanUndo => _undoStack.Count > 0;
     public bool CanRedo => _redoStack.Count > 0;
 
