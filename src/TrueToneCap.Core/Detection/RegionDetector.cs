@@ -95,14 +95,19 @@ public static class RegionDetector
     //  A: UIA 窗口枚举
     // ═══════════════════════════════════════
 
-    /// <summary>枚举虚拟桌面指定区域内的可见顶层窗口。</summary>
-    public static List<DetectedRegion> DetectWindows(int vx, int vy, int vw, int vh)
+    /// <summary>枚举虚拟桌面指定区域内的可见顶层窗口（Z-order 排序，最前在前）。</summary>
+    /// <param name="excludeHwnds">需要排除的窗口句柄（如覆盖层自身）。</param>
+    public static List<DetectedRegion> DetectWindows(int vx, int vy, int vw, int vh,
+        HashSet<nint>? excludeHwnds = null)
     {
         var regions = new List<DetectedRegion>();
         var added = new HashSet<(int, int, int, int)>(); // 去重
 
         EnumWindows((hwnd, _) =>
         {
+            // 排除自身窗口
+            if (excludeHwnds is not null && excludeHwnds.Contains(hwnd)) return true;
+
             if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
 
             // 跳过子窗口
@@ -114,13 +119,18 @@ public static class RegionDetector
             if ((exStyle & WS_EX_TOOLWINDOW) != 0 && (exStyle & WS_EX_APPWINDOW) == 0)
                 return true;
 
-            // 获取窗口矩形（优先 DWM 精确边框，排除 Win10/11 透明阴影，使框贴合真实窗口）
+            // 跳过透明/分层窗口（alpha=0 的覆盖层）
+            const long WS_EX_LAYERED = 0x00080000L;
+            const long WS_EX_TRANSPARENT = 0x00000020L;
+            if ((exStyle & WS_EX_LAYERED) != 0 && (exStyle & WS_EX_TRANSPARENT) != 0)
+                return true;
+
+            // 获取窗口矩形（优先 DWM 精确边框，排除 Win10/11 透明阴影）
             if (!GetVisibleWindowRect(hwnd, out var rect)) return true;
             int w = rect.Width, h = rect.Height;
 
             // 过滤：太小、太大、无效
-            if (w < 40 || h < 40 || w > 8192 || h > 8192) return true;
-            if (rect.Left == 0 && rect.Top == 0 && w == 0 && h == 0) return true;
+            if (w < 30 || h < 30 || w > 8192 || h > 8192) return true;
 
             // 过滤：窗口不在捕获区域内
             if (rect.Right <= vx || rect.Left >= vx + vw ||
@@ -132,15 +142,16 @@ public static class RegionDetector
             string className = cn.ToString();
             if (ExcludedClasses.Contains(className)) return true;
 
-            // 过滤标题
+            // 获取标题（允许空标题，用类名作为回退显示名）
             var sb = new StringBuilder(256);
             GetWindowText(hwnd, sb, 256);
             string title = sb.ToString();
-            if (string.IsNullOrWhiteSpace(title)) return true;
+
+            // 过滤已知无意义的标题关键词
             foreach (var kw in ExcludedTitleKeywords)
                 if (title.Contains(kw, StringComparison.OrdinalIgnoreCase)) return true;
 
-            // 去重
+            // 去重（相同位置和尺寸视为同一窗口）
             var key = (rect.Left, rect.Top, w, h);
             if (!added.Add(key)) return true;
 
@@ -148,14 +159,38 @@ public static class RegionDetector
             {
                 X = rect.Left, Y = rect.Top,
                 Width = w, Height = h,
-                Title = title,
+                Title = string.IsNullOrWhiteSpace(title) ? className : title,
                 ClassName = className,
                 Source = RegionSource.Uia,
             });
             return true;
         }, 0);
 
+        // EnumWindows 按 Z-order 返回（最前在前），保持此顺序
         return regions;
+    }
+
+    /// <summary>在区域列表中找到包含指定点的最小面积区域（QQ截图式：优先选中最内层窗口）。</summary>
+    public static int FindSmallestRegionAt(List<DetectedRegion> regions, int screenX, int screenY)
+    {
+        int bestIndex = -1;
+        int bestArea = int.MaxValue;
+
+        for (int i = 0; i < regions.Count; i++)
+        {
+            var r = regions[i];
+            if (screenX >= r.X && screenX <= r.X + r.Width &&
+                screenY >= r.Y && screenY <= r.Y + r.Height)
+            {
+                int area = r.Width * r.Height;
+                if (area < bestArea)
+                {
+                    bestArea = area;
+                    bestIndex = i;
+                }
+            }
+        }
+        return bestIndex;
     }
 
     // ═══════════════════════════════════════
@@ -235,26 +270,27 @@ public static class RegionDetector
 
     /// <summary>智能区域检测：UIA 窗口枚举为主，边缘检测仅作兜底。</summary>
     /// <remarks>
-    /// 边缘投影检测会把壁纸纹理/图标网格/窗口内 UI 边界拼成"不对齐任何窗口"的伪矩形，
-    /// 造成预览界面一堆莫名其妙的蓝框。因此正常情况（UIA 能枚举到窗口）只使用 UIA，
-    /// 框精确贴合真实窗口；仅当 UIA 完全无结果（纯壁纸/全屏游戏/自绘窗口等极端情况）
-    /// 才回退边缘检测，保证仍有可框选区域。漏检的窗口可由用户拖拽自定义框选兜底。
+    /// QQ截图式：保持 Z-order（最前窗口在前），悬停时选中最内层（最小面积）窗口。
+    /// 边缘投影检测会把壁纸纹理/图标网格/窗口内 UI 边界拼成伪矩形，
+    /// 因此正常情况（UIA 能枚举到窗口）只使用 UIA；仅当 UIA 完全无结果才回退边缘检测。
     /// </remarks>
-    public static List<DetectedRegion> DetectAll(byte[] bgra, int vx, int vy, int vw, int vh)
+    /// <param name="excludeHwnds">需要排除的窗口句柄（如覆盖层自身）。</param>
+    public static List<DetectedRegion> DetectAll(byte[] bgra, int vx, int vy, int vw, int vh,
+        HashSet<nint>? excludeHwnds = null)
     {
-        // A: 窗口枚举（主力 — 框对齐真实窗口）
-        var uiaRegions = DetectWindows(vx, vy, vw, vh);
+        // A: 窗口枚举（主力 — 框对齐真实窗口，保持 Z-order）
+        var uiaRegions = DetectWindows(vx, vy, vw, vh, excludeHwnds);
 
         if (uiaRegions.Count > 0)
         {
-            // 正常路径：仅 UIA，彻底避免边缘伪框
-            uiaRegions.Sort((a, b) => b.Area.CompareTo(a.Area));
+            // 保持 Z-order（EnumWindows 返回顺序），不排序
+            // 悬停时由 FindSmallestRegionAt 选中最内层窗口
             return uiaRegions;
         }
 
         // B: 兜底 — UIA 一个窗口都没检测到时才用边缘检测
         var edgeRegions = DetectEdgeRegions(bgra, vw, vh, vx, vy);
-        edgeRegions.Sort((a, b) => b.Area.CompareTo(a.Area));
+        edgeRegions.Sort((a, b) => a.Area.CompareTo(b.Area)); // 小面积优先
         return edgeRegions;
     }
 

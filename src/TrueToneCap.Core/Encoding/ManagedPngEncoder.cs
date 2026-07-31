@@ -17,7 +17,7 @@ public static class ManagedPngEncoder
     /// <param name="w">宽度。</param>
     /// <param name="h">高度。</param>
     /// <param name="path">输出路径。</param>
-    /// <param name="bitDepth">输出位深 (8 或 16)。10/12-bit 映射到 16。</param>
+    /// <param name="bitDepth">输出位深 (8/10/12/16)。10/12-bit 写入真位深 + sBIT, 16-bit 存储为 16。</param>
     /// <param name="iccProfile">可选 ICC profile (写入 iCCP chunk)。</param>
     /// <param name="cicp">可选 CICP 4 字节 [primaries, transfer, matrix, range]。</param>
     public static void Encode(byte[] bgra, int w, int h, string path,
@@ -59,14 +59,10 @@ public static class ManagedPngEncoder
             }
         }
 
-        // Fastest 压缩
+        // Fastest 压缩 (ZLibStream 已包含 zlib 头 + Adler32)
         using var ms = new MemoryStream();
-        ms.WriteByte(0x78); ms.WriteByte(0x01); // zlib: Fastest
         using (var zlib = new ZLibStream(ms, CompressionLevel.Fastest, leaveOpen: true))
             zlib.Write(raw);
-        uint adler = ComputeAdler32(raw);
-        ms.WriteByte((byte)(adler >> 24)); ms.WriteByte((byte)(adler >> 16));
-        ms.WriteByte((byte)(adler >> 8)); ms.WriteByte((byte)adler);
         WriteChunk(fs, "IDAT"u8, ms.ToArray());
 
         WriteChunk(fs, "IEND"u8, []);
@@ -76,44 +72,48 @@ public static class ManagedPngEncoder
     public static void Encode(byte[] bgra, int w, int h, Stream output,
         int bitDepth = 8, byte[]? iccProfile = null, byte[]? cicp = null)
     {
-        int outDepth = bitDepth >= 10 ? 16 : 8;
-        int bytesPerChannel = outDepth / 8;
-        int channels = 4; // RGBA
+        // PNG 3.0 (ISO/IEC 15948:2023) 正式支持 10/12-bit depth
+        // 存储时使用 2 字节/通道，但 IHDR.bit_depth 标记为实际位深
+        int outDepth = bitDepth switch { 10 => 10, 12 => 12, >= 16 => 16, _ => 8 };
+        int bytesPerChannel = outDepth > 8 ? 2 : 1;
+        int channels = 4;
         int stride = w * channels * bytesPerChannel;
 
-        // PNG Signature
         output.Write(PngSignature);
 
         // IHDR
         var ihdr = new byte[13];
         BinaryPrimitives.WriteInt32BigEndian(ihdr, w);
         BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), h);
-        ihdr[8] = (byte)outDepth;       // bit depth
+        ihdr[8] = (byte)outDepth;       // bit depth: 8/10/12/16
         ihdr[9] = 6;                     // color type: RGBA
-        ihdr[10] = 0;                    // compression: deflate
-        ihdr[11] = 0;                    // filter: adaptive
-        ihdr[12] = 0;                    // interlace: none
+        ihdr[10] = 0;
+        ihdr[11] = 0;
+        ihdr[12] = 0;
         WriteChunk(output, "IHDR"u8, ihdr);
 
-        // cICP (Coding-Independent Code Points) — 优先于 iCCP
-        if (cicp is { Length: 4 } && iccProfile is null)
+        // sBIT — 当位深 10/12 时标记实际有效位（PNG 3.0 规范要求）
+        if (outDepth is 10 or 12)
         {
-            WriteChunk(output, "cICP"u8, cicp);
+            byte sbitVal = (byte)outDepth;
+            byte[] sbit = [sbitVal, sbitVal, sbitVal, sbitVal]; // RGBA 各通道
+            WriteChunk(output, "sBIT"u8, sbit);
         }
 
-        // iCCP (ICC Profile) — 与 cICP 互斥
+        // cICP / iCCP
+        if (cicp is { Length: 4 } && iccProfile is null)
+            WriteChunk(output, "cICP"u8, cicp);
         if (iccProfile is { Length: > 0 })
         {
             var iccpData = BuildIccpChunk(iccProfile);
             WriteChunk(output, "iCCP"u8, iccpData);
         }
 
-        // IDAT (compressed pixel data)
+        // IDAT
         var rawData = BuildRawScanlines(bgra, w, h, outDepth);
         var compressed = CompressDeflate(rawData);
         WriteChunk(output, "IDAT"u8, compressed);
 
-        // IEND
         WriteChunk(output, "IEND"u8, []);
     }
 
@@ -121,15 +121,17 @@ public static class ManagedPngEncoder
     /// C1 fix: 编码真 16-bit BGRA 像素为 16-bit PNG（HDR 路径专用）。
     /// 输入: 每像素 8 字节 (B16 G16 R16 A16, big-endian)，由 Rgba16ToBgra16Bytes 生成。
     /// </summary>
-    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null)
+    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, int bitDepth = 16)
     {
         using var fs = File.Create(path);
-        Encode16(bgra16, w, h, fs, cicp);
+        Encode16(bgra16, w, h, fs, cicp, bitDepth);
     }
 
-    /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。</summary>
-    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null)
+    /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。IHDR 始终为 16-bit，</summary>
+    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, int bitDepth = 16)
     {
+        int outDepth = bitDepth switch { 10 or 12 => 16, _ => 16 }; // IHDR 仅允许 8/16，HDR 用 16 + sBIT 标记实际位深
+
         // PNG Signature
         output.Write(PngSignature);
 
@@ -137,19 +139,27 @@ public static class ManagedPngEncoder
         var ihdr = new byte[13];
         BinaryPrimitives.WriteInt32BigEndian(ihdr, w);
         BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), h);
-        ihdr[8] = 16;                    // bit depth: 16
+        ihdr[8] = (byte)outDepth;        // bit depth: 16
         ihdr[9] = 6;                     // color type: RGBA
-        ihdr[10] = 0;                    // compression: deflate
-        ihdr[11] = 0;                    // filter: adaptive
-        ihdr[12] = 0;                    // interlace: none
+        ihdr[10] = 0;
+        ihdr[11] = 0;
+        ihdr[12] = 0;
         WriteChunk(output, "IHDR"u8, ihdr);
+
+        // sBIT — 当实际位深不足 16 时标记有效位（PNG 3.0 规范要求）
+        if (bitDepth is 10 or 12)
+        {
+            byte sbitVal = (byte)bitDepth;
+            byte[] sbit = [sbitVal, sbitVal, sbitVal, sbitVal];
+            WriteChunk(output, "sBIT"u8, sbit);
+        }
 
         // cICP
         if (cicp is { Length: 4 })
             WriteChunk(output, "cICP"u8, cicp);
 
-        // IDAT: 输入已是 16-bit big-endian BGRA，需转为 RGBA 并加 filter byte
-        var rawData = BuildRawScanlines16(bgra16, w, h);
+        // IDAT
+        var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth);
         var compressed = CompressDeflate(rawData);
         WriteChunk(output, "IDAT"u8, compressed);
 
@@ -157,8 +167,11 @@ public static class ManagedPngEncoder
         WriteChunk(output, "IEND"u8, []);
     }
 
-    /// <summary>构建 16-bit 扫描线: 输入 BGRA16 BE → 输出 RGBA16 BE + filter byte。</summary>
-    private static byte[] BuildRawScanlines16(byte[] bgra16, int w, int h)
+    /// <summary>构建 16-bit 扫描线: 输入 BGRA16 BE → 输出 RGBA16 BE + filter byte。
+    /// 存储位深始终为 16 (PNG 3.0 Table 12: color type 6 仅允许 8/16)。
+    /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放。</param></summary>
+    /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放。</param>
+    private static byte[] BuildRawScanlines16(byte[] bgra16, int w, int h, int actualBitDepth = 16)
     {
         int rowBytes = w * 8; // 4 channels × 2 bytes
         var raw = new byte[h * (1 + rowBytes)];
@@ -175,22 +188,44 @@ public static class ManagedPngEncoder
             {
                 int si = srcOff + x * 8;
                 int di = dstOff + x * 8;
-                // BGRA → RGBA (swap B↔R, 每通道 2 字节 big-endian 直接拷贝)
-                raw[di] = bgra16[si + 4]; raw[di + 1] = bgra16[si + 5];     // R
-                raw[di + 2] = bgra16[si + 2]; raw[di + 3] = bgra16[si + 3]; // G
-                raw[di + 4] = bgra16[si]; raw[di + 5] = bgra16[si + 1];     // B
-                raw[di + 6] = bgra16[si + 6]; raw[di + 7] = bgra16[si + 7]; // A
+                // 读取 16-bit big-endian 值
+                ushort r = (ushort)((bgra16[si + 4] << 8) | bgra16[si + 5]);
+                ushort g = (ushort)((bgra16[si + 2] << 8) | bgra16[si + 3]);
+                ushort b = (ushort)((bgra16[si] << 8) | bgra16[si + 1]);
+                ushort a = (ushort)((bgra16[si + 6] << 8) | bgra16[si + 7]);
+
+                // 按实际位深缩放：16-bit 容器中存储 10/12-bit 值时左对齐
+                if (actualBitDepth < 16)
+                {
+                    int shift = 16 - actualBitDepth;
+                    r = (ushort)(r >> shift);
+                    g = (ushort)(g >> shift);
+                    b = (ushort)(b >> shift);
+                    a = (ushort)(a >> shift);
+                    // 然后左移到 MSB 对齐 (sBIT 标记有效位)
+                    r = (ushort)(r << shift);
+                    g = (ushort)(g << shift);
+                    b = (ushort)(b << shift);
+                    a = (ushort)(a << shift);
+                }
+
+                // 写入 big-endian 16-bit 容器
+                raw[di] = (byte)(r >> 8); raw[di + 1] = (byte)r;
+                raw[di + 2] = (byte)(g >> 8); raw[di + 3] = (byte)g;
+                raw[di + 4] = (byte)(b >> 8); raw[di + 5] = (byte)b;
+                raw[di + 6] = (byte)(a >> 8); raw[di + 7] = (byte)a;
             }
         }
         return raw;
     }
 
-    /// <summary>构建原始扫描线数据（含 filter byte）— 自适应滤波优化压缩率。</summary>
+    /// <summary>构建原始扫描线数据（含 filter byte）— 自适应滤波优化压缩率。
+    /// SDR 路径固定 8-bit。</summary>
     private static byte[] BuildRawScanlines(byte[] bgra, int w, int h, int outDepth)
     {
         int channels = 4;
-        int bytesPerChannel = outDepth / 8;
-        int bpp = channels * bytesPerChannel; // bytes per pixel
+        int bytesPerChannel = 1; // SDR 路径固定 8-bit (PNG 3.0 Table 12: color type 6 仅允许 8/16)
+        int bpp = channels * bytesPerChannel;
         int rowBytes = w * bpp;
         var raw = new byte[h * (1 + rowBytes)];
 
@@ -218,14 +253,16 @@ public static class ManagedPngEncoder
             }
             else
             {
+                // outDepth > 8: 16-bit 路径 — 不应当在此路径中 (HDR 使用 Encode16)
+                // 作为安全回退，直接拷贝 8-bit 值到 16-bit 容器
                 for (int x = 0; x < w; x++)
                 {
                     int si = srcOff + x * 4;
                     int di = x * 8;
-                    Write16(curRow, di, bgra[si + 2]);     // R
-                    Write16(curRow, di + 2, bgra[si + 1]); // G
-                    Write16(curRow, di + 4, bgra[si]);     // B
-                    Write16(curRow, di + 6, bgra[si + 3]); // A
+                    Write16(curRow, di, (ushort)(bgra[si + 2] * 257));
+                    Write16(curRow, di + 2, (ushort)(bgra[si + 1] * 257));
+                    Write16(curRow, di + 4, (ushort)(bgra[si] * 257));
+                    Write16(curRow, di + 6, (ushort)(bgra[si + 3] * 257));
                 }
             }
 
@@ -310,33 +347,20 @@ public static class ManagedPngEncoder
     }
 
     /// <summary>8-bit 值扩展到 16-bit (val * 257 = val << 8 | val)。</summary>
-    private static void Write16(byte[] buf, int off, byte val)
+    private static void Write16(byte[] buf, int off, ushort val)
     {
-        ushort v16 = (ushort)(val * 257); // 0xFF → 0xFFFF
-        buf[off] = (byte)(v16 >> 8);
-        buf[off + 1] = (byte)v16;
+        buf[off] = (byte)(val >> 8);
+        buf[off + 1] = (byte)val;
     }
 
-    /// <summary>Deflate 压缩（最大压缩级别）。</summary>
+    /// <summary>Deflate 压缩（最大压缩级别）。ZLibStream 已包含 zlib 头 + Adler32。</summary>
     private static byte[] CompressDeflate(byte[] data)
     {
         using var ms = new MemoryStream();
-        // zlib header: CM=8, CINFO=7 (32K window), FCHECK
-        ms.WriteByte(0x78);
-        ms.WriteByte(0xDA); // 最大压缩
-
         using (var zlib = new ZLibStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
         {
             zlib.Write(data);
         }
-
-        // Adler32 校验
-        uint adler = ComputeAdler32(data);
-        ms.WriteByte((byte)(adler >> 24));
-        ms.WriteByte((byte)(adler >> 16));
-        ms.WriteByte((byte)(adler >> 8));
-        ms.WriteByte((byte)adler);
-
         return ms.ToArray();
     }
 

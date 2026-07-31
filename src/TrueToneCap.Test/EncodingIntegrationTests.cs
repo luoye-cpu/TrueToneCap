@@ -33,7 +33,7 @@ public static class EncodingIntegrationTests
         Test_SdrEncode(OutputFormat.PNG, bgra, w, h, 100f);
         Test_SdrEncode(OutputFormat.JPEG_LI, bgra, w, h, 1.0f);
         Test_SdrEncode(OutputFormat.WebP, bgra, w, h, 92f);
-        Test_SdrEncode(OutputFormat.BMP, bgra, w, h, 100f);
+        Test_SdrEncode(OutputFormat.TIFF, bgra, w, h, 100f);
         Test_SdrEncode(OutputFormat.JPEG_XL, bgra, w, h, 0.8f);
         Test_SdrEncode(OutputFormat.AVIF, bgra, w, h, 18f);
 
@@ -287,7 +287,7 @@ public static class EncodingIntegrationTests
         OutputFormat.JPEG_XL => ".jxl",
         OutputFormat.AVIF => ".avif",
         OutputFormat.WebP => ".webp",
-        OutputFormat.BMP => ".bmp",
+        OutputFormat.TIFF => ".bmp",
         OutputFormat.JPEG_GAINMAP => ".jpg",
         _ => ".bin"
     };

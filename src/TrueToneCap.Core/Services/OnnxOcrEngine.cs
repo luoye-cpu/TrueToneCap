@@ -301,6 +301,7 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                         lines.Add(new OcrLine
                         {
                             Text = text,
+                            X = bx, Y = by, Width = bw, Height = bh,
                             Words = [new OcrWord { Text = text, X = bx, Y = by, Width = bw, Height = bh }]
                         });
                         allText.Add(text);

@@ -2,6 +2,7 @@
 // 全部编码器 — 零 Magick.NET 依赖
 // PNG: 托管编码器 | JPEG LI: jpegli P/Invoke | JXL: cjxl | AVIF: libavif/硬件 | WebP: libwebp | BMP: 托管
 using System.Threading.Tasks;
+using System.IO;
 using Vortice.Direct3D11;
 using Vortice.Direct3D;
 
@@ -18,14 +19,18 @@ public sealed class PngEncoder : ImageEncoder
     {
         if (s.HdrOutput)
         {
-            // HDR: scRGB → PQ 16-bit PNG + cICP (C1 fix: 真 16-bit 精度)
+            // HDR: scRGB → 目标色域线性 → PQ → PNG (10/12/16-bit) + cICP
             await Task.Run(() =>
             {
                 ct.ThrowIfCancellationRequested();
-                var p16 = FormatHelper.HdrToPq16(f);
+                var csTag = s.ColorSpaceTag ?? "sRGB";
+                var p16 = FormatHelper.HdrToPq16(f, csTag);
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
-                byte[] cicp = [9, 16, 0, 1]; // BT.2020 + ST.2084 PQ
-                ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp);
+                byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
+                byte[] cicp = [primaries, 16, 0, 1]; // PQ transfer=16
+                int hdrBitDepth = s.OutputBitDepth switch { 10 => 10, 12 => 12, _ => 16 };
+                // IHDR 始终为 16-bit，sBIT 标记实际位深 (PNG 3.0 Table 12: color type 6 仅允许 8/16)
+                ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, bitDepth: hdrBitDepth);
             }, ct);
         }
         else
@@ -36,16 +41,17 @@ public sealed class PngEncoder : ImageEncoder
     }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
+        // SDR PNG 始终使用 8-bit：8-bit 输入扩展到 10/12/16-bit 只会徒增体积而无精度收益
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
             var (icc, cicp) = FormatHelper.GetColorMetadata(s);
-            ManagedPngEncoder.Encode(px, w, h, path, s.OutputBitDepth, icc, cicp);
+            ManagedPngEncoder.Encode(px, w, h, path, 8, icc, cicp);
         }, ct);
     }
 }
 
-// ────── JPEG (ManagedJpegEncoder — 真正的基线 JPEG) ──────
+// ────── JPEG LI (jpegli — 唯一 JPEG 编码器) ──────
 public sealed class JpegLiEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.JPEG_LI;
@@ -59,10 +65,13 @@ public sealed class JpegLiEncoder : ImageEncoder
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
-            // butteraugli 距离 → JPEG 质量百分比
-            int quality = (int)Math.Clamp(100f - (s.Quality - 0.5f) * 28f, 10, 100);
             var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
-            ManagedJpegEncoder.Encode(px, w, h, path, quality, icc, s.ChromaSubsampling);
+
+            if (!JpegLiNative.IsAvailable)
+                throw new InvalidOperationException("JPEG LI 编码需要 cjpegli.exe (Google jpegli)，请将 cjpegli.exe 放入 native/ 目录或系统 PATH。");
+
+            var jpegBytes = JpegLiNative.Encode(px, w, h, s.Quality, s.ChromaSubsampling, icc);
+            File.WriteAllBytes(path, jpegBytes);
         }, ct);
     }
 }
@@ -78,12 +87,12 @@ public sealed class JpegXlEncoder : ImageEncoder
     {
         if (s.HdrOutput)
         {
-            // HDR JXL: scRGB → PQ 16-bit → NativeJxlEncoder.EncodeHdr
+            // HDR JXL: scRGB → 目标色域线性 → PQ 16-bit → NativeJxlEncoder.EncodeHdr
             await Task.Run(() =>
             {
                 ct.ThrowIfCancellationRequested();
-                var pq16 = FormatHelper.HdrToPq16(f);
-                // pq16 是 RGBA16 格式，直接传入 EncodeHdr
+                var csTag = s.ColorSpaceTag ?? "sRGB";
+                var pq16 = FormatHelper.HdrToPq16(f, csTag);
                 var icc = s.IccProfile;
                 NativeJxlEncoder.EncodeHdr(pq16, f.Width, f.Height, path, s.Quality, icc, 10000f);
             }, ct);
@@ -116,20 +125,20 @@ public sealed class AvifEncoder : ImageEncoder
     {
         if (s.HdrOutput)
         {
-            // HDR AVIF: 16-bit PNG 中转 + avifenc (C1 fix: 真 16-bit 中间 PNG)
+            // HDR AVIF: scRGB → 目标色域线性 → PQ 16-bit → 16-bit PNG 中转 + avifenc
             await Task.Run(() =>
             {
                 ct.ThrowIfCancellationRequested();
-                var p16 = FormatHelper.HdrToPq16(f);
+                var csTag = s.ColorSpaceTag ?? "sRGB";
+                var p16 = FormatHelper.HdrToPq16(f, csTag);
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
-                byte[] cicp = [9, 16, 0, 1];
+                byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
+                byte[] cicpHdr = [primaries, 16, 0, 1]; // PQ transfer
                 var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_avif_hdr_{Guid.NewGuid():N}.png");
                 try
                 {
-                    // C1 fix: 使用 Encode16 保留完整 16-bit 精度
-                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, tmpPng, cicp: cicp);
-                    // avifenc 直接读取 16-bit PNG 文件，标记 HDR 以注入 CICP 元数据
-                    NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, isHdr: true);
+                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, tmpPng, cicp: cicpHdr);
+                    NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr);
                 }
                 finally { try { File.Delete(tmpPng); } catch { } }
             }, ct);
@@ -141,7 +150,7 @@ public sealed class AvifEncoder : ImageEncoder
         }
     }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
-    { var be = AvifEncoderSelector.Select(s.AvifBackend); await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct, s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile); }
+    { var be = AvifEncoderSelector.Select(s.AvifBackend); await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct, s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile, s.GpuTexture); }
 }
 
 // ────── WebP ──────
@@ -175,21 +184,40 @@ public sealed class WebPEncoder : ImageEncoder
     }
 }
 
-// ────── BMP ──────
-public sealed class BmpEncoder : ImageEncoder
+// ────── TIFF ──────
+public sealed class TiffEncoder : ImageEncoder
 {
-    public override OutputFormat Format => OutputFormat.BMP;
-    public override bool SupportsHdr => false;
+    public override OutputFormat Format => OutputFormat.TIFF;
+    public override bool SupportsHdr => true;
     public override (float, float, float, string) GetQualityRange() => (100f, 100f, 100f, "无损 (固定)");
     public override string GetQualityDescription(float _) => "无损";
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
-    { var d = FormatHelper.ToSdr(f, s); await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct); }
+    {
+        if (s.HdrOutput)
+        {
+            // HDR TIFF: 16-bit PQ (目标色域线性 → PQ)
+            await Task.Run(() =>
+            {
+                ct.ThrowIfCancellationRequested();
+                var csTag = s.ColorSpaceTag ?? "sRGB";
+                var pq16 = FormatHelper.HdrToPq16(f, csTag);
+                var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(pq16, f.Width, f.Height);
+                ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, s.IccProfile);
+            }, ct);
+        }
+        else
+        {
+            var d = FormatHelper.ToSdr(f, s);
+            await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
+        }
+    }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
-            ManagedBmpEncoder.Encode(px, w, h, path);
+            var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
+            ManagedTiffEncoder.Encode(px, w, h, path, s.OutputBitDepth, icc);
         }, ct);
     }
 }
@@ -228,7 +256,7 @@ public sealed class LibAomAvifBackend : IAvifEncoder
 {
     public AvifEncoderBackend Backend => AvifEncoderBackend.LibAom;
     public bool IsAvailable => NativeAvifEncoder.IsAvailable;
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
     {
         await Task.Run(() =>
         {
@@ -243,7 +271,7 @@ public sealed class QsvAvifBackend : IAvifEncoder
 {
     public AvifEncoderBackend Backend => AvifEncoderBackend.Qsv;
     public bool IsAvailable => QsvEncoderNative.IsAvailable;
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
     {
         await Task.Run(() =>
         {
@@ -303,14 +331,42 @@ public sealed class NvencAvifBackend : IAvifEncoder
         }
     }
 
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
     {
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
 
-            // ═══ P/Invoke 崩溃隔离：CSE (AccessViolation/SEH) 安全 ═══
-            var result = NativeEncoderGuard.TryEncode("NVENC", () =>
+            // ═══ GPU 纹理直通路径：NVENC 直接从 D3D11 纹理编码，跳过 CPU 回读 ═══
+            if (texture is not null)
+            {
+                System.Diagnostics.Debug.WriteLine("[AVIF] NVENC: GPU 纹理直通路径");
+                var result = NativeEncoderGuard.TryEncode("NVENC_Texture", () =>
+                {
+                    ID3D11Device? device = null;
+                    lock (s_deviceLock) { device = s_cachedD3DDevice; }
+                    if (device is null)
+                    {
+                        System.Diagnostics.Debug.WriteLine("[AVIF] NVENC: 创建新 D3D11 设备...");
+                        device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+                    }
+                    using var nv = new NvEncoderNative(device);
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    var bs = nv.EncodeAv1FromTexture(texture, w, h, crf);
+                    System.Diagnostics.Debug.WriteLine($"[AVIF] ✅ NVENC 纹理直通: {w}x{h} CRF={crf} {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB");
+                    return bs;
+                });
+                if (result.Success)
+                {
+                    IvfWriter.WriteAvif(result.Value!, w, h, path);
+                    return;
+                }
+                System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC 纹理路径失败 ({result.Error?.GetType().Name}: {result.Error?.Message})，回退 CPU 路径");
+                // 纹理路径失败，回退到 CPU 像素路径（可能纹理被设备释放）
+            }
+
+            // ═══ CPU 像素路径（原有回退）：纹理不可用或纹理路径失败时使用 ═══
+            var result2 = NativeEncoderGuard.TryEncode("NVENC", () =>
             {
                 ID3D11Device? device = null;
                 lock (s_deviceLock) { device = s_cachedD3DDevice; }
@@ -332,13 +388,13 @@ public sealed class NvencAvifBackend : IAvifEncoder
                 return bs;
             });
 
-            if (result.Success)
+            if (result2.Success)
             {
-                IvfWriter.WriteAvif(result.Value!, w, h, path);
+                IvfWriter.WriteAvif(result2.Value!, w, h, path);
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC 失败 ({result.Error?.GetType().Name}: {result.Error?.Message})，回退 libaom");
+            System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC 失败 ({result2.Error?.GetType().Name}: {result2.Error?.Message})，回退 libaom");
             AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
         }, ct);
     }
@@ -350,7 +406,7 @@ public sealed class MftAvifBackend : IAvifEncoder
     public AvifEncoderBackend Backend => AvifEncoderBackend.Auto;
     public bool IsAvailable => MftEncoderNative.IsAv1MftAvailable;
 
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
     {
         await Task.Run(() =>
         {
@@ -426,31 +482,35 @@ public static class FormatHelper
         byte[]? cicp = null;
         if (icc is null)
         {
-            (byte primaries, byte transfer) = s.ColorSpaceTag switch
-            {
-                "DisplayP3" or "DCI_P3" => ((byte)12, (byte)13),
-                "BT2020" => ((byte)9, (byte)1),
-                "AdobeRGB" => ((byte)1, (byte)13),  // N13 fix: transfer=13 (sRGB/sYCC)，原 0 是 CICP 保留值
-                _ => ((byte)1, (byte)13) // sRGB / System
-            };
+            byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(s.ColorSpaceTag ?? "sRGB");
+            byte transfer = ColorManagement.ColorSpaceConverter.GetCicpTransfer(s.ColorSpaceTag ?? "sRGB", hdrOutput: false);
             cicp = [primaries, transfer, 0, 1];
         }
 
         return (icc, cicp);
     }
 
-    /// <summary>HDR scRGB → PQ 16-bit RGBA 数组（精确 10→16 bit 映射）。</summary>
-    public static ushort[] HdrToPq16(HdrFrameData f)
+    /// <summary>HDR scRGB → PQ 16-bit RGBA 数组（精确 10→16 bit 映射）。
+    /// 在 PQ 编码前先将 scRGB (BT.709) 转换到目标色域线性空间，
+    /// 确保像素值色域与 CICP/ICC 元数据一致。</summary>
+    /// <param name="f">HDR 帧数据（scRGB 线性浮点像素）。</param>
+    /// <param name="colorSpaceTag">目标色域标签，null/sRGB 时不转换。</param>
+    public static ushort[] HdrToPq16(HdrFrameData f, string? colorSpaceTag = null)
     {
         int pixelCount = f.Width * f.Height;
+
+        // ═══ 色域转换：scRGB (BT.709) → 目标色域线性 ═══
+        var matrix = ColorManagement.ColorSpaceConverter.GetMatrix(colorSpaceTag ?? "sRGB");
+        var converted = ColorManagement.ColorSpaceConverter.ConvertScrgbToTarget(f.Pixels, f.Width, f.Height, matrix);
+
         var p16 = new ushort[pixelCount * 4];
         Parallel.For(0, pixelCount, pi =>
         {
             int i = pi * 4;
-            float r = LinearToPQ(f.Pixels[i]);
-            float g = LinearToPQ(f.Pixels[i + 1]);
-            float b = LinearToPQ(f.Pixels[i + 2]);
-            float a = Math.Clamp(f.Pixels[i + 3], 0f, 1f);
+            float r = LinearToPQ(converted[i]);
+            float g = LinearToPQ(converted[i + 1]);
+            float b = LinearToPQ(converted[i + 2]);
+            float a = Math.Clamp(converted[i + 3], 0f, 1f);
             // M5 fix: 精确 10→16 bit 映射 (pq10 * 65535 / 1023)，而非 *64 截断
             p16[i]     = (ushort)Math.Clamp((int)Math.Round(r * 65535f), 0, 65535);
             p16[i + 1] = (ushort)Math.Clamp((int)Math.Round(g * 65535f), 0, 65535);
@@ -508,7 +568,7 @@ public static class FormatHelper
 public static class EncoderFactory
 {
     public static ImageEncoder Create(OutputFormat f) => f switch
-    { OutputFormat.PNG => new PngEncoder(), OutputFormat.JPEG_LI => new JpegLiEncoder(), OutputFormat.JPEG_XL => new JpegXlEncoder(), OutputFormat.AVIF => new AvifEncoder(), OutputFormat.WebP => new WebPEncoder(), OutputFormat.BMP => new BmpEncoder(), OutputFormat.JPEG_GAINMAP => new JpegGainMapEncoder(), _ => new PngEncoder() };
+    { OutputFormat.PNG => new PngEncoder(), OutputFormat.JPEG_LI => new JpegLiEncoder(), OutputFormat.JPEG_XL => new JpegXlEncoder(), OutputFormat.AVIF => new AvifEncoder(), OutputFormat.WebP => new WebPEncoder(), OutputFormat.TIFF => new TiffEncoder(), OutputFormat.JPEG_GAINMAP => new JpegGainMapEncoder(), _ => new PngEncoder() };
     public static OutputFormat Parse(string n) => n?.ToUpperInvariant() switch
-    { "PNG" => OutputFormat.PNG, "JPEG LI" or "JPEGLI" => OutputFormat.JPEG_LI, "JPEG XL" or "JXL" => OutputFormat.JPEG_XL, "AVIF" => OutputFormat.AVIF, "WEBP" => OutputFormat.WebP, "BMP" => OutputFormat.BMP, "JPEG GAINMAP" or "JPEGGAINMAP" or "GAINMAP" or "ULTRAHDR" => OutputFormat.JPEG_GAINMAP, _ => OutputFormat.PNG };
+    { "PNG" => OutputFormat.PNG, "JPEG LI" or "JPEGLI" => OutputFormat.JPEG_LI, "JPEG XL" or "JXL" => OutputFormat.JPEG_XL, "AVIF" => OutputFormat.AVIF, "WEBP" => OutputFormat.WebP, "TIFF" or "TIF" => OutputFormat.TIFF, "JPEG GAINMAP" or "JPEGGAINMAP" or "GAINMAP" or "ULTRAHDR" => OutputFormat.JPEG_GAINMAP, _ => OutputFormat.PNG };
 }

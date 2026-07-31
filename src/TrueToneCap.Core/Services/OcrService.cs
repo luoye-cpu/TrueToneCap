@@ -284,6 +284,11 @@ public class OcrLine
 {
     public string Text { get; set; } = "";
     public List<OcrWord> Words { get; set; } = [];
+    /// <summary>行级原图边界框（回退用，当 Words 为空时使用）。</summary>
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
 }
 
 public class OcrWord

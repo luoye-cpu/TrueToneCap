@@ -7,6 +7,7 @@ using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Encoding;
 using TrueToneCap.Core.Metadata;
 using TrueToneCap.Core.Processing;
+using Vortice.Direct3D11;
 
 namespace TrueToneCap.App.Services;
 
@@ -60,8 +61,33 @@ public sealed class CapturePipelineService
         return (bgra, null);
     }
 
+    /// <summary>
+    /// 从 Float16 广色域像素转换为 SDR BGRA8 + 嵌入 ICC 元数据。
+    /// 用于 HDR 关闭 + 广色域目标场景：
+    /// WGC Float16 包含完整广色域数据 → 色域矩阵转换 → 色调映射 → sRGB gamma → BGRA8
+    /// </summary>
+    public static (byte[] pixels, byte[]? iccProfile) PrepareFloat16WithIcc(
+        float[] hdrPixels, int w, int h,
+        bool iccBakeEnabled, string colorSpaceTag,
+        TrueToneCap.Core.Processing.ToneMappingParams toneParams)
+    {
+        // 1. 色域转换 + 色调映射到 BGRA8
+        var bgra = ColorSpaceConverter.ConvertFloat16ToSdrBgra(
+            hdrPixels, w, h, colorSpaceTag, toneParams);
+
+        // 2. ICC 色彩管理（嵌入元数据）
+        bool isSRgbTarget = colorSpaceTag is "System" or "sRGB";
+        if (!iccBakeEnabled || isSRgbTarget)
+            return (bgra, null);
+
+        var targetCs = ColorProfileProvider.MapColorSpaceTag(colorSpaceTag);
+        var targetIcc = ColorProfileProvider.GetStandardIccProfile(targetCs);
+        return (bgra, targetIcc);
+    }
+
     /// <summary>构建编码设置。</summary>
-    public EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta)
+    public EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta,
+        string? colorSpaceTag = null)
     {
         var s = _settings.Current;
         var avifBackend = s.AvifBackendIndex switch
@@ -71,6 +97,20 @@ public sealed class CapturePipelineService
             3 => AvifEncoderBackend.Nvenc,
             _ => AvifEncoderBackend.Auto
         };
+
+        // 每格式参数映射（与 MainWindow.BuildEncodingSettings 保持一致）
+        var (bitDepth, chroma) = format switch
+        {
+            OutputFormat.PNG => (s.BitDepthPng, "444"),
+            OutputFormat.JPEG_LI => (s.BitDepthJpegLi, s.ChromaJpegLi),
+            OutputFormat.JPEG_XL => (s.BitDepthJpegXl, s.ChromaJpegXl),
+            OutputFormat.AVIF => (s.BitDepthAvif, s.ChromaAvif),
+            OutputFormat.WebP => (s.BitDepthWebP, s.ChromaWebP),
+            OutputFormat.TIFF => (s.BitDepthBmp, s.ChromaBmp),
+            OutputFormat.JPEG_GAINMAP => (s.BitDepthGainMap, s.ChromaGainMap),
+            _ => (s.OutputBitDepth, s.AvifChroma),
+        };
+
         var settings = new EncodingSettings
         {
             Format = format,
@@ -78,15 +118,18 @@ public sealed class CapturePipelineService
             HdrOutput = hdrOutput,
             AvifBackend = avifBackend,
             AvifPngSuffix = s.AvifPngSuffix,
-            AvifChroma = s.AvifChroma,
+            AvifChroma = chroma,
+            ChromaSubsampling = chroma,
+            OutputBitDepth = bitDepth,
             DisplayBitDepth = s.DisplayBitDepth,
             GainMapMode = s.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
             Metadata = meta,
             PreferGpuEncode = true,
-            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
+            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable },
+            ColorSpaceTag = colorSpaceTag ?? "System"
         };
 
-        LogService.Info("Pipeline", $"编码设置: {format} HDR={hdrOutput} 质量={s.Quality:F1} AVIF后端={avifBackend} 色度={s.AvifChroma}");
+        LogService.Info("Pipeline", $"编码设置: {format} HDR={hdrOutput} 质量={s.Quality:F1} 位深={bitDepth} 色度={chroma} AVIF后端={avifBackend}");
         return settings;
     }
 
@@ -101,7 +144,7 @@ public sealed class CapturePipelineService
             OutputFormat.JPEG_XL => ".jxl",
             OutputFormat.AVIF => ".avif",
             OutputFormat.WebP => ".webp",
-            OutputFormat.BMP => ".bmp",
+            OutputFormat.TIFF => ".tiff",
             _ => ".png"
         };
         if (format == OutputFormat.AVIF && s.AvifPngSuffix) ext += ".png";
@@ -139,10 +182,12 @@ public sealed class CapturePipelineService
     public async Task<string> EncodeAndSaveAsync(
         byte[] bgra, int w, int h, OutputFormat format,
         bool hdrOutput, bool iccBakeEnabled, string colorSpaceTag,
-        CancellationToken ct = default)
+        CancellationToken ct = default, ID3D11Texture2D? gpuTexture = null)
     {
         var encoder = EncoderFactory.Create(format);
-        var settings = BuildEncodingSettings(format, hdrOutput, null);
+        var settings = BuildEncodingSettings(format, hdrOutput, null, colorSpaceTag);
+        if (gpuTexture is not null)
+            settings.GpuTexture = gpuTexture;
         var outDir = GetEffectiveOutputDir();
         var path = BuildOutputPath(format, outDir);
 
@@ -159,13 +204,89 @@ public sealed class CapturePipelineService
                 {
                     Pixels = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(pixels, w, h),
                     Width = w, Height = h,
-                    IccProfile = settings.IccProfile
+                    IccProfile = settings.IccProfile,
+                    GpuTexture = gpuTexture
                 };
                 encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
             }
             else
             {
                 encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
+            }
+        }, ct);
+
+        return path;
+    }
+
+    /// <summary>编码并保存（使用调用方提供的显式设置，供 MainWindow UI 路径使用）。</summary>
+    public async Task<string> EncodeAndSaveAsync(
+        byte[] bgra, int w, int h, EncodingSettings settings,
+        bool iccBakeEnabled, string colorSpaceTag,
+        CancellationToken ct = default, ID3D11Texture2D? gpuTexture = null)
+    {
+        var encoder = EncoderFactory.Create(settings.Format);
+        if (gpuTexture is not null)
+            settings.GpuTexture = gpuTexture;
+        var outDir = GetEffectiveOutputDir();
+        var path = BuildOutputPath(settings.Format, outDir);
+
+        LogService.Info("Pipeline", $"开始编码: {settings.Format} {w}x{h} HDR={settings.HdrOutput} → {Path.GetFileName(path)}");
+
+        await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var (pixels, iccProfile) = PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
+            if (iccProfile is not null)
+                settings.IccProfile = iccProfile;
+
+            ct.ThrowIfCancellationRequested();
+            if (settings.HdrOutput && encoder.SupportsHdr)
+            {
+                var hdrFrame = new HdrFrameData
+                {
+                    Pixels = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(pixels, w, h),
+                    Width = w, Height = h,
+                    IccProfile = settings.IccProfile,
+                    GpuTexture = gpuTexture
+                };
+                encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
+            }
+            else
+            {
+                encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
+            }
+        }, ct);
+
+        var fileSize = File.Exists(path) ? new FileInfo(path).Length : 0;
+        LogService.Info("Pipeline", $"编码完成: {Path.GetFileName(path)} ({fileSize / 1024.0:F1} KB)");
+        return path;
+    }
+
+    /// <summary>编码并保存 HDR 帧数据（WGC 直接捕获的 scRGB float 像素）。</summary>
+    public async Task<string> EncodeHdrFrameAsync(
+        HdrFrameData hdrFrame, EncodingSettings settings,
+        CancellationToken ct = default)
+    {
+        var encoder = EncoderFactory.Create(settings.Format);
+        var outDir = GetEffectiveOutputDir();
+        var path = BuildOutputPath(settings.Format, outDir);
+
+        await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            if (encoder.SupportsHdr)
+            {
+                encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
+            }
+            else
+            {
+                // 编码器不支持 HDR → 色调映射到 SDR
+                var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
+                // 传递 GPU 纹理到 SDR 编码路径
+                if (hdrFrame.GpuTexture is not null)
+                    settings.GpuTexture = hdrFrame.GpuTexture;
+                encoder.EncodeSdrAsync(sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct)
+                    .GetAwaiter().GetResult();
             }
         }, ct);
 

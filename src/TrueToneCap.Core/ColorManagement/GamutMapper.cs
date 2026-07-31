@@ -1,8 +1,6 @@
 // TrueToneCap.Core/ColorManagement/GamutMapper.cs
 // ACES 影视标准色域缩限 — 广色域/HDR → sRGB 单一路径
 
-using ImageMagick;
-
 namespace TrueToneCap.Core.ColorManagement;
 
 /// <summary>ACES 色域映射引擎：Perceptual 感知意图，影视工业标准。</summary>

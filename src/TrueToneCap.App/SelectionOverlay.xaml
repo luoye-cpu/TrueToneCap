@@ -5,7 +5,9 @@
     Closed="OnClosed">
 
     <Grid x:Name="RootGrid" IsTabStop="True">
-        <!-- 桌面截图背景（拉伸填充，确保覆盖整个窗口） -->
+        <!-- HDR SwapChain 背景（HDR 显示器上直接呈现 scRGB 线性帧） -->
+        <SwapChainPanel x:Name="HdrPanel" IsHitTestVisible="False" Visibility="Collapsed"/>
+        <!-- SDR 桌面截图背景（回退路径） -->
         <Image x:Name="DesktopImage" Stretch="Fill" IsHitTestVisible="False"/>
 
         <!-- 半透明覆盖层：等待用户单击或框选 -->

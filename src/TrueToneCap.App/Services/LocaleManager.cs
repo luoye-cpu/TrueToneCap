@@ -24,10 +24,11 @@ public static class LocaleManager
 
     // ── 导航 ──
     public static string NavOutput => s_lang == AppLanguage.Chinese ? "输出设置" : "Output";
-    public static string NavColor => s_lang == AppLanguage.Chinese ? "色彩设置" : "Color";
+    public static string NavColor => s_lang == AppLanguage.Chinese ? "色彩管理" : "Color";
     public static string NavCapture => s_lang == AppLanguage.Chinese ? "截图与录制" : "Capture";
-    public static string NavAI => s_lang == AppLanguage.Chinese ? "AI 翻译" : "AI Translate";
-    public static string NavSystem => s_lang == AppLanguage.Chinese ? "系统" : "System";
+    public static string NavAI => s_lang == AppLanguage.Chinese ? "OCR / 翻译" : "OCR / Translate";
+    public static string NavSystem => s_lang == AppLanguage.Chinese ? "系统设置" : "System";
+    public static string NavLog => s_lang == AppLanguage.Chinese ? "运行日志" : "Logs";
 
     // ── 输出页 ──
     public static string PageOutput => s_lang == AppLanguage.Chinese ? "输出设置" : "Output Settings";

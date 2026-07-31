@@ -648,7 +648,7 @@ public static class ColorProfileProvider
 
     /// <summary>基于 sRGB ICC 模板修改 primaries 生成自定义色彩空间 ICC。
     /// 保留 sRGB 的完整 tag 结构（TRC、wtpt 等），仅替换 rXYZ/gXYZ/bXYZ 和 desc。</summary>
-    private static byte[]? PatchSrgbPrimaries(IccPrimaries p, string name)
+    public static byte[]? PatchSrgbPrimaries(IccPrimaries p, string name)
     {
         var template = Encoding.IccStore.SRGB;
         if (template is null || template.Length < 132) return null;
@@ -758,6 +758,115 @@ public static class ColorProfileProvider
 /// <summary>简易色域转换器（scRGB ↔ sRGB/P3）。</summary>
 public static class ColorSpaceConverter
 {
+    // ═══════════════════════════════════════════════════════════════
+    //  3×3 转换矩阵（线性 scRGB BT.709 → 目标色域线性）
+    //  预计算 BT.709_to_XYZ × XYZ_to_Target
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>scRGB (BT.709) → BT.2020 线性转换矩阵。</summary>
+    public static readonly float[,] SrgbToBt2020 = new float[3, 3]
+    {
+        { 0.627403f, 0.329283f, 0.043313f },
+        { 0.069097f, 0.919541f, 0.011362f },
+        { 0.016392f, 0.088013f, 0.895595f }
+    };
+
+    /// <summary>scRGB (BT.709) → Display P3 线性转换矩阵。</summary>
+    public static readonly float[,] SrgbToDisplayP3 = new float[3, 3]
+    {
+        { 0.822462f, 0.177194f, 0.000344f },
+        { 0.033194f, 0.966799f, 0.000007f },
+        { 0.017083f, 0.072411f, 0.910506f }
+    };
+
+    /// <summary>scRGB (BT.709) → Adobe RGB 线性转换矩阵。</summary>
+    public static readonly float[,] SrgbToAdobeRgb = new float[3, 3]
+    {
+        { 0.715160f, 0.284849f, 0.000009f },
+        { 0.000000f, 1.000000f, 0.000000f },
+        { 0.000000f, 0.041169f, 0.958831f }
+    };
+
+    /// <summary>根据色彩空间标签获取 scRGB→目标色域 3×3 矩阵。</summary>
+    public static float[,]? GetMatrix(string colorSpaceTag) => colorSpaceTag switch
+    {
+        "BT2020" => SrgbToBt2020,
+        "DisplayP3" or "DCI_P3" => SrgbToDisplayP3,
+        "AdobeRGB" => SrgbToAdobeRgb,
+        _ => null // sRGB / System: 无需转换
+    };
+
+    /// <summary>获取 CICP 原色索引 (ITU-T H.273)。</summary>
+    public static byte GetCicpPrimaries(string colorSpaceTag) => colorSpaceTag switch
+    {
+        "DisplayP3" or "DCI_P3" => 12,
+        "BT2020" => 9,
+        "AdobeRGB" => 1,
+        _ => 1
+    };
+
+    /// <summary>获取 CICP 传输函数索引。</summary>
+    public static byte GetCicpTransfer(string colorSpaceTag, bool hdrOutput) => (colorSpaceTag, hdrOutput) switch
+    {
+        (_, true) => 16,  // ST.2084 PQ (ITU-T H.273 Table 3)
+        ("AdobeRGB", _) => 13,
+        _ => 13
+    };
+
+    /// <summary>
+    /// 将 scRGB Float16 线性浮点像素转换到目标色域线性空间并做色调映射到 SDR BGRA8。
+    /// 用于 HDR 关闭 + 广色域目标场景：
+    ///   WGC Float16 包含完整广色域数据 → 色域矩阵转换 → 色调映射 → sRGB gamma → BGRA8
+    /// </summary>
+    /// <param name="hdrPixels">scRGB 线性 RGBA 浮点像素 (WGC Float16 会话)。</param>
+    /// <param name="w">宽度。</param>
+    /// <param name="h">高度。</param>
+    /// <param name="colorSpaceTag">目标色域标签，null/sRGB 时仅做色调映射。</param>
+    /// <param name="toneParams">色调映射参数。</param>
+    /// <returns>BGRA8 字节数组。</returns>
+    public static byte[] ConvertFloat16ToSdrBgra(float[] hdrPixels, int w, int h,
+        string? colorSpaceTag, Processing.ToneMappingParams toneParams)
+    {
+        // 1. 色域转换：scRGB (BT.709) → 目标色域线性
+        var matrix = GetMatrix(colorSpaceTag ?? "sRGB");
+        var converted = ConvertScrgbToTarget(hdrPixels, w, h, matrix);
+
+        // 2. 复用 ToneMapper 融合内核：色调映射 + gamma + swizzle → BGRA8
+        return Processing.ToneMapper.FloatToSRgbBytes(converted, w, h, toneParams);
+    }
+
+    /// <summary>将 scRGB 线性浮点像素转换到目标色域线性空间。</summary>
+    public static float[] ConvertScrgbToTarget(float[] srcPixels, int w, int h, float[,]? matrix)
+    {
+        if (matrix is null)
+        {
+            var copy = new float[srcPixels.Length];
+            System.Buffer.BlockCopy(srcPixels, 0, copy, 0, srcPixels.Length * sizeof(float));
+            return copy;
+        }
+
+        int pixelCount = w * h;
+        var result = new float[srcPixels.Length];
+        float m00 = matrix[0, 0], m01 = matrix[0, 1], m02 = matrix[0, 2];
+        float m10 = matrix[1, 0], m11 = matrix[1, 1], m12 = matrix[1, 2];
+        float m20 = matrix[2, 0], m21 = matrix[2, 1], m22 = matrix[2, 2];
+
+        System.Threading.Tasks.Parallel.For(0, pixelCount, pi =>
+        {
+            int i = pi * 4;
+            float r = srcPixels[i];
+            float g = srcPixels[i + 1];
+            float b = srcPixels[i + 2];
+            float a = srcPixels[i + 3];
+            result[i]     = r * m00 + g * m01 + b * m02;
+            result[i + 1] = r * m10 + g * m11 + b * m12;
+            result[i + 2] = r * m20 + g * m21 + b * m22;
+            result[i + 3] = a;
+        });
+
+        return result;
+    }
+
     /// <summary>线性 scRGB → sRGB（gamma 编码）。</summary>
     public static Span<float> ScRgbToSRgb(Span<float> pixels)
     {
