@@ -144,6 +144,11 @@ public sealed class WgcCaptureService : IDisposable
         private ID3D11Texture2D? _stagingTex;
         private int _stagingW, _stagingH;
 
+        // ═══ GPU 纹理缓存：最新帧的 GPU 拷贝，用于直通编码路径（跳过 CPU 回读）═══
+        private ID3D11Texture2D? _latestTexture;
+        private int _latestTexW, _latestTexH;
+        private bool _latestTexValid;
+
         public int Width => _width;
         public int Height => _height;
         public bool HasFrame => _hasFrame;
@@ -231,6 +236,7 @@ public sealed class WgcCaptureService : IDisposable
                         _writeBufferHdr = _latestHdr;
                         _latestHdr = pixels;
                         _latestSdr = null;
+                        CacheTextureGpuCopy(texture, w, h);
                         _frameTimestamp = Environment.TickCount64;
                     }
                 }
@@ -243,6 +249,7 @@ public sealed class WgcCaptureService : IDisposable
                         _writeBufferSdr = _latestSdr;
                         _latestSdr = pixels;
                         _latestHdr = null;
+                        CacheTextureGpuCopy(texture, w, h);
                         _frameTimestamp = Environment.TickCount64;
                     }
                 }
@@ -291,6 +298,61 @@ public sealed class WgcCaptureService : IDisposable
         public long GetFrameAge()
         {
             lock (_frameLock) { return Environment.TickCount64 - _frameTimestamp; }
+        }
+
+        /// <summary>获取最新帧的 GPU 纹理拷贝（用于 GPU 直通编码路径）。
+        /// 返回的纹理是 Default 资源，不可 CPU 读，不可跨 D3D11 设备使用。
+        /// 调用方必须自行 AddRef 或 CopyResource 后再跨线程使用。
+        /// 返回 null 表示无帧或 GPU 拷贝失败。</summary>
+        public ID3D11Texture2D? GetLatestTexture()
+        {
+            lock (_frameLock)
+            {
+                if (!_latestTexValid || _latestTexture is null) return null;
+                // 返回 AddRef 后的拷贝，调用方负责 Release
+                // 通过 QueryInterface 增加引用计数
+                var ptr = Marshal.GetIUnknownForObject(_latestTexture);
+                if (ptr == 0) return null;
+                try
+                {
+                    var copy = _latestTexture.QueryInterface<ID3D11Texture2D>();
+                    return copy;
+                }
+                catch { return null; }
+            }
+        }
+
+        /// <summary>在锁内缓存 GPU 纹理拷贝（从 WGC 帧纹理拷贝到本地的 Default 纹理）。</summary>
+        private void CacheTextureGpuCopy(ID3D11Texture2D wgcTexture, int w, int h)
+        {
+            try
+            {
+                // 尺寸变化时重新创建
+                if (_latestTexture is null || _latestTexW != w || _latestTexH != h)
+                {
+                    _latestTexture?.Dispose();
+                    _latestTexture = _d3dDevice.CreateTexture2D(new Texture2DDescription
+                    {
+                        Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                        Format = wgcTexture.Description.Format,
+                        SampleDescription = new(1, 0),
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.None,
+                        CPUAccessFlags = CpuAccessFlags.None
+                    });
+                    _latestTexW = w;
+                    _latestTexH = h;
+                }
+                // D3D11 线程安全：此方法在 _frameLock 内调用，且与 _d3dDevice 同一线程
+                var ctx = _d3dDevice.ImmediateContext;
+                ctx.CopyResource(_latestTexture, wgcTexture);
+                _latestTexValid = true;
+            }
+            catch (Exception ex)
+            {
+                Log($"[Pool] {_hmonitor:X}: CacheTextureGpuCopy 失败: {ex.Message}");
+                _latestTexValid = false;
+            }
         }
 
         // ── Staging 纹理复用 + 像素缓冲区复用的像素读取 ──
@@ -414,6 +476,7 @@ public sealed class WgcCaptureService : IDisposable
             try { _framePool?.Dispose(); } catch { }
             try { _winrtDevice?.Dispose(); } catch { }
             lock (s_d3dContextLock) { try { _stagingTex?.Dispose(); } catch { } }
+            try { _latestTexture?.Dispose(); } catch { }
             _firstFrameEvent.Dispose();
         }
     }
@@ -501,6 +564,8 @@ public sealed class WgcCaptureService : IDisposable
             }
 
             var device = GetOrCreateDevice(hmonitor);
+            // WGC 仅支持 B8G8R8A8UIntNormalized 和 R16G16B16A16Float 两种帧池格式。
+            // HDR 显示器上 DWM 自动将 HDR 内容色调映射为 SDR 后交付，输出已是 sRGB gamma 编码。
             var session = new PooledSession(hmonitor, DirectXPixelFormat.B8G8R8A8UIntNormalized, device);
             if (!session.Start())
                 throw new InvalidOperationException($"无法为显示器 0x{hmonitor:X} 创建 WGC 会话");
@@ -604,9 +669,28 @@ public sealed class WgcCaptureService : IDisposable
         finally { s_captureLock.Release(); }
     }
 
+    /// <summary>无锁读取最新帧（供录制器使用）。不获取 s_captureLock，不创建会话，
+    /// 仅从已有池化会话中读取最新帧。如果会话不存在或无帧则返回 null。</summary>
+    public CaptureResult? TryGetLatestFrame(nint targetMonitor)
+    {
+        lock (_poolLock)
+        {
+            var key = (targetMonitor, false);
+            if (!_sessionPool.TryGetValue(key, out var session) || !session.HasFrame)
+                return null;
+            var pixels = session.GetLatestSdr();
+            if (pixels is null) return null;
+            return new CaptureResult
+            {
+                SdrPixels = pixels,
+                Width = session.Width,
+                Height = session.Height
+            };
+        }
+    }
+
     /// <summary>捕获主体（同步，在调用线程执行）。
-    /// 懒启动首次截图时 WGC 会话在 UI 线程创建，保证帧正常投递；
-    /// ICC 同步读缓存永不阻塞；等首帧仅首次约数十毫秒，体感即时。</summary>
+    /// 统一捕获 SDR（用于预览）+ HDR（用于编码），一次调用返回两者。</summary>
     private CaptureResult CaptureMonitorInternal(WgcCaptureConfig? config = null)
     {
         config ??= new WgcCaptureConfig();
@@ -620,89 +704,77 @@ public sealed class WgcCaptureService : IDisposable
         if (displayInfo is null)
             throw new InvalidOperationException("找不到目标显示器。");
 
-        CaptureResult? result = null;
+        // ═══ 1. 始终捕获 SDR（用于预览）═══
+        var sdrSession = GetOrCreateSdrSession(targetMonitor);
+        Log($"[WGC] SDR 池状态: HasFrame={sdrSession.HasFrame} Age={sdrSession.GetFrameAge()}ms");
 
-        // HDR 路径（如果显示器支持且用户请求）
-        if (config.PreferHdr && displayInfo.IsHdr)
+        byte[]? sdrPixels = null;
+        if (sdrSession.HasFrame)
         {
-            var hdrSession = GetOrCreateHdrSession(targetMonitor);
-            if (hdrSession is not null && hdrSession.HasFrame)
-            {
-                var hdrPixels = hdrSession.GetLatestHdr();
-                if (hdrPixels is not null)
-                {
-                    result = new CaptureResult
-                    {
-                        HdrPixels = hdrPixels,
-                        Width = hdrSession.Width,
-                        Height = hdrSession.Height
-                    };
-                }
-            }
+            sdrPixels = sdrSession.GetLatestSdr();
+        }
+        else
+        {
+            Log($"[WGC] SDR 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
+            if (sdrSession.WaitForFirstFrame(config.FrameTimeoutMs))
+                sdrPixels = sdrSession.GetLatestSdr();
         }
 
-        // SDR 路径（主路径 / HDR 回退）
-        if (result is null)
+        if (sdrPixels is null)
+            throw new TimeoutException($"SDR 捕获超时（{config.FrameTimeoutMs}ms）。");
+
+        int w = sdrSession.Width, h = sdrSession.Height;
+
+        // ═══ 2. 尝试 Float16 扩展范围捕获（HDR + 广色域 SDR 均适用）═══
+        // 不限制 IsHdr：SDR 广色域显示器 (P3/AdobeRGB + ACM) 的 DWM 内部合成缓冲区
+        // 也是扩展范围的，Float16 会话可以获取完整广色域数据。
+        // 如果显示器不支持 Float16 帧池，GetOrCreateHdrSession 会返回 null（已缓存）。
+        float[]? hdrPixels = null;
+        if (config.PreferHdr)
         {
-            var sdrSession = GetOrCreateSdrSession(targetMonitor);
-            Log($"[WGC] 池状态: HasFrame={sdrSession.HasFrame} Age={sdrSession.GetFrameAge()}ms");
-
-            // 池化快速路径：已有帧则直接取
-            if (sdrSession.HasFrame)
+            try
             {
-                var sdrPixels = sdrSession.GetLatestSdr();
-                if (sdrPixels is not null)
+                var hdrSession = GetOrCreateHdrSession(targetMonitor);
+                if (hdrSession is not null)
                 {
-                    result = new CaptureResult
+                    if (!hdrSession.HasFrame)
                     {
-                        SdrPixels = sdrPixels,
-                        Width = sdrSession.Width,
-                        Height = sdrSession.Height
-                    };
-                    Log($"[WGC] 池化快速路径: {sw.ElapsedMilliseconds}ms");
-                }
-                else
-                {
-                    Log($"[WGC] ⚠ HasFrame=true 但 GetLatestSdr()=null");
-                }
-            }
-
-            // 回退：池无帧时等待（首次/线程问题）
-            if (result is null)
-            {
-                Log($"[WGC] 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
-                if (sdrSession.WaitForFirstFrame(config.FrameTimeoutMs))
-                {
-                    var sdrPixels = sdrSession.GetLatestSdr();
-                    if (sdrPixels is not null)
-                    {
-                        result = new CaptureResult
-                        {
-                            SdrPixels = sdrPixels,
-                            Width = sdrSession.Width,
-                            Height = sdrSession.Height
-                        };
-                        Log($"[WGC] 等待后取帧: {sw.ElapsedMilliseconds}ms");
+                        Log($"[WGC] Float16 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
+                        hdrSession.WaitForFirstFrame(config.FrameTimeoutMs);
                     }
-                }
-                else
-                {
-                    Log($"[WGC] 等待首帧超时");
+                    if (hdrSession.HasFrame)
+                        hdrPixels = hdrSession.GetLatestHdr();
                 }
             }
-
-            // 最终回退：一次性捕获（池完全失败时）
-            if (result is null)
+            catch (Exception ex)
             {
-                Log("[WGC] 池化会话无帧，执行一次性捕获回退");
-                result = OneShotCapture(targetMonitor, displayInfo, config.FrameTimeoutMs);
+                Log($"[WGC] Float16 捕获失败: {ex.Message}（不影响 SDR 结果）");
             }
         }
 
-        if (result is null)
-            throw new TimeoutException($"WGC 捕获超时（{config.FrameTimeoutMs}ms）。");
+        // ═══ 3. 获取 GPU 纹理（用于 GPU 直通编码路径）═══
+        // 优先使用 SDR 会话的纹理，因为 NVENC 输入格式为 BGRA8
+        ID3D11Texture2D? gpuTexture = null;
+        try
+        {
+            gpuTexture = sdrSession.GetLatestTexture();
+            Log($"[WGC] GPU 纹理获取: {(gpuTexture is not null ? "✓" : "✗")}");
+        }
+        catch (Exception ex)
+        {
+            Log($"[WGC] GPU 纹理获取失败: {ex.Message}（不影响编码结果）");
+        }
 
-        // 附加 ICC + 显示器信息（同步读缓存，永不阻塞；未命中则后台预热并返回 null）
+        var result = new CaptureResult
+        {
+            SdrPixels = sdrPixels,
+            HdrPixels = hdrPixels,
+            Width = w,
+            Height = h,
+            GpuTexture = gpuTexture
+        };
+
+        // 附加 ICC + 显示器信息
         try
         {
             result.IccProfile = ColorProfileProvider.GetDisplayIccProfile(displayInfo.MonitorHandle);
@@ -712,8 +784,8 @@ public sealed class WgcCaptureService : IDisposable
 
         sw.Stop();
         result.CaptureTimeMs = sw.ElapsedMilliseconds;
-        Log($"[WGC] CaptureMonitor 完成: {result.Width}x{result.Height} {sw.ElapsedMilliseconds}ms (HDR={result.IsHdr})");
-        ScheduleIdleStop(); // 截图后启动延迟停止计时器
+        Log($"[WGC] CaptureMonitor 完成: {w}x{h} {sw.ElapsedMilliseconds}ms (HDR={hdrPixels is not null}, GPU纹理={gpuTexture is not null})");
+        ScheduleIdleStop();
         return result;
     }
 
@@ -779,8 +851,26 @@ public sealed class WgcCaptureService : IDisposable
                         }
                         ctx.Unmap(staging, 0);
                         TrueToneCap.Core.PixelOps.FixAlphaChannel(pixels);
+
+                        // 创建 GPU 纹理拷贝（用于 GPU 直通编码路径）
+                        ID3D11Texture2D? gpuTex = null;
+                        try
+                        {
+                            gpuTex = device.CreateTexture2D(new Texture2DDescription
+                            {
+                                Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                                Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                                SampleDescription = new(1, 0),
+                                Usage = ResourceUsage.Default,
+                                BindFlags = BindFlags.None,
+                                CPUAccessFlags = CpuAccessFlags.None
+                            });
+                            ctx.CopyResource(gpuTex, texture);
+                        }
+                        catch { gpuTex?.Dispose(); gpuTex = null; }
+
                         captured = true;
-                        tcs.TrySetResult(new CaptureResult { SdrPixels = pixels, Width = w, Height = h });
+                        tcs.TrySetResult(new CaptureResult { SdrPixels = pixels, Width = w, Height = h, GpuTexture = gpuTex });
                     }
                     catch { }
                 };
@@ -852,10 +942,11 @@ public sealed class WgcCaptureService : IDisposable
         if (displays.Count == 1)
         {
             // 同步调用，已在 Task.Run 线程池中执行，不会阻塞 UI 线程
+            // 单显示器：同时捕获 SDR（用于预览）和 HDR（用于编码/预览）
             var single = CaptureMonitorInternal(new WgcCaptureConfig
             {
                 TargetMonitor = displays[0].MonitorHandle,
-                PreferHdr = false,
+                PreferHdr = true, // 同时获取 HDR 和 SDR 数据
                 FrameTimeoutMs = config.FrameTimeoutMs
             });
             sw.Stop();

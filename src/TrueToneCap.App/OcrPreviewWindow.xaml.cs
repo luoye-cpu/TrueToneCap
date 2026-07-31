@@ -145,7 +145,8 @@ public sealed partial class OcrPreviewWindow : Window
     //  覆盖层：按 OCR 坐标点对点绘制命中块
     // ═══════════════════════════════════════
 
-    /// <summary>原图像素坐标 → 覆盖层(Canvas)显示坐标的缩放比（Uniform 下 x/y 一致）。</summary>
+    /// <summary>原图像素坐标 → 覆盖层(Canvas)显示坐标的缩放比。</summary>
+    /// <remarks>当 OverlayCanvas 尺寸与 PreviewImage 渲染尺寸一致时，x/y 缩放比相同。</remarks>
     private double ScaleX => _imgW > 0 ? OverlayCanvas.Width / _imgW : 1.0;
     private double ScaleY => _imgH > 0 ? OverlayCanvas.Height / _imgH : 1.0;
 
@@ -193,22 +194,20 @@ public sealed partial class OcrPreviewWindow : Window
                 Canvas.SetLeft(bar, cx);
                 Canvas.SetTop(bar, cy);
 
-                // 译文文字：Viewbox 自适应缩放，刚好填满条形
-                var vb = new Viewbox
-                {
-                    Stretch = Stretch.Uniform,
-                    StretchDirection = StretchDirection.DownOnly,
-                    Margin = new Thickness(4, 0, 4, 0),
-                };
-                vb.Child = new TextBlock
+                // 译文文字：直接设置字体大小，不使用 Viewbox
+                var textBlock = new TextBlock
                 {
                     Text = translated,
-                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)), // 亮白文字
+                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)),
                     FontWeight = Microsoft.UI.Text.FontWeights.Medium,
                     TextWrapping = TextWrapping.NoWrap,
                     VerticalAlignment = VerticalAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    Margin = new Thickness(6, 0, 6, 0),
+                    // 字体大小与 OCR 框高度自适应：最小 10px，最大 48px
+                    FontSize = Math.Clamp(ch * 0.7, 10.0, 48.0),
                 };
-                bar.Child = vb;
+                bar.Child = textBlock;
                 ToolTipService.SetToolTip(bar, $"原文: {line.Text}\n译文: {translated}");
 
                 int idx = i;
@@ -276,9 +275,12 @@ public sealed partial class OcrPreviewWindow : Window
         }
     }
 
-    /// <summary>取行的原图边界矩形（优先 Words 合并，回退行级坐标）。</summary>
+    /// <summary>取行的原图边界矩形，带 4px padding。</summary>
     private static (int X, int Y, int Width, int Height) LineRect(OcrLine line)
     {
+        const int pad = 4; // 4px padding，确保文字被完全覆盖
+
+        // 策略1: 从 Words 合并边界框 + padding
         if (line.Words is { Count: > 0 })
         {
             int x1 = int.MaxValue, y1 = int.MaxValue, x2 = int.MinValue, y2 = int.MinValue;
@@ -287,9 +289,16 @@ public sealed partial class OcrPreviewWindow : Window
                 x1 = Math.Min(x1, w.X); y1 = Math.Min(y1, w.Y);
                 x2 = Math.Max(x2, w.X + w.Width); y2 = Math.Max(y2, w.Y + w.Height);
             }
-            if (x2 > x1 && y2 > y1) return (x1, y1, x2 - x1, y2 - y1);
+            if (x2 > x1 && y2 > y1)
+                return (Math.Max(0, x1 - pad), Math.Max(0, y1 - pad),
+                        x2 - x1 + pad * 2, y2 - y1 + pad * 2);
         }
-        return (0, 0, 0, 0);
+        // 策略2: 使用 OcrLine 自身的坐标 + padding
+        if (line.Width > 0 && line.Height > 0)
+            return (Math.Max(0, line.X - pad), Math.Max(0, line.Y - pad),
+                    line.Width + pad * 2, line.Height + pad * 2);
+        // 策略3: 整图 1/4 居中区域（确保覆盖层始终可见，不会完全透明）
+        return (0, 0, 1, 1);
     }
 
     // ═══════════════════════════════════════
@@ -419,7 +428,13 @@ DispatcherQueue.TryEnqueue(() =>
         catch (Exception ex)
         {
             DispatcherQueue.TryEnqueue(() =>
-                InfoTxt.Text = $"❌ 翻译失败: {ex.Message}");
+            {
+                // 翻译失败：检查是否因为 LLM 不可用但未配置免费后端
+                string msg = ex.Message;
+                if (msg.Contains("网络") || msg.Contains("timeout") || msg.Contains("连接"))
+                    msg = "翻译服务暂时不可用，建议检查网络连接。\n也可在设置中配置 LLM API 获得更稳定的翻译。";
+                InfoTxt.Text = $"❌ {msg}";
+            });
         }
         finally
         {

@@ -91,7 +91,7 @@ public sealed partial class MainWindow : Window
             (OutputFormat.JPEG_XL, "JPEG XL"),
             (OutputFormat.AVIF, "AVIF"),
             (OutputFormat.WebP, "WebP"),
-            (OutputFormat.BMP, "BMP"),
+            (OutputFormat.TIFF, "TIFF"),
         ];
 
         FormatCbo.ItemsSource = _formats.Select(f => f.Label).ToList();
@@ -105,6 +105,11 @@ public sealed partial class MainWindow : Window
         _trayIcon.OnCaptureHotkey = () => DispatcherQueue.TryEnqueue(() => StartSelectionCapture());
         _trayIcon.OnExitApp = () => _isExiting = true;
         _trayIcon.RegisterCaptureHotkey(_settings.Hotkey);
+
+        // 注册无感截图热键
+        HotkeyManager.RegisterNamed(this, "silent", _settings.SilentHotkey,
+            () => DispatcherQueue.TryEnqueue(() => SilentCapture()),
+            ["Ctrl+Alt+Q", "Alt+Shift+Q"]);
 
         // ── 子类化窗口过程以处理托盘消息 ──
         SubclassWindowForTray(hwnd);
@@ -185,9 +190,9 @@ public sealed partial class MainWindow : Window
         _settings.QsvAvailable = cap.QsvAvailable;
         _settings.DisplayBitDepth = cap.DisplayBitDepth;
 
-        // ACM 优先：ACM 开启时禁用 ICC 烘焙（避免双重色彩管理）
-        if (cap.SystemAcm && _settings.IccBakeEnabled)
-            _settings.IccBakeEnabled = false;
+        // ACM 不再强制禁用 ICC 烘焙：用户可选择输出到任意色域，
+        // ACM 仅保证显示器正确显示，不影响截图输出色彩空间。
+        // 输出到非显示器色域时需要 ICC 烘焙来转换像素值。
 
         if (_settings.FirstRun)
         {
@@ -205,13 +210,13 @@ public sealed partial class MainWindow : Window
             HdrSwitch.IsEnabled = cap.SystemHdr;
             HdrSwitch.IsOn = _settings.HdrEnabled;
             var hdrText = cap.SystemHdr ? $"✅ HDR 已启用 ({cap.DisplayBitDepth}-bit)" : "⚠ HDR 未开启（已禁用）";
-            var acmText = cap.SystemAcm ? " | ACM 已启用（系统管理色彩）" : "";
+            var acmText = cap.SystemAcm ? " | ACM 已启用（系统管理显示器色彩）" : "";
             HdrHintTxt.Text = hdrText + acmText;
 
             IccBakeSwitch.IsEnabled = cap.IccBakeAvailable;
             IccBakeSwitch.IsOn = _settings.IccBakeEnabled;
             if (cap.SystemAcm)
-                IccHintTxt.Text = "ACM 已启用 — Windows 自动管理显示器色彩，ICC 烘焙已禁用。";
+                IccHintTxt.Text = "ACM 已启用 — ICC 烘焙可用于输出到非显示器色域（如 BT.2020/P3）。";
             else if (cap.CustomIcc)
                 IccHintTxt.Text = $"检测到校色 ICC → 自动烘焙到 {ColorProfileProvider.GetColorSpaceDisplayName(GetSelectedColorSpaceTag())}";
             else
@@ -264,12 +269,25 @@ public sealed partial class MainWindow : Window
         ColorCbo.SelectedIndex = Math.Clamp(_settings.ColorSpaceIndex, 0, 6);
         HotkeyTxt.Text = _settings.Hotkey;
         RecordHotkeyTxt.Text = _settings.RecordHotkey;
+        SilentHotkeyTxt.Text = _settings.SilentHotkey;
         AutoStartChk.IsChecked = _settings.AutoStart;
         PreviewChk.IsChecked = _settings.ShowPreview;
         MinimizeTrayChk.IsChecked = _settings.MinimizeToTray;
+        ToastCaptureChk.IsChecked = _settings.ToastOnCapture;
+        ToastSilentChk.IsChecked = _settings.ToastOnSilentCapture;
+        ToastRecordChk.IsChecked = _settings.ToastOnRecording;
+        SetComboByTag(OverlayColorCbo, _settings.OverlayColor);
+        SetComboByTag(BorderColorCbo, _settings.BorderColor);
         AvifPngSuffixChk.IsChecked = _settings.AvifPngSuffix;
         AvifBackendCbo.SelectedIndex = Math.Clamp(_settings.AvifBackendIndex, 0, 3);
         if (AvifChromaCbo is not null) SetComboByTag(AvifChromaCbo, _settings.AvifChroma);
+        // 每格式编码选项
+        if (BdPngCbo is not null) SetComboByTag(BdPngCbo, _settings.BitDepthPng.ToString());
+        if (BdJpegXlCbo is not null) SetComboByTag(BdJpegXlCbo, _settings.BitDepthJpegXl.ToString());
+        if (BdAvifCbo is not null) SetComboByTag(BdAvifCbo, _settings.BitDepthAvif.ToString());
+        if (BdTiffCbo is not null) SetComboByTag(BdTiffCbo, _settings.BitDepthBmp.ToString());
+        if (ChromaJpegXlCbo is not null) SetComboByTag(ChromaJpegXlCbo, _settings.ChromaJpegXl);
+        if (ChromaWebPCbo is not null) SetComboByTag(ChromaWebPCbo, _settings.ChromaWebP);
         RecordQualitySld.Value = _settings.RecordQuality;
         if (ArchiveChk is not null) ArchiveChk.IsChecked = _settings.ArchiveEnabled;
         if (ArchiveModeCbo is not null) { SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode); ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed; }
@@ -317,14 +335,35 @@ public sealed partial class MainWindow : Window
             _settings.ColorSpaceIndex = ColorCbo.SelectedIndex;
             _settings.Hotkey = HotkeyTxt.Text;
             _settings.RecordHotkey = RecordHotkeyTxt.Text;
+            _settings.SilentHotkey = SilentHotkeyTxt.Text;
             _settings.AutoStart = AutoStartChk.IsChecked == true;
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.MinimizeToTray = MinimizeTrayChk.IsChecked == true;
+            _settings.ToastOnCapture = ToastCaptureChk.IsChecked == true;
+            _settings.ToastOnSilentCapture = ToastSilentChk.IsChecked == true;
+            _settings.ToastOnRecording = ToastRecordChk.IsChecked == true;
+            _settings.OverlayColor = (OverlayColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#99001833";
+            _settings.BorderColor = (BorderColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#FF4488FF";
             _settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;
             if (GainMapModeCbo is not null)
-                _settings.GainMapMode = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Rgb";
+                _settings.GainMapMode = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
             _settings.AvifBackendIndex = AvifBackendCbo.SelectedIndex;
             _settings.AvifChroma = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
+            // 每格式编码选项
+            _settings.BitDepthPng = int.TryParse((BdPngCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var bdp) ? bdp : 8;
+            _settings.BitDepthJpegXl = int.TryParse((BdJpegXlCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var bdjxl) ? bdjxl : 10;
+            _settings.BitDepthAvif = int.TryParse((BdAvifCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var bdav) ? bdav : 10;
+            _settings.BitDepthJpegLi = 8; // JPEG LI 固定 8-bit
+            _settings.BitDepthWebP = 8;   // WebP 固定 8-bit
+            _settings.BitDepthBmp = int.TryParse((BdTiffCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var bdt) ? bdt : 8;
+            _settings.BitDepthGainMap = 8; // Gain Map 基于 JPEG，固定 8-bit
+            _settings.ChromaPng = "444";   // PNG 是 RGB 无损格式，不支持色度子采样
+            _settings.ChromaJpegLi = "420"; // JPEG LI 无独立 UI，默认 4:2:0
+            _settings.ChromaAvif = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
+            _settings.ChromaJpegXl = (ChromaJpegXlCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
+            _settings.ChromaWebP = (ChromaWebPCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420";
+            _settings.ChromaBmp = "444";   // TIFF 无损，固定 4:4:4
+            _settings.ChromaGainMap = "420";
             _settings.RecordQuality = RecordQualitySld.Value;
             _settings.AnimAvifBackendIndex = 0;
             _settings.ArchiveEnabled = ArchiveChk?.IsChecked == true;
@@ -395,20 +434,25 @@ public sealed partial class MainWindow : Window
             OutputFormat.JPEG_XL => "✅ 新一代格式，Modular 模式对截图极优。支持 HDR。",
             OutputFormat.AVIF => "✅ 先进格式，支持 HDR + 硬件加速编码。默认 4:4:4。",
             OutputFormat.WebP => "⚠ 仅 SDR 8-bit。适合简单分享场景。",
-            OutputFormat.BMP => "⚠ 无压缩 BMP。仅限特殊用途。",
+            OutputFormat.TIFF => "✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。",
             _ => ""
         };
 
-        // ── AVIF 专属选项卡片 ──
+        // ── 格式专属选项卡片 ──
         bool isAvif = format == OutputFormat.AVIF;
-        AvifOptionsCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
-
-        // ── GainMap 专属选项卡片 ──
         bool isGainMap = format == OutputFormat.JPEG_GAINMAP;
+        AvifOptionsCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
         GainMapOptionsCard.Visibility = isGainMap ? Visibility.Visible : Visibility.Collapsed;
+        PngOptionsCard.Visibility = format == OutputFormat.PNG ? Visibility.Visible : Visibility.Collapsed;
+        JpegXlOptionsCard.Visibility = format == OutputFormat.JPEG_XL ? Visibility.Visible : Visibility.Collapsed;
+        WebPOptionsCard.Visibility = format == OutputFormat.WebP ? Visibility.Visible : Visibility.Collapsed;
+        TiffOptionsCard.Visibility = format == OutputFormat.TIFF ? Visibility.Visible : Visibility.Collapsed;
+        // P1-3: AVIF 位深选项卡片（与 AvifOptionsCard 联动）
+        if (AvifBitDepthCard is not null)
+            AvifBitDepthCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
         if (isGainMap)
         {
-            var gmTag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Rgb";
+            var gmTag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
             GainMapHintTxt.Text = gmTag == "Gray"
                 ? "灰度增益：仅编码亮度差，体积最小。黑白文字/图标场景推荐。"
                 : "RGB 增益：三通道独立编码，色彩还原最准确。彩色截图推荐。";
@@ -438,7 +482,7 @@ public sealed partial class MainWindow : Window
 
     private void OnGainMapModeChanged(object sender, SelectionChangedEventArgs e)
     {
-        var tag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Rgb";
+        var tag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
         GainMapHintTxt.Text = tag == "Gray"
             ? "灰度增益：仅编码亮度差，体积最小。黑白文字/图标场景推荐。"
             : "RGB 增益：三通道独立编码，色彩还原最准确。彩色截图推荐。";
@@ -446,22 +490,6 @@ public sealed partial class MainWindow : Window
 
     private void OnArchiveChanged(object sender, RoutedEventArgs e)
         => ArchiveModePanel.Visibility = ArchiveChk.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-
-    /// <summary>根据归档模式生成子目录路径。</summary>
-    private string GetArchivePath(string baseDir)
-    {
-        var now = DateTime.Now;
-        string mode = _settings.ArchiveMode;
-        string sub = mode switch
-        {
-            "Year" => now.ToString("yyyy"),
-            "Day" => now.ToString("yyyy-MM-dd"),
-            _ => now.ToString("yyyy-MM"), // Month (default)
-        };
-        string full = Path.Combine(baseDir, sub);
-        Directory.CreateDirectory(full);
-        return full;
-    }
 
     private void OnQualityChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
@@ -495,27 +523,41 @@ public sealed partial class MainWindow : Window
     private void OnHdrToggled(object sender, RoutedEventArgs e)
     {
         _settings.HdrEnabled = HdrSwitch.IsOn;
-        if (HdrSwitch.IsOn) _settings.ColorSpaceIndex = 5;
-        else _settings.ColorSpaceIndex = 0;
-        ColorCbo.SelectedIndex = _settings.ColorSpaceIndex;
+        // 用户可自由选择色域：HDR 开启时 BT.2020 是推荐选择，
+        // 但用户也可选择 sRGB/P3/AdobeRGB，此时 HDR 帧会先色调映射到 SDR 再烘焙到目标色域。
+        UpdateGamutMappingUI();
     }
 
     private void OnColorSpaceChanged(object sender, SelectionChangedEventArgs e)
     {
+        var tag = GetSelectedColorSpaceTag();
+        bool isSRgb = tag is "System" or "sRGB";
+
         if (_settings.AcmeDetected)
         {
-            IccHintTxt.Text = "ACM 已启用 — Windows 自动管理显示器色彩，ICC 烘焙已禁用。";
-            return;
+            IccHintTxt.Text = isSRgb
+                ? "ACM 已启用 — sRGB 输出无需 ICC 烘焙。"
+                : $"ACM 已启用 — ICC 烘焙将像素从显示器色域转换到 {ColorProfileProvider.GetColorSpaceDisplayName(tag)}。";
         }
-        if (IccBakeSwitch.IsEnabled)
+        else if (IccBakeSwitch.IsEnabled)
         {
-            var tag = GetSelectedColorSpaceTag();
-            bool isSRgb = tag is "System" or "sRGB";
             IccHintTxt.Text = isSRgb
                 ? "烘焙目标: sRGB（不嵌入 ICC，sRGB 是通用默认）"
                 : $"烘焙目标: {ColorProfileProvider.GetColorSpaceDisplayName(tag)}（将嵌入标准 ICC）";
         }
         UpdateGamutMappingUI();
+    }
+
+    private void OnOverlayColorChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _settings.OverlayColor = (OverlayColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#99001833";
+        SaveSettingsQuiet();
+    }
+
+    private void OnBorderColorChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _settings.BorderColor = (BorderColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#FF4488FF";
+        SaveSettingsQuiet();
     }
 
     /// <summary>检测当前显示器色域并显示在 UI 中。</summary>
@@ -563,12 +605,46 @@ public sealed partial class MainWindow : Window
         };
         TargetGamutTxt.Text = targetName;
 
+        bool hdrOn = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
         bool sourceIsWide = sourceTag.Contains("HDR") || sourceTag.Contains("P3") || sourceTag.Contains("BT.2020");
-        bool needsMapping = targetTag != "System" || sourceIsWide;
-        MappingArrow.Text = needsMapping ? "→ ACES 缩限到" : "→ 直通（同色域）";
-        GamutMapHintTxt.Text = needsMapping
-            ? $"ACES 影视标准：{sourceTag} → {targetName}，Perceptual 感知缩限"
-            : "当前显示器色域与目标一致，无需转换。";
+        bool targetIsWide = targetTag is "BT2020" or "DisplayP3" or "DCI_P3" or "AdobeRGB";
+        bool needsMapping = targetIsWide || (targetTag == "System" && sourceIsWide);
+
+        if (hdrOn && targetIsWide)
+        {
+            // HDR 开启 + 广色域目标 → HDR 直通编码（scRGB→目标色域→PQ）
+            MappingArrow.Text = "→ HDR 直通（保留动态范围）";
+            GamutMapHintTxt.Text = $"HDR 编码路径：WGC Float16 → 色域矩阵 → PQ → {targetName}，保留完整高动态范围。";
+        }
+        else if (hdrOn && !targetIsWide)
+        {
+            // HDR 开启 + sRGB 目标 → 色调映射到 SDR
+            MappingArrow.Text = "→ HDR 色调映射到 SDR";
+            GamutMapHintTxt.Text = "HDR 帧 → GPU/CPU 色调映射 → sRGB 输出。";
+        }
+        else if (!hdrOn && targetIsWide)
+        {
+            // HDR 关闭 + 广色域目标 → WGC Float16 捕获 → 色域转换 → 色调映射到 SDR
+            bool canUseFloat16 = sourceIsWide || _settings.AcmeDetected || _settings.IccBakeEnabled;
+            if (canUseFloat16)
+            {
+                MappingArrow.Text = "→ Float16 广色域捕获 → 色域映射";
+                GamutMapHintTxt.Text = $"WGC Float16 捕获完整广色域 → 3×3 矩阵转换到 {targetName} → 色调映射 (Hable) → SDR 输出。";
+            }
+            else
+            {
+                MappingArrow.Text = "→ ACES 缩限到";
+                GamutMapHintTxt.Text = $"SDR 捕获 → ICC 烘焙 → {targetName}。";
+            }
+        }
+        else
+        {
+            // SDR 直通或 ICC 烘焙
+            MappingArrow.Text = needsMapping ? "→ ACES 缩限到" : "→ 直通（同色域）";
+            GamutMapHintTxt.Text = needsMapping
+                ? $"SDR 捕获 → ICC 烘焙 → {targetName}。"
+                : "当前显示器色域与目标一致，无需转换。";
+        }
     }
 
     // ── 编码辅助（仅在最终保存/复制时触发）──
@@ -602,47 +678,21 @@ public sealed partial class MainWindow : Window
             }
 
             var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
-            var encoder = EncoderFactory.Create(format);
             var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
             var settings = BuildEncodingSettings(format, hdrOutput, null);
-            var outDir = GetEffectiveOutputDir();
-            var path = BuildOutputPath(format, outDir);
-
-            // ── 全部重操作移到后台线程：ICC 烘焙 + BGRA→scRGB + 编码 ──
             var iccBakeEnabled = IccBakeSwitch.IsOn;
             var colorSpaceTag = GetSelectedColorSpaceTag();
 
-            await Task.Run(() =>
-            {
-                ct.ThrowIfCancellationRequested();
-                // ICC 烘焙（委托给 CapturePipelineService）
-                var (pixels, iccProfile) = CapturePipelineService.PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
-                if (iccProfile is not null)
-                    settings.IccProfile = iccProfile;
-
-                ct.ThrowIfCancellationRequested();
-                if (hdrOutput && encoder.SupportsHdr)
-                {
-                    var hdrFrame = new HdrFrameData
-                    {
-                        Pixels = BgraToScrgbLinear(pixels, w, h),
-                        Width = w, Height = h,
-                        IccProfile = settings.IccProfile
-                    };
-                    encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
-                }
-                else
-                {
-                    encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
-                }
-            }, ct);
+            // 委托给 CapturePipelineService 执行 ICC 烘焙 + 编码
+            var path = await AppServices.Pipeline.EncodeAndSaveAsync(
+                bgra, w, h, settings, iccBakeEnabled, colorSpaceTag, ct);
 
             sw.Stop();
 
             DispatcherQueue.TryEnqueue(async () =>
             {
                 await CopyFileToClipboardAsync(path);
-                ToastService.ShowCaptureSuccess(path, sw.ElapsedMilliseconds);
+                ShowSaveToast(path, sw.ElapsedMilliseconds);
             });
         }
         catch (OperationCanceledException)
@@ -654,6 +704,135 @@ public sealed partial class MainWindow : Window
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ 保存失败: {ex.Message}");
             ToastService.ShowCaptureFailed(ex.Message);
         }
+    }
+
+    /// <summary>判断是否应使用 Float16 捕获来获取广色域数据（HDR 关闭 + 广色域目标时）。</summary>
+    private bool ShouldUseFloat16ForWideGamut()
+    {
+        if (HdrSwitch.IsOn && HdrSwitch.IsEnabled) return false; // HDR 开启时走 HDR 路径
+        var tag = GetSelectedColorSpaceTag();
+        return tag is "BT2020" or "DisplayP3" or "DCI_P3" or "AdobeRGB";
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  无感截图
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>无感截图：按下热键后自动截取当前显示器 → 编码保存 → 复制到剪贴板 → 右下角提示。</summary>
+    private async void SilentCapture()
+    {
+        if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0) return;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            if (_wgcService is null) return;
+
+            var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
+            var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
+            bool useFloat16Wide = ShouldUseFloat16ForWideGamut();
+
+            var captureResult = await _wgcService.CaptureMonitorAsync(new WgcCaptureConfig
+            {
+                PreferHdr = hdrOutput || useFloat16Wide, // 广色域目标也需要 Float16
+                FrameTimeoutMs = 3000
+            });
+
+            bool actualHdr = captureResult.IsHdr;
+            int fw = captureResult.Width, fh = captureResult.Height;
+            var meta = captureResult.SourceDisplay is not null
+                ? MetadataCollector.Collect(captureResult.SourceDisplay)
+                : null;
+            var colorSpaceTag = GetSelectedColorSpaceTag();
+            var iccBakeEnabled = IccBakeSwitch.IsOn;
+
+            string path;
+            if (actualHdr && captureResult.HdrPixels is not null)
+            {
+                // HDR 帧存在 → HDR 编码路径 或 Float16 广色域 SDR 路径
+                var settings = BuildEncodingSettings(format, actualHdr, meta);
+                settings.IccProfile ??= captureResult.IccProfile;
+
+                if (hdrOutput)
+                {
+                    // HDR 直通编码
+                    path = await AppServices.Pipeline.EncodeHdrFrameAsync(
+                        new HdrFrameData
+                        {
+                            Pixels = captureResult.HdrPixels,
+                            Width = fw, Height = fh,
+                            IccProfile = captureResult.IccProfile,
+                            Metadata = meta,
+                            GpuTexture = captureResult.GpuTexture
+                        }, settings);
+                }
+                else
+                {
+                    // Float16 广色域 → 色域转换 → 色调映射 → SDR 编码
+                    var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
+                        captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
+                        new ToneMappingParams { Mode = ToneMapMode.Hable });
+                    if (iccProfile is not null)
+                        settings.IccProfile = iccProfile;
+                    settings.HdrOutput = false;
+                    path = await AppServices.Pipeline.EncodeAndSaveAsync(
+                        sdrPixels, fw, fh, settings, false, colorSpaceTag, default, captureResult.GpuTexture);
+                }
+            }
+            else
+            {
+                // 纯 SDR 路径
+                var sdrPixels = captureResult.SdrPixels ?? captureResult.GetDisplayPixels();
+                if (sdrPixels is null) return;
+
+                var settings = BuildEncodingSettings(format, false, meta);
+                settings.IccProfile ??= captureResult.IccProfile;
+                path = await AppServices.Pipeline.EncodeAndSaveAsync(
+                    sdrPixels, fw, fh, settings, iccBakeEnabled, colorSpaceTag, default, captureResult.GpuTexture);
+            }
+
+            sw.Stop();
+            await CopyFileToClipboardAsync(path);
+
+            DispatcherQueue.TryEnqueue(() => ShowSaveToast(path, sw.ElapsedMilliseconds, "silent"));
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("SilentCapture", $"无感截图失败: {ex.Message}");
+        }
+        finally { Interlocked.Exchange(ref _isCapturing, 0); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  统一保存提示（右下角 Toast）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>显示右下角保存成功提示（截图/录制/无感截图统一使用）。</summary>
+    /// <param name="mode">capture=截图, silent=无感截图, recording=动图录制</param>
+    private void ShowSaveToast(string filePath, long elapsedMs, string mode = "capture")
+    {
+        // 根据模式检查是否启用提示
+        bool enabled = mode switch
+        {
+            "silent" => _settings.ToastOnSilentCapture,
+            "recording" => _settings.ToastOnRecording,
+            _ => _settings.ToastOnCapture,
+        };
+        if (!enabled) return;
+
+        try
+        {
+            var toast = new SilentCaptureToast();
+            toast.SetContent("✅ 已保存并复制到剪贴板",
+                $"{Path.GetFileName(filePath)}  ({elapsedMs}ms)");
+            toast.Activate();
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("Toast", $"提示窗口创建失败: {ex.Message}");
+        }
+
+        // 同时发送 Windows 通知（备用）
+        ToastService.ShowCaptureSuccess(filePath, elapsedMs);
     }
 
     /// <summary>将已保存的输出文件复制到剪贴板（直接复制文件，非路径字符串）。</summary>
@@ -735,6 +914,70 @@ public sealed partial class MainWindow : Window
         return result;
     }
 
+    /// <summary>从 HDR 桌面帧中裁剪区域（scRGB linear float[] RGBA）。</summary>
+    private static float[]? ExtractHdrRegionFromDesktop(float[] full, int fullW, int fullH,
+        int vx, int vy, RectInt32 screenRect)
+    {
+        int rx = screenRect.X - vx;
+        int ry = screenRect.Y - vy;
+        int rw = screenRect.Width;
+        int rh = screenRect.Height;
+
+        if (rx < 0 || ry < 0 || rx + rw > fullW || ry + rh > fullH)
+            return null;
+
+        var result = new float[rw * rh * 4];
+        int srcStride = fullW * 4;
+        int dstStride = rw * 4;
+        for (int row = 0; row < rh; row++)
+        {
+            int srcOff = ((ry + row) * srcStride) + (rx * 4);
+            int dstOff = row * dstStride;
+            Array.Copy(full, srcOff, result, dstOff, dstStride);
+        }
+        return result;
+    }
+
+    /// <summary>HDR 编码保存：直接使用 scRGB linear 浮点像素编码为 HDR 格式。</summary>
+    private async Task EncodeAndSaveHdrAsync(float[] hdrPixels, int w, int h)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _captureCts?.Cancel();
+        _captureCts = new CancellationTokenSource();
+        var ct = _captureCts.Token;
+        try
+        {
+            var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
+            var cursorMonitor = DisplayEnumerator.GetMonitorUnderCursor();
+            var meta = MetadataCollector.Collect(DisplayEnumerator.FindDisplayByMonitor(cursorMonitor));
+            var settings = BuildEncodingSettings(format, true, meta);
+
+            var path = await AppServices.Pipeline.EncodeHdrFrameAsync(
+                new HdrFrameData
+                {
+                    Pixels = hdrPixels,
+                    Width = w, Height = h,
+                    Metadata = meta
+                }, settings, ct);
+
+            sw.Stop();
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                await CopyFileToClipboardAsync(path);
+                ShowSaveToast(path, sw.ElapsedMilliseconds);
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "⚠ 操作已取消");
+        }
+        catch (Exception ex)
+        {
+            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ HDR 保存失败: {ex.Message}");
+            ToastService.ShowCaptureFailed(ex.Message);
+        }
+    }
+
     private async void StartSelectionCapture()
     {
         // ── 防重入 ──
@@ -763,7 +1006,7 @@ public sealed partial class MainWindow : Window
             int vw = displays.Count > 0 ? displays.Max(d => d.X + d.Width) - vx : 1920;
             int vh = displays.Count > 0 ? displays.Max(d => d.Y + d.Height) - vy : 1080;
 
-            // WGC 多显示器拼接捕获
+            // WGC 多显示器拼接捕获（SDR 用于预览）
             CaptureResult captureResult;
             try
             {
@@ -793,24 +1036,101 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
+            // ── HDR 捕获：CaptureAllMonitorsAsync 已在内部分支捕获 HDR（单显示器时）──
+            float[]? hdrDesktopPixels = captureResult.HdrPixels;
+            int hdrW = captureResult.Width, hdrH = captureResult.Height;
+            System.Diagnostics.Debug.WriteLine(
+                $"[诊断] captureResult: HDR={(hdrDesktopPixels is not null ? $"len={hdrDesktopPixels.Length} {hdrW}x{hdrH}" : "null")} SDR={(desktopPixels is not null ? $"len={desktopPixels.Length}" : "null")}");
+
             sw.Stop();
             System.Diagnostics.Debug.WriteLine(
                 $"[⏱ 端到端] 阶段1-WGC捕获: {captureResult.Width}x{captureResult.Height} {sw.ElapsedMilliseconds}ms");
 
-            // 阶段2: 创建选区覆盖层
+            // 阶段2: 截图预览窗口
             sw.Restart();
+
+            bool hasHdr = hdrDesktopPixels is not null;
+
+            // ═══ HDR 路径：全 D3D11 原生窗口（scRGB 正确显示）═══
+            if (hasHdr)
+            {
+                StatusTxt.Text = "🖥️ HDR 预览";
+                var sharedDevice = AppServices.Wgc?.GetOrCreateDevice(
+                    DisplayEnumerator.GetMonitorUnderCursor());
+                using var hdrWnd = new Services.HdrCaptureWindow(sharedDevice);
+                bool initOk = hdrWnd.Initialize(vx, vy, vw, vh);
+
+                if (initOk)
+                {
+                    if (hdrDesktopPixels is null) return;
+                    hdrWnd.LoadFrame(hdrDesktopPixels, hdrW, hdrH);
+                    hdrWnd.Render();
+
+                    // 等待用户操作
+                    var tcs = new TaskCompletionSource<(HdrCaptureAction action, int x, int y, int w, int h)>();
+                    hdrWnd.ActionCompleted += (action, ax, ay, aw, ah) =>
+                        tcs.TrySetResult((action, ax, ay, aw, ah));
+                    var (action, rx, ry, rw, rh) = await tcs.Task;
+
+                    if (action == HdrCaptureAction.Cancel)
+                    {
+                        DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
+                        return;
+                    }
+
+                    // 从 HDR 帧裁剪选区
+                    var hdrRegion = hdrDesktopPixels is not null
+                        ? ExtractHdrRegionFromDesktop(hdrDesktopPixels, hdrW, hdrH, vx, vy,
+                            new RectInt32(rx, ry, rw, rh))
+                        : null;
+                    var sdrRegion = desktopPixels is not null
+                        ? ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy,
+                            new RectInt32(rx, ry, rw, rh))
+                        : null;
+
+                    switch (action)
+                    {
+                        case HdrCaptureAction.Save:
+                            if (hdrRegion is not null)
+                                await EncodeAndSaveHdrAsync(hdrRegion, rw, rh);
+                            else if (sdrRegion is not null)
+                                await EncodeAndSaveAsync(sdrRegion, rw, rh);
+                            break;
+                        case HdrCaptureAction.Copy:
+                            if (sdrRegion is not null)
+                                await EncodeAndCopyAsync(sdrRegion, rw, rh);
+                            break;
+                        case HdrCaptureAction.Ocr:
+                            if (sdrRegion is not null)
+                                await CaptureAndOcrFromPixelsAsync(sdrRegion, rw, rh);
+                            break;
+                        case HdrCaptureAction.Translate:
+                            if (sdrRegion is not null)
+                                await CaptureAndTranslateFromPixelsAsync(sdrRegion, rw, rh);
+                            break;
+                    }
+
+                    if (MinimizeTrayChk.IsChecked == true
+                        && action is HdrCaptureAction.Save or HdrCaptureAction.Copy)
+                        DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
+
+                    return;
+                }
+                // HDR 窗口初始化失败 → 回退到 SDR 路径
+                System.Diagnostics.Debug.WriteLine($"[MainWindow] HDR 窗口失败: {hdrWnd.LastError}，回退 SDR");
+            }
+
+            // ═══ SDR 路径：SelectionOverlay（WinUI 3）═══
+            StatusTxt.Text = "📷 选区模式";
+            if (desktopPixels is null)
+            {
+                DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 桌面像素数据为空");
+                return;
+            }
             var overlay = new SelectionOverlay(desktopPixels, vx, vy, vw, vh);
             overlay.Activate();
-
-            // 测量覆盖层首次渲染（监听 Activated）
             var overlayReady = new TaskCompletionSource<bool>();
-            overlay.Activated += (_, _) =>
-            {
-                sw.Stop();
-                System.Diagnostics.Debug.WriteLine($"[⏱ 端到端] 阶段2-覆盖层激活: {sw.ElapsedMilliseconds}ms");
-                System.Diagnostics.Debug.WriteLine($"[⏱ 端到端] 总耗时(热键→覆盖层可见): {sw.ElapsedMilliseconds + (sw.ElapsedMilliseconds > 0 ? 0 : 0)}ms");
-                overlayReady.TrySetResult(true);
-            };
+            overlay.Activated += (_, _) => overlayReady.TrySetResult(true);
             _ = Task.Run(async () => { await Task.Delay(1000); overlayReady.TrySetResult(false); });
 
             overlay.ActionCompleted += async (action, rect) =>
@@ -823,7 +1143,6 @@ public sealed partial class MainWindow : Window
                         return;
                     }
 
-                    // 优先使用标注合成后的像素
                     var regionPixels = overlay.AnnotatedRegionPixels
                         ?? ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy, rect);
 
@@ -849,14 +1168,12 @@ public sealed partial class MainWindow : Window
                             break;
                     }
 
-                    // 截图完成 → 仅保存/复制时缩回托盘
                     if (MinimizeTrayChk.IsChecked == true
                         && action is SelectionOverlay.ActionResult.Confirm or SelectionOverlay.ActionResult.Copy)
                         DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
                 }
                 catch (Exception ex)
                 {
-                    // ═══ async void 安全网：未捕获异常会直接终止进程 ═══
                     System.Diagnostics.Debug.WriteLine($"[MainWindow] ActionCompleted 异常: {ex}");
                     DispatcherQueue.TryEnqueue(() =>
                     {
@@ -864,9 +1181,12 @@ public sealed partial class MainWindow : Window
                         ToastService.ShowCaptureFailed(ex.Message);
                     });
                 }
+                finally
+                {
+                    // 确保锁释放：覆盖层完成时无论成功/失败都释放防重入锁
+                    Interlocked.Exchange(ref _isCapturing, 0);
+                }
             };
-
-            overlay.ActionCompleted += (_, _) => Interlocked.Exchange(ref _isCapturing, 0);
         }
         catch (Exception ex)
         {
@@ -1034,56 +1354,65 @@ public sealed partial class MainWindow : Window
 
             var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
             var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
-            var outDir = GetEffectiveOutputDir();
+            bool useFloat16Wide = ShouldUseFloat16ForWideGamut();
 
             // ── WGC 单显示器捕获 ──
             var captureResult = await _wgcService.CaptureMonitorAsync(new WgcCaptureConfig
             {
-                PreferHdr = hdrOutput,
+                PreferHdr = hdrOutput || useFloat16Wide,
                 FrameTimeoutMs = 3000
             });
 
             ct.ThrowIfCancellationRequested();
             bool actualHdr = captureResult.IsHdr;
             int fw = captureResult.Width, fh = captureResult.Height;
-
-            // ── 编码保存 ──
             var meta = captureResult.SourceDisplay is not null
                 ? MetadataCollector.Collect(captureResult.SourceDisplay)
                 : null;
+            var colorSpaceTag = GetSelectedColorSpaceTag();
+            var iccBakeEnabled = IccBakeSwitch.IsOn;
 
-            var settings = BuildEncodingSettings(format, actualHdr, meta);
-            settings.IccProfile ??= captureResult.IccProfile;
-
-            var encoder = EncoderFactory.Create(format);
-            var fullPath = BuildOutputPath(format, outDir);
-
+            string fullPath;
             if (actualHdr && captureResult.HdrPixels is not null)
             {
-                await Task.Run(() =>
-                    encoder.EncodeAsync(new HdrFrameData
-                    {
-                        Pixels = captureResult.HdrPixels,
-                        Width = fw, Height = fh,
-                        IccProfile = captureResult.IccProfile,
-                        Metadata = meta
-                    }, settings, fullPath, ct), ct);
+                var settings = BuildEncodingSettings(format, actualHdr, meta);
+                settings.IccProfile ??= captureResult.IccProfile;
+
+                if (hdrOutput)
+                {
+                    // HDR 直通编码
+                    fullPath = await AppServices.Pipeline.EncodeHdrFrameAsync(
+                        new HdrFrameData
+                        {
+                            Pixels = captureResult.HdrPixels,
+                            Width = fw, Height = fh,
+                            IccProfile = captureResult.IccProfile,
+                            Metadata = meta,
+                            GpuTexture = captureResult.GpuTexture
+                        }, settings, ct);
+                }
+                else
+                {
+                    // Float16 广色域 → 色域转换 → 色调映射 → SDR
+                    var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
+                        captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
+                        new ToneMappingParams { Mode = ToneMapMode.Hable });
+                    if (iccProfile is not null)
+                        settings.IccProfile = iccProfile;
+                    settings.HdrOutput = false;
+                    fullPath = await AppServices.Pipeline.EncodeAndSaveAsync(
+                        sdrPixels, fw, fh, settings, false, colorSpaceTag, ct, captureResult.GpuTexture);
+                }
             }
             else
             {
                 var sdrPixels = captureResult.SdrPixels ?? captureResult.GetDisplayPixels();
                 if (sdrPixels is null) throw new InvalidOperationException("无法获取显示像素");
 
-                // 修复: SDR 路径添加 ICC 烘焙（与 EncodeAndSaveAsync 一致）
-                var iccBakeEnabled = IccBakeSwitch.IsOn;
-                var colorSpaceTag = GetSelectedColorSpaceTag();
-                var (bakedPixels, bakedIcc) = CapturePipelineService.PreparePixelsWithIcc(
-                    sdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag);
-                if (bakedIcc is not null)
-                    settings.IccProfile = bakedIcc;
-
-                ct.ThrowIfCancellationRequested();
-                await Task.Run(() => encoder.EncodeSdrAsync(bakedPixels, fw, fh, settings, fullPath, ct), ct);
+                var settings = BuildEncodingSettings(format, false, meta);
+                settings.IccProfile ??= captureResult.IccProfile;
+                fullPath = await AppServices.Pipeline.EncodeAndSaveAsync(
+                    sdrPixels, fw, fh, settings, iccBakeEnabled, colorSpaceTag, ct, captureResult.GpuTexture);
             }
 
             sw.Stop();
@@ -1092,7 +1421,7 @@ public sealed partial class MainWindow : Window
                 ? $"✅ HDR 已保存 ({sw.ElapsedMilliseconds}ms)"
                 : $"✅ 已保存 ({sw.ElapsedMilliseconds}ms)";
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = status);
-            ToastService.ShowCaptureSuccess(fullPath, sw.ElapsedMilliseconds);
+            ShowSaveToast(fullPath, sw.ElapsedMilliseconds);
         }
         catch (OperationCanceledException)
         {
@@ -1107,22 +1436,25 @@ public sealed partial class MainWindow : Window
         finally { CaptureBtn.IsEnabled = true; Interlocked.Exchange(ref _isCapturing, 0); }
     }
 
-    /// <summary>获取有效的输出目录（含归档子目录）。</summary>
-    private string GetEffectiveOutputDir()
-    {
-        var outDir = PathTxt.Text;
-        if (string.IsNullOrWhiteSpace(outDir))
-            outDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "TrueToneCap");
-        if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
-        if (_settings.ArchiveEnabled) outDir = GetArchivePath(outDir);
-        return outDir;
-    }
-
     /// <summary>构建编码设置。</summary>
     private EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta)
     {
         var avifBackend = AvifBackendCbo.SelectedIndex switch
         { 1 => AvifEncoderBackend.LibAom, 2 => AvifEncoderBackend.Qsv, 3 => AvifEncoderBackend.Nvenc, _ => AvifEncoderBackend.Auto };
+
+        // 根据格式选择每格式独立位深和色度采样
+        var (bitDepth, chroma) = format switch
+        {
+            OutputFormat.PNG => (_settings.BitDepthPng, "444"),
+            OutputFormat.JPEG_LI => (_settings.BitDepthJpegLi, _settings.ChromaJpegLi),
+            OutputFormat.JPEG_XL => (_settings.BitDepthJpegXl, _settings.ChromaJpegXl),
+            OutputFormat.AVIF => (_settings.BitDepthAvif, _settings.ChromaAvif),
+            OutputFormat.WebP => (_settings.BitDepthWebP, _settings.ChromaWebP),
+            OutputFormat.TIFF => (_settings.BitDepthBmp, _settings.ChromaBmp),
+            OutputFormat.JPEG_GAINMAP => (_settings.BitDepthGainMap, _settings.ChromaGainMap),
+            _ => (_settings.OutputBitDepth, _settings.AvifChroma),
+        };
+
         return new EncodingSettings
         {
             Format = format,
@@ -1130,31 +1462,16 @@ public sealed partial class MainWindow : Window
             HdrOutput = hdrOutput,
             AvifBackend = avifBackend,
             AvifPngSuffix = AvifPngSuffixChk.IsChecked == true,
-            AvifChroma = _settings.AvifChroma,
-            ChromaSubsampling = _settings.AvifChroma,
-            OutputBitDepth = _settings.OutputBitDepth,
+            AvifChroma = chroma,
+            ChromaSubsampling = chroma,
+            OutputBitDepth = bitDepth,
             DisplayBitDepth = _settings.DisplayBitDepth,
             GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
             Metadata = meta,
             PreferGpuEncode = true,
-            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable }
+            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable },
+            ColorSpaceTag = GetSelectedColorSpaceTag()
         };
-    }
-    private string BuildOutputPath(OutputFormat format, string outDir)
-    {
-        var avifPngSuffix = AvifPngSuffixChk.IsChecked == true;
-        var ext = format switch
-        {
-            OutputFormat.JPEG_LI => ".jpg",
-            OutputFormat.JPEG_GAINMAP => ".jpg",
-            OutputFormat.JPEG_XL => ".jxl",
-            OutputFormat.AVIF => ".avif",
-            OutputFormat.WebP => ".webp",
-            OutputFormat.BMP => ".bmp",
-            _ => ".png"
-        };
-        if (format == OutputFormat.AVIF && avifPngSuffix) ext += ".png";
-        return Path.Combine(outDir, $"{PrefixTxt.Text}{DateTime.Now:yyyyMMdd_HHmmssfff}{ext}");
     }
 
     // ── 快捷键录制 ──
@@ -1256,6 +1573,7 @@ public sealed partial class MainWindow : Window
         NavCapture.Content = LocaleManager.NavCapture;
         NavAI.Content = LocaleManager.NavAI;
         NavSystem.Content = LocaleManager.NavSystem;
+        NavLog.Content = LocaleManager.NavLog;
 
         PageOutputTitle.Text = LocaleManager.PageOutput;
         BasicOutputTitle.Text = LocaleManager.BasicOutput;
@@ -1509,6 +1827,9 @@ public sealed partial class MainWindow : Window
     private void OnRecordHotkeyClick(object sender, RoutedEventArgs e)
         => StartHotkeyRecording(RecordHotkeyTxt);
 
+    private void OnSilentHotkeyRecordClick(object sender, RoutedEventArgs e)
+        => StartHotkeyRecording(SilentHotkeyTxt);
+
     private void StartHotkeyRecording(TextBox target)
     {
         _recordingTarget = target;
@@ -1564,6 +1885,11 @@ public sealed partial class MainWindow : Window
         else if (recordedBox == RecordHotkeyTxt)
         {
             _settings.RecordHotkey = result;
+        }
+        else if (recordedBox == SilentHotkeyTxt)
+        {
+            _settings.SilentHotkey = result;
+            try { HotkeyManager.RegisterNamed(this, "silent", result, () => DispatcherQueue.TryEnqueue(() => SilentCapture()), ["Ctrl+Alt+Q", "Alt+Shift+Q"]); } catch { }
         }
         try { SaveSettingsQuiet(); } catch { }
     }
@@ -1715,6 +2041,7 @@ public sealed partial class MainWindow : Window
     // ═══════════════════════════════════════════════════════════════
 
     private string _logFilter = "All";
+    private string _logCategoryFilter = "All";
     private string _logSearch = "";
     private readonly List<LogEntry> _logEntries = [];
 
@@ -1731,6 +2058,9 @@ public sealed partial class MainWindow : Window
 
     private void ApplyLogFilter()
     {
+        // 修复: XAML 初始化期间 SelectionChanged 事件触发时控件尚未创建
+        if (LogListView is null) return;
+
         var filtered = _logEntries.AsEnumerable();
 
         // 级别筛选
@@ -1738,6 +2068,7 @@ public sealed partial class MainWindow : Window
         {
             var level = _logFilter switch
             {
+                "Debug" => LogLevel.Debug,
                 "Info" => LogLevel.Info,
                 "Warning" => LogLevel.Warning,
                 "Error" => LogLevel.Error,
@@ -1745,6 +2076,23 @@ public sealed partial class MainWindow : Window
             };
             if (level.HasValue)
                 filtered = filtered.Where(e => e.Level == level.Value);
+        }
+
+        // 分类筛选
+        if (_logCategoryFilter != "All")
+        {
+            var cat = _logCategoryFilter switch
+            {
+                "System" => LogCategory.System,
+                "Capture" => LogCategory.Capture,
+                "Encoding" => LogCategory.Encoding,
+                "UI" => LogCategory.UI,
+                "OCR" => LogCategory.OCR,
+                "Network" => LogCategory.Network,
+                _ => (LogCategory?)null,
+            };
+            if (cat.HasValue)
+                filtered = filtered.Where(e => e.Category == cat.Value);
         }
 
         // 文本搜索
@@ -1764,12 +2112,16 @@ public sealed partial class MainWindow : Window
 
     private void OnLogFilterChanged(object sender, SelectionChangedEventArgs e)
     {
+        // 修复: XAML 初始化期间 ComboBox 默认选中触发事件，此时其他控件可能尚未创建
+        if (LogFilterCbo is null) return;
         _logFilter = (LogFilterCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "All";
+        _logCategoryFilter = (LogCategoryCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "All";
         ApplyLogFilter();
     }
 
     private void OnLogSearchChanged(object sender, TextChangedEventArgs e)
     {
+        if (LogSearchTxt is null) return;
         _logSearch = LogSearchTxt.Text;
         ApplyLogFilter();
     }
@@ -1834,31 +2186,67 @@ public static class FontHelper
 
 public sealed class AppSettingsData
 {
+    // ── 输出格式 (0=PNG, 1=GainMap, 2=JPEG LI, 3=JPEG XL, 4=AVIF, 5=WebP, 6=TIFF) ──
     public int FormatIndex { get; set; }
+
+    // ── 质量 ──
     public double Quality { get; set; } = 80;
+
+    // ── 输出路径 ──
     public string OutputPath { get; set; } = "";
     public string FileNamePrefix { get; set; } = "TrueToneCap_";
+
+    // ── 色彩 (0=System, 1=sRGB, 2=DisplayP3, 3=DCI_P3, 4=AdobeRGB, 5=BT.2020) ──
+    public int ColorSpaceIndex { get; set; }
+
+    // ── HDR / ICC ──
     public bool HdrEnabled { get; set; } = true;
     public bool IccBakeEnabled { get; set; }
-    public int ColorSpaceIndex { get; set; }
+
+    // ── 热键 ──
     public string Hotkey { get; set; } = "Ctrl+Shift+S";
     public string RecordHotkey { get; set; } = "Ctrl+Shift+G";
+    public string SilentHotkey { get; set; } = "Ctrl+Shift+Q";
+
+    // ── 行为 ──
     public bool AutoStart { get; set; }
     public bool ShowPreview { get; set; } = true;
     public bool MinimizeToTray { get; set; } = true;
+
+    // ── AVIF ──
     public bool AvifPngSuffix { get; set; }
-    public int AvifBackendIndex { get; set; }
-    public string AvifChroma { get; set; } = "444"; // 444 / 422 / 420 (截图推荐444)
+    public int AvifBackendIndex { get; set; } // 0=Auto, 1=LibAom, 2=Qsv, 3=Nvenc
+    public string AvifChroma { get; set; } = "444";
+
+    // ── 录制 ──
     public double RecordQuality { get; set; } = 80;
     public int AnimAvifBackendIndex { get; set; }
 
-    // 归档设置
+    // ── 归档 ──
     public bool ArchiveEnabled { get; set; }
-    public string ArchiveMode { get; set; } = "Month"; // Year / Month / Day
+    public string ArchiveMode { get; set; } = "Month";
 
-    // LLM / 翻译设置
+    // ── 每格式位深 ──
+    public int BitDepthPng { get; set; } = 8;
+    public int BitDepthJpegLi { get; set; } = 8;
+    public int BitDepthJpegXl { get; set; } = 10;
+    public int BitDepthAvif { get; set; } = 10;
+    public int BitDepthWebP { get; set; } = 8;
+    public int BitDepthBmp { get; set; } = 8;
+    public int BitDepthGainMap { get; set; } = 8;
+
+    // ── 每格式色度采样 ──
+    public string ChromaPng { get; set; } = "444";
+    public string ChromaJpegLi { get; set; } = "420";
+    public string ChromaJpegXl { get; set; } = "444";
+    public string ChromaAvif { get; set; } = "444";
+    public string ChromaWebP { get; set; } = "420";
+    public string ChromaBmp { get; set; } = "444";
+    public string ChromaGainMap { get; set; } = "420";
+
+    // ── 翻译 ──
     public bool UseCustomLlm { get; set; }
-    public string TranslationMode { get; set; } = "Free"; // Free / LLM / Vision
+    public string TranslationMode { get; set; } = "Free";
     public string LlmEndpoint { get; set; } = "";
     public string LlmApiKey { get; set; } = "";
     public string LlmModel { get; set; } = "deepseek-chat";
@@ -1866,21 +2254,28 @@ public sealed class AppSettingsData
     public string TargetLanguage { get; set; } = "zh-CN";
     public string OcrLanguage { get; set; } = "";
 
-    // 自动检测标志
+    // ── 系统检测 ──
     public bool AcmeDetected { get; set; }
     public bool FirstRun { get; set; } = true;
     public bool NvencAvailable { get; set; }
     public bool QsvAvailable { get; set; }
     public int DisplayBitDepth { get; set; } = 8;
-    /// <summary>输出位深 (8/10/12/16)，控制输出文件的位深度。默认 8。</summary>
     public int OutputBitDepth { get; set; } = 8;
-    /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>
-    public string GainMapMode { get; set; } = "Rgb";
-    /// <summary>界面语言: zh=中文, en=English。</summary>
-    public string Language { get; set; } = "zh"; // Rgb / Gray
-    /// <summary>OCR 引擎选择: OnnxGpu / OnnxCpu / WindowsOcr。</summary>
+
+    // ── 增益图 ──
+    public string GainMapMode { get; set; } = "Gray";
+
+    // ── 界面 ──
+    public string Language { get; set; } = "zh";
     public string OcrEngineMode { get; set; } = "OnnxGpu";
-    /// <summary>主题模式: Default / Light / Dark / OLED。</summary>
     public string ThemeMode { get; set; } = "Default";
 
+    // ── Toast ──
+    public bool ToastOnCapture { get; set; } = true;
+    public bool ToastOnSilentCapture { get; set; } = true;
+    public bool ToastOnRecording { get; set; } = true;
+
+    // ── 预览界面颜色 ──
+    public string OverlayColor { get; set; } = "#99001833";
+    public string BorderColor { get; set; } = "#FF4488FF";
 }

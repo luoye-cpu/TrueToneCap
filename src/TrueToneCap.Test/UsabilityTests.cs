@@ -111,7 +111,7 @@ public static class UsabilityTests
         HdrEncode_AllSupported(hdrFrame);
         HdrEncode_Pq16_Precision();
 
-        // ─── 9. ManagedJpegEncoder 专项测试 ───
+        // ─── 9. JPEG 专项测试 (jpegli) ───
         Console.WriteLine("\n── 9. JPEG 编码器专项 ──");
         Jpeg_AllQualityLevels();
         Jpeg_Chroma_420_422_444();
@@ -613,7 +613,7 @@ public static class UsabilityTests
     static void SdrEncode_AllFormats(byte[] bgra, int w, int h)
     {
         var formats = new[] { OutputFormat.PNG, OutputFormat.JPEG_LI, OutputFormat.JPEG_XL,
-                              OutputFormat.AVIF, OutputFormat.WebP, OutputFormat.BMP };
+                              OutputFormat.AVIF, OutputFormat.WebP, OutputFormat.TIFF };
         foreach (var fmt in formats)
         {
             try
@@ -628,7 +628,7 @@ public static class UsabilityTests
                 {
                     OutputFormat.PNG => ".png", OutputFormat.JPEG_LI => ".jpg",
                     OutputFormat.JPEG_XL => ".jxl", OutputFormat.AVIF => ".avif",
-                    OutputFormat.WebP => ".webp", OutputFormat.BMP => ".bmp",
+                    OutputFormat.WebP => ".webp", OutputFormat.TIFF => ".bmp",
                     _ => ".bin"
                 };
                 string path = Path.Combine(OutDir, $"sdr_{fmt}_{w}x{h}{ext}");
@@ -901,7 +901,7 @@ public static class UsabilityTests
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  9. JPEG 专项
+    //  9. JPEG 专项 (jpegli)
     // ═══════════════════════════════════════════════════════════════
 
     static void Jpeg_AllQualityLevels()
@@ -909,9 +909,10 @@ public static class UsabilityTests
         var bgra = new byte[16 * 16 * 4];
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 128; bgra[i + 1] = 64; bgra[i + 2] = 255; bgra[i + 3] = 255; }
 
-        foreach (int q in new[] { 1, 10, 50, 75, 90, 95, 100 })
+        foreach (float q in new[] { 0.5f, 1.0f, 1.5f, 2.0f, 3.0f })
         {
-            var data = ManagedJpegEncoder.EncodeToBytes(bgra, 16, 16, q);
+            using var jpegli = new JpegLiNative();
+            var data = jpegli.Encode(bgra, 16, 16, q);
             bool valid = data.Length > 100 && data[0] == 0xFF && data[1] == 0xD8;
             Assert($"JPEG Quality={q}: {data.Length}B, SOI={valid}", valid);
         }
@@ -924,7 +925,8 @@ public static class UsabilityTests
 
         foreach (var chroma in new[] { "444", "422", "420" })
         {
-            var data = ManagedJpegEncoder.EncodeToBytes(bgra, 32, 16, 90, null, chroma);
+            using var jpegli = new JpegLiNative();
+            var data = jpegli.Encode(bgra, 32, 16, 1.0f, chroma);
             bool valid = data.Length > 50 && data[0] == 0xFF && data[1] == 0xD8;
             Assert($"JPEG Chroma={chroma}: {data.Length}B, 有效={valid}", valid);
         }
@@ -936,7 +938,8 @@ public static class UsabilityTests
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 128; bgra[i + 1] = 128; bgra[i + 2] = 128; bgra[i + 3] = 255; }
 
         var icc = ColorProfileProvider.GetDefaultSRgbIcc();
-        var data = ManagedJpegEncoder.EncodeToBytes(bgra, 16, 16, 90, icc, "444");
+        using var jpegli = new JpegLiNative();
+        var data = jpegli.Encode(bgra, 16, 16, 1.0f, "444", icc);
         bool valid = data.Length > 200 && data[0] == 0xFF && data[1] == 0xD8;
         // 验证 ICC 存在 (APP2 marker 0xFFE2)
         bool hasIcc = false;
@@ -949,7 +952,8 @@ public static class UsabilityTests
     {
         var bgra = new byte[8 * 8 * 4];
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 255; bgra[i + 1] = 0; bgra[i + 2] = 0; bgra[i + 3] = 255; } // 纯蓝
-        var data = ManagedJpegEncoder.EncodeToBytes(bgra, 8, 8, 50);
+        using var jpegli = new JpegLiNative();
+        var data = jpegli.Encode(bgra, 8, 8, 1.0f);
         bool valid = data.Length > 50
             && data[0] == 0xFF && data[1] == 0xD8  // SOI
             && data[^2] == 0xFF && data[^1] == 0xD9; // EOI
@@ -960,9 +964,10 @@ public static class UsabilityTests
     {
         var bgra = new byte[32 * 32 * 4];
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = (byte)(i % 256); bgra[i + 1] = (byte)(i * 2 % 256); bgra[i + 2] = (byte)(i * 3 % 256); bgra[i + 3] = 255; }
-        string path = Path.Combine(OutDir, "jpeg_stream_test.jpg");
-        ManagedJpegEncoder.Encode(bgra, 32, 32, path, 85, null, "444");
-        var fi = new FileInfo(path);
+        using var jpegli = new JpegLiNative();
+        var data = jpegli.Encode(bgra, 32, 32, 1.0f, "444");
+        File.WriteAllBytes(Path.Combine(OutDir, "jpeg_stream_test.jpg"), data);
+        var fi = new FileInfo(Path.Combine(OutDir, "jpeg_stream_test.jpg"));
         Assert($"JPEG 文件写入: {fi.Length}B", fi.Exists && fi.Length > 0);
     }
 

@@ -8,11 +8,18 @@ namespace TrueToneCap.App.Services;
 /// <summary>HLSL 着色器后台编译器。</summary>
 public static class ShaderCompiler
 {
-    private static readonly string[] s_shaders = ["ToneMapping.hlsl", "MosaicEffect.hlsl"];
-    private static readonly string s_profile = "ps_6_0";
-    private static readonly string s_entry = "main";
+    private record ShaderDef(string File, string Profile);
 
-    /// <summary>确保所有 CSO 文件存在。缺失时后台自动编译。</summary>
+    private static readonly ShaderDef[] s_shaders =
+    [
+        new("ToneMapping.hlsl", "ps_6_0"),
+        new("MosaicEffect.hlsl", "ps_6_0"),
+        new("CopyTexture.hlsl", "ps_6_0"),
+        new("FullscreenVS.hlsl", "vs_6_0"),
+    ];
+    private const string s_entry = "main";
+
+    /// <summary>确保所有 CSO 文件存在。缺失时后台自动编译。应在应用启动最开始调用。</summary>
     public static void EnsureCompiled(string shaderDir, string outputDir)
     {
         var dxcPath = FindDxc();
@@ -26,34 +33,34 @@ public static class ShaderCompiler
 
         foreach (var shader in s_shaders)
         {
-            var inputPath = Path.Combine(shaderDir, shader);
-            var outputPath = Path.Combine(outputDir, shader + ".cso");
+            var inputPath = Path.Combine(shaderDir, shader.File);
+            var outputPath = Path.Combine(outputDir, shader.File + ".cso");
 
             if (File.Exists(outputPath))
             {
-                Debug.WriteLine($"[Shader] {shader}.cso 已存在 ({new FileInfo(outputPath).Length} bytes)");
+                Debug.WriteLine($"[Shader] {shader.File}.cso 已存在 ({new FileInfo(outputPath).Length} bytes)");
                 continue;
             }
 
             if (!File.Exists(inputPath))
             {
-                Debug.WriteLine($"[Shader] {shader} 源文件未找到");
+                Debug.WriteLine($"[Shader] {shader.File} 源文件未找到");
                 continue;
             }
 
             // 后台编译
-            Task.Run(() => CompileShader(dxcPath, inputPath, outputPath, shader));
+            Task.Run(() => CompileShader(dxcPath, inputPath, outputPath, shader.File, shader.Profile));
         }
     }
 
-    private static void CompileShader(string dxcPath, string input, string output, string name)
+    private static void CompileShader(string dxcPath, string input, string output, string name, string profile)
     {
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = dxcPath,
-                Arguments = $"-T {s_profile} -E {s_entry} \"{input}\" -Fo \"{output}\"",
+                Arguments = $"-T {profile} -E {s_entry} \"{input}\" -Fo \"{output}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true

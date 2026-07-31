@@ -16,6 +16,7 @@ public static class OcrLanguages
     /// <summary>PP-OCRv6 统一模型支持的语言（50 语言统一字典）。</summary>
     public static readonly OcrLanguage[] OnnxLanguages =
     [
+        new("zh-en", "中英混合", ["OnnxGpu", "OnnxCpu"]),
         new("ch", "中文 (简体)", ["OnnxGpu", "OnnxCpu"]),
         new("en", "English", ["OnnxGpu", "OnnxCpu"]),
         new("ja", "日本語", ["OnnxGpu", "OnnxCpu"]),
@@ -65,8 +66,8 @@ public static class OcrLanguages
     /// <summary>获取默认语言 ID。</summary>
     public static string GetDefaultLanguage(OcrEngineType engineType) => engineType switch
     {
-        OcrEngineType.OnnxGpu or OcrEngineType.OnnxCpu => "ch",
+        OcrEngineType.OnnxGpu or OcrEngineType.OnnxCpu => "zh-en",
         OcrEngineType.WindowsOcr => "zh-Hans-CN",
-        _ => "ch",
+        _ => "zh-en",
     };
 }

@@ -1,6 +1,7 @@
 // TrueToneCap.App/Services/HotkeyManager.cs
 // 全局热键管理（基于 Win32 RegisterHotKey + 冲突检测 + 回退）
-// 不再子类化窗口 — 由 MainWindow.WndProcHook 统一转发 WM_HOTKEY
+// 支持多热键注册（截图/录制/无感截图）
+// 由 MainWindow.WndProcHook 统一转发 WM_HOTKEY
 
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
@@ -11,9 +12,9 @@ namespace TrueToneCap.App.Services;
 public static class HotkeyManager
 {
     private static nint _hwnd;
-    private static int _hotkeyId = -1;
-    private static Action? _callback;
-    private static string _lastRegisteredHotkey = "";
+    private static readonly Dictionary<int, Action> _callbacks = [];
+    private static readonly Dictionary<string, int> _namedIds = [];
+    private static int _nextId = 9001;
 
     private const uint WM_HOTKEY = 0x0312;
     private const uint MOD_ALT = 1, MOD_CONTROL = 2, MOD_SHIFT = 4, MOD_WIN = 8, MOD_NOREPEAT = 0x4000;
@@ -21,90 +22,105 @@ public static class HotkeyManager
     [DllImport("user32.dll")] static extern bool RegisterHotKey(nint h, int id, uint mods, uint vk);
     [DllImport("user32.dll")] static extern bool UnregisterHotKey(nint h, int id);
 
-    /// <summary>已注册的热键字符串（空表示注册失败）。</summary>
-    public static string RegisteredHotkey => _lastRegisteredHotkey;
-
     /// <summary>WM_HOTKEY 消息 ID（供 WndProcHook 转发）。</summary>
     public const uint WM_HOTKEY_MSG = WM_HOTKEY;
 
     /// <summary>处理 WM_HOTKEY 消息。由 MainWindow.WndProcHook 调用。</summary>
     public static bool HandleHotKeyMessage(uint msg, nint wParam)
     {
-        if (msg == WM_HOTKEY && (int)wParam == _hotkeyId)
+        if (msg == WM_HOTKEY && _callbacks.TryGetValue((int)wParam, out var cb))
         {
-            _callback?.Invoke();
+            cb.Invoke();
             return true;
         }
         return false;
     }
 
-    /// <summary>注册全局热键（不再子类化窗口）。</summary>
-    public static bool Register(Window window, string hotkey, Action callback)
+    /// <summary>注册命名全局热键。name 用于后续注销/更新。</summary>
+    public static bool RegisterNamed(Window window, string name, string hotkey, Action callback,
+        string[]? fallbacks = null)
     {
-        // 先注销旧热键
-        UnregisterHotkeyOnly();
-
         _hwnd = WindowNative.GetWindowHandle(window);
-        _callback = callback;
-        _hotkeyId = 9001;
 
-        // 首先尝试用户首选热键
-        if (TryRegister(hotkey))
+        // 先注销同名旧热键
+        UnregisterNamed(name);
+
+        var id = _nextId++;
+        _namedIds[name] = id;
+        _callbacks[id] = callback;
+
+        // 尝试用户首选热键
+        if (TryRegisterId(id, hotkey))
             return true;
 
         // 回退方案
-        string[] fallbacks = ["Ctrl+Shift+X", "Ctrl+Alt+S", "Alt+Print", "Print"];
-        foreach (var fb in fallbacks)
+        if (fallbacks is not null)
         {
-            if (TryRegister(fb))
-                return true;
+            foreach (var fb in fallbacks)
+            {
+                if (TryRegisterId(id, fb))
+                    return true;
+            }
         }
 
-        _lastRegisteredHotkey = "";
+        // 全部失败，清理
+        _callbacks.Remove(id);
+        _namedIds.Remove(name);
         return false;
     }
 
-    private static bool TryRegister(string hotkey)
+    /// <summary>兼容旧接口：注册截图热键。</summary>
+    public static bool Register(Window window, string hotkey, Action callback)
+    {
+        return RegisterNamed(window, "capture", hotkey, callback,
+            ["Ctrl+Shift+X", "Ctrl+Alt+S", "Alt+Print", "Print"]);
+    }
+
+    /// <summary>注销命名热键。</summary>
+    public static void UnregisterNamed(string name)
+    {
+        if (_namedIds.TryGetValue(name, out var id))
+        {
+            if (_hwnd != 0) UnregisterHotKey(_hwnd, id);
+            _callbacks.Remove(id);
+            _namedIds.Remove(name);
+        }
+    }
+
+    /// <summary>完全注销所有热键。</summary>
+    public static void Unregister()
+    {
+        if (_hwnd != 0)
+        {
+            foreach (var id in _callbacks.Keys)
+                UnregisterHotKey(_hwnd, id);
+        }
+        _callbacks.Clear();
+        _namedIds.Clear();
+    }
+
+    private static bool TryRegisterId(int id, string hotkey)
     {
         if (!ParseHotkey(hotkey, out uint mods, out uint vk))
             return false;
 
         // 临时注册检测冲突
-        if (RegisterHotKey(_hwnd, _hotkeyId + 1, mods | MOD_NOREPEAT, vk))
-            UnregisterHotKey(_hwnd, _hotkeyId + 1);
+        if (RegisterHotKey(_hwnd, id + 100, mods | MOD_NOREPEAT, vk))
+            UnregisterHotKey(_hwnd, id + 100);
         else
         {
             LogService.Warn("HotkeyManager", $"冲突: {hotkey} (err={Marshal.GetLastWin32Error()})");
             return false;
         }
 
-        if (!RegisterHotKey(_hwnd, _hotkeyId, mods | MOD_NOREPEAT, vk))
+        if (!RegisterHotKey(_hwnd, id, mods | MOD_NOREPEAT, vk))
         {
             LogService.Error("HotkeyManager", $"注册失败: {hotkey}");
             return false;
         }
 
-        _lastRegisteredHotkey = hotkey;
-        LogService.Info("HotkeyManager", $"已注册: {hotkey}");
+        LogService.Info("HotkeyManager", $"已注册: {hotkey} (id={id})");
         return true;
-    }
-
-    /// <summary>仅注销 Win32 热键。</summary>
-    private static void UnregisterHotkeyOnly()
-    {
-        if (_hotkeyId >= 0 && _hwnd != 0)
-        {
-            UnregisterHotKey(_hwnd, _hotkeyId);
-            _hotkeyId = -1;
-        }
-        _callback = null;
-        _lastRegisteredHotkey = "";
-    }
-
-    /// <summary>完全注销。</summary>
-    public static void Unregister()
-    {
-        UnregisterHotkeyOnly();
     }
 
     private static bool ParseHotkey(string s, out uint mods, out uint vk)

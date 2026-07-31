@@ -21,8 +21,9 @@ public static class IccStore
             if (_srgb is not null) return _srgb;
             lock (_lock)
             {
-                _srgb ??= ColorManagement.ColorProfileProvider.GetStandardIccProfile("sRGB");
-                _srgb ??= ColorManagement.ColorProfileProvider.GetDefaultSRgbIcc();
+                if (_srgb is not null) return _srgb;
+                // 直接调用 GetDefaultSRgbIcc 避免与 GetStandardIccProfile 循环
+                _srgb = ColorManagement.ColorProfileProvider.GetDefaultSRgbIcc();
                 return _srgb ?? [];
             }
         }
@@ -36,7 +37,10 @@ public static class IccStore
             if (_adobeRgb is not null) return _adobeRgb;
             lock (_lock)
             {
-                _adobeRgb ??= ColorManagement.ColorProfileProvider.GetStandardIccProfile("AdobeRGB");
+                if (_adobeRgb is not null) return _adobeRgb;
+                // 直接使用 PatchSrgbPrimaries 避免循环
+                _adobeRgb = ColorManagement.ColorProfileProvider.PatchSrgbPrimaries(
+                    ColorManagement.IccPrimaries.AdobeRGB, "Adobe RGB (1998)");
                 return _adobeRgb ?? SRGB;
             }
         }
@@ -50,7 +54,9 @@ public static class IccStore
             if (_displayP3 is not null) return _displayP3;
             lock (_lock)
             {
-                _displayP3 ??= ColorManagement.ColorProfileProvider.GetStandardIccProfile("DisplayP3");
+                if (_displayP3 is not null) return _displayP3;
+                _displayP3 = ColorManagement.ColorProfileProvider.PatchSrgbPrimaries(
+                    ColorManagement.IccPrimaries.DisplayP3, "Display P3");
                 return _displayP3 ?? SRGB;
             }
         }
@@ -64,7 +70,9 @@ public static class IccStore
             if (_bt2020 is not null) return _bt2020;
             lock (_lock)
             {
-                _bt2020 ??= ColorManagement.ColorProfileProvider.GetStandardIccProfile("BT2020");
+                if (_bt2020 is not null) return _bt2020;
+                _bt2020 = ColorManagement.ColorProfileProvider.PatchSrgbPrimaries(
+                    ColorManagement.IccPrimaries.BT2020, "BT.2020");
                 return _bt2020 ?? SRGB;
             }
         }

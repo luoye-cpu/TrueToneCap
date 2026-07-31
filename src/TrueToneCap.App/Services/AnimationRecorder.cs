@@ -126,13 +126,8 @@ public sealed class AnimationRecorder : IDisposable
 
                 try
                 {
-                    // 复用共享 WGC 服务（不再创建独立实例）
-                    var result = await _wgcService.CaptureMonitorAsync(new WgcCaptureConfig
-                    {
-                        TargetMonitor = displayInfo.MonitorHandle,
-                        PreferHdr = false,
-                        FrameTimeoutMs = 100
-                    });
+                    // 无锁读取：直接从池化会话取最新帧，不与主截图竞争 s_captureLock
+                    var result = _wgcService.TryGetLatestFrame(displayInfo.MonitorHandle);
 
                     if (result?.SdrPixels is null) continue;
 
@@ -147,11 +142,6 @@ public sealed class AnimationRecorder : IDisposable
                         Interlocked.Increment(ref _framesCaptured);
                         last = pixels;
                     }
-                }
-                catch (InvalidOperationException)
-                {
-                    // 捕获锁被占用（主截图正在进行），跳过本帧
-                    continue;
                 }
                 catch (Exception ex)
                 {
