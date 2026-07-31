@@ -23,6 +23,12 @@ if (args.Contains("--usability-tests"))
     return TrueToneCap.Test.UsabilityTests.RunAll();
 }
 
+// ── 色彩管线精度测试入口 ──
+if (args.Contains("--color-tests"))
+{
+    return TrueToneCap.Test.ColorPipelineTests.RunAll();
+}
+
 Console.WriteLine("══════════════════════════════════════");
 Console.WriteLine("  TrueToneCap ONNX OCR 综合分析");
 Console.WriteLine("══════════════════════════════════════\n");

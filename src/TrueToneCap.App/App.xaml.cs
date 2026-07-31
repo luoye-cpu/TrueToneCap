@@ -58,16 +58,26 @@ public partial class App : Application
         var initTheme = LoadThemeFromSettings();
         _currentTheme = initTheme;
 
-        // 仅当用户明确选择了 Light/Dark/OLED 时才设定 RequestedTheme
-        // Default（跟随系统）→ 不设置，让 WinUI 自动跟随 Windows 主题
-        if (initTheme == AppThemeMode.Light)
-            RequestedTheme = ApplicationTheme.Light;
-        else if (initTheme == AppThemeMode.Dark || initTheme == AppThemeMode.OLED)
-            RequestedTheme = ApplicationTheme.Dark;
-        // else: Default → 不设置 RequestedTheme，跟随系统
+        // WinUI 3 非打包应用不设置 RequestedTheme 时默认深色，不会自动跟随系统
+        // 因此 Default 模式下必须主动检测系统主题并显式设置
+        var effectiveTheme = ResolveEffectiveTheme(initTheme);
+        RequestedTheme = effectiveTheme is AppThemeMode.Light
+            ? ApplicationTheme.Light
+            : ApplicationTheme.Dark;
 
         // ── 加载内嵌字体（优先于 XAML 初始化）──
         FontLoader.LoadBundledFonts();
+
+        // ── 着色器预热：后台静默编译缺失的 CSO（最早时机，不阻塞启动）──
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var shaderDir = Path.Combine(AppContext.BaseDirectory, "data", "Shaders");
+                ShaderCompiler.EnsureCompiled(shaderDir, shaderDir);
+            }
+            catch { }
+        });
 
         // ── 初始化 OCR 引擎（纯内嵌 ONNX + Windows，零外部依赖）──
         _ = Task.Run(() => { try { MultiOcrService.Initialize(); } catch { } });

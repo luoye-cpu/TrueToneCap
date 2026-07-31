@@ -54,12 +54,12 @@ public static class NativeAvifEncoder
     public static void Encode(byte[] bgra, int w, int h, string path,
         int crf = 30, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null)
     {
-        Encode(bgra, w, h, path, crf, isHdr: false, chroma, bitDepth);
+        Encode(bgra, w, h, path, crf, isHdr: false, chroma, bitDepth, iccProfile);
     }
 
     /// <summary>编码 BGRA 像素为 AVIF 文件，通过临时 Y4M 文件。</summary>
     public static void Encode(byte[] bgra, int w, int h, string path,
-        int crf, bool isHdr, string chroma = "444", int bitDepth = 10)
+        int crf, bool isHdr, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用 请将 avifenc.exe 放入 native/ 目录");
@@ -67,15 +67,39 @@ public static class NativeAvifEncoder
         var tmpY4m = Path.Combine(Path.GetTempPath(), $"ttc_avif_{Guid.NewGuid():N}.y4m");
         try
         {
-            WriteBgraToY4mFile(bgra, w, h, tmpY4m);
+            WriteBgraToY4mFile(bgra, w, h, tmpY4m, chroma);
 
             var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
             int q = CrfToQuality(crf);
-            var hdrArgs = isHdr ? "--cicp 9 16 0 --depth 10" : "";
+
+            // 构建 CICP 参数：根据 isHdr 和色彩空间选择
+            string cicpArgs = isHdr ? "--cicp 9/16/0 --depth 10" : "--cicp 1/13/0";
+
+            // 色度采样参数
+            string chromaArg = chroma switch
+            {
+                "420" => "--yuv 420",
+                "422" => "--yuv 422",
+                _ => "--yuv 444"
+            };
+
+            // ICC 参数
+            string iccArg = "";
+            if (iccProfile is { Length: > 128 })
+            {
+                var iccPath = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
+                try
+                {
+                    File.WriteAllBytes(iccPath, iccProfile);
+                    iccArg = $"--icc \"{iccPath}\"";
+                }
+                catch { }
+            }
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-q {q} -s 6 {hdrArgs} --input-format y4m \"{tmpY4m}\" \"{path}\"".Trim(),
+                Arguments = $"-q {q} -s 6 {chromaArg} {cicpArgs} {iccArg} \"{tmpY4m}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -97,26 +121,102 @@ public static class NativeAvifEncoder
         }
     }
 
-    /// <summary>将 BGRA 像素写入 Y4M 文件。</summary>
-    private static void WriteBgraToY4mFile(byte[] bgra, int w, int h, string y4mPath)
+    /// <summary>将 BGRA 像素写入 Y4M 文件，支持色度采样。</summary>
+    private static void WriteBgraToY4mFile(byte[] bgra, int w, int h, string y4mPath, string chroma = "444")
     {
         using (var fs = new FileStream(y4mPath, FileMode.Create, FileAccess.Write))
         {
-            byte[] header = System.Text.Encoding.ASCII.GetBytes($"YUV4MPEG2 W{w} H{h} F1:1 Ip A0:0 C444\nFRAME\n");
-            fs.Write(header, 0, header.Length);
-            int pixelCount = w * h;
-            for (int i = 0; i < pixelCount; i++)
+            // Y4M 色度标记
+            string y4mChroma = chroma switch
             {
-                int si = i * 4;
-                byte b = bgra[si];
-                byte g = bgra[si + 1];
-                byte r = bgra[si + 2];
-                int y  = (66 * r + 129 * g + 25 * b + 128) / 256 + 16;
-                int cb = (-38 * r - 74 * g + 112 * b + 128) / 256 + 128;
-                int cr = (112 * r - 94 * g - 18 * b + 128) / 256 + 128;
-                fs.WriteByte((byte)Math.Clamp(y, 16, 235));
-                fs.WriteByte((byte)Math.Clamp(cb, 16, 240));
-                fs.WriteByte((byte)Math.Clamp(cr, 16, 240));
+                "420" => "C420jpeg",
+                "422" => "C422jpeg",
+                _ => "C444jpeg"
+            };
+            byte[] header = System.Text.Encoding.ASCII.GetBytes($"YUV4MPEG2 W{w} H{h} F1:1 Ip A0:0 {y4mChroma}\nFRAME\n");
+            fs.Write(header, 0, header.Length);
+
+            int pixelCount = w * h;
+            if (chroma == "444")
+            {
+                // 4:4:4 — 每像素 3 字节，BT.709 全范围矩阵
+                for (int i = 0; i < pixelCount; i++)
+                {
+                    int si = i * 4;
+                    byte b = bgra[si];
+                    byte g = bgra[si + 1];
+                    byte r = bgra[si + 2];
+                    // BT.709 全范围 (JPEG 风格)
+                    int y  = (int)( 0.299f   * r + 0.587f   * g + 0.114f   * b + 0.5f);
+                    int cb = (int)(-0.168736f * r - 0.331264f * g + 0.5f     * b + 128.5f);
+                    int cr = (int)( 0.5f     * r - 0.418688f * g - 0.081312f * b + 128.5f);
+                    fs.WriteByte((byte)Math.Clamp(y, 0, 255));
+                    fs.WriteByte((byte)Math.Clamp(cb, 0, 255));
+                    fs.WriteByte((byte)Math.Clamp(cr, 0, 255));
+                }
+            }
+            else if (chroma == "422")
+            {
+                // 4:2:2 — 水平 2× 下采样
+                for (int row = 0; row < h; row++)
+                {
+                    for (int col = 0; col < w; col++)
+                    {
+                        int si = (row * w + col) * 4;
+                        byte b = bgra[si];
+                        byte g = bgra[si + 1];
+                        byte r = bgra[si + 2];
+                        int y = (int)(0.299f * r + 0.587f * g + 0.114f * b + 0.5f);
+                        fs.WriteByte((byte)Math.Clamp(y, 0, 255));
+                        if (col % 2 == 0)
+                        {
+                            int cb = (int)(-0.168736f * r - 0.331264f * g + 0.5f * b + 128.5f);
+                            int cr = (int)(0.5f * r - 0.418688f * g - 0.081312f * b + 128.5f);
+                            fs.WriteByte((byte)Math.Clamp(cb, 0, 255));
+                            fs.WriteByte((byte)Math.Clamp(cr, 0, 255));
+                        }
+                    }
+                }
+            }
+            else // 420
+            {
+                // 4:2:0 — 2×2 块下采样
+                for (int row = 0; row < h; row++)
+                {
+                    for (int col = 0; col < w; col++)
+                    {
+                        int si = (row * w + col) * 4;
+                        byte b = bgra[si];
+                        byte g = bgra[si + 1];
+                        byte r = bgra[si + 2];
+                        int y = (int)(0.299f * r + 0.587f * g + 0.114f * b + 0.5f);
+                        fs.WriteByte((byte)Math.Clamp(y, 0, 255));
+                        if (row % 2 == 0 && col % 2 == 0)
+                        {
+                            // 2×2 块平均
+                            float sumR = 0, sumG = 0, sumB = 0;
+                            int cnt = 0;
+                            for (int dy = 0; dy < 2; dy++)
+                            {
+                                for (int dx = 0; dx < 2; dx++)
+                                {
+                                    int sx = Math.Min(col + dx, w - 1);
+                                    int sy = Math.Min(row + dy, h - 1);
+                                    int si2 = (sy * w + sx) * 4;
+                                    sumR += bgra[si2 + 2];
+                                    sumG += bgra[si2 + 1];
+                                    sumB += bgra[si2];
+                                    cnt++;
+                                }
+                            }
+                            float avgR = sumR / cnt, avgG = sumG / cnt, avgB = sumB / cnt;
+                            int cb = (int)(-0.168736f * avgR - 0.331264f * avgG + 0.5f * avgB + 128.5f);
+                            int cr = (int)(0.5f * avgR - 0.418688f * avgG - 0.081312f * avgB + 128.5f);
+                            fs.WriteByte((byte)Math.Clamp(cb, 0, 255));
+                            fs.WriteByte((byte)Math.Clamp(cr, 0, 255));
+                        }
+                    }
+                }
             }
         }
     }
@@ -125,26 +225,28 @@ public static class NativeAvifEncoder
     private static int CrfToQuality(int crf) =>
         (int)Math.Clamp(100 - (crf * 100.0 / 63.0), 0, 100);
 
-    /// <summary>直接从 PNG 文件编码为 AVIF（兼容旧接口，通过 avifenc WIC 读取 PNG）。</summary>
-    public static void EncodeFile(string pngPath, string avifPath, int crf = 30)
-    {
-        EncodeFile(pngPath, avifPath, crf, isHdr: false);
-    }
-
-    /// <summary>直接从 PNG 文件编码为 AVIF，支持 HDR 参数。</summary>
-    public static void EncodeFile(string pngPath, string avifPath, int crf, bool isHdr)
+    /// <summary>直接从 PNG 文件编码为 AVIF，支持 CICP 参数。</summary>
+    public static void EncodeFile(string pngPath, string avifPath, int crf, byte[]? cicp = null)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
 
         var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
         int q = CrfToQuality(crf);
-        var hdrArgs = isHdr ? "--cicp 9 16 0 --depth 10" : "";
-        // 使用 avifenc 直接读取 PNG 文件（通过 WIC，不依赖 libpng）
+
+        // 从 cicp 字节数组构建参数，默认 sRGB
+        string cicpArgs = "--cicp 1/13/0";
+        if (cicp is { Length: 4 })
+        {
+            cicpArgs = $"--cicp {cicp[0]}/{cicp[1]}/{cicp[2]}";
+            if (cicp[1] == 16) // ST.2084 PQ → 10-bit
+                cicpArgs += " --depth 10";
+        }
+
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = $"-q {q} -s 6 {hdrArgs} --input-format png \"{pngPath}\" \"{avifPath}\"".Trim(),
+            Arguments = $"-q {q} -s 6 {cicpArgs} \"{pngPath}\" \"{avifPath}\"".Trim(),
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
@@ -194,7 +296,7 @@ public static class NativeAvifEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-q {q} -s 6 --depth 10 --cicp 9 16 0 --input-format y4m \"{tmpY4m}\" \"{path}\"".Trim(),
+                Arguments = $"-q {q} -s 6 --depth 10 --cicp 9/16/0 \"{tmpY4m}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

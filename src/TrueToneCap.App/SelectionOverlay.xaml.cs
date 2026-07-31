@@ -28,7 +28,6 @@ public sealed partial class SelectionOverlay : Window
     // ── 自动识别区域 ──
     private List<DetectedRegion> _detectedRegions = [];
     private int _hoveredRegionIndex = -1;
-    private readonly List<Border> _regionHintElements = [];
 
     // ── 标注状态 ──
     private bool _isAnnotating;
@@ -58,7 +57,10 @@ public sealed partial class SelectionOverlay : Window
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(nint hwnd);
     [DllImport("dwmapi.dll")]
-    private static extern int DwmExtendFrameIntoClientArea(nint hwnd, ref int margins);
+    private static extern int DwmExtendFrameIntoClientArea(nint hwnd, ref MARGINS margins);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MARGINS { public int cxLeftWidth, cxRightWidth, cyTopHeight, cyBottomHeight; }
 
     private static readonly nint HWND_TOPMOST = new(-1);
     private const uint SWP_SHOWWINDOW = 0x0040;
@@ -83,13 +85,26 @@ public sealed partial class SelectionOverlay : Window
     // ── 选区在覆盖层中的有效像素位置（用于标注画布定位） ──
     private double _selEffX1, _selEffY1, _selEffW, _selEffH;
 
+    // ── HDR 背景窗口（可选，当 HDR 捕获可用时使用） ──
+    private HdrPreviewWindow? _hdrBgWnd;
+    private float[]? _hdrPixels;
+    private int _hdrW, _hdrH;
+
+    /// <summary>SDR 构造：使用桌面 BGRA 像素作为背景。</summary>
     public SelectionOverlay(byte[] desktopPixels, int vx, int vy, int vw, int vh)
+        : this(desktopPixels, vx, vy, vw, vh, null, 0, 0) { }
+
+    /// <summary>HDR 构造：额外接收 HDR 浮点帧用于 HDR 背景窗口。</summary>
+    public SelectionOverlay(byte[] desktopPixels, int vx, int vy, int vw, int vh,
+        float[]? hdrPixels, int hdrW, int hdrH)
     {
         DesktopPixels = desktopPixels;
         DesktopWidth = vw;
         DesktopHeight = vh;
         _vx = vx; _vy = vy; _vw = vw; _vh = vh;
-
+        _hdrPixels = hdrPixels;
+        _hdrW = hdrW;
+        _hdrH = hdrH;
         this.InitializeComponent();
 
         var hwnd = WindowNative.GetWindowHandle(this);
@@ -123,16 +138,47 @@ public sealed partial class SelectionOverlay : Window
             // 全屏无边框覆盖：覆盖整个虚拟桌面（支持负坐标多屏）
             _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
                 SWP_SHOWWINDOW | SWP_NOACTIVATE);
-            // 消除 DWM 窗口阴影（无边框窗口可能仍有 1px 边缘）
-            int dwmMargin = 1;
-            _ = DwmExtendFrameIntoClientArea(hwnd, ref dwmMargin);
+
+            // ═══ 创建 HDR 背景窗口（在覆盖层下方，DWM 透明穿透可见）═══
+            bool hdrBgOk = false;
+            if (_hdrPixels is not null && _hdrW > 0 && _hdrH > 0)
+            {
+                try
+                {
+                    var sharedDevice = AppServices.Wgc
+                        ?.GetOrCreateDevice(TrueToneCap.Core.Capture.DisplayEnumerator.GetMonitorUnderCursor());
+                    _hdrBgWnd = new HdrPreviewWindow(sharedDevice);
+                    if (_hdrBgWnd.Initialize(vx, vy, _hdrW, _hdrH))
+                    {
+                        _hdrBgWnd.PresentFrame(_hdrPixels, _hdrW, _hdrH);
+                        hdrBgOk = true;
+                        System.Diagnostics.Debug.WriteLine($"[Overlay] HDR 背景窗口已创建");
+                    }
+                    else
+                    {
+                        _hdrBgWnd.Dispose();
+                        _hdrBgWnd = null;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Overlay] HDR 背景创建失败: {ex.Message}");
+                    _hdrBgWnd?.Dispose();
+                    _hdrBgWnd = null;
+                }
+            }
+
+            // 全透明窗口：margins 全部 -1 使整个客户区透明，
+            // 让下层 HDR 独立窗口的 scRGB 内容可见
+            var margins = new MARGINS { cxLeftWidth = -1, cxRightWidth = -1, cyTopHeight = -1, cyBottomHeight = -1 };
+            _ = DwmExtendFrameIntoClientArea(hwnd, ref margins);
             // 获取 DPI 缩放：主路径 GetDpiForWindow，回落 XamlRoot.RasterizationScale
             uint dpi = GetDpiForWindow(hwnd);
             if (dpi > 0)
                 _dpiScale = dpi / 96.0;
             else
                 _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
-            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2}");
+            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2} HDR背景={hdrBgOk}");
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
             if (!_bgRendered)
             {
@@ -333,8 +379,8 @@ public sealed partial class SelectionOverlay : Window
             using (var stream = wb.PixelBuffer.AsStream()) { stream.Write(bgra, 0, bgra.Length); }
             wb.Invalidate();
             DesktopImage.Source = wb;
-            RootGrid.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
 
+            RootGrid.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
             DimOverlay.Visibility = Visibility.Visible;
             HintText.Visibility = Visibility.Visible;
             Toolbar.Visibility = Visibility.Collapsed;
@@ -493,12 +539,22 @@ public sealed partial class SelectionOverlay : Window
         if (result is ActionResult.Confirm or ActionResult.Copy)
             AnnotatedRegionPixels = GetAnnotatedRegionPixels();
 
+        // 关闭 HDR 背景窗口
+        _hdrBgWnd?.Close();
+        _hdrBgWnd?.Dispose();
+        _hdrBgWnd = null;
+
         ActionCompleted?.Invoke(result, SelectedRect);
         this.Close();
     }
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
+        // 关闭 HDR 背景窗口
+        _hdrBgWnd?.Close();
+        _hdrBgWnd?.Dispose();
+        _hdrBgWnd = null;
+
         // 仅当 Finish 未被调用时（如系统强制关闭窗口）才触发 Cancel
         if (!_finished && !_selectionComplete)
             ActionCompleted?.Invoke(ActionResult.Cancel, default);
@@ -781,32 +837,30 @@ public sealed partial class SelectionOverlay : Window
     }
 
     // ═══════════════════════════════════════
-    //  自动识别区域 (A+B)
+    //  QQ截图式窗口智能识别
     // ═══════════════════════════════════════
 
-    /// <summary>后台检测并渲染区域提示。</summary>
+    // 单一高亮边框（QQ截图风格：只显示当前悬停窗口的边框）
+    private Border? _activeHighlight;
+    private Border? _windowTooltip;
+    private TextBlock? _tooltipText;
+
+    /// <summary>后台检测窗口区域（排除覆盖层自身）。</summary>
     private async void DetectAndRenderRegions()
     {
         try
         {
+            var selfHwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             _detectedRegions = await Task.Run(() =>
-                RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh));
+                RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh,
+                    new HashSet<nint> { selfHwnd }));
 
             DispatcherQueue.TryEnqueue(() =>
             {
-                RenderRegionHints();
                 int uia = _detectedRegions.Count(r => r.Source == RegionSource.Uia);
                 int edge = _detectedRegions.Count(r => r.Source == RegionSource.Edge);
                 System.Diagnostics.Debug.WriteLine(
-                    $"[SelectionOverlay] 区域检测完成: {_detectedRegions.Count} 个区域 (UIA={uia}, Edge={edge})");
-                // 诊断落盘：确认边缘伪框已消除（正常桌面 Edge 应为 0）
-                try
-                {
-                    System.IO.File.AppendAllText(
-                        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "TrueToneCap_WGC.log"),
-                        $"{DateTime.Now:HH:mm:ss.fff} [Region] 检测完成 total={_detectedRegions.Count} UIA={uia} Edge={edge}\n");
-                }
-                catch { }
+                    $"[SelectionOverlay] 窗口检测完成: {_detectedRegions.Count} 个 (UIA={uia}, Edge={edge})");
             });
         }
         catch (Exception ex)
@@ -815,93 +869,105 @@ public sealed partial class SelectionOverlay : Window
         }
     }
 
-    /// <summary>在 RegionHintCanvas 上渲染半透明区域提示。</summary>
-    private void RenderRegionHints()
+    /// <summary>QQ截图式：仅高亮当前悬停的窗口（最小面积优先），显示标题提示。</summary>
+    private void UpdateRegionHover(double mouseX, double mouseY)
     {
-        ClearRegionHints();
         double scale = GetSafeDpiScale();
         if (scale <= 0.01) scale = 1.0;
 
-        foreach (var region in _detectedRegions)
+        // 将鼠标坐标转换为屏幕坐标
+        int screenX = _vx + (int)(mouseX * scale);
+        int screenY = _vy + (int)(mouseY * scale);
+
+        // 使用最小面积优先命中测试（选中最内层窗口）
+        int newHover = RegionDetector.FindSmallestRegionAt(_detectedRegions, screenX, screenY);
+
+        if (newHover == _hoveredRegionIndex) return;
+        _hoveredRegionIndex = newHover;
+
+        // 清除旧高亮
+        if (_activeHighlight is not null)
         {
-            double rx = (region.X - _vx) / scale;
-            double ry = (region.Y - _vy) / scale;
-            double rw = region.Width / scale;
-            double rh = region.Height / scale;
-
-            if (rw < 4 || rh < 4) continue;
-
-            var border = new Border
-            {
-                Width = rw, Height = rh,
-                BorderBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(80, 68, 136, 255)),
-                BorderThickness = new Thickness(1),
-                Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(15, 68, 136, 255)),
-                IsHitTestVisible = false,
-            };
-            Canvas.SetLeft(border, rx);
-            Canvas.SetTop(border, ry);
-            RegionHintCanvas.Children.Add(border);
-            _regionHintElements.Add(border);
+            RegionHintCanvas.Children.Remove(_activeHighlight);
+            _activeHighlight = null;
         }
+        if (_windowTooltip is not null)
+        {
+            RegionHintCanvas.Children.Remove(_windowTooltip);
+            _windowTooltip = null;
+            _tooltipText = null;
+        }
+
+        if (newHover < 0)
+        {
+            HintText.Text = "单击 = 全屏  |  拖拽 = 框选  |  悬停窗口 = 智能选中  |  Esc = 取消";
+            return;
+        }
+
+        var region = _detectedRegions[newHover];
+        double rx = (region.X - _vx) / scale;
+        double ry = (region.Y - _vy) / scale;
+        double rw = region.Width / scale;
+        double rh = region.Height / scale;
+
+        // 绘制高亮边框（QQ截图风格：蓝色粗边框 + 半透明填充）
+        _activeHighlight = new Border
+        {
+            Width = rw, Height = rh,
+            BorderBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(230, 50, 130, 246)),
+            BorderThickness = new Thickness(2.5),
+            Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(30, 50, 130, 246)),
+            IsHitTestVisible = false,
+        };
+        Canvas.SetLeft(_activeHighlight, rx);
+        Canvas.SetTop(_activeHighlight, ry);
+        RegionHintCanvas.Children.Add(_activeHighlight);
+
+        // 窗口标题 + 尺寸提示（显示在窗口左上角）
+        string label = $"{region.Title ?? "窗口"}  ({region.Width}×{region.Height})";
+        _tooltipText = new TextBlock
+        {
+            Text = label,
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
+            Padding = new Thickness(6, 2, 6, 2),
+        };
+        _windowTooltip = new Border
+        {
+            Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(220, 30, 30, 30)),
+            CornerRadius = new CornerRadius(3),
+            Child = _tooltipText,
+            IsHitTestVisible = false,
+        };
+        // 提示框定位：窗口左上角上方
+        double tipY = ry - 22;
+        if (tipY < 0) tipY = ry + 2; // 放不下就放窗口内部顶部
+        Canvas.SetLeft(_windowTooltip, rx);
+        Canvas.SetTop(_windowTooltip, tipY);
+        RegionHintCanvas.Children.Add(_windowTooltip);
+
+        // 更新底部提示
+        HintText.Text = $"🪟 {region.Title}  |  单击选中  |  拖拽自定义  |  Esc 取消";
     }
 
     /// <summary>清除所有区域提示。</summary>
     private void ClearRegionHints()
     {
         _hoveredRegionIndex = -1;
-        foreach (var el in _regionHintElements)
-            RegionHintCanvas.Children.Remove(el);
-        _regionHintElements.Clear();
-    }
-
-    /// <summary>根据鼠标位置更新悬停高亮。</summary>
-    private void UpdateRegionHover(double mouseX, double mouseY)
-    {
-        double scale = GetSafeDpiScale();
-        if (scale <= 0.01) scale = 1.0;
-
-        int newHover = -1;
-        for (int i = 0; i < _detectedRegions.Count; i++)
+        if (_activeHighlight is not null)
         {
-            var r = _detectedRegions[i];
-            double rx = (r.X - _vx) / scale;
-            double ry = (r.Y - _vy) / scale;
-            double rw = r.Width / scale;
-            double rh = r.Height / scale;
-
-            // 检测鼠标是否在区域内（留 4px 边距便于点击）
-            if (mouseX >= rx - 2 && mouseX <= rx + rw + 2 &&
-                mouseY >= ry - 2 && mouseY <= ry + rh + 2)
-            {
-                newHover = i;
-                break;
-            }
+            RegionHintCanvas.Children.Remove(_activeHighlight);
+            _activeHighlight = null;
         }
-
-        if (newHover == _hoveredRegionIndex) return;
-
-        // 重置旧高亮
-        if (_hoveredRegionIndex >= 0 && _hoveredRegionIndex < _regionHintElements.Count)
+        if (_windowTooltip is not null)
         {
-            var old = _regionHintElements[_hoveredRegionIndex];
-            old.BorderBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(80, 68, 136, 255));
-            old.BorderThickness = new Thickness(1);
-            old.Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(15, 68, 136, 255));
-        }
-
-        // 设置新高亮
-        _hoveredRegionIndex = newHover;
-        if (newHover >= 0 && newHover < _regionHintElements.Count)
-        {
-            var cur = _regionHintElements[newHover];
-            cur.BorderBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(220, 68, 136, 255));
-            cur.BorderThickness = new Thickness(2);
-            cur.Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(50, 68, 136, 255));
+            RegionHintCanvas.Children.Remove(_windowTooltip);
+            _windowTooltip = null;
+            _tooltipText = null;
         }
     }
 
-    /// <summary>选中一个自动识别的区域。</summary>
+    /// <summary>选中一个自动识别的区域（QQ截图式单击选中）。</summary>
     private void SelectDetectedRegion(DetectedRegion region)
     {
         double scale = GetSafeDpiScale();

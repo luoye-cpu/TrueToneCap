@@ -23,23 +23,23 @@
             </controls:NavigationView.PaneHeader>
 
             <controls:NavigationView.MenuItems>
-                <controls:NavigationViewItem x:Name="NavOutput" Tag="Output">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE8B7;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
+                <controls:NavigationViewItem x:Name="NavOutput" Tag="Output" Content="输出设置">
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE8B7;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
-                <controls:NavigationViewItem x:Name="NavColor" Tag="Color">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE790;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
+                <controls:NavigationViewItem x:Name="NavColor" Tag="Color" Content="色彩管理">
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE790;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
-                <controls:NavigationViewItem x:Name="NavCapture" Tag="Capture">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE722;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
+                <controls:NavigationViewItem x:Name="NavCapture" Tag="Capture" Content="截图设置">
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE722;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
-                <controls:NavigationViewItem x:Name="NavAI" Tag="AI">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE774;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
+                <controls:NavigationViewItem x:Name="NavAI" Tag="AI" Content="OCR / 翻译">
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE945;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
-                <controls:NavigationViewItem x:Name="NavSystem" Tag="System">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
+                <controls:NavigationViewItem x:Name="NavSystem" Tag="System" Content="系统设置">
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE713;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
-                <controls:NavigationViewItem x:Name="NavLog" Tag="Log">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE8D4;" FontFamily="Segoe MDL2 Assets"/></controls:NavigationViewItem.Icon>
+                <controls:NavigationViewItem x:Name="NavLog" Tag="Log" Content="运行日志">
+                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE8D4;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
             </controls:NavigationView.MenuItems>
 
@@ -89,6 +89,22 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- AVIF 位深选项卡片 -->
+                        <Border x:Name="AvifBitDepthCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="AVIF 位深" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="BdAvifCbo" Grid.Column="1">
+                                        <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="10">10-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="10-bit 为 HDR 最佳选择；8-bit 兼容性最广。"/>
+                            </StackPanel>
+                        </Border>
+
                         <!-- GainMap 专属选项 -->
                         <Border x:Name="GainMapOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
                             <StackPanel Spacing="12">
@@ -101,6 +117,67 @@
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="GainMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- PNG 选项卡片 -->
+                        <Border x:Name="PngOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="PNG 选项" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="BdPngCbo" Grid.Column="1">
+                                        <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="10">10-bit (PNG 3.0)</ComboBoxItem>
+                                        <ComboBoxItem Tag="12">12-bit (PNG 3.0)</ComboBoxItem>
+                                        <ComboBoxItem Tag="16">16-bit</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <!-- PNG 色度采样：PNG 是 RGB 无损格式，不支持色度子采样 -->
+                            </StackPanel>
+                        </Border>
+
+                        <!-- JPEG XL 选项卡片 -->
+                        <Border x:Name="JpegXlOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="JPEG XL 选项" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="BdJpegXlCbo" Grid.Column="1">
+                                        <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="10">10-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="ChromaJpegXlCbo" Grid.Column="1">
+                                        <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
+                                        <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- WebP 选项卡片 -->
+                        <Border x:Name="WebPOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="WebP 选项" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="ChromaWebPCbo" Grid.Column="1">
+                                        <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
+                                        <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                        <!-- TIFF 选项卡片 -->
+                        <Border x:Name="TiffOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="TIFF 选项" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="BdTiffCbo" Grid.Column="1">
+                                        <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="16">16-bit</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -157,7 +234,38 @@
                             <StackPanel Spacing="12">
                                 <TextBlock Text="截图" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="快捷键" VerticalAlignment="Center"/><TextBox x:Name="HotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+S" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="CaptureHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnCaptureHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
+                                <Grid ColumnDefinitions="120,*,60"><TextBlock Text="无感截图快捷键" VerticalAlignment="Center"/><TextBox x:Name="SilentHotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+Q" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="SilentHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnSilentHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <CheckBox x:Name="PreviewChk" Content="截图后右下角缩略图预览"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="预览界面颜色" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock Text="覆盖遮罩颜色" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="OverlayColorCbo" Grid.Column="1" SelectionChanged="OnOverlayColorChanged">
+                                        <ComboBoxItem Tag="#99001833">深蓝半透明（默认）</ComboBoxItem>
+                                        <ComboBoxItem Tag="#99000000">纯黑半透明</ComboBoxItem>
+                                        <ComboBoxItem Tag="#991A1A2E">深紫半透明</ComboBoxItem>
+                                        <ComboBoxItem Tag="#990D1B2A">深海蓝</ComboBoxItem>
+                                        <ComboBoxItem Tag="#992D2D2D">深灰半透明</ComboBoxItem>
+                                        <ComboBoxItem Tag="#80FFFFFF">白色半透明</ComboBoxItem>
+                                        <ComboBoxItem Tag="#99003322">深绿半透明</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock Text="选区边框颜色" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="BorderColorCbo" Grid.Column="1" SelectionChanged="OnBorderColorChanged">
+                                        <ComboBoxItem Tag="#FF4488FF">天蓝（默认）</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FF00FF88">翠绿</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FFFF6644">橙红</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FFFF44AA">粉红</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FFFFCC00">金黄</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FFAA66FF">紫色</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FFFFFFFF">纯白</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FF00FFCC">青色</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
                             </StackPanel>
                         </Border>
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
@@ -327,6 +435,9 @@
                                 <TextBlock x:Name="BehaviorTitle" Text="行为" FontSize="14" FontWeight="SemiBold"/>
                                 <CheckBox x:Name="AutoStartChk" Content="开机自动启动"/>
                                 <CheckBox x:Name="MinimizeTrayChk" Content="关闭时最小化到托盘" IsChecked="True"/>
+                                <CheckBox x:Name="ToastCaptureChk" Content="截图保存后右下角提示" IsChecked="True"/>
+                                <CheckBox x:Name="ToastSilentChk" Content="无感截图保存后右下角提示" IsChecked="True"/>
+                                <CheckBox x:Name="ToastRecordChk" Content="动图录制完成后右下角提示" IsChecked="True"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -339,48 +450,59 @@
                             <Button x:Name="LogOpenDirBtn" Grid.Column="2" Content="打开日志文件夹" Click="OnLogOpenDir" Width="120" Height="32"/>
                         </Grid>
                         <Border Padding="8" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
-                                </Grid.RowDefinitions>
+                            <StackPanel Spacing="8">
                                 <!-- 过滤栏 -->
-                                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
-                                    <TextBlock Text="筛选:" VerticalAlignment="Center" FontSize="12"/>
-                                    <ComboBox x:Name="LogFilterCbo" SelectedIndex="0" SelectionChanged="OnLogFilterChanged" Width="100">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="级别:" VerticalAlignment="Center" FontSize="12"/>
+                                    <ComboBox x:Name="LogFilterCbo" SelectedIndex="0" SelectionChanged="OnLogFilterChanged" Width="90">
                                         <ComboBoxItem Tag="All">全部</ComboBoxItem>
+                                        <ComboBoxItem Tag="Debug">调试</ComboBoxItem>
                                         <ComboBoxItem Tag="Info">信息</ComboBoxItem>
                                         <ComboBoxItem Tag="Warning">警告</ComboBoxItem>
                                         <ComboBoxItem Tag="Error">错误</ComboBoxItem>
                                     </ComboBox>
-                                    <TextBox x:Name="LogSearchTxt" PlaceholderText="搜索日志..." Width="200" TextChanged="OnLogSearchChanged"/>
+                                    <TextBlock Text="分类:" VerticalAlignment="Center" FontSize="12"/>
+                                    <ComboBox x:Name="LogCategoryCbo" SelectedIndex="0" SelectionChanged="OnLogFilterChanged" Width="90">
+                                        <ComboBoxItem Tag="All">全部</ComboBoxItem>
+                                        <ComboBoxItem Tag="System">⚙️ 系统</ComboBoxItem>
+                                        <ComboBoxItem Tag="Capture">📷 捕获</ComboBoxItem>
+                                        <ComboBoxItem Tag="Encoding">💾 编码</ComboBoxItem>
+                                        <ComboBoxItem Tag="UI">🖥️ 界面</ComboBoxItem>
+                                        <ComboBoxItem Tag="OCR">🔤 OCR</ComboBoxItem>
+                                        <ComboBoxItem Tag="Network">🌐 网络</ComboBoxItem>
+                                    </ComboBox>
+                                    <TextBox x:Name="LogSearchTxt" PlaceholderText="搜索日志..." Width="180" TextChanged="OnLogSearchChanged"/>
                                 </StackPanel>
                                 <!-- 日志列表 -->
-                                <ListView x:Name="LogListView" Grid.Row="1" SelectionMode="Single"
+                                <ListView x:Name="LogListView" SelectionMode="Single"
                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
                                     ScrollViewer.VerticalScrollMode="Enabled"
-                                    MaxHeight="600">
+                                    ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                    Height="500">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                            <Setter Property="Padding" Value="0"/>
+                                            <Setter Property="MinHeight" Value="24"/>
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
                                     <ListView.ItemTemplate>
                                         <DataTemplate>
-                                            <Grid Padding="4,2">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding Icon}" FontSize="12" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                            <Grid Padding="6,3" ColumnDefinitions="Auto,Auto,Auto,Auto,*">
+                                                <TextBlock Text="{Binding Icon}" FontSize="12" VerticalAlignment="Top" Margin="0,0,4,0"/>
                                                 <TextBlock Grid.Column="1" Text="{Binding TimeDisplay}"
-                                                    FontSize="11" Foreground="#888888" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding Tag}" FontSize="11"
-                                                    Foreground="#66BBFF" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                                <TextBlock Grid.Column="3" Text="{Binding Message}" FontSize="12"
-                                                    TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                                    FontSize="11" Foreground="#888888" VerticalAlignment="Top" Margin="0,1,6,0" FontFamily="Consolas"/>
+                                                <TextBlock Grid.Column="2" Text="{Binding CategoryIcon}" FontSize="11"
+                                                    VerticalAlignment="Top" Margin="0,1,4,0"/>
+                                                <TextBlock Grid.Column="3" Text="{Binding Tag}" FontSize="11"
+                                                    Foreground="#66BBFF" FontWeight="SemiBold" VerticalAlignment="Top" Margin="0,1,8,0"/>
+                                                <TextBlock Grid.Column="4" Text="{Binding Message}" FontSize="12"
+                                                    TextWrapping="Wrap" VerticalAlignment="Top" IsTextSelectionEnabled="True"/>
                                             </Grid>
                                         </DataTemplate>
                                     </ListView.ItemTemplate>
                                 </ListView>
-                            </Grid>
+                            </StackPanel>
                         </Border>
                         <TextBlock x:Name="LogStatusTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                             Text="日志目录: 请查看 log/ 文件夹"/>

@@ -20,7 +20,7 @@ public static unsafe class NativeJxlEncoder
         }
     }
 
-    /// <summary>编码 16-bit HDR RGBA 像素为 JXL 文件 (PQ/HLG 传递函数)。</summary>
+    /// <summary>编码 16-bit HDR RGBA 像素为 JXL 文件 (PQ, BT.2020)。</summary>
     public static void EncodeHdr(ushort[] rgba16, int w, int h, string path,
         float distance = 1.0f, byte[]? iccProfile = null, float intensityTarget = 10000f)
     {
@@ -34,12 +34,30 @@ public static unsafe class NativeJxlEncoder
                 xsize = (uint)w, ysize = (uint)h,
                 bits_per_sample = 16,
                 exponent_bits_per_sample = 0, // 整型 16-bit (PQ 编码)
+                num_color_channels = 3,
                 intensity_target = intensityTarget,
                 min_nits = 0f,
                 relative_to_max_display = 0,
                 orientation = JxlOrientation.JXL_ORIENT_IDENTITY
             };
-            Jxl.JxlEncoderSetBasicInfo(encoder, &bi);
+
+            var result = Jxl.JxlEncoderSetBasicInfo(encoder, &bi);
+            if (result != JxlEncoderStatus.JXL_ENC_SUCCESS)
+                throw new InvalidOperationException($"[JXL] SetBasicInfo 失败: {result}");
+
+            // ═══ 设置色彩编码为 PQ / BT.2020 ═══
+            // 使用 JxlEncoderSetColorEncoding 替代 BasicInfo.color_encoding
+            var colorEncoding = new JxlColorEncoding
+            {
+                color_space = JxlColorSpace.JXL_COLOR_SPACE_RGB,
+                white_point = JxlWhitePoint.JXL_WHITE_POINT_D65,
+                primaries = JxlPrimaries.JXL_PRIMARIES_2100,
+                transfer_function = JxlTransferFunction.JXL_TRANSFER_FUNCTION_PQ,
+                rendering_intent = JxlRenderingIntent.JXL_RENDERING_INTENT_RELATIVE,
+            };
+            var ceResult = Jxl.JxlEncoderSetColorEncoding(encoder, &colorEncoding);
+            if (ceResult != JxlEncoderStatus.JXL_ENC_SUCCESS)
+                System.Diagnostics.Debug.WriteLine($"[JXL] SetColorEncoding 警告: {ceResult}");
 
             // ICC Profile 嵌入 (BT.2100 PQ)
             if (iccProfile is { Length: > 128 })
@@ -112,6 +130,7 @@ public static unsafe class NativeJxlEncoder
                 bits_per_sample = (uint)Math.Clamp(bitDepth, 8, 16),
                 intensity_target = 255f,
                 num_color_channels = 3,
+                uses_original_profile = 1, // 输入已是 sRGB gamma，不做内部色彩转换
                 orientation = JxlOrientation.JXL_ORIENT_IDENTITY
             };
             Jxl.JxlEncoderSetBasicInfo(encoder, &bi);

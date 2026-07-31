@@ -349,44 +349,66 @@ public class LlmConfig
     public string TargetLanguage { get; set; } = "zh-CN";
 }
 
-/// <summary>预置 LLM 提供商端点（供 UI 下拉选择）。</summary>
+/// <summary>预置 LLM 提供商端点（供 UI 下拉选择）— 2026-07 更新。</summary>
 public static class LlmProviders
 {
     public record ProviderInfo(string Name, string Endpoint, string DefaultModel, string PlaceholderKey);
 
     public static readonly ProviderInfo[] All =
     [
-        new("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "sk-..."),
-        new("DeepSeek (Flash)", "https://api.deepseek.com/v1", "deepseek-v4-flash", "sk-..."),
+        new("OpenRouter (免费自动路由)", "https://openrouter.ai/api/v1", "openrouter/auto-beta", "sk-or-..."),
+        new("硅基流动", "https://api.siliconflow.cn/v1", "tencent/Hunyuan-MT-7B", "sk-..."),
+        new("DeepSeek", "https://api.deepseek.com/v1", "deepseek-v4-flash", "sk-..."),
+        new("DeepSeek (Pro)", "https://api.deepseek.com/v1", "deepseek-v4-pro", "sk-..."),
         new("智谱 GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-4.7-flash", "your-api-key"),
-        new("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "AIza..."),
-        new("硅基流动", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-72B-Instruct", "sk-..."),
-        new("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini", "sk-..."),
-        new("OpenAI (4.1)", "https://api.openai.com/v1", "gpt-4.1-mini", "sk-..."),
+        new("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash", "AIza..."),
+        new("OpenAI", "https://api.openai.com/v1", "gpt-4.1-mini", "sk-..."),
         new("阿里云百炼", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-turbo", "sk-..."),
         new("Moonshot", "https://api.moonshot.cn/v1", "moonshot-v1-8k", "sk-..."),
+        new("Anthropic Claude", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514", "sk-ant-..."),
         new("自定义", "", "", ""),
     ];
 
-    /// <summary>所有可用模型名称（供 UI 下拉）。</summary>
+    /// <summary>所有可用模型名称（供 UI 下拉）— 2026-07 更新。</summary>
     public static readonly (string Tag, string Label)[] Models =
     [
-        ("deepseek-chat", "DeepSeek V3"),
-        ("deepseek-v4-flash", "DeepSeek V4 Flash"),
-        ("glm-4.7-flash", "GLM-4.7 Flash (智谱)"),
-        ("glm-4-flash", "GLM-4 Flash (智谱)"),
-        ("gemini-2.0-flash", "Gemini 2.0 Flash (Google)"),
-        ("gemini-2.5-flash", "Gemini 2.5 Flash (Google)"),
-        ("gemini-2.5-pro", "Gemini 2.5 Pro (Google)"),
-        ("Qwen/Qwen2.5-72B-Instruct", "Qwen2.5-72B (硅基流动)"),
+        // OpenRouter 自动路由 (免费，按实际模型计费，无额外费用)
+        ("openrouter/auto-beta", "Auto Router (OpenRouter 免费路由)"),
+        // OpenRouter 免费模型
+        ("meta-llama/llama-4-scout:free", "Llama 4 Scout (免费)"),
+        ("google/gemini-2.5-flash-preview:free", "Gemini 2.5 Flash (免费)"),
+        ("deepseek/deepseek-v4-flash:free", "DeepSeek V4 Flash (免费)"),
+        // 硅基流动 (聚合平台, 有免费额度)
+        ("tencent/Hunyuan-MT-7B", "混元翻译 MT-7B (硅基流动·免费·33语言)"),
         ("deepseek-ai/DeepSeek-V3", "DeepSeek V3 (硅基流动)"),
         ("deepseek-ai/DeepSeek-R1", "DeepSeek R1 (硅基流动)"),
-        ("gpt-4o-mini", "GPT-4o mini"),
+        ("Qwen/Qwen2.5-72B-Instruct", "Qwen2.5-72B (硅基流动)"),
+        ("Qwen/Qwen3-235B-A22B", "Qwen3-235B (硅基流动)"),
+        // DeepSeek 官方 (1M 上下文, 支持思考模式)
+        ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        // 智谱 GLM
+        ("glm-4.7-flash", "GLM-4.7 Flash (智谱)"),
+        ("glm-4-flash", "GLM-4 Flash (智谱)"),
+        // Google Gemini (OpenAI 兼容端点)
+        ("gemini-3.5-flash", "Gemini 3.5 Flash (Google)"),
+        ("gemini-3-pro", "Gemini 3 Pro (Google)"),
+        ("gemini-2.5-flash", "Gemini 2.5 Flash (Google)"),
+        // OpenAI
         ("gpt-4.1-mini", "GPT-4.1 mini"),
         ("gpt-4.1-nano", "GPT-4.1 nano"),
+        ("gpt-4o-mini", "GPT-4o mini"),
+        // 阿里云百炼
         ("qwen-turbo", "Qwen Turbo (阿里)"),
         ("qwen-plus", "Qwen Plus (阿里)"),
+        ("qwen-max", "Qwen Max (阿里)"),
+        // Moonshot
         ("moonshot-v1-8k", "Moonshot V1 8K"),
+        ("moonshot-v1-128k", "Moonshot V1 128K"),
+        // Anthropic Claude
+        ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
+        ("claude-3-5-haiku-20241022", "Claude 3.5 Haiku"),
+        // 自定义
         ("custom", "自定义模型"),
     ];
 }

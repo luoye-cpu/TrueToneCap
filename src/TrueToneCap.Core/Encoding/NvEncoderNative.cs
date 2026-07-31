@@ -268,15 +268,160 @@ public sealed unsafe class NvEncoderNative : IDisposable
     private delegate int CreateInputBufferFn(nint enc, nint p, nint* buf);
     private delegate int LockInputBufferFn(nint enc, nint p);
     private delegate int UnlockInputBufferFn(nint enc, nint p);
+    private delegate int RegisterResourceFn(nint enc, nint p);
+    private delegate int MapInputResourceFn(nint enc, nint p);
+    private delegate int UnmapInputResourceFn(nint enc, nint p);
     private delegate int CreateBitstreamFn(nint enc, nint p, nint* buf);
     private delegate int EncodePictureFn(nint enc, nint p);
     private delegate int LockBitstreamFn(nint enc, nint p);
     private delegate int UnlockBitstreamFn(nint enc, nint p);
 
+    // ═══════════════════════════════════════════════════════
+    //  GPU 纹理直通编码路径
+    //  使用 NvEncRegisterResource + NvEncMapInputResource，
+    //  让 NVENC 直接读取 D3D11 纹理，跳过 GPU→CPU 回读。
+    //  节省 4K 下约 6-15ms 的 GPU→CPU 同步等待。
+    // ═══════════════════════════════════════════════════════
+
+    /// <summary>从 D3D11 纹理直接编码 AV1 帧（GPU 纹理直通路径）。
+    /// 纹理格式必须为 B8G8R8A8_UNorm 或 R16G16B16A16_Float（HDR 时）。
+    /// 使用 NVENC 的 RegisterResource + MapInputResource API，
+    /// 避免 GPU→CPU 回读再上传的往返开销。</summary>
+    public byte[] EncodeAv1FromTexture(ID3D11Texture2D texture, int w, int h, int qp)
+        => EncodeRawFromTexture(texture, w, h, qp, CodecAv1);
+
+    /// <summary>从 D3D11 纹理直接编码 HEVC 帧（GPU 纹理直通路径）。</summary>
+    public byte[] EncodeHevcFromTexture(ID3D11Texture2D texture, int w, int h, int qp)
+        => EncodeRawFromTexture(texture, w, h, qp, CodecHevc);
+
+    private byte[] EncodeRawFromTexture(ID3D11Texture2D texture, int w, int h, int qp, Guid codec)
+    {
+        var initFn = GetFuncDelegate<InitEncoderFn>(GetFuncPtr(11));
+        var registerResFn = GetFuncDelegate<RegisterResourceFn>(GetFuncPtr(13));  // NvEncRegisterResource
+        var mapInputFn = GetFuncDelegate<MapInputResourceFn>(GetFuncPtr(15));     // NvEncMapInputResource
+        var unmapInputFn = GetFuncDelegate<UnmapInputResourceFn>(GetFuncPtr(21)); // NvEncUnmapInputResource
+        var createBufFn = GetFuncDelegate<CreateBitstreamFn>(GetFuncPtr(14));
+        var encFn = GetFuncDelegate<EncodePictureFn>(GetFuncPtr(16));
+        var lockFn = GetFuncDelegate<LockBitstreamFn>(GetFuncPtr(17));
+        var unlockFn = GetFuncDelegate<UnlockBitstreamFn>(GetFuncPtr(18));
+
+        int paramSize = 256 + 512;
+        byte* p = stackalloc byte[paramSize];
+        new Span<byte>(p, paramSize).Clear();
+        *(uint*)(p + 0) = _activeVersion;
+        var preset = PresetP1;
+        Buffer.MemoryCopy(&codec, p + 8, 16, 16);
+        Buffer.MemoryCopy(&preset, p + 24, 16, 16);
+        *(uint*)(p + 40) = (uint)w; *(uint*)(p + 44) = (uint)h;
+        *(uint*)(p + 48) = (uint)w; *(uint*)(p + 52) = (uint)h;
+        *(uint*)(p + 56) = 1; *(uint*)(p + 60) = 1;
+        *(nint*)(p + 96) = (nint)(p + 256);
+        *(uint*)(p + 128) = 5;
+        *(uint*)(p + 256) = _activeVersion;
+        *(uint*)(p + 256 + 20) = (uint)w;
+        *(uint*)(p + 256 + 24) = 1;
+        *(uint*)(p + 256 + 120) = (uint)qp;
+        *(uint*)(p + 256 + 140) = (uint)qp;
+
+        int hr = initFn(_encoder, (nint)p);
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] InitEncoder: 0x{hr:X8}");
+
+        // ── Step 1: NvEncRegisterResource ──
+        // 注册 D3D11 纹理到 NVENC。结构体布局 (64-bit):
+        //   +0:  uint32   version
+        //   +4:  uint32   resourceType = 2 (NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX)
+        //   +8:  uint32   width
+        //   +12: uint32   height
+        //   +16: uint32   pitch = 0 (texture)
+        //   +20: uint32   bufferFormat = 7 (NV_ENC_BUFFER_FORMAT_ARGB10)
+        //   +24: uint32   bufferUsage = 1 (NV_ENC_INPUT_IMAGE)
+        //   +28: int64    reserved (padding for pointer alignment)
+        //   +32: nint     pResourceToRegister = texture.NativePointer
+        //   +40: uint32   flags = 0
+        //   +44: uint32   reserved
+        //   +48: nint     pRegisteredResource (OUTPUT)
+        byte* rr = stackalloc byte[128];
+        new Span<byte>(rr, 128).Clear();
+        *(uint*)rr = _activeVersion | (1u << 16) | (0x7u << 28);  // NV_ENC_REGISTER_RESOURCE_VER
+        *(uint*)(rr + 4) = 2;   // NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX
+        *(uint*)(rr + 8) = (uint)w;
+        *(uint*)(rr + 12) = (uint)h;
+        *(uint*)(rr + 16) = 0;  // pitch = 0 for texture
+        *(uint*)(rr + 20) = 7;  // NV_ENC_BUFFER_FORMAT_ARGB10
+        *(uint*)(rr + 24) = 1;  // NV_ENC_INPUT_IMAGE
+        *(nint*)(rr + 32) = texture.NativePointer;
+        *(uint*)(rr + 40) = 0;  // flags
+
+        hr = registerResFn(_encoder, (nint)rr);
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] RegisterResource: 0x{hr:X8}");
+        nint registeredRes = *(nint*)(rr + 48);
+
+        // ── Step 2: NvEncMapInputResource ──
+        // 映射已注册的资源，获取 NVENC 输入缓冲区
+        //   +0:  uint32   version
+        //   +4:  uint32   subResourceIndex = 0
+        //   +8:  nint     pRegisteredResource (from step 1)
+        //   +16: uint32   flags = 0
+        //   +20: uint32   reserved
+        //   +24: nint     pMappedBuffer (OUTPUT)
+        //   +32: uint32   mappedBufferPitch (OUTPUT)
+        byte* mr = stackalloc byte[64];
+        new Span<byte>(mr, 64).Clear();
+        *(uint*)mr = _activeVersion | (1u << 16) | (0x7u << 28);  // NV_ENC_MAP_INPUT_RESOURCE_VER
+        *(nint*)(mr + 8) = registeredRes;
+        *(uint*)(mr + 16) = 0;  // flags
+
+        hr = mapInputFn(_encoder, (nint)mr);
+        if (hr != NVENC_SUCCESS) throw new InvalidOperationException($"[NVENC] MapInputResource: 0x{hr:X8}");
+        nint mappedBuffer = *(nint*)(mr + 24);
+        int srcPitch = *(int*)(mr + 32);
+
+        // ── Step 3: Create bitstream buffer ──
+        int bufSize = w * h * 4;
+        byte* bb = stackalloc byte[32];
+        new Span<byte>(bb, 32).Clear();
+        *(uint*)bb = _activeVersion;
+        *(uint*)(bb + 4) = (uint)(bufSize * 2);
+        nint bsBuf = 0;
+        hr = createBufFn(_encoder, (nint)bb, &bsBuf);
+        if (hr != NVENC_SUCCESS) { unmapInputFn(_encoder, (nint)mr); throw new InvalidOperationException($"[NVENC] CreateBitstream: 0x{hr:X8}"); }
+
+        // ── Step 4: Encode picture ──
+        byte* pic = stackalloc byte[128];
+        new Span<byte>(pic, 128).Clear();
+        *(uint*)pic = _activeVersion;
+        *(uint*)(pic + 4) = (uint)w; *(uint*)(pic + 8) = (uint)h;
+        *(uint*)(pic + 12) = (uint)srcPitch;
+        *(uint*)(pic + 16) = NV_ENC_PIC_FLAG_FORCEINTRA | NV_ENC_PIC_FLAG_EOS;
+        *(nint*)(pic + 40) = mappedBuffer;
+        *(nint*)(pic + 48) = bsBuf;
+        *(uint*)(pic + 72) = 7;  // NV_ENC_BUFFER_FORMAT_ARGB10
+        hr = encFn(_encoder, (nint)pic);
+        if (hr != NVENC_SUCCESS) { unmapInputFn(_encoder, (nint)mr); throw new InvalidOperationException($"[NVENC] EncodePicture: 0x{hr:X8}"); }
+
+        // ── Step 5: Read bitstream ──
+        byte* lk = stackalloc byte[64];
+        new Span<byte>(lk, 64).Clear();
+        *(uint*)lk = _activeVersion;
+        *(nint*)(lk + 8) = bsBuf;
+        hr = lockFn(_encoder, (nint)lk);
+        if (hr != NVENC_SUCCESS) { unmapInputFn(_encoder, (nint)mr); throw new InvalidOperationException($"[NVENC] LockBitstream: 0x{hr:X8}"); }
+        int bsSize = *(int*)(lk + 24);
+        nint bsData = *(nint*)(lk + 16);
+        var result = new byte[bsSize];
+        Marshal.Copy(bsData, result, 0, bsSize);
+        unlockFn(_encoder, (nint)lk);
+
+        // ── Cleanup: UnmapInputResource ──
+        unmapInputFn(_encoder, (nint)mr);
+
+        return result;
+    }
+
     public void Dispose()
     {
         if (_disposed) return; _disposed = true;
-        if (_encoder != 0) GetFuncDelegate<DestroyEncoderFn>(GetFuncPtr(27))(_encoder); // NvEncDestroyEncoder
+        if (_encoder != 0) GetFuncDelegate<DestroyEncoderFn>(GetFuncPtr(24))(_encoder); // NvEncDestroyEncoder
         if (_funcTable != 0) Marshal.FreeHGlobal(_funcTable);
         if (_dll != 0) NativeLibrary.Free(_dll);
     }

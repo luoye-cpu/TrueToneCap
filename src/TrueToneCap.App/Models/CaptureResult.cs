@@ -3,6 +3,7 @@
 
 using TrueToneCap.Core.Capture;
 using TrueToneCap.Core.Processing;
+using Vortice.Direct3D11;
 
 namespace TrueToneCap.App.Models;
 
@@ -11,13 +12,18 @@ public sealed class CaptureResult : IDisposable
 {
     private bool _disposed;
 
-    /// <summary>HDR 浮点像素 (R16G16B16A16_Float → float[])，SDR 捕获时为 null。</summary>
+    /// <summary>HDR 浮点像素 (R16G16B16A16_Float → float[])，无 HDR 时为 null。</summary>
     public float[]? HdrPixels { get; init; }
 
-    /// <summary>SDR 字节像素 (BGRA8)，HDR 捕获时为 null。</summary>
+    /// <summary>SDR 字节像素 (BGRA8)，用于预览。</summary>
     public byte[]? SdrPixels { get; init; }
 
-    /// <summary>是否为 HDR 捕获。</summary>
+    /// <summary>GPU 纹理（D3D11 纹理引用，用于 GPU 直通编码路径）。
+    /// 当此字段不为 null 时，编码器应优先使用纹理而非 CPU 像素数组，
+    /// 避免 GPU→CPU→GPU 往返。</summary>
+    public ID3D11Texture2D? GpuTexture { get; init; }
+
+    /// <summary>是否有 HDR 浮点数据。</summary>
     public bool IsHdr => HdrPixels is not null;
 
     public int Width { get; init; }
@@ -58,5 +64,6 @@ public sealed class CaptureResult : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        try { (GpuTexture as IDisposable)?.Dispose(); } catch { }
     }
 }

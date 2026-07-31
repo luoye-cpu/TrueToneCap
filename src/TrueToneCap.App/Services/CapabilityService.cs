@@ -19,8 +19,8 @@ public sealed record CapabilityResult
     public bool QsvAvailable { get; init; }
     public int DisplayBitDepth { get; init; } = 8;
 
-    /// <summary>ACM 开启时 ICC 烘焙应禁用（避免双重色彩管理）。</summary>
-    public bool IccBakeAvailable => CustomIcc && !SystemAcm;
+    /// <summary>ACM 开启时 ICC 烘焙仍可用（用户可能需要输出到显示器色域以外的目标）。</summary>
+    public bool IccBakeAvailable => CustomIcc;
 }
 
 /// <summary>系统能力检测服务（HDR / ACM / ICC / 硬件编码器）。</summary>
@@ -72,13 +72,58 @@ public sealed class CapabilityService
             hdr = displays.Any(d => d.IsHdr);
             LogService.Info("Capability", $"显示器枚举: {displays.Count} 个, HDR={hdr}");
 
-            using var key = Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows NT\CurrentVersion\ICM");
-            if (key is not null)
+            // ACM 检测策略 (Windows 11 22H2+):
+            // 1. 检查 HKLM ICM 全局开关
+            // 2. 检查 HKCU ProfileAssociations 中是否存在 ICMProfileAC 值（ACM 自动分配的配置文件）
+            try
             {
-                var val = key.GetValue("AcmeEnabled");
-                acm = val is int i && i != 0;
+                using var hklmKey = Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM");
+                if (hklmKey is not null)
+                {
+                    var val = hklmKey.GetValue("AcmEnabled");
+                    if (val is int i && i != 0) { acm = true; }
+                }
             }
+            catch { }
+
+            // 回退: 检查用户级 ProfileAssociations 中是否有 ICMProfileAC（ACM 自动分配标志）
+            if (!acm)
+            {
+                try
+                {
+                    using var icmKey = Registry.CurrentUser.OpenSubKey(
+                        @"Software\Microsoft\Windows NT\CurrentVersion\ICM\ProfileAssociations\Display");
+                    if (icmKey is not null)
+                    {
+                        foreach (var clsid in icmKey.GetSubKeyNames())
+                        {
+                            using var clsidKey = icmKey.OpenSubKey(clsid);
+                            if (clsidKey is null) continue;
+                            foreach (var monitorId in clsidKey.GetSubKeyNames())
+                            {
+                                using var monKey = clsidKey.OpenSubKey(monitorId);
+                                if (monKey is null) continue;
+                                var acProfile = monKey.GetValue("ICMProfileAC");
+                                // ICMProfileAC 非空且非空字符串 → ACM 已为该显示器分配配置文件
+                                if (acProfile is string[] arr && arr.Any(s => !string.IsNullOrWhiteSpace(s)))
+                                {
+                                    acm = true;
+                                    break;
+                                }
+                                if (acProfile is string s2 && !string.IsNullOrWhiteSpace(s2))
+                                {
+                                    acm = true;
+                                    break;
+                                }
+                            }
+                            if (acm) break;
+                        }
+                    }
+                }
+                catch { }
+            }
+
             LogService.Info("Capability", $"ACM 检测: {(acm ? "启用" : "未启用")}");
         }
         catch (Exception ex)
