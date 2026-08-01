@@ -224,7 +224,7 @@ public static class ManagedPngEncoder
     private static byte[] BuildRawScanlines(byte[] bgra, int w, int h, int outDepth)
     {
         int channels = 4;
-        int bytesPerChannel = 1; // SDR 路径固定 8-bit (PNG 3.0 Table 12: color type 6 仅允许 8/16)
+        int bytesPerChannel = outDepth <= 8 ? 1 : 2; // 8-bit → 1B, 10/12/16-bit → 2B
         int bpp = channels * bytesPerChannel;
         int rowBytes = w * bpp;
         var raw = new byte[h * (1 + rowBytes)];

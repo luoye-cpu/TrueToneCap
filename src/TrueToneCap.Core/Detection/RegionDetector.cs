@@ -4,12 +4,11 @@
 //   B: 边缘投影矩形检测 (高对比度边界)
 
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace TrueToneCap.Core.Detection;
 
 /// <summary>屏幕区域自动检测引擎。</summary>
-public static class RegionDetector
+public static partial class RegionDetector
 {
     // ═══════════════════════════════════════
     //  P/Invoke
@@ -20,30 +19,33 @@ public static class RegionDetector
     [DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, nint lParam);
 
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(nint hwnd);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool IsWindowVisible(nint hwnd);
 
-    [DllImport("user32.dll")]
-    private static extern bool IsIconic(nint hwnd);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool IsIconic(nint hwnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetWindowRect(nint hwnd, out RECT lpRect);
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetWindowRect(nint hwnd, out RECT lpRect);
 
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern int GetWindowText(nint hwnd, StringBuilder lpString, int nMaxCount);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int GetWindowTextW(nint hwnd, char[] lpString, int nMaxCount);
 
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern int GetClassName(nint hwnd, StringBuilder lpClassName, int nMaxCount);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int GetClassNameW(nint hwnd, char[] lpClassName, int nMaxCount);
 
-    [DllImport("user32.dll")]
-    private static extern long GetWindowLongPtr(nint hwnd, int nIndex);
+    [LibraryImport("user32.dll")]
+    private static partial long GetWindowLongPtrW(nint hwnd, int nIndex);
 
-    [DllImport("user32.dll")]
-    private static extern nint GetAncestor(nint hwnd, uint gaFlags);
+    [LibraryImport("user32.dll")]
+    private static partial nint GetAncestor(nint hwnd, uint gaFlags);
 
     // DWM 精确窗口边框（排除 Win10/11 透明阴影）
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmGetWindowAttribute(nint hwnd, uint dwAttribute, out RECT pvAttribute, uint cbAttribute);
+    [LibraryImport("dwmapi.dll")]
+    private static partial int DwmGetWindowAttribute(nint hwnd, uint dwAttribute, out RECT pvAttribute, uint cbAttribute);
 
     private const uint DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
@@ -111,11 +113,11 @@ public static class RegionDetector
             if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
 
             // 跳过子窗口
-            long style = GetWindowLongPtr(hwnd, GWL_STYLE);
+            long style = GetWindowLongPtrW(hwnd, GWL_STYLE);
             if ((style & WS_CHILD) != 0) return true;
 
             // 跳过工具窗口（除非有 APPWINDOW 标记）
-            long exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+            long exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             if ((exStyle & WS_EX_TOOLWINDOW) != 0 && (exStyle & WS_EX_APPWINDOW) == 0)
                 return true;
 
@@ -137,15 +139,15 @@ public static class RegionDetector
                 rect.Bottom <= vy || rect.Top >= vy + vh) return true;
 
             // 过滤类名
-            var cn = new StringBuilder(256);
-            GetClassName(hwnd, cn, 256);
-            string className = cn.ToString();
+            var cn = new char[256];
+            int cnLen = GetClassNameW(hwnd, cn, 256);
+            string className = new(cn, 0, Math.Max(0, cnLen));
             if (ExcludedClasses.Contains(className)) return true;
 
             // 获取标题（允许空标题，用类名作为回退显示名）
-            var sb = new StringBuilder(256);
-            GetWindowText(hwnd, sb, 256);
-            string title = sb.ToString();
+            var titleChars = new char[256];
+            int titleLen = GetWindowTextW(hwnd, titleChars, 256);
+            string title = new(titleChars, 0, Math.Max(0, titleLen));
 
             // 过滤已知无意义的标题关键词
             foreach (var kw in ExcludedTitleKeywords)

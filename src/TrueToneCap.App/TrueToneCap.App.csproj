@@ -2,10 +2,10 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
-    <LangVersion>13</LangVersion>
+    <LangVersion>14</LangVersion>
     <Nullable>enable</Nullable>
     <Platform>x64</Platform>
     <PlatformTarget>x64</PlatformTarget>
@@ -19,9 +19,9 @@
     <ApplicationTitle>TrueToneCap</ApplicationTitle>
     <ApplicationId>com.trueonecap.app</ApplicationId>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.2.0-beta</Version>
-    <AssemblyVersion>0.2.0.0</AssemblyVersion>
-    <FileVersion>0.2.0.0</FileVersion>
+    <Version>0.3.0-beta</Version>
+    <AssemblyVersion>0.3.0.0</AssemblyVersion>
+    <FileVersion>0.3.0.0</FileVersion>
     <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
     <NoWarn>$(NoWarn);MSB3884</NoWarn>
   </PropertyGroup>
@@ -29,20 +29,25 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
-    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
-    <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="11.0.0-preview.6.26359.118" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\TrueToneCap.Core\TrueToneCap.Core.csproj" />
   </ItemGroup>
 
-  <!-- 内嵌字体 + 数据文件 + OCR 模型 → 输出到 data/ -->
+  <!-- ═══ AOT 兼容：JSON 源生成器 + 裁剪根配置 ═══ -->
   <ItemGroup>
-    <Content Include="Fonts\**\*.ttf" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Fonts\" />
-    <Content Include="Fonts\**\*.otf" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Fonts\" />
+    <TrimmerRootDescriptor Include="$(MSBuildProjectDirectory)\..\..\TrimmerRoots.xml" />
+  </ItemGroup>
+
+  <!-- ═══ 压制 XAML 运行时绑定裁剪警告（AOT 下日志面板绑定安全） ═══ -->
+  <PropertyGroup>
+    <SuppressXamlTrimWarnings>true</SuppressXamlTrimWarnings>
+  </PropertyGroup>
+
+  <!-- 数据文件 + OCR 模型 → 输出到 data/ -->
+  <ItemGroup>
     <Content Include="Shaders\*.hlsl" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
     <Content Include="Shaders\*.cso" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
     <Content Include="Shaders\*.ps1" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
@@ -76,16 +81,13 @@
     </ItemGroup>
     <Move SourceFiles="@(_PdbFiles)" DestinationFolder="$(PublishDir)data\" />
 
-    <!-- 移动遗留的根目录 Fonts/ Models/ Shaders/ 到 data/ (兼容旧构建) -->
+    <!-- 移动遗留的根目录 Models/ Shaders/ 到 data/ (兼容旧构建) -->
     <ItemGroup>
-      <_LegacyFonts Include="$(PublishDir)Fonts\**\*" Condition="Exists('$(PublishDir)Fonts')" />
       <_LegacyModels Include="$(PublishDir)Models\**\*" Condition="Exists('$(PublishDir)Models')" />
       <_LegacyShaders Include="$(PublishDir)Shaders\**\*" Condition="Exists('$(PublishDir)Shaders')" />
     </ItemGroup>
-    <Move SourceFiles="@(_LegacyFonts)" DestinationFolder="$(PublishDir)data\Fonts\" Condition="'@(_LegacyFonts)' != ''" />
     <Move SourceFiles="@(_LegacyModels)" DestinationFolder="$(PublishDir)data\Models\" Condition="'@(_LegacyModels)' != ''" />
     <Move SourceFiles="@(_LegacyShaders)" DestinationFolder="$(PublishDir)data\Shaders\" Condition="'@(_LegacyShaders)' != ''" />
-    <RemoveDir Directories="$(PublishDir)Fonts" Condition="Exists('$(PublishDir)Fonts')" />
     <RemoveDir Directories="$(PublishDir)Models" Condition="Exists('$(PublishDir)Models')" />
     <RemoveDir Directories="$(PublishDir)Shaders" Condition="Exists('$(PublishDir)Shaders')" />
 

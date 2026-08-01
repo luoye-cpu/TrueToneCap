@@ -32,18 +32,11 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     public override (float, float, float, string) GetQualityRange() => (0.5f, 3.0f, 1.0f, "butteraugli 距离 (0.5-3.0)");
     public override string GetQualityDescription(float q) => $"距离: {q:F1}";
 
-    public GainMapMode GainMapMode { get; set; } = GainMapMode.Rgb;
-    /// <summary>增益图 JPEG 质量 (1-100)。</summary>
-    public int GainMapJpegQuality { get; set; } = 85;
-
     // ── 编码入口 ──
 
     public override async Task EncodeAsync(HdrFrameData frame, EncodingSettings settings,
         string outputPath, CancellationToken ct = default)
     {
-        // 从 settings 读取增益图模式（默认 RGB）
-        GainMapMode = settings.GainMapMode;
-
         if (!settings.HdrOutput)
         {
             // SDR 模式：回退为普通 JPEG LI（通过统一编码器，带 ICC 和色域支持）
@@ -107,22 +100,26 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, settings.Quality, icc);
             token.ThrowIfCancellationRequested();
 
+            // 从 settings 读取增益图模式（线程安全，无实例状态）
+            var gainMapMode = settings.GainMapMode;
+            int gainMapJpegQuality = 85; // 默认增益图 JPEG 质量
+
             // ── 3. 计算增益图 ──
-            byte[] gainMapPixels = ComputeGainMap(hdrTarget, sdrLinear, w, h, GainMapMode);
+            byte[] gainMapPixels = ComputeGainMap(hdrTarget, sdrLinear, w, h, gainMapMode);
             token.ThrowIfCancellationRequested();
 
             // ── 4. 增益图缩放 + 编码 ──
-            byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, GainMapMode, out int gmSW, out int gmSH);
+            byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, gainMapMode, out int gmSW, out int gmSH);
             byte[] gainMapJpegBytes = EncodeGainMapToJpegBytesSafe(gainMapScaled, gmSW, gmSH,
-                GainMapMode, GainMapJpegQuality);
+                gainMapMode, gainMapJpegQuality);
             token.ThrowIfCancellationRequested();
 
             // ── 5. MPF 封装 ──
             WriteJpegGainMapFile(baseJpegBytes, gainMapJpegBytes, w, h, gmSW, gmSH,
-                GainMapMode, outputPath);
+                gainMapMode, outputPath);
 
             System.Diagnostics.Debug.WriteLine(
-                $"[GainMap] 输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({GainMapMode}), " +
+                $"[GainMap] 输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({gainMapMode}), " +
                 $"Base={baseJpegBytes.Length / 1024}KB, GainMap={gainMapJpegBytes.Length / 1024}KB");
         }, hardCts.Token);
     }

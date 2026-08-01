@@ -160,6 +160,7 @@ public static class ToneMapper
         var bytes = new byte[width * height * 4];
         int pixelCount = width * height;
         float evScale = MathF.Pow(2.0f, toneParams.Exposure);
+        float hableWhitePoint = 11.2f; // 默认白点
 
         Parallel.For(0, pixelCount, pi =>
         {
@@ -187,9 +188,9 @@ public static class ToneMapper
                     break;
                 }
                 case ToneMapMode.Hable:
-                    r = HableCurve(r, 11.2f);
-                    g = HableCurve(g, 11.2f);
-                    b = HableCurve(b, 11.2f);
+                    r = HableCurve(r, hableWhitePoint);
+                    g = HableCurve(g, hableWhitePoint);
+                    b = HableCurve(b, hableWhitePoint);
                     break;
                 case ToneMapMode.Aces:
                     r = AcesCurve(r);

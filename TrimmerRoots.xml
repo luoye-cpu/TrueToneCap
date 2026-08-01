@@ -1,0 +1,33 @@
+<!-- TrueToneCap/TrimmerRoots.xml
+     AOT 裁剪根配置 — 保留 SharpGen.Runtime 和 Vortice 的 COM vtable 反射所需类型。
+     移除这些类型会导致所有 D3D11 操作在 AOT 运行时崩溃。 -->
+<linker>
+  <assembly fullname="SharpGen.Runtime">
+    <type fullname="SharpGen.Runtime.TypeDataStorage" preserve="all" />
+    <type fullname="SharpGen.Runtime.TypeDataStorage/*" preserve="all" />
+  </assembly>
+  <assembly fullname="Vortice.Direct3D11">
+    <type fullname="Vortice.Direct3D11.*" preserve="all" />
+  </assembly>
+  <assembly fullname="Vortice.DXGI">
+    <type fullname="Vortice.DXGI.*" preserve="all" />
+  </assembly>
+  <assembly fullname="Vortice.Direct2D1">
+    <type fullname="Vortice.Direct2D1.*" preserve="all" />
+  </assembly>
+  <assembly fullname="Vortice.Mathematics">
+    <type fullname="Vortice.Mathematics.*" preserve="all" />
+  </assembly>
+  <assembly fullname="Magick.NET-Q16-HDRI-AnyCPU">
+    <type fullname="ImageMagick.*" preserve="all" />
+  </assembly>
+  <assembly fullname="Magick.NET.Core">
+    <type fullname="ImageMagick.*" preserve="all" />
+  </assembly>
+  <assembly fullname="JxlNet">
+    <type fullname="JxlNet.*" preserve="all" />
+  </assembly>
+  <assembly fullname="SharpGen.Runtime.COM">
+    <type fullname="SharpGen.Runtime.COM.*" preserve="all" />
+  </assembly>
+</linker>

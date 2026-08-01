@@ -42,55 +42,21 @@ public sealed record WgcCaptureConfig
 /// WGC 统一捕获服务 — 会话池化高性能版。
 /// 核心优化：后台持久 Session 持续接收帧，截图时零延迟取最新帧。
 /// </summary>
-public sealed class WgcCaptureService : IDisposable
+public sealed partial class WgcCaptureService : IDisposable
 {
     // ── 并发保护 ──
     private static readonly SemaphoreSlim s_captureLock = new(1, 1);
 
-    // ── 异步诊断日志（带大小轮转）──
-    private static readonly string? s_logPath = Path.Combine(Path.GetTempPath(), "TrueToneCap_WGC.log");
-    private static readonly Channel<string>? s_logChannel;
-    private static readonly CancellationTokenSource s_logCts = new();
-    private const long MaxLogSizeBytes = 1_048_576; // 1MB 轮转上限
-
-    private static void Log(string msg)
-    {
-        System.Diagnostics.Debug.WriteLine(msg);
-        s_logChannel?.Writer.TryWrite($"{DateTime.Now:HH:mm:ss.fff} {msg}\n");
-    }
-
-    static WgcCaptureService()
-    {
-        try
-        {
-            System.IO.File.WriteAllText(s_logPath!, $"=== WGC Pooled {DateTime.Now}\n");
-            s_logChannel = System.Threading.Channels.Channel.CreateUnbounded<string>(
-                new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await foreach (var entry in s_logChannel.Reader.ReadAllAsync(s_logCts.Token))
-                    {
-                        // P2: 日志文件轮转 — 超过 1MB 时截断重写
-                        var fi = new FileInfo(s_logPath!);
-                        if (fi.Exists && fi.Length > MaxLogSizeBytes)
-                            await System.IO.File.WriteAllTextAsync(s_logPath!, $"=== Log rotated {DateTime.Now}\n", s_logCts.Token);
-                        await System.IO.File.AppendAllTextAsync(s_logPath!, entry, s_logCts.Token);
-                    }
-                }
-                catch (OperationCanceledException) { }
-            });
-        }
-        catch { }
-    }
+    // ── 内部诊断日志（使用统一 LogService）──
+    private static void Log(string msg) => LogService.Debug("WgcCapture", msg, LogCategory.Capture);
 
     private ID3D11Device? _d3dDevice;
     private nint _deviceMonitor;
     private bool _disposed;
 
     // ═══ D3D11 线程安全：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
-    private static readonly object s_d3dContextLock = new();
+    // 实例级锁：每个 WgcCaptureService 实例的 D3D11 设备各自加锁，多显示器场景不互相阻塞
+    private readonly object _d3dContextLock = new();
 
     // ═══ P0: 懒启动会话池 + 延迟自动停止 ═══
     // P3 修复: 使用 (HMONITOR, IsHdr) 元组 key，避免位或标记碰撞
@@ -122,6 +88,9 @@ public sealed class WgcCaptureService : IDisposable
         private readonly nint _hmonitor;
         private readonly DirectXPixelFormat _format;
         private readonly ID3D11Device _d3dDevice;
+        // ═══ D3D11 设备锁：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
+        // 同一 WgcCaptureService 实例的所有 PooledSession 共享此锁（同一 D3D11 设备）
+        private readonly object _gpuLock;
 
         private IDirect3DDevice? _winrtDevice;
         private Direct3D11CaptureFramePool? _framePool;
@@ -134,7 +103,7 @@ public sealed class WgcCaptureService : IDisposable
         private byte[]? _writeBufferSdr;   // 生产者写入缓冲区（不与消费者共享）
         private float[]? _writeBufferHdr;
         private int _width, _height;
-        private long _frameTimestamp;
+        private long _frameTimestamp; // 始终在 _frameLock 内访问，锁提供内存屏障
         private readonly object _frameLock = new();
         private readonly ManualResetEventSlim _firstFrameEvent = new(false);
         private volatile bool _hasFrame;
@@ -154,11 +123,12 @@ public sealed class WgcCaptureService : IDisposable
         public bool HasFrame => _hasFrame;
         public bool IsHdr => _format == DirectXPixelFormat.R16G16B16A16Float;
 
-        public PooledSession(nint hmonitor, DirectXPixelFormat format, ID3D11Device d3dDevice)
+        public PooledSession(nint hmonitor, DirectXPixelFormat format, ID3D11Device d3dDevice, object gpuLock)
         {
             _hmonitor = hmonitor;
             _format = format;
             _d3dDevice = d3dDevice;
+            _gpuLock = gpuLock;
         }
 
         /// <summary>启动持久捕获会话。</summary>
@@ -327,6 +297,9 @@ public sealed class WgcCaptureService : IDisposable
         {
             try
             {
+                // ═══ D3D11 操作必须在 GPU 锁内 ═══
+                lock (_gpuLock)
+                {
                 // 尺寸变化时重新创建
                 if (_latestTexture is null || _latestTexW != w || _latestTexH != h)
                 {
@@ -343,10 +316,10 @@ public sealed class WgcCaptureService : IDisposable
                     _latestTexW = w;
                     _latestTexH = h;
                 }
-                // D3D11 线程安全：此方法在 _frameLock 内调用，且与 _d3dDevice 同一线程
                 var ctx = _d3dDevice.ImmediateContext;
                 ctx.CopyResource(_latestTexture, wgcTexture);
                 _latestTexValid = true;
+                }
             }
             catch (Exception ex)
             {
@@ -366,47 +339,48 @@ public sealed class WgcCaptureService : IDisposable
                 _writeBufferSdr = new byte[len];
             var pixels = _writeBufferSdr;
 
-            // ═══ D3D11 线程安全：所有 GPU 操作必须在锁内执行 ═══
-            lock (s_d3dContextLock)
+            // ═══ D3D11 线程安全：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
+            // 同一 D3D11 设备的所有操作共享 _gpuLock，防止 WGC 回调与截图线程冲突
+            lock (_gpuLock)
             {
-                var ctx = _d3dDevice.ImmediateContext;
+            var ctx = _d3dDevice.ImmediateContext;
 
-                // P2: 复用 staging 纹理
-                if (_stagingTex is null || _stagingW != w || _stagingH != h)
+            // P2: 复用 staging 纹理
+            if (_stagingTex is null || _stagingW != w || _stagingH != h)
+            {
+                _stagingTex?.Dispose();
+                _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                 {
-                    _stagingTex?.Dispose();
-                    _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
-                    {
-                        Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
-                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
-                        SampleDescription = new(1, 0),
-                        Usage = ResourceUsage.Staging,
-                        BindFlags = BindFlags.None,
-                        CPUAccessFlags = CpuAccessFlags.Read
-                    });
-                    _stagingW = w; _stagingH = h;
-                }
+                    Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                    Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                    SampleDescription = new(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    BindFlags = BindFlags.None,
+                    CPUAccessFlags = CpuAccessFlags.Read
+                });
+                _stagingW = w; _stagingH = h;
+            }
 
-                ctx.CopyResource(_stagingTex, texture);
-                var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            ctx.CopyResource(_stagingTex, texture);
+            var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
 
-                unsafe
+            unsafe
+            {
+                byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                int srcRowPitch = (int)mapped.RowPitch;
+                int dstStride = w * 4;
+
+                fixed (byte* dst = pixels)
                 {
-                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
-                    int srcRowPitch = (int)mapped.RowPitch;
-                    int dstStride = w * 4;
-
-                    fixed (byte* dst = pixels)
+                    for (int row = 0; row < h; row++)
                     {
-                        for (int row = 0; row < h; row++)
-                        {
-                            byte* srcRow = srcBase + row * srcRowPitch;
-                            byte* dstRow = dst + row * dstStride;
-                            Buffer.MemoryCopy(srcRow, dstRow, dstStride, dstStride);
-                        }
+                        byte* srcRow = srcBase + row * srcRowPitch;
+                        byte* dstRow = dst + row * dstStride;
+                        Buffer.MemoryCopy(srcRow, dstRow, dstStride, dstStride);
                     }
                 }
-                ctx.Unmap(_stagingTex, 0);
+            }
+            ctx.Unmap(_stagingTex, 0);
             }
 
             // Alpha 修复（WGC 输出 alpha 可能为 0）— 纯 CPU 操作，无需锁
@@ -424,46 +398,46 @@ public sealed class WgcCaptureService : IDisposable
                 _writeBufferHdr = new float[pixelCount];
             var pixels = _writeBufferHdr;
 
-            // ═══ D3D11 线程安全：所有 GPU 操作必须在锁内执行 ═══
-            lock (s_d3dContextLock)
+            // ═══ D3D11 线程安全：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
+            lock (_gpuLock)
             {
-                var ctx = _d3dDevice.ImmediateContext;
+            var ctx = _d3dDevice.ImmediateContext;
 
-                if (_stagingTex is null || _stagingW != w || _stagingH != h)
+            if (_stagingTex is null || _stagingW != w || _stagingH != h)
+            {
+                _stagingTex?.Dispose();
+                _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                 {
-                    _stagingTex?.Dispose();
-                    _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
-                    {
-                        Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
-                        Format = Vortice.DXGI.Format.R16G16B16A16_Float,
-                        SampleDescription = new(1, 0),
-                        Usage = ResourceUsage.Staging,
-                        BindFlags = BindFlags.None,
-                        CPUAccessFlags = CpuAccessFlags.Read
-                    });
-                    _stagingW = w; _stagingH = h;
-                }
+                    Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                    Format = Vortice.DXGI.Format.R16G16B16A16_Float,
+                    SampleDescription = new(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    BindFlags = BindFlags.None,
+                    CPUAccessFlags = CpuAccessFlags.Read
+                });
+                _stagingW = w; _stagingH = h;
+            }
 
-                ctx.CopyResource(_stagingTex, texture);
-                var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            ctx.CopyResource(_stagingTex, texture);
+            var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
 
-                unsafe
+            unsafe
+            {
+                byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                int srcRowPitch = (int)mapped.RowPitch;
+                int halfsPerRow = w * 4;
+
+                fixed (float* dst = pixels)
                 {
-                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
-                    int srcRowPitch = (int)mapped.RowPitch;
-                    int halfsPerRow = w * 4;
-
-                    fixed (float* dst = pixels)
+                    for (int row = 0; row < h; row++)
                     {
-                        for (int row = 0; row < h; row++)
-                        {
-                            byte* srcRow = srcBase + row * srcRowPitch;
-                            float* dstRow = dst + row * w * 4;
-                            TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(srcRow, dstRow, halfsPerRow);
-                        }
+                        byte* srcRow = srcBase + row * srcRowPitch;
+                        float* dstRow = dst + row * w * 4;
+                        TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(srcRow, dstRow, halfsPerRow);
                     }
                 }
-                ctx.Unmap(_stagingTex, 0);
+            }
+            ctx.Unmap(_stagingTex, 0);
             }
 
             return pixels;
@@ -475,8 +449,12 @@ public sealed class WgcCaptureService : IDisposable
             try { _session?.Dispose(); } catch { }
             try { _framePool?.Dispose(); } catch { }
             try { _winrtDevice?.Dispose(); } catch { }
-            lock (s_d3dContextLock) { try { _stagingTex?.Dispose(); } catch { } }
-            try { _latestTexture?.Dispose(); } catch { }
+            // ═══ D3D11 资源释放也必须在 GPU 锁内 ═══
+            lock (_gpuLock)
+            {
+                try { _stagingTex?.Dispose(); } catch { }
+                try { _latestTexture?.Dispose(); } catch { }
+            }
             _firstFrameEvent.Dispose();
         }
     }
@@ -497,12 +475,12 @@ public sealed class WgcCaptureService : IDisposable
             }
             catch
             {
-                lock (s_d3dContextLock) { _d3dDevice?.Dispose(); }
+                lock (_d3dContextLock) { _d3dDevice?.Dispose(); }
                 _d3dDevice = null;
             }
         }
 
-        lock (s_d3dContextLock) { _d3dDevice?.Dispose(); }
+        lock (_d3dContextLock) { _d3dDevice?.Dispose(); }
         _d3dDevice = null;
         _deviceMonitor = hmonitor;
 
@@ -566,7 +544,7 @@ public sealed class WgcCaptureService : IDisposable
             var device = GetOrCreateDevice(hmonitor);
             // WGC 仅支持 B8G8R8A8UIntNormalized 和 R16G16B16A16Float 两种帧池格式。
             // HDR 显示器上 DWM 自动将 HDR 内容色调映射为 SDR 后交付，输出已是 sRGB gamma 编码。
-            var session = new PooledSession(hmonitor, DirectXPixelFormat.B8G8R8A8UIntNormalized, device);
+            var session = new PooledSession(hmonitor, DirectXPixelFormat.B8G8R8A8UIntNormalized, device, _d3dContextLock);
             if (!session.Start())
                 throw new InvalidOperationException($"无法为显示器 0x{hmonitor:X} 创建 WGC 会话");
 
@@ -598,7 +576,7 @@ public sealed class WgcCaptureService : IDisposable
             }
 
             var device = GetOrCreateDevice(hmonitor);
-            var session = new PooledSession(hmonitor, DirectXPixelFormat.R16G16B16A16Float, device);
+            var session = new PooledSession(hmonitor, DirectXPixelFormat.R16G16B16A16Float, device, _d3dContextLock);
             if (!session.Start())
             {
                 lock (s_hdrCapabilityCache) { s_hdrCapabilityCache[hmonitor] = false; }
@@ -1109,14 +1087,15 @@ public sealed class WgcCaptureService : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct MSG { public nint hwnd; public uint message; public nint wParam; public nint lParam; public uint time; public int pt_x; public int pt_y; }
 
-    [DllImport("user32.dll")]
-    private static extern int PeekMessageW(out MSG msg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+    [LibraryImport("user32.dll")]
+    private static partial int PeekMessageW(out MSG msg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
 
-    [DllImport("user32.dll")]
-    private static extern bool TranslateMessage(ref MSG msg);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool TranslateMessage(ref MSG msg);
 
-    [DllImport("user32.dll")]
-    private static extern nint DispatchMessageW(ref MSG msg);
+    [LibraryImport("user32.dll")]
+    private static partial nint DispatchMessageW(ref MSG msg);
 
     private static void PumpMessages()
     {
@@ -1127,10 +1106,10 @@ public sealed class WgcCaptureService : IDisposable
         }
     }
 
-    [DllImport("user32.dll")]
-    private static extern nint GetShellWindow();
-    [DllImport("user32.dll")]
-    private static extern nint GetDesktopWindow();
+    [LibraryImport("user32.dll")]
+    private static partial nint GetShellWindow();
+    [LibraryImport("user32.dll")]
+    private static partial nint GetDesktopWindow();
 
     private static int VtblCall4(nint pThis, nint hmonitor, Guid riid, out nint result)
     {
@@ -1143,13 +1122,13 @@ public sealed class WgcCaptureService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int CreateForMonitorDelegate(nint pThis, nint hmonitor, ref Guid riid, out nint result);
 
-    [DllImport("combase.dll", ExactSpelling = true)]
-    private static extern int RoGetActivationFactory(nint hstring, ref Guid iid, out nint factory);
+    [LibraryImport("combase.dll")]
+    private static partial int RoGetActivationFactory(nint hstring, ref Guid iid, out nint factory);
 
-    private static class IntPtrHelper
+    private static partial class IntPtrHelper
     {
-        [DllImport("combase.dll", ExactSpelling = true)]
-        private static extern int WindowsCreateString([MarshalAs(UnmanagedType.LPWStr)] string s, int len, out nint hstr);
+        [LibraryImport("combase.dll", StringMarshalling = StringMarshalling.Utf16)]
+        private static partial int WindowsCreateString(string s, int len, out nint hstr);
         public static nint CreateString(string s) { WindowsCreateString(s, s.Length, out var h); return h; }
     }
 
@@ -1178,8 +1157,8 @@ public sealed class WgcCaptureService : IDisposable
         return MarshalInterface<IDirect3DDevice>.FromAbi(winrtPtr);
     }
 
-    [DllImport("d3d11.dll")]
-    private static extern int CreateDirect3D11DeviceFromDXGIDevice(nint dxgiDevice, out nint outD3D11Device);
+    [LibraryImport("d3d11.dll")]
+    private static partial int CreateDirect3D11DeviceFromDXGIDevice(nint dxgiDevice, out nint outD3D11Device);
 
     /// <summary>从 WinRT IDirect3DSurface 获取 DXGI 表面。</summary>
     private static IDXGISurface? GetDxgiSurface(IDirect3DSurface surface)
@@ -1270,6 +1249,5 @@ public sealed class WgcCaptureService : IDisposable
         _disposed = true;
         InvalidateSessions();
         try { _d3dDevice?.Dispose(); } catch { }
-        s_logCts.Cancel();
     }
 }

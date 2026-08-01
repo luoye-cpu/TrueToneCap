@@ -178,7 +178,7 @@ public sealed class CapturePipelineService
         return full;
     }
 
-    /// <summary>编码并保存 SDR 像素到文件。</summary>
+    /// <summary>编码并保存 SDR 像素到文件（同步编码，在后台线程执行）。</summary>
     public async Task<string> EncodeAndSaveAsync(
         byte[] bgra, int w, int h, OutputFormat format,
         bool hdrOutput, bool iccBakeEnabled, string colorSpaceTag,
@@ -191,6 +191,11 @@ public sealed class CapturePipelineService
         var outDir = GetEffectiveOutputDir();
         var path = BuildOutputPath(format, outDir);
 
+        LogService.Info("Pipeline", $"SDR 编码启动: {format} {w}x{h} HDR={hdrOutput} → {Path.GetFileName(path)}");
+
+        PowerManager.PreventSleep();
+        try
+        {
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
@@ -207,15 +212,32 @@ public sealed class CapturePipelineService
                     IccProfile = settings.IccProfile,
                     GpuTexture = gpuTexture
                 };
-                encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
+                // 同步执行：Task.Run 内已在后台线程，直接调用同步包装
+                EncodeSync(encoder, hdrFrame, settings, path, ct);
             }
             else
             {
-                encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
+                EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
             }
         }, ct);
+        }
+        finally { PowerManager.AllowSleep(); }
 
+        var fileSize = File.Exists(path) ? new FileInfo(path).Length : 0;
+        LogService.Info("Pipeline", $"SDR 编码完成: {Path.GetFileName(path)} ({fileSize / 1024.0:F1} KB)");
         return path;
+    }
+
+    /// <summary>后台线程中同步执行 HDR 编码（避免 GetAwaiter().GetResult() 阻塞线程池）。</summary>
+    private static void EncodeSync(ImageEncoder encoder, HdrFrameData frame, EncodingSettings settings, string path, CancellationToken ct)
+    {
+        encoder.EncodeAsync(frame, settings, path, ct).GetAwaiter().GetResult();
+    }
+
+    /// <summary>后台线程中同步执行 SDR 编码。</summary>
+    private static void EncodeSyncSdr(ImageEncoder encoder, byte[] pixels, int w, int h, EncodingSettings settings, string path, CancellationToken ct)
+    {
+        encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
     }
 
     /// <summary>编码并保存（使用调用方提供的显式设置，供 MainWindow UI 路径使用）。</summary>
@@ -232,6 +254,9 @@ public sealed class CapturePipelineService
 
         LogService.Info("Pipeline", $"开始编码: {settings.Format} {w}x{h} HDR={settings.HdrOutput} → {Path.GetFileName(path)}");
 
+        PowerManager.PreventSleep();
+        try
+        {
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
@@ -249,13 +274,15 @@ public sealed class CapturePipelineService
                     IccProfile = settings.IccProfile,
                     GpuTexture = gpuTexture
                 };
-                encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
+                EncodeSync(encoder, hdrFrame, settings, path, ct);
             }
             else
             {
-                encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
+                EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
             }
         }, ct);
+        }
+        finally { PowerManager.AllowSleep(); }
 
         var fileSize = File.Exists(path) ? new FileInfo(path).Length : 0;
         LogService.Info("Pipeline", $"编码完成: {Path.GetFileName(path)} ({fileSize / 1024.0:F1} KB)");
@@ -271,25 +298,35 @@ public sealed class CapturePipelineService
         var outDir = GetEffectiveOutputDir();
         var path = BuildOutputPath(settings.Format, outDir);
 
+        LogService.Info("Pipeline", $"HDR 编码启动: {settings.Format} {hdrFrame.Width}x{hdrFrame.Height} → {Path.GetFileName(path)}");
+
+        PowerManager.PreventSleep();
+        try
+        {
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
             if (encoder.SupportsHdr)
             {
-                encoder.EncodeAsync(hdrFrame, settings, path, ct).GetAwaiter().GetResult();
+                LogService.Debug("Pipeline", $"HDR 直通编码: {settings.Format}");
+                EncodeSync(encoder, hdrFrame, settings, path, ct);
             }
             else
             {
                 // 编码器不支持 HDR → 色调映射到 SDR
+                LogService.Info("Pipeline", $"编码器不支持 HDR，色调映射到 SDR: {settings.Format}");
                 var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
                 // 传递 GPU 纹理到 SDR 编码路径
                 if (hdrFrame.GpuTexture is not null)
                     settings.GpuTexture = hdrFrame.GpuTexture;
-                encoder.EncodeSdrAsync(sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct)
-                    .GetAwaiter().GetResult();
+                EncodeSyncSdr(encoder, sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
             }
         }, ct);
+        }
+        finally { PowerManager.AllowSleep(); }
 
+        var fileSize = File.Exists(path) ? new FileInfo(path).Length : 0;
+        LogService.Info("Pipeline", $"HDR 编码完成: {Path.GetFileName(path)} ({fileSize / 1024.0:F1} KB)");
         return path;
     }
 }

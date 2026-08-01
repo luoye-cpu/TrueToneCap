@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.2.0 Beta** · Windows 11 24H2+ · WinUI 3 · .NET 10 · WGC
+> **v0.3.0-beta** · Windows 11 24H2+ · WinUI 3 · .NET 10 · WGC
 
 TrueToneCap 是一把为像素而生的手术刀。
 
@@ -21,7 +21,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 ## Quick Start / 快速开始
 
-1. Download `TrueToneCap-v0.2.0-beta-win-x64.zip`, extract / 下载解压
+1. Download `TrueToneCap-v0.3.0-beta-win-x64.zip`, extract / 下载解压
 2. Run `TrueToneCap.exe` / 双击运行
 3. Press `Ctrl+Shift+S` to capture / 按快捷键截图
 
@@ -47,13 +47,14 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 | Format | HDR | Bit Depth | Encoder |
 |--------|-----|-----------|---------|
-| PNG | ✅ cICP | 8/16-bit | Magick.NET |
-| JPEG Gain Map | ✅ Ultra HDR | 8-bit + gain map | Magick.NET + MPF |
-| JPEG XL | ✅ | Float/16-bit | libjxl |
-| AVIF | ✅ | 10/12-bit | libaom / QSV / NVENC |
-| WebP | ❌ | 8-bit | Magick.NET |
+| PNG | ✅ cICP | 8/10/12/16-bit | 托管编码器 (ManagedPngEncoder) |
+| JPEG Gain Map | ✅ Ultra HDR | 8-bit + gain map | jpegli + 增益图 |
+| JPEG XL | ✅ | 8/10/12-bit | JxlNet (NativeJxlEncoder) |
+| AVIF | ✅ | 8/10/12-bit | libaom / QSV / NVENC / MFT |
+| WebP | ❌ | 8-bit | libwebp / cwebp 回退 PNG |
 | JPEG LI | ❌ | 8-bit | jpegli |
-| BMP | ❌ | 8-bit | Magick.NET |
+| TIFF | ✅ | 8/16-bit | 托管编码器 |
+| BMP | ❌ | 8-bit | 托管编码器 |
 
 ---
 
@@ -68,6 +69,18 @@ dotnet run --project src\TrueToneCap.App -c Release
 ---
 
 ## Changelog / 更新日志
+
+### v0.3.0-beta — 2026-08-01
+
+- 🏗️ Pipeline: 全面管线大修 — 捕获/色调映射/色彩管理/编码 全部重写 / Major pipeline overhaul
+- 🎨 Color: 色域转换链路修复 — scRGB→BT.2020/P3/AdobeRGB 矩阵 + 动态 CICP / Color gamut conversion fix
+- 🖼️ Encoding: 全线迁移到托管/原生编码器，零 Magick.NET 依赖 / Migrated to managed/native encoders
+- ⚡ GPU: NVENC GPU 纹理直通路径 (D3D11→NVENC，跳过 CPU 回读) / GPU texture direct path
+- 🔧 JPEG: 全面迁移到 jpegli，Gain Map 加入崩溃隔离+色域转换 / JPEG migration to jpegli
+- 🖥️ ACM: ACM 开启时 ICC 烘焙不再禁用，Float16 广色域路径 / ACM+ICC coexistence fix
+- 🔤 Font: 界面字体自定义功能，支持任意系统已安装字体 / Custom UI font selection
+- 🧪 Test: 192/192 测试全部通过 / 192/192 tests pass
+- 📦 Package: 原生工具链嵌入资源，运行时自动提取 / Native tools embedded as resources
 
 ### v0.2.0 — 2026-07-28
 
@@ -108,7 +121,7 @@ dotnet run --project src\TrueToneCap.App -c Release
 
 ### v0.1.2 — 2026-07-04
 
-- 🔤 HarmonyOS Sans SC 内嵌 / 回落微软雅黑
+- 🔤 界面字体可自定义（微软雅黑默认，支持任意系统字体）
 - 🚀 开机静默托盘 (`--autostart`)
 - 🎨 Gain Map 灰度/RGB 双模 + ICC 检测修正
 - 🖥️ AVIF 10-bit / JXL 16-bit / PNG 16-bit 高色深保护

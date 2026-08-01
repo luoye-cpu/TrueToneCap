@@ -24,10 +24,14 @@ public partial class App : Application
 {
     private static Mutex? s_mutex;
 
-    [DllImport("user32.dll")] static extern int MessageBoxW(nint h, string text, string caption, uint type);
-    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(nint hWnd);
-    [DllImport("user32.dll")] private static extern nint FindWindowW(string? lpClassName, string lpWindowName);
-    [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(int value);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)] private static partial int MessageBoxW(nint h, string text, string caption, uint type);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetForegroundWindow(nint hWnd);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)] private static partial nint FindWindowW(string? lpClassName, string lpWindowName);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetProcessDpiAwarenessContext(int value);
 
     // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
     // 程序化强制设置，确保不被 manifest 忽略或系统兼容性覆盖
@@ -35,13 +39,18 @@ public partial class App : Application
 
     public App()
     {
+        LogService.InitializeFileLog();
+        LogService.Info("App", "应用启动开始");
+
         // ── 强制逐显示器 V2 DPI 感知（必须在任何窗口创建前调用）──
         SetProcessDpiAwarenessContext(DPI_CONTEXT_PER_MONITOR_AWARE_V2);
+        LogService.Debug("App", "DPI 感知设置完成");
 
         // ── 单实例检测 ──
         s_mutex = new Mutex(true, @"Global\TrueToneCap_SingleInstance", out bool createdNew);
         if (!createdNew)
         {
+            LogService.Info("App", "已有实例运行，激活窗口并退出");
             // 已有实例运行 → 尝试激活已有窗口
             try
             {
@@ -57,6 +66,7 @@ public partial class App : Application
         // ── 初始化主题（必须在 InitializeComponent 之前设置 RequestedTheme）──
         var initTheme = LoadThemeFromSettings();
         _currentTheme = initTheme;
+        LogService.Info("App", $"主题初始化: {initTheme} → {ResolveEffectiveTheme(initTheme)}");
 
         // WinUI 3 非打包应用不设置 RequestedTheme 时默认深色，不会自动跟随系统
         // 因此 Default 模式下必须主动检测系统主题并显式设置
@@ -65,28 +75,27 @@ public partial class App : Application
             ? ApplicationTheme.Light
             : ApplicationTheme.Dark;
 
-        // ── 加载内嵌字体（优先于 XAML 初始化）──
-        FontLoader.LoadBundledFonts();
-
         // ── 着色器预热：后台静默编译缺失的 CSO（最早时机，不阻塞启动）──
         _ = Task.Run(() =>
         {
             try
             {
                 var shaderDir = Path.Combine(AppContext.BaseDirectory, "data", "Shaders");
+                LogService.Info("App", "着色器预热启动");
                 ShaderCompiler.EnsureCompiled(shaderDir, shaderDir);
+                LogService.Info("App", "着色器预热完成");
             }
-            catch { }
+            catch (Exception ex) { LogService.Warn("App", $"着色器预热异常: {ex.Message}"); }
         });
 
         // ── 初始化 OCR 引擎（纯内嵌 ONNX + Windows，零外部依赖）──
-        _ = Task.Run(() => { try { MultiOcrService.Initialize(); } catch { } });
+        _ = Task.Run(() => { try { MultiOcrService.Initialize(); LogService.Info("App", "OCR 引擎后台初始化"); } catch (Exception ex) { LogService.Warn("App", $"OCR 初始化异常: {ex.Message}"); } });
 
         // ── 初始化 jpegli 编码器（jxl.dll）──
         _ = Task.Run(() =>
         {
-            try { JpegLiNative.Initialize(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[App] jpegli 初始化失败: {ex.Message}"); }
+            try { JpegLiNative.Initialize(); LogService.Info("App", "jpegli 编码器初始化"); }
+            catch (Exception ex) { LogService.Warn("App", $"jpegli 初始化失败: {ex.Message}"); }
         });
 
         this.InitializeComponent();
@@ -116,6 +125,7 @@ public partial class App : Application
             }
 
             var fullMsg = $"TrueToneCap 崩溃:\n\n{msg}\n\n{e.Exception?.StackTrace}";
+            LogService.Error("App", $"未处理异常: {msg}", e.Exception);
             try
             {
                 var crashPath = Path.Combine(
@@ -155,20 +165,26 @@ public partial class App : Application
         return mode;
     }
 
-    /// <summary>切换应用主题（运行时）。不注入动态资源，完全依赖 fe.RequestedTheme + WinUI 内置主题。</summary>
+    /// <summary>切换应用主题（运行时）。设置 Application.RequestedTheme 全局生效。</summary>
     public static void ApplyTheme(AppThemeMode mode)
     {
         _currentTheme = mode;
-        // 所有主题视觉效果由窗口级 fe.RequestedTheme 控制，不注入动态资源字典
+        var effective = ResolveEffectiveTheme(mode);
+        if (Current is App app)
+        {
+            app.RequestedTheme = effective == AppThemeMode.Light
+                ? ApplicationTheme.Light
+                : ApplicationTheme.Dark;
+        }
     }
 
     /// <summary>从 settings.json 加载主题设置（用于构造函数，在 InitializeComponent 前调用）。</summary>
+    /// <remarks>注意: 必须与 SettingsService 的保存路径一致，即 AppContext.BaseDirectory。</remarks>
     private static AppThemeMode LoadThemeFromSettings()
     {
         try
         {
-            var settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "TrueToneCap", "settings.json");
+            var settingsPath = Path.Combine(AppContext.BaseDirectory, "TrueToneCap.settings.json");
             if (File.Exists(settingsPath))
             {
                 var json = File.ReadAllText(settingsPath);
@@ -192,11 +208,13 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         // 提升进程优先级以减少截图延迟
-        try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High; } catch { }
+        try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High; LogService.Info("App", "进程优先级已提升为 High"); } catch { }
         LogService.Info("App", $"TrueToneCap 启动 v0.2.0, OS={Environment.OSVersion}, 进程提升优先级=High");
         LogService.Info("App", $"命令行: {string.Join(" ", Environment.GetCommandLineArgs())}");
         // ── 初始化应用服务（Settings / Capability / Pipeline / WGC / GPU）──
+        LogService.Info("App", "初始化应用服务 (DI 容器)...");
         AppServices.Initialize();
+        LogService.Info("App", "应用服务初始化完成");
 
         // ── 使用构造函数中已设置的 _currentTheme（RequestedTheme 已在此之前设置）──
         var initTheme = _currentTheme;
@@ -206,7 +224,6 @@ public partial class App : Application
             a.Equals("--autostart", StringComparison.OrdinalIgnoreCase));
 
         var window = new MainWindow(isAutostart);
-
         LogService.Info("App", $"主窗口已创建, 自动启动={isAutostart}");
 
         // ── 显式设置窗口内容主题（Application.RequestedTheme 可能不被所有控件继承）──
@@ -231,8 +248,6 @@ public partial class App : Application
             window.Activate();
         }
         // 开机启动：不显示窗口，由 MainWindow 构造函数中自动缩放到托盘
-
-        // ── 初始主题资源注入（窗口创建后，统一由 ApplyTheme 管理）──
-        ApplyTheme(initTheme);
+        LogService.Info("App", isAutostart ? "开机自启动模式，不显示窗口" : "窗口已激活");
     }
 }
