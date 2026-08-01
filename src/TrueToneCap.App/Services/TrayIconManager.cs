@@ -7,7 +7,7 @@ using WinRT.Interop;
 
 namespace TrueToneCap.App.Services;
 
-public sealed class TrayIconManager : IDisposable
+public sealed partial class TrayIconManager : IDisposable
 {
     private readonly Window _window;
     private readonly nint _hwnd;
@@ -18,11 +18,12 @@ public sealed class TrayIconManager : IDisposable
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool Shell_NotifyIconW(uint dwMessage, ref NOTIFYICONDATAW lpData);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool DestroyIcon(nint hIcon);
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DestroyIcon(nint hIcon);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern uint RegisterWindowMessageW(string lpString);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint RegisterWindowMessageW(string lpString);
 
     private const uint NIM_ADD = 0;
     private const uint NIM_MODIFY = 1;
@@ -175,18 +176,22 @@ public sealed class TrayIconManager : IDisposable
         }
     }
 
-    [DllImport("user32.dll")]
-    private static extern nint CreatePopupMenu();
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool AppendMenuW(nint hMenu, uint uFlags, uint uIDNewItem, string lpNewItem);
-    [DllImport("user32.dll")]
-    private static extern uint TrackPopupMenu(nint hMenu, uint uFlags, int x, int y, int nReserved, nint hWnd, nint prcRect);
-    [DllImport("user32.dll")]
-    private static extern bool DestroyMenu(nint hMenu);
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(nint hWnd);
-    [DllImport("user32.dll")]
-    private static extern bool GetCursorPos(out POINT lpPoint);
+    [LibraryImport("user32.dll")]
+    private static partial nint CreatePopupMenu();
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AppendMenuW(nint hMenu, uint uFlags, uint uIDNewItem, string lpNewItem);
+    [LibraryImport("user32.dll")]
+    private static partial uint TrackPopupMenu(nint hMenu, uint uFlags, int x, int y, int nReserved, nint hWnd, nint prcRect);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DestroyMenu(nint hMenu);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetForegroundWindow(nint hWnd);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetCursorPos(out POINT lpPoint);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X, Y; }
@@ -195,29 +200,31 @@ public sealed class TrayIconManager : IDisposable
     //  程序化图标生成（32x32 ARGB）
     // ═══════════════════════════════════════
 
-    [DllImport("user32.dll")]
-    private static extern nint GetDC(nint hwnd);
+    [LibraryImport("user32.dll")]
+    private static partial nint GetDC(nint hwnd);
 
-    [DllImport("user32.dll")]
-    private static extern int ReleaseDC(nint hwnd, nint hdc);
+    [LibraryImport("user32.dll")]
+    private static partial int ReleaseDC(nint hwnd, nint hdc);
 
-    [DllImport("gdi32.dll")]
-    private static extern nint CreateCompatibleBitmap(nint hdc, int cx, int cy);
+    [LibraryImport("gdi32.dll")]
+    private static partial nint CreateCompatibleBitmap(nint hdc, int cx, int cy);
 
-    [DllImport("gdi32.dll")]
-    private static extern nint CreateCompatibleDC(nint hdc);
+    [LibraryImport("gdi32.dll")]
+    private static partial nint CreateCompatibleDC(nint hdc);
 
-    [DllImport("gdi32.dll")]
-    private static extern bool DeleteDC(nint hdc);
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DeleteDC(nint hdc);
 
-    [DllImport("gdi32.dll")]
-    private static extern bool DeleteObject(nint hObject);
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DeleteObject(nint hObject);
 
-    [DllImport("gdi32.dll")]
-    private static extern nint SelectObject(nint hdc, nint h);
+    [LibraryImport("gdi32.dll")]
+    private static partial nint SelectObject(nint hdc, nint h);
 
-    [DllImport("gdi32.dll")]
-    private static extern uint SetPixelV(nint hdc, int x, int y, uint color);
+    [LibraryImport("gdi32.dll")]
+    private static partial uint SetPixelV(nint hdc, int x, int y, uint color);
 
     [DllImport("user32.dll")]
     private static extern nint CreateIconIndirect(ref ICONINFO piconinfo);

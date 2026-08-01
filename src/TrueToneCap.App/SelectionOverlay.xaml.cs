@@ -48,14 +48,15 @@ public sealed partial class SelectionOverlay : Window
     public enum ActionResult { Cancel, Confirm, Annotate, Copy, Ocr, Translate }
     public event Action<ActionResult, RectInt32>? ActionCompleted;
 
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll")]
-    private static extern int GetWindowLong(nint hWnd, int nIndex);
-    [DllImport("user32.dll")]
-    private static extern int SetWindowLong(nint hWnd, int nIndex, int dwNewLong);
-    [DllImport("user32.dll")]
-    private static extern uint GetDpiForWindow(nint hwnd);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [LibraryImport("user32.dll")]
+    private static partial int GetWindowLongW(nint hWnd, int nIndex);
+    [LibraryImport("user32.dll")]
+    private static partial int SetWindowLongW(nint hWnd, int nIndex, int dwNewLong);
+    [LibraryImport("user32.dll")]
+    private static partial uint GetDpiForWindow(nint hwnd);
     [DllImport("dwmapi.dll")]
     private static extern int DwmExtendFrameIntoClientArea(nint hwnd, ref MARGINS margins);
 
@@ -122,16 +123,24 @@ public sealed partial class SelectionOverlay : Window
             presenter.SetBorderAndTitleBar(false, false);
         }
 
-        int style = GetWindowLong(hwnd, GWL_STYLE);
-        style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
-        SetWindowLong(hwnd, GWL_STYLE, style);
+        // ═══ Win32 窗口样式设置（非致命：失败时不影响覆盖层基本功能）═══
+        try
+        {
+            int style = GetWindowLongW(hwnd, GWL_STYLE);
+            style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
+            SetWindowLongW(hwnd, GWL_STYLE, style);
 
-        // 移除任务栏图标 + 防止意外激活（保持为透明覆盖层）
-        int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
-        exStyle |= WS_EX_NOACTIVATE;
-        exStyle &= ~WS_EX_APPWINDOW;
-        exStyle |= WS_EX_TOOLWINDOW;
-        SetWindowLong(hwnd, GWL_EXSTYLE, exStyle);
+            // 移除任务栏图标 + 防止意外激活（保持为透明覆盖层）
+            int exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            exStyle |= WS_EX_NOACTIVATE;
+            exStyle &= ~WS_EX_APPWINDOW;
+            exStyle |= WS_EX_TOOLWINDOW;
+            SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] 窗口样式设置失败（非致命）: {ex.Message}");
+        }
 
         this.Activated += (_, _) =>
         {
@@ -179,6 +188,8 @@ public sealed partial class SelectionOverlay : Window
             else
                 _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
             System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2} HDR背景={hdrBgOk}");
+
+            DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
             if (!_bgRendered)
             {
@@ -198,11 +209,12 @@ public sealed partial class SelectionOverlay : Window
         RootGrid.PointerMoved += OnPointerMoved;
         RootGrid.PointerReleased += OnPointerReleased;
 
-        // ── 字体注入 ──
+        // ── 字体注入（使用用户选择的字体） ──
+        var fontFamily = FontLoader.GetEffectiveFontFamily(AppServices.Settings.Current.FontFamily);
         if (RootGrid.IsLoaded)
-            FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+            FontHelper.ApplyFontToVisualTree(RootGrid, fontFamily);
         else
-            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, fontFamily);
 
         // ── 标注画布鼠标事件（在画布元素上） ──
         AnnotationCanvas.PointerPressed += OnAnnoCanvasPressed;
@@ -248,8 +260,8 @@ public sealed partial class SelectionOverlay : Window
         }
     }
 
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
+    [LibraryImport("user32.dll")]
+    private static partial short GetAsyncKeyState(int vKey);
     private static bool IsCtrlPressed() => (GetAsyncKeyState(0x11) & 0x8000) != 0;
 
     /// <summary>SafeDPI helper — defends against Activated not firing.</summary>

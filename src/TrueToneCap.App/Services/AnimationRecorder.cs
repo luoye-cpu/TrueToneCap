@@ -78,6 +78,7 @@ public sealed class AnimationRecorder : IDisposable
         _state = RecordingState.Recording;
         _startTime = DateTime.UtcNow;
         _framesCaptured = 0;
+        LogService.Info("AnimationRecorder", $"录制启动: 帧率={_config.FrameRate} 最大时长={_config.MaxDurationSeconds}s 格式={_config.OutputFormat}");
         _framesDropped = 0;
         Task.Run(() => RecordLoop(_cts.Token));
     }
@@ -85,6 +86,7 @@ public sealed class AnimationRecorder : IDisposable
     public async Task StopAndEncodeAsync()
     {
         if (_state != RecordingState.Recording) return;
+        LogService.Info("AnimationRecorder", "录制停止，开始编码...");
         _state = RecordingState.Encoding;
         _cts.Cancel();
         _frameChannel.Writer.TryComplete();
@@ -93,6 +95,7 @@ public sealed class AnimationRecorder : IDisposable
 
     public void Cancel()
     {
+        LogService.Info("AnimationRecorder", "录制已取消");
         _cts.Cancel();
         _frameChannel.Writer.TryComplete();
         _state = RecordingState.Cancelled;
@@ -109,6 +112,7 @@ public sealed class AnimationRecorder : IDisposable
 
         if (displayInfo is null)
         {
+            LogService.Error("AnimationRecorder", "找不到目标显示器");
             Report("找不到目标显示器");
             _state = RecordingState.Error;
             return;
@@ -155,6 +159,7 @@ public sealed class AnimationRecorder : IDisposable
         catch (OperationCanceledException) { /* 正常停止 */ }
 
         _frameChannel.Writer.TryComplete();
+        LogService.Info("AnimationRecorder", $"录制循环结束: 捕获 {_framesCaptured} 帧");
         Report();
     }
 
@@ -185,6 +190,7 @@ public sealed class AnimationRecorder : IDisposable
             if (_encodedFrames.Count == 0)
             {
                 _state = RecordingState.Error;
+                LogService.Warn("AnimationRecorder", "没有捕获到任何帧");
                 Report("没有捕获到任何帧");
                 return;
             }
@@ -245,15 +251,19 @@ public sealed class AnimationRecorder : IDisposable
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is not null)
                 {
-                    // 修复死锁: 必须异步读取 stderr，ffmpeg 输出大量日志到 stderr
+                    // 修复死锁: 异步读取 stdout 和 stderr，防止管道缓冲区满导致死锁
+                    var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                     var stderrTask = proc.StandardError.ReadToEndAsync();
-                    proc.StandardOutput.ReadToEnd();
                     if (!proc.WaitForExit(120_000))
                     {
                         proc.Kill();
                         LogService.Warn("AnimationRecorder", "ffmpeg 超时 (120s)，已终止");
                     }
-                    stderrTask.GetAwaiter().GetResult();
+                    // 确保两个流都读完，释放管道缓冲区
+                    Task.WhenAll(stdoutTask, stderrTask).GetAwaiter().GetResult();
+                    var stderr = stderrTask.Result;
+                    if (!string.IsNullOrEmpty(stderr) && proc.ExitCode != 0)
+                        LogService.Warn("AnimationRecorder", $"ffmpeg stderr: {stderr[..Math.Min(stderr.Length, 500)]}");
                 }
 
                 if (proc?.ExitCode != 0 || !File.Exists(path))
@@ -266,6 +276,10 @@ public sealed class AnimationRecorder : IDisposable
                     TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 8);
                     path = fallbackPath;
                     LogService.Warn("AnimationRecorder", "ffmpeg 不可用，回退为单帧 PNG");
+                }
+                else
+                {
+                    LogService.Info("AnimationRecorder", $"ffmpeg 编码成功: {path}");
                 }
             }
             finally
@@ -280,12 +294,14 @@ public sealed class AnimationRecorder : IDisposable
         catch (Exception ex)
         {
             _state = RecordingState.Error;
+            LogService.Error("AnimationRecorder", $"编码异常: {ex.Message}", ex);
             Report(ex.Message);
         }
         finally
         {
             // 释放帧缓冲内存
             _encodedFrames.Clear();
+            LogService.Info("AnimationRecorder", "编码资源已释放");
             Report();
         }
     }

@@ -56,52 +56,52 @@
 
         <!-- ═══════ 主操作工具栏（选区完成后显示） ═══════ -->
         <Border x:Name="Toolbar" 
-                Background="{ThemeResource CardBackgroundFillColorDefault}" CornerRadius="8" 
+                Background="{ThemeResource CardBackgroundFillColorDefault}" CornerRadius="12" 
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                Padding="6,4" Visibility="Collapsed"
+                Padding="16,12" Visibility="Collapsed"
                 HorizontalAlignment="Left" VerticalAlignment="Top">
-            <StackPanel Orientation="Horizontal" Spacing="4">
-                <Button x:Name="BtnConfirm" Width="70" Height="36"
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button x:Name="BtnConfirm" Width="140" Height="72"
                         Click="OnConfirm" ToolTipService.ToolTip="保存截图到文件并复制 (Enter)"
                         Style="{StaticResource AccentButtonStyle}">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon Glyph="&#xE8FB;" FontSize="14"/>
-                        <TextBlock Text="保存" FontSize="12" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8FB;" FontSize="32"/>
+                        <TextBlock Text="保存" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
-                <Button x:Name="BtnAnnotate" Width="70" Height="36"
+                <Button x:Name="BtnAnnotate" Width="140" Height="72"
                         Click="OnAnnotate" ToolTipService.ToolTip="标注选区（矩形/箭头/马赛克等）">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon Glyph="&#xE70F;" FontSize="14"/>
-                        <TextBlock Text="标注" FontSize="12" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE70F;" FontSize="32"/>
+                        <TextBlock Text="标注" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
-                <Button x:Name="BtnCopy" Width="70" Height="36"
+                <Button x:Name="BtnCopy" Width="140" Height="72"
                         Click="OnCopy" ToolTipService.ToolTip="复制图像到剪贴板">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon Glyph="&#xE8C8;" FontSize="14"/>
-                        <TextBlock Text="复制" FontSize="12" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8C8;" FontSize="32"/>
+                        <TextBlock Text="复制" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
-                <Button x:Name="BtnOcr" Width="70" Height="36"
+                <Button x:Name="BtnOcr" Width="140" Height="72"
                         Click="OnOcr" ToolTipService.ToolTip="识别图中文字 (OCR)">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon Glyph="&#xE8A9;" FontSize="14"/>
-                        <TextBlock Text="识字" FontSize="12" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8A9;" FontSize="32"/>
+                        <TextBlock Text="识字" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
-                <Button x:Name="BtnTranslate" Width="70" Height="36"
+                <Button x:Name="BtnTranslate" Width="140" Height="72"
                         Click="OnTranslate" ToolTipService.ToolTip="翻译图中文字">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon Glyph="&#xE909;" FontSize="14"/>
-                        <TextBlock Text="翻译" FontSize="12" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE909;" FontSize="32"/>
+                        <TextBlock Text="翻译" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
-                <Button x:Name="BtnCancel" Width="58" Height="36"
+                <Button x:Name="BtnCancel" Width="120" Height="72"
                         Click="OnCancel" ToolTipService.ToolTip="取消选区 (Esc)">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon Glyph="&#xE10A;" FontSize="14"/>
-                        <TextBlock Text="取消" FontSize="12" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE10A;" FontSize="32"/>
+                        <TextBlock Text="取消" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
             </StackPanel>
@@ -109,51 +109,51 @@
 
         <!-- ═══════ 标注工具栏（标注模式下显示） ═══════ -->
         <Border x:Name="AnnotationToolbar" 
-                Background="{ThemeResource CardBackgroundFillColorDefault}" CornerRadius="8" 
+                Background="{ThemeResource CardBackgroundFillColorDefault}" CornerRadius="12" 
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                Padding="6,4" Visibility="Collapsed"
+                Padding="16,12" Visibility="Collapsed"
                 HorizontalAlignment="Left" VerticalAlignment="Top">
-            <StackPanel Orientation="Horizontal" Spacing="3">
-                <Button x:Name="AnnoRectBtn" Width="34" Height="34" Click="OnAnnoToolClick" Tag="Rect"
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="AnnoRectBtn" Width="68" Height="68" Click="OnAnnoToolClick" Tag="Rect"
                         ToolTipService.ToolTip="矩形 (R)">
-                    <FontIcon Glyph="&#xE7FB;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE7FB;" FontSize="36"/>
                 </Button>
-                <Button x:Name="AnnoEllipseBtn" Width="34" Height="34" Click="OnAnnoToolClick" Tag="Ellipse"
+                <Button x:Name="AnnoEllipseBtn" Width="68" Height="68" Click="OnAnnoToolClick" Tag="Ellipse"
                         ToolTipService.ToolTip="椭圆 (E)">
-                    <FontIcon Glyph="&#xE8D8;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE8D8;" FontSize="36"/>
                 </Button>
-                <Button x:Name="AnnoArrowBtn" Width="34" Height="34" Click="OnAnnoToolClick" Tag="Arrow"
+                <Button x:Name="AnnoArrowBtn" Width="68" Height="68" Click="OnAnnoToolClick" Tag="Arrow"
                         ToolTipService.ToolTip="箭头 (A)">
-                    <FontIcon Glyph="&#xE72A;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE72A;" FontSize="36"/>
                 </Button>
-                <Button x:Name="AnnoPenBtn" Width="34" Height="34" Click="OnAnnoToolClick" Tag="Pen"
+                <Button x:Name="AnnoPenBtn" Width="68" Height="68" Click="OnAnnoToolClick" Tag="Pen"
                         ToolTipService.ToolTip="画笔 (P)">
-                    <FontIcon Glyph="&#xE84F;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE84F;" FontSize="36"/>
                 </Button>
-                <Button x:Name="AnnoTextBtn" Width="34" Height="34" Click="OnAnnoToolClick" Tag="Text"
+                <Button x:Name="AnnoTextBtn" Width="68" Height="68" Click="OnAnnoToolClick" Tag="Text"
                         ToolTipService.ToolTip="文字 (T)">
-                    <FontIcon Glyph="&#xE8D4;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE8D4;" FontSize="36"/>
                 </Button>
-                <Button x:Name="AnnoMosaicBtn" Width="34" Height="34" Click="OnAnnoToolClick" Tag="Mosaic"
+                <Button x:Name="AnnoMosaicBtn" Width="68" Height="68" Click="OnAnnoToolClick" Tag="Mosaic"
                         ToolTipService.ToolTip="马赛克 (M)">
-                    <FontIcon Glyph="&#xE7F1;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE7F1;" FontSize="36"/>
                 </Button>
-                <Rectangle Width="1" Fill="#FF888888" Margin="6,4"/>
-                <Button x:Name="AnnoUndoBtn" Width="34" Height="34" Click="OnAnnoUndo"
+                <Rectangle Width="1" Fill="#FF888888" Margin="10,8"/>
+                <Button x:Name="AnnoUndoBtn" Width="68" Height="68" Click="OnAnnoUndo"
                         ToolTipService.ToolTip="撤销 (Ctrl+Z)">
-                    <FontIcon Glyph="&#xE7A7;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE7A7;" FontSize="36"/>
                 </Button>
-                <Button x:Name="AnnoRedoBtn" Width="34" Height="34" Click="OnAnnoRedo"
+                <Button x:Name="AnnoRedoBtn" Width="68" Height="68" Click="OnAnnoRedo"
                         ToolTipService.ToolTip="重做 (Ctrl+Y)">
-                    <FontIcon Glyph="&#xE7A6;" FontSize="16"/>
+                    <FontIcon Glyph="&#xE7A6;" FontSize="36"/>
                 </Button>
-                <Rectangle Width="1" Fill="#FF888888" Margin="6,4"/>
-                <Button x:Name="AnnoDoneBtn" Width="64" Height="34" Click="OnAnnoDone"
+                <Rectangle Width="1" Fill="#FF888888" Margin="10,8"/>
+                <Button x:Name="AnnoDoneBtn" Width="120" Height="68" Click="OnAnnoDone"
                         Background="#FF4488FF" Foreground="White"
                         ToolTipService.ToolTip="完成标注 (Esc)">
-                    <StackPanel Orientation="Horizontal" Spacing="3">
-                        <FontIcon Glyph="&#xE8FB;" FontSize="14"/>
-                        <TextBlock Text="完成" FontSize="12" VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8FB;" FontSize="32"/>
+                        <TextBlock Text="完成" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
             </StackPanel>

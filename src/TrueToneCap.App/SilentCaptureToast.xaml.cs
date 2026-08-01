@@ -5,6 +5,7 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
+using System.Runtime.InteropServices;
 using Windows.Graphics;
 using WinRT.Interop;
 
@@ -19,13 +20,15 @@ public sealed partial class SilentCaptureToast : Window
     private const int WS_EX_NOACTIVATE = 0x08000000;
     private const int WS_EX_TOPMOST = 0x00000008;
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern int GetWindowLong(nint hWnd, int nIndex);
+    [LibraryImport("user32.dll")]
+    private static partial int GetWindowLongW(nint hWnd, int nIndex);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern int SetWindowLong(nint hWnd, int nIndex, int dwNewLong);
+    [LibraryImport("user32.dll")]
+    private static partial int SetWindowLongW(nint hWnd, int nIndex, int dwNewLong);
 
-    public SilentCaptureToast()
+    /// <summary>创建 Toast 通知窗口。</summary>
+    /// <param name="position">通知位置: BottomRight / TopRight / TopLeft / BottomLeft / WindowsNotify</param>
+    public SilentCaptureToast(string position = "BottomRight")
     {
         InitializeComponent();
 
@@ -42,19 +45,41 @@ public sealed partial class SilentCaptureToast : Window
         appWindow.Resize(new SizeInt32(320, 80));
 
         // 设置为工具窗口 + 置顶 + 不抢焦点
-        int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
-        SetWindowLong(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST);
+        try
+        {
+            int exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Toast] 窗口样式设置失败（非致命）: {ex.Message}");
+        }
 
         // Mica 背景（如果可用）
         try { SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop(); } catch { }
 
-        // 定位到右下角
+        // 定位到指定位置
         var displayArea = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
         if (displayArea is not null)
         {
             var workArea = displayArea.WorkArea;
-            var x = workArea.X + workArea.Width - 340;
-            var y = workArea.Y + workArea.Height - 100;
+            const int toastW = 340, toastH = 100;
+            int x = position switch
+            {
+                "TopRight" => workArea.X + workArea.Width - toastW,
+                "TopLeft" => workArea.X + 20,
+                "BottomLeft" => workArea.X + 20,
+                "WindowsNotify" => workArea.X + workArea.Width - toastW, // 右下角，同时由 ToastService 接管
+                _ => workArea.X + workArea.Width - toastW, // BottomRight
+            };
+            int y = position switch
+            {
+                "TopRight" => workArea.Y + 20,
+                "TopLeft" => workArea.Y + 20,
+                "BottomLeft" => workArea.Y + workArea.Height - toastH,
+                "WindowsNotify" => workArea.Y + workArea.Height - toastH,
+                _ => workArea.Y + workArea.Height - toastH, // BottomRight
+            };
             appWindow.Move(new PointInt32(x, y));
         }
 

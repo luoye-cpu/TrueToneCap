@@ -57,17 +57,19 @@ public static class NativeAvifEncoder
         Encode(bgra, w, h, path, crf, isHdr: false, chroma, bitDepth, iccProfile);
     }
 
-    /// <summary>编码 BGRA 像素为 AVIF 文件，通过临时 Y4M 文件。</summary>
+    /// <summary>编码 BGRA 像素为 AVIF 文件，通过临时 PNG 文件（替代 Y4M，兼容性更佳）。</summary>
     public static void Encode(byte[] bgra, int w, int h, string path,
         int crf, bool isHdr, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用 请将 avifenc.exe 放入 native/ 目录");
 
-        var tmpY4m = Path.Combine(Path.GetTempPath(), $"ttc_avif_{Guid.NewGuid():N}.y4m");
+        var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_avif_{Guid.NewGuid():N}.png");
         try
         {
-            WriteBgraToY4mFile(bgra, w, h, tmpY4m, chroma);
+            // 写入临时 PNG（avifenc 原生支持 PNG 输入，比 Y4M 更可靠）
+            // 用 EncodeFast 写入 8-bit Filter=None 最小压缩，速度最快
+            ManagedPngEncoder.EncodeFast(bgra, w, h, tmpPng);
 
             var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
             int q = CrfToQuality(crf);
@@ -99,7 +101,7 @@ public static class NativeAvifEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-q {q} -s 6 {chromaArg} {cicpArgs} {iccArg} \"{tmpY4m}\" \"{path}\"".Trim(),
+                Arguments = $"-q {q} -s 6 {chromaArg} {cicpArgs} {iccArg} \"{tmpPng}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -117,109 +119,11 @@ public static class NativeAvifEncoder
         }
         finally
         {
-            try { File.Delete(tmpY4m); } catch { }
+            try { File.Delete(tmpPng); } catch { }
         }
     }
 
-    /// <summary>将 BGRA 像素写入 Y4M 文件，支持色度采样。</summary>
-    private static void WriteBgraToY4mFile(byte[] bgra, int w, int h, string y4mPath, string chroma = "444")
-    {
-        using (var fs = new FileStream(y4mPath, FileMode.Create, FileAccess.Write))
-        {
-            // Y4M 色度标记
-            string y4mChroma = chroma switch
-            {
-                "420" => "C420jpeg",
-                "422" => "C422jpeg",
-                _ => "C444jpeg"
-            };
-            byte[] header = System.Text.Encoding.ASCII.GetBytes($"YUV4MPEG2 W{w} H{h} F1:1 Ip A0:0 {y4mChroma}\nFRAME\n");
-            fs.Write(header, 0, header.Length);
-
-            int pixelCount = w * h;
-            if (chroma == "444")
-            {
-                // 4:4:4 — 每像素 3 字节，BT.709 全范围矩阵
-                for (int i = 0; i < pixelCount; i++)
-                {
-                    int si = i * 4;
-                    byte b = bgra[si];
-                    byte g = bgra[si + 1];
-                    byte r = bgra[si + 2];
-                    // BT.709 全范围 (JPEG 风格)
-                    int y  = (int)( 0.299f   * r + 0.587f   * g + 0.114f   * b + 0.5f);
-                    int cb = (int)(-0.168736f * r - 0.331264f * g + 0.5f     * b + 128.5f);
-                    int cr = (int)( 0.5f     * r - 0.418688f * g - 0.081312f * b + 128.5f);
-                    fs.WriteByte((byte)Math.Clamp(y, 0, 255));
-                    fs.WriteByte((byte)Math.Clamp(cb, 0, 255));
-                    fs.WriteByte((byte)Math.Clamp(cr, 0, 255));
-                }
-            }
-            else if (chroma == "422")
-            {
-                // 4:2:2 — 水平 2× 下采样
-                for (int row = 0; row < h; row++)
-                {
-                    for (int col = 0; col < w; col++)
-                    {
-                        int si = (row * w + col) * 4;
-                        byte b = bgra[si];
-                        byte g = bgra[si + 1];
-                        byte r = bgra[si + 2];
-                        int y = (int)(0.299f * r + 0.587f * g + 0.114f * b + 0.5f);
-                        fs.WriteByte((byte)Math.Clamp(y, 0, 255));
-                        if (col % 2 == 0)
-                        {
-                            int cb = (int)(-0.168736f * r - 0.331264f * g + 0.5f * b + 128.5f);
-                            int cr = (int)(0.5f * r - 0.418688f * g - 0.081312f * b + 128.5f);
-                            fs.WriteByte((byte)Math.Clamp(cb, 0, 255));
-                            fs.WriteByte((byte)Math.Clamp(cr, 0, 255));
-                        }
-                    }
-                }
-            }
-            else // 420
-            {
-                // 4:2:0 — 2×2 块下采样
-                for (int row = 0; row < h; row++)
-                {
-                    for (int col = 0; col < w; col++)
-                    {
-                        int si = (row * w + col) * 4;
-                        byte b = bgra[si];
-                        byte g = bgra[si + 1];
-                        byte r = bgra[si + 2];
-                        int y = (int)(0.299f * r + 0.587f * g + 0.114f * b + 0.5f);
-                        fs.WriteByte((byte)Math.Clamp(y, 0, 255));
-                        if (row % 2 == 0 && col % 2 == 0)
-                        {
-                            // 2×2 块平均
-                            float sumR = 0, sumG = 0, sumB = 0;
-                            int cnt = 0;
-                            for (int dy = 0; dy < 2; dy++)
-                            {
-                                for (int dx = 0; dx < 2; dx++)
-                                {
-                                    int sx = Math.Min(col + dx, w - 1);
-                                    int sy = Math.Min(row + dy, h - 1);
-                                    int si2 = (sy * w + sx) * 4;
-                                    sumR += bgra[si2 + 2];
-                                    sumG += bgra[si2 + 1];
-                                    sumB += bgra[si2];
-                                    cnt++;
-                                }
-                            }
-                            float avgR = sumR / cnt, avgG = sumG / cnt, avgB = sumB / cnt;
-                            int cb = (int)(-0.168736f * avgR - 0.331264f * avgG + 0.5f * avgB + 128.5f);
-                            int cr = (int)(0.5f * avgR - 0.418688f * avgG - 0.081312f * avgB + 128.5f);
-                            fs.WriteByte((byte)Math.Clamp(cb, 0, 255));
-                            fs.WriteByte((byte)Math.Clamp(cr, 0, 255));
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // WriteBgraToY4mFile 已移除 — 改用 PNG 中间文件，兼容性更佳、编码质量无损
 
     /// <summary>从 CRF (0-63) 转换为 avifenc 质量值 (0-100, 100=无损)。</summary>
     private static int CrfToQuality(int crf) =>

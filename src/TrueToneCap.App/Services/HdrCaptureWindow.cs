@@ -13,7 +13,7 @@ namespace TrueToneCap.App.Services;
 
 public enum HdrCaptureAction { Cancel, Save, Copy, Annotate, Ocr, Translate }
 
-public sealed class HdrCaptureWindow : IDisposable
+public sealed partial class HdrCaptureWindow : IDisposable
 {
     private nint _hwnd;
     private int _winX, _winY, _winW, _winH;
@@ -59,20 +59,33 @@ public sealed class HdrCaptureWindow : IDisposable
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern ushort RegisterClassW(ref WNDCLASSW wc);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern nint CreateWindowExW(uint ex, string cls, string t, uint s, int x, int y, int w, int h, nint p, nint m, nint i, nint lp);
-    [DllImport("user32.dll")] private static extern bool DestroyWindow(nint h);
-    [DllImport("user32.dll")] private static extern nint DefWindowProcW(nint h, uint m, nint w, nint l);
-    [DllImport("user32.dll")] private static extern bool SetWindowPos(nint h, nint a, int x, int y, int cx, int cy, uint f);
-    [DllImport("user32.dll")] private static extern bool SetCapture(nint h);
-    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
-    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int k);
-    [DllImport("kernel32.dll")] private static extern nint GetModuleHandleW(string? n);
-    [DllImport("user32.dll")] private static extern nint LoadCursorW(nint h, nint c);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial nint CreateWindowExW(uint ex, string cls, string t, uint s, int x, int y, int w, int h, nint p, nint m, nint i, nint lp);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DestroyWindow(nint h);
+    [LibraryImport("user32.dll")]
+    private static partial nint DefWindowProcW(nint h, uint m, nint w, nint l);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetWindowPos(nint h, nint a, int x, int y, int cx, int cy, uint f);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetCapture(nint h);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ReleaseCapture();
+    [LibraryImport("user32.dll")] private static partial short GetAsyncKeyState(int k);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)] private static partial nint GetModuleHandleW(string? n);
+    [LibraryImport("user32.dll")]
+    private static partial nint LoadCursorW(nint h, nint c);
     [DllImport("user32.dll")] private static extern nint BeginPaint(nint h, ref PAINTSTRUCT ps);
     [DllImport("user32.dll")] private static extern bool EndPaint(nint h, ref PAINTSTRUCT ps);
-    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(nint hWnd);
-    [DllImport("user32.dll")] private static extern nint SetWindowLongPtr(nint hWnd, int nIndex, nint dwNewLong);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetForegroundWindow(nint hWnd);
+    [LibraryImport("user32.dll")]
+    private static partial nint SetWindowLongPtrW(nint hWnd, int nIndex, nint dwNewLong);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSW { public uint style; public nint proc; public int cbCls; public int cbWnd; public nint inst; public nint icon; public nint cur; public nint bg; public string? menu; public string? cls; }
@@ -113,7 +126,7 @@ public sealed class HdrCaptureWindow : IDisposable
             if (_hwnd == 0) { LastError = $"CreateWindowExW 失败: {Marshal.GetLastWin32Error()}"; return false; }
             // 将实例指针存入窗口 GWLP_USERDATA
             s_windows[_hwnd] = this;
-            SetWindowLongPtr(_hwnd, GWLP_USERDATA, _hwnd); // 用窗口句柄自身作为 key
+            SetWindowLongPtrW(_hwnd, GWLP_USERDATA, _hwnd); // 用窗口句柄自身作为 key
             SetForegroundWindow(_hwnd); // 获取键盘焦点
 
             using var dxgiD = _device.QueryInterface<IDXGIDevice>();
@@ -369,45 +382,38 @@ public sealed class HdrCaptureWindow : IDisposable
         }
     }
 
-    /// <summary>使用 System.Drawing (GDI+) 渲染文字到 Bitmap，用 alpha 通道合成到 float 缓冲区。</summary>
+    /// <summary>使用 Win2D 渲染文字到临时缓冲区，用 alpha 通道合成到 float 缓冲区（替代 System.Drawing GDI+）。</summary>
     private unsafe void DrawTextGdi(float[] px, int bufW, int bufH, string text, int x, int y, int tw, int th, float r, float g, float b)
     {
         try
         {
-            using var bmp = new System.Drawing.Bitmap(tw, th, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-            using (var gfx = System.Drawing.Graphics.FromImage(bmp))
+            using var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
+            using var renderTarget = new Microsoft.Graphics.Canvas.CanvasRenderTarget(device, tw, th, 96);
+            using var ds = renderTarget.CreateDrawingSession();
+            ds.Clear(Microsoft.UI.Colors.Transparent);
+            var format = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
             {
-                // 透明背景 → alpha=0，白色文字 → alpha=255，抗锯齿边缘 → alpha=1..254
-                gfx.Clear(System.Drawing.Color.Transparent);
-                gfx.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                gfx.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
-                using var font = new System.Drawing.Font("Microsoft YaHei UI", 11f, System.Drawing.FontStyle.Bold);
-                using var brush = new System.Drawing.SolidBrush(System.Drawing.Color.White);
-                var sf = new System.Drawing.StringFormat
-                {
-                    Alignment = System.Drawing.StringAlignment.Center,
-                    LineAlignment = System.Drawing.StringAlignment.Center
-                };
-                gfx.DrawString(text, font, brush, new System.Drawing.RectangleF(0, 0, tw, th), sf);
-            }
+                FontFamily = "Microsoft YaHei UI",
+                FontSize = 11,
+                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+            };
+            ds.DrawText(text, 0, 0, tw, th, Microsoft.UI.Colors.White, format);
+            ds.Flush();
 
-            // 读取像素：Format32bppArgb 在 little-endian 内存中为 BGRA
-            // alpha 通道 (byte[3]) 直接作为文字覆盖率
-            var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, tw, th),
-                System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-            int stride = data.Stride;
-            byte* src = (byte*)data.Scan0;
+            // 读取像素：Win2D GetPixelBytes 返回 BGRA byte[]
+            var pixels = renderTarget.GetPixelBytes();
+            int stride = tw * 4;
             for (int row = 0; row < th; row++)
             {
                 int dstY = y + row;
                 if (dstY < 0 || dstY >= bufH) continue;
-                byte* rowPtr = src + row * stride;
                 for (int col = 0; col < tw; col++)
                 {
                     int dstX = x + col;
                     if (dstX < 0 || dstX >= bufW) continue;
-                    int si = col * 4;
-                    byte alpha = rowPtr[si + 3]; // A 通道 = 文字覆盖率
+                    int si = row * stride + col * 4;
+                    byte alpha = pixels[si + 3]; // A 通道 = 文字覆盖率
                     if (alpha < 15) continue;
                     float a = alpha / 255f;
                     int di = (dstY * bufW + dstX) * 4;
@@ -417,11 +423,10 @@ public sealed class HdrCaptureWindow : IDisposable
                     px[di + 2] = px[di + 2] * (1 - a) + b * a;
                 }
             }
-            bmp.UnlockBits(data);
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[HC] DrawTextGdi 失败: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[HC] DrawTextWin2D 失败: {ex.Message}");
         }
     }
 

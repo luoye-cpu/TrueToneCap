@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 namespace TrueToneCap.Core.ColorManagement;
 
 /// <summary>显示器 ICC 配置文件提供器（带缓存 + 异步）。</summary>
-public static class ColorProfileProvider
+public static partial class ColorProfileProvider
 {
     // ═══ ICC 缓存：按显示器设备名缓存，避免每次截图重复调 WCS API ═══
     private static readonly ConcurrentDictionary<string, byte[]?> s_iccCache = new();
@@ -352,15 +352,15 @@ public static class ColorProfileProvider
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfoW(nint hMonitor, ref MONITORINFOEXW lpmi);
 
-    [DllImport("mscms.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [LibraryImport("mscms.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool WcsGetDefaultColorProfileSize(
+    private static partial bool WcsGetDefaultColorProfileSize(
         uint scope, string? deviceName, ColorProfileType profileType,
         ColorProfileSubType profileSubType, uint dwFlags, ref uint size);
 
-    [DllImport("mscms.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [LibraryImport("mscms.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool WcsGetDefaultColorProfile(
+    private static partial bool WcsGetDefaultColorProfile(
         uint scope, string? deviceName, ColorProfileType profileType,
         ColorProfileSubType profileSubType, uint dwFlags, uint size, byte[] buffer);
 

@@ -39,11 +39,12 @@ public sealed partial class AnnotationWindow : Window
         _rawPixels = bgraPixels;
         _imgW = width; _imgH = height;
 
-        // ── 字体注入 ──
+        // ── 字体注入（使用用户选择的字体） ──
+        var fontFamily = FontLoader.GetEffectiveFontFamily(AppServices.Settings.Current.FontFamily);
         if (RootGrid.IsLoaded)
-            FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+            FontHelper.ApplyFontToVisualTree(RootGrid, fontFamily);
         else
-            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, fontFamily);
 
         // ── 智能窗口尺寸：基于当前显示器工作区，图片自适应 ──
         try

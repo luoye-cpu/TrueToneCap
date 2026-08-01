@@ -298,21 +298,20 @@ public class TranslationService
         if (!endpoint.EndsWith("/chat/completions"))
             endpoint += "/chat/completions";
 
-        var requestBody = new
-        {
-            model,
-            messages = new[]
-            {
-                new { role = "system", content = systemPrompt },
-                new { role = "user", content = $"Translate from {sl} to {targetLang}:\n\n{text}" }
-            },
-            temperature = 0.3,
-            max_tokens = 4096
-        };
+        // 使用源生成器构建请求体（AOT 兼容，替代匿名类型 + JsonContent.Create）
+        var requestBody = new LlmChatRequest(
+            Model: model,
+            Messages: [
+                new LlmChatMessage("system", systemPrompt),
+                new LlmChatMessage("user", $"Translate from {sl} to {targetLang}:\n\n{text}")
+            ],
+            Temperature: 0.3,
+            MaxTokens: 4096
+        );
 
         var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
-            Content = JsonContent.Create(requestBody)
+            Content = JsonContent.Create(requestBody, LlmJsonContext.Default.LlmChatRequest)
         };
         if (!string.IsNullOrEmpty(_config.ApiKey))
             request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");

@@ -9,7 +9,7 @@ using Vortice.DXGI;
 
 namespace TrueToneCap.App.Services;
 
-public sealed class HdrPreviewWindow : IDisposable
+public sealed partial class HdrPreviewWindow : IDisposable
 {
     // ── 窗口句柄与尺寸 ──
     private nint _hwnd;
@@ -40,14 +40,21 @@ public sealed class HdrPreviewWindow : IDisposable
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern ushort RegisterClassW(ref WNDCLASSW wc);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern nint CreateWindowExW(uint dwExStyle, string lpClassName, string lpWindowName,
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial nint CreateWindowExW(uint dwExStyle, string lpClassName, string lpWindowName,
         uint dwStyle, int x, int y, int w, int h, nint hWndParent, nint hMenu, nint hInstance, nint lpParam);
-    [DllImport("user32.dll")] private static extern bool DestroyWindow(nint hWnd);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(nint hWnd, int nCmdShow);
-    [DllImport("user32.dll")] private static extern nint DefWindowProcW(nint hWnd, uint msg, nint wParam, nint lParam);
-    [DllImport("kernel32.dll")] private static extern nint GetModuleHandleW(string? lpName);
-    [DllImport("user32.dll")] private static extern nint SetFocus(nint hWnd);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DestroyWindow(nint hWnd);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ShowWindow(nint hWnd, int nCmdShow);
+    [LibraryImport("user32.dll")]
+    private static partial nint DefWindowProcW(nint hWnd, uint msg, nint wParam, nint lParam);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial nint GetModuleHandleW(string? lpName);
+    [LibraryImport("user32.dll")]
+    private static partial nint SetFocus(nint hWnd);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSW

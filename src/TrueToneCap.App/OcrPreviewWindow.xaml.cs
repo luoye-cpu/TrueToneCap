@@ -46,10 +46,12 @@ public sealed partial class OcrPreviewWindow : Window
         _translationConfig = translationConfig;
         _saveHandler = saveHandler;
 
+        // ── 字体注入（使用用户选择的字体） ──
+        var fontFamily = FontLoader.GetEffectiveFontFamily(AppServices.Settings.Current.FontFamily);
         if (RootGrid.IsLoaded)
-            FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+            FontHelper.ApplyFontToVisualTree(RootGrid, fontFamily);
         else
-            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, FontLoader.DefaultFontFamily);
+            RootGrid.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(RootGrid, fontFamily);
 
         // 智能窗口尺寸（参考 AnnotationWindow）
         try

@@ -430,14 +430,51 @@
                                 </Grid>
                             </StackPanel>
                         </Border>
+                        <!-- ── 界面字体 ── -->
+                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock x:Name="FontTitle" Text="界面字体" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="FontLabel" Text="字体" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="FontCbo" SelectionChanged="OnFontChanged">
+                                        <ComboBoxItem Tag="">默认 (微软雅黑)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Microsoft YaHei">微软雅黑</ComboBoxItem>
+                                        <ComboBoxItem Tag="Segoe UI">Segoe UI</ComboBoxItem>
+                                        <ComboBoxItem Tag="Noto Sans SC">Noto Sans SC</ComboBoxItem>
+                                        <ComboBoxItem Tag="Microsoft YaHei UI">Microsoft YaHei UI</ComboBoxItem>
+                                        <ComboBoxItem Tag="CUSTOM">自定义...</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid x:Name="FontCustomPanel" ColumnDefinitions="120,*" Visibility="Collapsed">
+                                    <TextBlock Text="字体名称" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="FontCustomTxt" Grid.Column="1" PlaceholderText="输入系统已安装的字体名称" TextChanged="OnFontCustomTextChanged"/>
+                                </Grid>
+                                <TextBlock x:Name="FontDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="界面字体仅影响应用外观，不影响截图像素。选择已安装的字体后需重启应用生效。"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock x:Name="ToastTitle" Text="通知" FontSize="14" FontWeight="SemiBold"/>
+                                <CheckBox x:Name="ToastCaptureChk" Content="截图后提示" IsChecked="True"/>
+                                <CheckBox x:Name="ToastSilentChk" Content="无感截图后提示" IsChecked="True"/>
+                                <CheckBox x:Name="ToastRecordChk" Content="录制后提示" IsChecked="True"/>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="ToastPositionLabel" Text="通知位置" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="ToastPositionCbo" Grid.Column="1" SelectionChanged="OnToastPositionChanged">
+                                        <ComboBoxItem Tag="BottomRight" IsSelected="True">右下角</ComboBoxItem>
+                                        <ComboBoxItem Tag="TopRight">右上角</ComboBoxItem>
+                                        <ComboBoxItem Tag="TopLeft">左上角</ComboBoxItem>
+                                        <ComboBoxItem Tag="BottomLeft">左下角</ComboBoxItem>
+                                        <ComboBoxItem Tag="WindowsNotify">Windows 自带通知</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
                                 <TextBlock x:Name="BehaviorTitle" Text="行为" FontSize="14" FontWeight="SemiBold"/>
                                 <CheckBox x:Name="AutoStartChk" Content="开机自动启动"/>
                                 <CheckBox x:Name="MinimizeTrayChk" Content="关闭时最小化到托盘" IsChecked="True"/>
-                                <CheckBox x:Name="ToastCaptureChk" Content="截图保存后右下角提示" IsChecked="True"/>
-                                <CheckBox x:Name="ToastSilentChk" Content="无感截图保存后右下角提示" IsChecked="True"/>
-                                <CheckBox x:Name="ToastRecordChk" Content="动图录制完成后右下角提示" IsChecked="True"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>
