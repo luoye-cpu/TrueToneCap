@@ -9,7 +9,7 @@ using WinRT.Interop;
 
 namespace TrueToneCap.App.Services;
 
-public static class HotkeyManager
+public static partial class HotkeyManager
 {
     private static nint _hwnd;
     private static readonly Dictionary<int, Action> _callbacks = [];
@@ -19,8 +19,12 @@ public static class HotkeyManager
     private const uint WM_HOTKEY = 0x0312;
     private const uint MOD_ALT = 1, MOD_CONTROL = 2, MOD_SHIFT = 4, MOD_WIN = 8, MOD_NOREPEAT = 0x4000;
 
-    [DllImport("user32.dll")] static extern bool RegisterHotKey(nint h, int id, uint mods, uint vk);
-    [DllImport("user32.dll")] static extern bool UnregisterHotKey(nint h, int id);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool RegisterHotKey(nint h, int id, uint mods, uint vk);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool UnregisterHotKey(nint h, int id);
 
     /// <summary>WM_HOTKEY 消息 ID（供 WndProcHook 转发）。</summary>
     public const uint WM_HOTKEY_MSG = WM_HOTKEY;

@@ -28,23 +28,25 @@ public sealed class DisplayInfo
 }
 
 /// <summary>显示器枚举器。通过 DXGI 枚举所有活动显示器。</summary>
-public static class DisplayEnumerator
+public static partial class DisplayEnumerator
 {
     // ────── Win32 鼠标/显示器 API ──────
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X, Y; }
 
-    [DllImport("user32.dll")]
-    private static extern bool GetCursorPos(out POINT pt);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetCursorPos(out POINT pt);
 
-    [DllImport("user32.dll")]
-    private static extern nint MonitorFromPoint(POINT pt, uint flags);
+    [LibraryImport("user32.dll")]
+    private static partial nint MonitorFromPoint(POINT pt, uint flags);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfoW(nint hMonitor, ref MONITORINFOEX info);
 
-    [DllImport("user32.dll")]
-    private static extern nint MonitorFromWindow(nint hwnd, uint flags);
+    [LibraryImport("user32.dll")]
+    private static partial nint MonitorFromWindow(nint hwnd, uint flags);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }

@@ -68,19 +68,20 @@ public sealed partial class MainWindow : Window
                     try { SaveSettings(); } catch { }
                     _trayIcon?.RemoveIcon();
                     _trayIcon?.Dispose();
-                    FontLoader.UnloadBundledFonts();
                     Environment.Exit(0);
                 });
             }
         };
 
         // ── 字体注入：在 Content 加载完成后递归遍历可视化树 ──
+        // 使用用户选择的字体（如果已设置），否则使用默认回退链
+        string initialFont = FontLoader.GetEffectiveFontFamily(_settings.FontFamily);
         if (this.Content is FrameworkElement fe)
         {
             if (fe.IsLoaded)
-                FontHelper.ApplyFontToVisualTree(fe, FontLoader.DefaultFontFamily);
+                FontHelper.ApplyFontToVisualTree(fe, initialFont);
             else
-                fe.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(fe, FontLoader.DefaultFontFamily);
+                fe.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(fe, initialFont);
         }
 
         _formats =
@@ -97,6 +98,9 @@ public sealed partial class MainWindow : Window
         FormatCbo.ItemsSource = _formats.Select(f => f.Label).ToList();
         LoadSettings();             // 仅加载配置文件，不做检测
         ApplySettingsToUI();        // 将配置反映到 UI
+        // 同步窗口主题到 UI（启动时 ApplyTheme 已设置 Application.RequestedTheme，
+        // 但窗口内容元素 fe.RequestedTheme 需要单独设置才能生效）
+        SyncWindowTheme();
         UpdateQualityPanel();
 
         StatusTxt.Text = "能力检测中...";
@@ -276,6 +280,7 @@ public sealed partial class MainWindow : Window
         ToastCaptureChk.IsChecked = _settings.ToastOnCapture;
         ToastSilentChk.IsChecked = _settings.ToastOnSilentCapture;
         ToastRecordChk.IsChecked = _settings.ToastOnRecording;
+        SetComboByTag(ToastPositionCbo, _settings.ToastPosition);
         SetComboByTag(OverlayColorCbo, _settings.OverlayColor);
         SetComboByTag(BorderColorCbo, _settings.BorderColor);
         AvifPngSuffixChk.IsChecked = _settings.AvifPngSuffix;
@@ -304,6 +309,8 @@ public sealed partial class MainWindow : Window
         SetComboByTag(OcrEngineCbo, _settings.OcrEngineMode);
         SetComboByTag(ThemeCbo, _settings.ThemeMode);
         SetComboByTag(LanguageCbo, _settings.Language);
+        // 字体
+        RestoreFontSelection();
         DetectAndShowSourceGamut();
         // 主题已在 App.OnLaunched 中初始化，此处仅恢复 ComboBox 选中项
         // Apply engine mode immediately
@@ -342,6 +349,7 @@ public sealed partial class MainWindow : Window
             _settings.ToastOnCapture = ToastCaptureChk.IsChecked == true;
             _settings.ToastOnSilentCapture = ToastSilentChk.IsChecked == true;
             _settings.ToastOnRecording = ToastRecordChk.IsChecked == true;
+            _settings.ToastPosition = (ToastPositionCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "BottomRight";
             _settings.OverlayColor = (OverlayColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#99001833";
             _settings.BorderColor = (BorderColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#FF4488FF";
             _settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;
@@ -370,6 +378,10 @@ public sealed partial class MainWindow : Window
             _settings.ArchiveMode = (ArchiveModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
             _settings.FirstRun = false;
             _settings.Language = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh";
+
+            // 字体
+            var fontTag = (FontCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+            _settings.FontFamily = fontTag == "CUSTOM" ? FontCustomTxt.Text.Trim() : fontTag;
 
             // LLM 设置
             _settings.TranslationMode = (TranslationModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Free";
@@ -666,28 +678,40 @@ public sealed partial class MainWindow : Window
     private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _captureCts?.Cancel();
+        LogService.Info("MainWindow", $"开始截图流程: {w}x{h} 格式={_formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)].Format}");
+
+        // 创建新 CTS 前确认旧操作已完成，避免取消时文件写入中断
+        if (_captureCts is not null)
+        {
+            _captureCts.Cancel();
+            // 给旧操作一小段时间完成文件写入
+            await Task.Delay(50);
+        }
         _captureCts = new CancellationTokenSource();
         var ct = _captureCts.Token;
         try
         {
             if (bgra is null || bgra.Length != w * h * 4)
             {
+                LogService.Error("MainWindow", $"像素数据无效: bgra={(bgra is null ? "null" : bgra.Length.ToString())} w={w} h={h}");
                 DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 像素数据无效");
                 return;
             }
 
             var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
             var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
-            var settings = BuildEncodingSettings(format, hdrOutput, null);
             var iccBakeEnabled = IccBakeSwitch.IsOn;
             var colorSpaceTag = GetSelectedColorSpaceTag();
+            LogService.Info("MainWindow", $"编码设置: 格式={format} HDR={hdrOutput} ICC烘焙={iccBakeEnabled} 色域={colorSpaceTag}");
+            var settings = BuildEncodingSettings(format, hdrOutput, null);
 
             // 委托给 CapturePipelineService 执行 ICC 烘焙 + 编码
+            LogService.Info("MainWindow", $"委托 CapturePipelineService 执行编码...");
             var path = await AppServices.Pipeline.EncodeAndSaveAsync(
                 bgra, w, h, settings, iccBakeEnabled, colorSpaceTag, ct);
 
             sw.Stop();
+            LogService.Info("MainWindow", $"截图保存完成: {Path.GetFileName(path)} ({sw.ElapsedMilliseconds}ms)");
 
             DispatcherQueue.TryEnqueue(async () =>
             {
@@ -697,10 +721,12 @@ public sealed partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
+            LogService.Warn("MainWindow", "截图操作已取消");
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "⚠ 操作已取消");
         }
         catch (Exception ex)
         {
+            LogService.Error("MainWindow", $"截图保存失败: {ex.Message}", ex);
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ 保存失败: {ex.Message}");
             ToastService.ShowCaptureFailed(ex.Message);
         }
@@ -723,13 +749,19 @@ public sealed partial class MainWindow : Window
     {
         if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0) return;
         var sw = System.Diagnostics.Stopwatch.StartNew();
+        LogService.Info("SilentCapture", "无感截图启动");
         try
         {
-            if (_wgcService is null) return;
+            if (_wgcService is null)
+            {
+                LogService.Error("SilentCapture", "WGC 捕获服务未初始化");
+                return;
+            }
 
             var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
             var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
             bool useFloat16Wide = ShouldUseFloat16ForWideGamut();
+            LogService.Info("SilentCapture", $"捕获配置: 格式={format} HDR={hdrOutput} Float16广色域={useFloat16Wide}");
 
             var captureResult = await _wgcService.CaptureMonitorAsync(new WgcCaptureConfig
             {
@@ -749,12 +781,14 @@ public sealed partial class MainWindow : Window
             if (actualHdr && captureResult.HdrPixels is not null)
             {
                 // HDR 帧存在 → HDR 编码路径 或 Float16 广色域 SDR 路径
+                LogService.Info("SilentCapture", $"HDR 帧捕获成功: {fw}x{fh} {(captureResult.IsHdr ? "HDR" : "SDR")}");
                 var settings = BuildEncodingSettings(format, actualHdr, meta);
                 settings.IccProfile ??= captureResult.IccProfile;
 
                 if (hdrOutput)
                 {
                     // HDR 直通编码
+                    LogService.Info("SilentCapture", $"HDR 直通编码: {format} {fw}x{fh}");
                     path = await AppServices.Pipeline.EncodeHdrFrameAsync(
                         new HdrFrameData
                         {
@@ -768,6 +802,7 @@ public sealed partial class MainWindow : Window
                 else
                 {
                     // Float16 广色域 → 色域转换 → 色调映射 → SDR 编码
+                    LogService.Info("SilentCapture", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                     var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
                         captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
                         new ToneMappingParams { Mode = ToneMapMode.Hable });
@@ -782,7 +817,12 @@ public sealed partial class MainWindow : Window
             {
                 // 纯 SDR 路径
                 var sdrPixels = captureResult.SdrPixels ?? captureResult.GetDisplayPixels();
-                if (sdrPixels is null) return;
+                if (sdrPixels is null)
+                {
+                    LogService.Warn("SilentCapture", "SDR 像素数据为空，跳过保存");
+                    return;
+                }
+                LogService.Info("SilentCapture", $"SDR 帧捕获成功: {fw}x{fh}");
 
                 var settings = BuildEncodingSettings(format, false, meta);
                 settings.IccProfile ??= captureResult.IccProfile;
@@ -791,13 +831,19 @@ public sealed partial class MainWindow : Window
             }
 
             sw.Stop();
+            LogService.Info("SilentCapture", $"无感截图完成: {Path.GetFileName(path)} ({sw.ElapsedMilliseconds}ms)");
             await CopyFileToClipboardAsync(path);
 
             DispatcherQueue.TryEnqueue(() => ShowSaveToast(path, sw.ElapsedMilliseconds, "silent"));
         }
+        catch (OperationCanceledException)
+        {
+            LogService.Warn("SilentCapture", "无感截图已取消");
+        }
         catch (Exception ex)
         {
-            LogService.Warn("SilentCapture", $"无感截图失败: {ex.Message}");
+            LogService.Error("SilentCapture", $"无感截图失败: {ex.Message}", ex);
+            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ 无感截图失败: {ex.Message}");
         }
         finally { Interlocked.Exchange(ref _isCapturing, 0); }
     }
@@ -806,7 +852,7 @@ public sealed partial class MainWindow : Window
     //  统一保存提示（右下角 Toast）
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>显示右下角保存成功提示（截图/录制/无感截图统一使用）。</summary>
+    /// <summary>显示保存成功提示（截图/录制/无感截图统一使用）。</summary>
     /// <param name="mode">capture=截图, silent=无感截图, recording=动图录制</param>
     private void ShowSaveToast(string filePath, long elapsedMs, string mode = "capture")
     {
@@ -819,9 +865,18 @@ public sealed partial class MainWindow : Window
         };
         if (!enabled) return;
 
+        var position = _settings.ToastPosition;
+
+        // Windows 自带通知：不创建自定义窗口，直接走 Windows 通知
+        if (position == "WindowsNotify")
+        {
+            ToastService.ShowCaptureSuccess(filePath, elapsedMs);
+            return;
+        }
+
         try
         {
-            var toast = new SilentCaptureToast();
+            var toast = new SilentCaptureToast(position);
             toast.SetContent("✅ 已保存并复制到剪贴板",
                 $"{Path.GetFileName(filePath)}  ({elapsedMs}ms)");
             toast.Activate();
@@ -831,7 +886,7 @@ public sealed partial class MainWindow : Window
             LogService.Warn("Toast", $"提示窗口创建失败: {ex.Message}");
         }
 
-        // 同时发送 Windows 通知（备用）
+        // 如果未选择 Windows 通知，仍发送（备用）
         ToastService.ShowCaptureSuccess(filePath, elapsedMs);
     }
 
@@ -942,7 +997,14 @@ public sealed partial class MainWindow : Window
     private async Task EncodeAndSaveHdrAsync(float[] hdrPixels, int w, int h)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _captureCts?.Cancel();
+        LogService.Info("MainWindow", $"HDR 编码启动: {w}x{h} 格式={_formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)].Format}");
+
+        // 创建新 CTS 前确认旧操作已完成，避免取消时文件写入中断
+        if (_captureCts is not null)
+        {
+            _captureCts.Cancel();
+            await Task.Delay(50);
+        }
         _captureCts = new CancellationTokenSource();
         var ct = _captureCts.Token;
         try
@@ -950,8 +1012,10 @@ public sealed partial class MainWindow : Window
             var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
             var cursorMonitor = DisplayEnumerator.GetMonitorUnderCursor();
             var meta = MetadataCollector.Collect(DisplayEnumerator.FindDisplayByMonitor(cursorMonitor));
+            LogService.Info("MainWindow", $"HDR 元数据: 显示器={cursorMonitor} 尺寸={w}x{h}");
             var settings = BuildEncodingSettings(format, true, meta);
 
+            LogService.Info("MainWindow", $"HDR 直通编码: {format} {w}x{h} → scRGB linear");
             var path = await AppServices.Pipeline.EncodeHdrFrameAsync(
                 new HdrFrameData
                 {
@@ -961,6 +1025,7 @@ public sealed partial class MainWindow : Window
                 }, settings, ct);
 
             sw.Stop();
+            LogService.Info("MainWindow", $"HDR 编码完成: {Path.GetFileName(path)} ({sw.ElapsedMilliseconds}ms)");
             DispatcherQueue.TryEnqueue(async () =>
             {
                 await CopyFileToClipboardAsync(path);
@@ -969,10 +1034,12 @@ public sealed partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
+            LogService.Warn("MainWindow", "HDR 编码已取消");
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "⚠ 操作已取消");
         }
         catch (Exception ex)
         {
+            LogService.Error("MainWindow", $"HDR 保存失败: {ex.Message}", ex);
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ HDR 保存失败: {ex.Message}");
             ToastService.ShowCaptureFailed(ex.Message);
         }
@@ -983,12 +1050,15 @@ public sealed partial class MainWindow : Window
         // ── 防重入 ──
         if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0)
         {
+            LogService.Warn("MainWindow", "截图已在进行中，忽略重复触发");
             System.Diagnostics.Trace.WriteLine("[MainWindow] 截图已在进行中，忽略重复触发");
             return;
         }
 
+        bool overlayShown = false;
         try
         {
+            LogService.Info("MainWindow", "选区截图启动");
             StatusTxt.Text = "📷 WGC 捕获桌面...";
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -1010,13 +1080,16 @@ public sealed partial class MainWindow : Window
             CaptureResult captureResult;
             try
             {
+                LogService.Info("MainWindow", "WGC 多显示器拼接捕获启动...");
                 captureResult = await _wgcService.CaptureAllMonitorsAsync(new WgcCaptureConfig
                 {
                     FrameTimeoutMs = 3000
                 });
+                LogService.Info("MainWindow", $"WGC 捕获完成: {captureResult.Width}x{captureResult.Height} HDR={captureResult.IsHdr}");
             }
             catch (Exception ex)
             {
+                LogService.Error("MainWindow", $"WGC 捕获失败: {ex.Message}", ex);
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     StatusTxt.Text = $"❌ WGC 捕获失败: {ex.Message}";
@@ -1043,8 +1116,7 @@ public sealed partial class MainWindow : Window
                 $"[诊断] captureResult: HDR={(hdrDesktopPixels is not null ? $"len={hdrDesktopPixels.Length} {hdrW}x{hdrH}" : "null")} SDR={(desktopPixels is not null ? $"len={desktopPixels.Length}" : "null")}");
 
             sw.Stop();
-            System.Diagnostics.Debug.WriteLine(
-                $"[⏱ 端到端] 阶段1-WGC捕获: {captureResult.Width}x{captureResult.Height} {sw.ElapsedMilliseconds}ms");
+            LogService.Info("MainWindow", $"阶段1 WGC捕获完成: {captureResult.Width}x{captureResult.Height} {sw.ElapsedMilliseconds}ms");
 
             // 阶段2: 截图预览窗口
             sw.Restart();
@@ -1091,20 +1163,24 @@ public sealed partial class MainWindow : Window
                     switch (action)
                     {
                         case HdrCaptureAction.Save:
+                            LogService.Info("MainWindow", "HDR 选区保存");
                             if (hdrRegion is not null)
                                 await EncodeAndSaveHdrAsync(hdrRegion, rw, rh);
                             else if (sdrRegion is not null)
                                 await EncodeAndSaveAsync(sdrRegion, rw, rh);
                             break;
                         case HdrCaptureAction.Copy:
+                            LogService.Info("MainWindow", "HDR 选区复制到剪贴板");
                             if (sdrRegion is not null)
                                 await EncodeAndCopyAsync(sdrRegion, rw, rh);
                             break;
                         case HdrCaptureAction.Ocr:
+                            LogService.Info("MainWindow", "HDR 选区 OCR 识别");
                             if (sdrRegion is not null)
                                 await CaptureAndOcrFromPixelsAsync(sdrRegion, rw, rh);
                             break;
                         case HdrCaptureAction.Translate:
+                            LogService.Info("MainWindow", "HDR 选区翻译");
                             if (sdrRegion is not null)
                                 await CaptureAndTranslateFromPixelsAsync(sdrRegion, rw, rh);
                             break;
@@ -1118,6 +1194,8 @@ public sealed partial class MainWindow : Window
                 }
                 // HDR 窗口初始化失败 → 回退到 SDR 路径
                 System.Diagnostics.Debug.WriteLine($"[MainWindow] HDR 窗口失败: {hdrWnd.LastError}，回退 SDR");
+                // 释放 HDR 像素引用，防止内存泄漏
+                hdrDesktopPixels = null;
             }
 
             // ═══ SDR 路径：SelectionOverlay（WinUI 3）═══
@@ -1129,6 +1207,7 @@ public sealed partial class MainWindow : Window
             }
             var overlay = new SelectionOverlay(desktopPixels, vx, vy, vw, vh);
             overlay.Activate();
+            overlayShown = true; // 标记覆盖层已激活，由 ActionCompleted 负责释放锁
             var overlayReady = new TaskCompletionSource<bool>();
             overlay.Activated += (_, _) => overlayReady.TrySetResult(true);
             _ = Task.Run(async () => { await Task.Delay(1000); overlayReady.TrySetResult(false); });
@@ -1155,15 +1234,19 @@ public sealed partial class MainWindow : Window
                     switch (action)
                     {
                         case SelectionOverlay.ActionResult.Confirm:
+                            LogService.Info("MainWindow", $"选区确认保存: {rect.Width}x{rect.Height}");
                             await EncodeAndSaveAsync(regionPixels, rect.Width, rect.Height);
                             break;
                         case SelectionOverlay.ActionResult.Copy:
+                            LogService.Info("MainWindow", "选区复制到剪贴板");
                             await EncodeAndCopyAsync(regionPixels, rect.Width, rect.Height);
                             break;
                         case SelectionOverlay.ActionResult.Ocr:
+                            LogService.Info("MainWindow", "选区 OCR 识别");
                             await CaptureAndOcrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
                             break;
                         case SelectionOverlay.ActionResult.Translate:
+                            LogService.Info("MainWindow", "选区翻译");
                             await CaptureAndTranslateFromPixelsAsync(regionPixels, rect.Width, rect.Height);
                             break;
                     }
@@ -1174,6 +1257,7 @@ public sealed partial class MainWindow : Window
                 }
                 catch (Exception ex)
                 {
+                    LogService.Error("MainWindow", $"选区动作异常: {ex.Message}", ex);
                     System.Diagnostics.Debug.WriteLine($"[MainWindow] ActionCompleted 异常: {ex}");
                     DispatcherQueue.TryEnqueue(() =>
                     {
@@ -1196,26 +1280,35 @@ public sealed partial class MainWindow : Window
                 ToastService.ShowCaptureFailed(ex.Message);
             });
         }
-        finally { Interlocked.Exchange(ref _isCapturing, 0); }
+        finally
+        {
+            // 覆盖层未激活时(即异常/早期返回路径)由外层 finally 释放锁；
+            // 覆盖层已激活时由 ActionCompleted 回调负责释放锁，外层不再释放。
+            if (!overlayShown)
+                Interlocked.Exchange(ref _isCapturing, 0);
+        }
     }
 
     private async Task CaptureAndOcrFromPixelsAsync(byte[] pixels, int w, int h)
     {
+        LogService.Info("MainWindow", $"OCR 识别启动: {w}x{h} 语言={_settings.OcrLanguage}");
         StatusTxt.Text = "📝 文字提取中...";
         try
         {
             // 确保 OCR 引擎已初始化（首次使用或后台未完成时）
-            MultiOcrService.Initialize(System.IO.Path.Combine(
+            var modelDir = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "TrueToneCap", "onnx_models"));
+                "TrueToneCap", "onnx_models");
+            MultiOcrService.Initialize(modelDir);
+            LogService.Info("MainWindow", $"OCR 引擎初始化, 模型目录: {modelDir}");
 
             var ocrLang = _settings.OcrLanguage;
             var result = await MultiOcrService.RecognizeAsync(pixels, w, h, string.IsNullOrEmpty(ocrLang) ? null : ocrLang);
 
             if (!string.IsNullOrEmpty(result.Error))
-            { StatusTxt.Text = $"❌ OCR: {result.Error}"; return; }
+            { LogService.Warn("MainWindow", $"OCR 识别错误: {result.Error}"); StatusTxt.Text = $"❌ OCR: {result.Error}"; return; }
             if (string.IsNullOrWhiteSpace(result.Text) || (result.Lines is null or { Count: 0 }))
-            { StatusTxt.Text = "📝 未检测到文字"; return; }
+            { LogService.Info("MainWindow", "OCR 未检测到文字"); StatusTxt.Text = "📝 未检测到文字"; return; }
 
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -1228,19 +1321,23 @@ public sealed partial class MainWindow : Window
 
     private async Task CaptureAndTranslateFromPixelsAsync(byte[] pixels, int w, int h)
     {
+        LogService.Info("MainWindow", $"翻译启动: {w}x{h} 语言={_settings.OcrLanguage}");
         StatusTxt.Text = "🌐 识别并翻译中...";
         try
         {
             // 确保 OCR 引擎已初始化
-            MultiOcrService.Initialize(System.IO.Path.Combine(
+            var modelDir = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "TrueToneCap", "onnx_models"));
+                "TrueToneCap", "onnx_models");
+            MultiOcrService.Initialize(modelDir);
+            LogService.Info("MainWindow", $"OCR 引擎初始化(翻译), 模型目录: {modelDir}");
 
             var ocrLang = _settings.OcrLanguage;
             var ocrResult = await MultiOcrService.RecognizeAsync(pixels, w, h, string.IsNullOrEmpty(ocrLang) ? null : ocrLang);
 
             if (!string.IsNullOrEmpty(ocrResult.Error) || string.IsNullOrWhiteSpace(ocrResult.Text) || (ocrResult.Lines is null or { Count: 0 }))
             {
+                LogService.Warn("MainWindow", string.IsNullOrEmpty(ocrResult.Error) ? "OCR 未检测到文字" : $"OCR 错误: {ocrResult.Error}");
                 StatusTxt.Text = string.IsNullOrEmpty(ocrResult.Error) ? "📝 未检测到文字" : $"❌ {ocrResult.Error}";
                 return;
             }
@@ -1337,6 +1434,7 @@ public sealed partial class MainWindow : Window
     private async void OnCaptureNow(object sender, RoutedEventArgs e)
     {
         if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0) return;
+        LogService.Info("MainWindow", "快速捕获启动 (单显示器全屏)");
         _captureCts?.Cancel();
         _captureCts = new CancellationTokenSource();
         var ct = _captureCts.Token;
@@ -1357,6 +1455,7 @@ public sealed partial class MainWindow : Window
             bool useFloat16Wide = ShouldUseFloat16ForWideGamut();
 
             // ── WGC 单显示器捕获 ──
+            LogService.Info("MainWindow", $"WGC 单显示器捕获: HDR={hdrOutput} Float16广色域={useFloat16Wide}");
             var captureResult = await _wgcService.CaptureMonitorAsync(new WgcCaptureConfig
             {
                 PreferHdr = hdrOutput || useFloat16Wide,
@@ -1375,12 +1474,14 @@ public sealed partial class MainWindow : Window
             string fullPath;
             if (actualHdr && captureResult.HdrPixels is not null)
             {
+                LogService.Info("MainWindow", $"HDR 帧捕获: {fw}x{fh}");
                 var settings = BuildEncodingSettings(format, actualHdr, meta);
                 settings.IccProfile ??= captureResult.IccProfile;
 
                 if (hdrOutput)
                 {
                     // HDR 直通编码
+                    LogService.Info("MainWindow", $"HDR 直通编码: {format}");
                     fullPath = await AppServices.Pipeline.EncodeHdrFrameAsync(
                         new HdrFrameData
                         {
@@ -1394,6 +1495,7 @@ public sealed partial class MainWindow : Window
                 else
                 {
                     // Float16 广色域 → 色域转换 → 色调映射 → SDR
+                    LogService.Info("MainWindow", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                     var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
                         captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
                         new ToneMappingParams { Mode = ToneMapMode.Hable });
@@ -1408,6 +1510,7 @@ public sealed partial class MainWindow : Window
             {
                 var sdrPixels = captureResult.SdrPixels ?? captureResult.GetDisplayPixels();
                 if (sdrPixels is null) throw new InvalidOperationException("无法获取显示像素");
+                LogService.Info("MainWindow", $"SDR 帧捕获: {fw}x{fh}");
 
                 var settings = BuildEncodingSettings(format, false, meta);
                 settings.IccProfile ??= captureResult.IccProfile;
@@ -1425,10 +1528,13 @@ public sealed partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
+            LogService.Warn("MainWindow", "快速捕获已取消");
+            sw.Stop();
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "⚠ 操作已取消");
         }
         catch (Exception ex)
         {
+            LogService.Error("MainWindow", $"快速捕获失败: {ex.Message}", ex);
             sw.Stop();
             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ {ex.Message}");
             ToastService.ShowCaptureFailed(ex.Message);
@@ -1436,42 +1542,16 @@ public sealed partial class MainWindow : Window
         finally { CaptureBtn.IsEnabled = true; Interlocked.Exchange(ref _isCapturing, 0); }
     }
 
-    /// <summary>构建编码设置。</summary>
+    /// <summary>构建编码设置（委托给 CapturePipelineService，减少重复逻辑）。</summary>
     private EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta)
     {
-        var avifBackend = AvifBackendCbo.SelectedIndex switch
+        var settings = AppServices.Pipeline.BuildEncodingSettings(format, hdrOutput, meta, GetSelectedColorSpaceTag());
+        // 覆盖 UI 特有的设置
+        settings.Quality = (float)QualitySld.Value;
+        settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;
+        settings.AvifBackend = AvifBackendCbo.SelectedIndex switch
         { 1 => AvifEncoderBackend.LibAom, 2 => AvifEncoderBackend.Qsv, 3 => AvifEncoderBackend.Nvenc, _ => AvifEncoderBackend.Auto };
-
-        // 根据格式选择每格式独立位深和色度采样
-        var (bitDepth, chroma) = format switch
-        {
-            OutputFormat.PNG => (_settings.BitDepthPng, "444"),
-            OutputFormat.JPEG_LI => (_settings.BitDepthJpegLi, _settings.ChromaJpegLi),
-            OutputFormat.JPEG_XL => (_settings.BitDepthJpegXl, _settings.ChromaJpegXl),
-            OutputFormat.AVIF => (_settings.BitDepthAvif, _settings.ChromaAvif),
-            OutputFormat.WebP => (_settings.BitDepthWebP, _settings.ChromaWebP),
-            OutputFormat.TIFF => (_settings.BitDepthBmp, _settings.ChromaBmp),
-            OutputFormat.JPEG_GAINMAP => (_settings.BitDepthGainMap, _settings.ChromaGainMap),
-            _ => (_settings.OutputBitDepth, _settings.AvifChroma),
-        };
-
-        return new EncodingSettings
-        {
-            Format = format,
-            Quality = (float)QualitySld.Value,
-            HdrOutput = hdrOutput,
-            AvifBackend = avifBackend,
-            AvifPngSuffix = AvifPngSuffixChk.IsChecked == true,
-            AvifChroma = chroma,
-            ChromaSubsampling = chroma,
-            OutputBitDepth = bitDepth,
-            DisplayBitDepth = _settings.DisplayBitDepth,
-            GainMapMode = _settings.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
-            Metadata = meta,
-            PreferGpuEncode = true,
-            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable },
-            ColorSpaceTag = GetSelectedColorSpaceTag()
-        };
+        return settings;
     }
 
     // ── 快捷键录制 ──
@@ -1530,11 +1610,22 @@ public sealed partial class MainWindow : Window
             _ => AppThemeMode.Default,
         };
         App.ApplyTheme(mode);
+        SyncWindowTheme();
+        try { SaveSettingsQuiet(); } catch { }
+    }
 
-        // 解析有效主题（Default → 跟随系统）
+    private void OnToastPositionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.ToastPosition = (ToastPositionCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "BottomRight";
+        try { SaveSettingsQuiet(); } catch { }
+    }
+
+    /// <summary>将当前主题同步到窗口内容元素（fe.RequestedTheme 控制 WinUI 控件实际渲染）。</summary>
+    private void SyncWindowTheme()
+    {
+        var mode = App.CurrentTheme;
         var effective = App.ResolveEffectiveTheme(mode);
-
-        // 设置窗口级主题
         if (Content is FrameworkElement fe)
         {
             fe.RequestedTheme = effective switch
@@ -1544,8 +1635,6 @@ public sealed partial class MainWindow : Window
                 _ => ElementTheme.Default,
             };
         }
-
-        try { SaveSettingsQuiet(); } catch { }
     }
 
     private void OnLanguageChanged(object sender, SelectionChangedEventArgs e)
@@ -1558,6 +1647,64 @@ public sealed partial class MainWindow : Window
         ApplyLocale();
         UpdateQualityPanel();
         try { SaveSettingsQuiet(); } catch { }
+    }
+
+    private void OnFontChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        var tag = (FontCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+        // 显示/隐藏自定义输入框
+        FontCustomPanel.Visibility = tag == "CUSTOM" ? Visibility.Visible : Visibility.Collapsed;
+        if (tag != "CUSTOM")
+        {
+            _settings.FontFamily = tag;
+            ApplyFontToUI();
+            try { SaveSettingsQuiet(); } catch { }
+        }
+    }
+
+    private void OnFontCustomTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.FontFamily = FontCustomTxt.Text.Trim();
+        ApplyFontToUI();
+        try { SaveSettingsQuiet(); } catch { }
+    }
+
+    /// <summary>将当前字体设置应用到整个 UI（递归遍历可视化树）。</summary>
+    private void ApplyFontToUI()
+    {
+        string fontFamily = FontLoader.GetEffectiveFontFamily(_settings.FontFamily);
+        if (this.Content is FrameworkElement fe)
+            FontHelper.ApplyFontToVisualTree(fe, fontFamily);
+    }
+
+    /// <summary>从 _settings.FontFamily 恢复字体下拉框选中项。</summary>
+    private void RestoreFontSelection()
+    {
+        var font = _settings.FontFamily ?? "";
+        // 尝试在预定义选项中匹配
+        foreach (ComboBoxItem item in FontCbo.Items)
+        {
+            var tag = item.Tag as string ?? "";
+            if (tag == font)
+            {
+                item.IsSelected = true;
+                FontCustomPanel.Visibility = Visibility.Collapsed;
+                return;
+            }
+        }
+        // 未匹配 → 选中"自定义"并填入文本
+        foreach (ComboBoxItem item in FontCbo.Items)
+        {
+            if (item.Tag is string t && t == "CUSTOM")
+            {
+                item.IsSelected = true;
+                FontCustomPanel.Visibility = Visibility.Visible;
+                FontCustomTxt.Text = font;
+                break;
+            }
+        }
     }
 
     /// <summary>将本地化文本应用到所有 UI 元素（标签 + 下拉选项）。</summary>
@@ -1594,9 +1741,38 @@ public sealed partial class MainWindow : Window
 
         PageSystemTitle.Text = LocaleManager.PageSystem;
         AppearanceTitle.Text = LocaleManager.Appearance;
+        // 字体
+        FontTitle.Text = LocaleManager.FontTitle;
+        FontLabel.Text = LocaleManager.FontLabel;
+        FontDesc.Text = LocaleManager.FontDesc;
+        FontCustomTxt.PlaceholderText = LocaleManager.FontCustomPlaceholder;
+        // 更新字体下拉选项文本
+        foreach (ComboBoxItem item in FontCbo.Items)
+        {
+            var tag = item.Tag as string ?? "";
+            item.Content = tag switch
+            {
+                "" => LocaleManager.FontDefault,
+                "CUSTOM" => LocaleManager.FontCustom,
+                _ => item.Content // 保留字体名称不变
+            };
+        }
         BehaviorTitle.Text = LocaleManager.Behavior;
         AutoStartChk.Content = LocaleManager.AutoStart;
         MinimizeTrayChk.Content = LocaleManager.MinimizeTray;
+
+        // ── Toast 通知本地化 ──
+        ToastTitle.Text = LocaleManager.ToastTitle;
+        ToastCaptureChk.Content = LocaleManager.ToastOnCapture;
+        ToastSilentChk.Content = LocaleManager.ToastOnSilent;
+        ToastRecordChk.Content = LocaleManager.ToastOnRecording;
+        ToastPositionLabel.Text = LocaleManager.ToastPositionLabel;
+        // 更新 Toast 位置下拉选项文本
+        SetComboItemText(ToastPositionCbo, "BottomRight", LocaleManager.ToastPosBottomRight);
+        SetComboItemText(ToastPositionCbo, "TopRight", LocaleManager.ToastPosTopRight);
+        SetComboItemText(ToastPositionCbo, "TopLeft", LocaleManager.ToastPosTopLeft);
+        SetComboItemText(ToastPositionCbo, "BottomLeft", LocaleManager.ToastPosBottomLeft);
+        SetComboItemText(ToastPositionCbo, "WindowsNotify", LocaleManager.ToastPosWindows);
 
         StatusTxt.Text = LocaleManager.Ready;
         CaptureBtn.Content = LocaleManager.AreaCapture;
@@ -1932,7 +2108,6 @@ public sealed partial class MainWindow : Window
         // 如果走到这里，说明 AppWindow.Closing 未被取消（用户选择了真正退出）
         _trayIcon?.RemoveIcon();
         _trayIcon?.Dispose();
-        FontLoader.UnloadBundledFonts();
     }
 
     private void OnSaveSettings(object sender, RoutedEventArgs e) => SaveSettings();
@@ -1989,14 +2164,20 @@ public sealed partial class MainWindow : Window
     }
 
     // GDI P/Invoke（仅保留作为最终回退）
-    [DllImport("user32.dll")] private static extern nint GetDC(nint hWnd);
-    [DllImport("user32.dll")] private static extern int ReleaseDC(nint hWnd, nint hDC);
-    [DllImport("gdi32.dll")] private static extern bool BitBlt(nint hdcD, int xD, int yD, int w, int h, nint hdcS, int xS, int yS, uint rop);
-    [DllImport("gdi32.dll")] private static extern nint CreateCompatibleDC(nint hdc);
-    [DllImport("gdi32.dll")] private static extern nint CreateCompatibleBitmap(nint hdc, int w, int h);
-    [DllImport("gdi32.dll")] private static extern nint SelectObject(nint hdc, nint h);
-    [DllImport("gdi32.dll")] private static extern bool DeleteDC(nint hdc);
-    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint h);
+    [LibraryImport("user32.dll")] private static partial nint GetDC(nint hWnd);
+    [LibraryImport("user32.dll")] private static partial int ReleaseDC(nint hWnd, nint hDC);
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool BitBlt(nint hdcD, int xD, int yD, int w, int h, nint hdcS, int xS, int yS, uint rop);
+    [LibraryImport("gdi32.dll")] private static partial nint CreateCompatibleDC(nint hdc);
+    [LibraryImport("gdi32.dll")] private static partial nint CreateCompatibleBitmap(nint hdc, int w, int h);
+    [LibraryImport("gdi32.dll")] private static partial nint SelectObject(nint hdc, nint h);
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DeleteDC(nint hdc);
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DeleteObject(nint h);
     [DllImport("gdi32.dll")] private static extern int GetDIBits(nint hdc, nint hbmp, uint start, uint cLines, byte[]? lpBits, ref BITMAPINFO lpbmi, uint usage);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -2010,10 +2191,10 @@ public sealed partial class MainWindow : Window
     private const uint BI_RGB = 0;
 
     // ── Win32 窗口子类化（托盘消息处理）──
-    [DllImport("user32.dll")]
-    private static extern nint SetWindowLongPtrW(nint hWnd, int nIndex, nint dwNewLong);
-    [DllImport("user32.dll")]
-    private static extern nint CallWindowProcW(nint lpPrevWndFunc, nint hWnd, uint msg, nint wParam, nint lParam);
+    [LibraryImport("user32.dll")]
+    private static partial nint SetWindowLongPtrW(nint hWnd, int nIndex, nint dwNewLong);
+    [LibraryImport("user32.dll")]
+    private static partial nint CallWindowProcW(nint lpPrevWndFunc, nint hWnd, uint msg, nint wParam, nint lParam);
     private const int GWLP_WNDPROC = -4;
 
     private nint _originalWndProc;
@@ -2274,8 +2455,14 @@ public sealed class AppSettingsData
     public bool ToastOnCapture { get; set; } = true;
     public bool ToastOnSilentCapture { get; set; } = true;
     public bool ToastOnRecording { get; set; } = true;
+    /// <summary>Toast 通知位置: BottomRight / TopRight / TopLeft / BottomLeft / WindowsNotify</summary>
+    public string ToastPosition { get; set; } = "BottomRight";
 
     // ── 预览界面颜色 ──
     public string OverlayColor { get; set; } = "#99001833";
     public string BorderColor { get; set; } = "#FF4488FF";
+
+    // ── 字体选择 ──
+    /// <summary>用户选择的字体族名称（空=使用默认回退链）。</summary>
+    public string FontFamily { get; set; } = "";
 }

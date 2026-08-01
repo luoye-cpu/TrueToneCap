@@ -8,16 +8,16 @@
             <!-- ═══ 覆盖 WinUI 主题字体 ═══ -->
             <ResourceDictionary.ThemeDictionaries>
                 <ResourceDictionary x:Key="Default">
-                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
-                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
-                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
-                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Dark">
-                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
-                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
@@ -27,10 +27,10 @@
 
             <!-- 全局默认字体隐式回退 -->
             <Style TargetType="TextBlock">
-                <Setter Property="FontFamily" Value="Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif" />
+                <Setter Property="FontFamily" Value="Microsoft YaHei, Segoe UI, sans-serif" />
             </Style>
             <Style TargetType="Control">
-                <Setter Property="FontFamily" Value="Microsoft YaHei, HarmonyOS Sans SC, Segoe UI, sans-serif" />
+                <Setter Property="FontFamily" Value="Microsoft YaHei, Segoe UI, sans-serif" />
             </Style>
 
             <!-- FontIcon 必须使用 Segoe MDL2 Assets，否则图标字形无法渲染 -->

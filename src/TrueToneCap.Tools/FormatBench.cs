@@ -25,7 +25,6 @@ var formats = new (OutputFormat Fmt, string Name, float Quality, bool Hdr, int T
     (OutputFormat.PNG,          "PNG (无损)",          100, false, 10),
     (OutputFormat.JPEG_LI,       "JPEG LI",             2.0f, false, 10),
     (OutputFormat.WebP,          "WebP",                90f, false, 10),
-    (OutputFormat.BMP,           "BMP",                 100, false, 10),
     (OutputFormat.AVIF,          "AVIF",                30f, false, 60),
     (OutputFormat.JPEG_XL,       "JPEG XL",             2.0f, false, 60),
     (OutputFormat.JPEG_GAINMAP,  "JPEG GainMap (HDR)",  90f, true,  60),

@@ -29,8 +29,8 @@ public sealed class DetectedRegion
     /// <summary>缩略图像素数据（BGRA 8-bit, 120×80），UI 预览用。</summary>
     public byte[]? ThumbnailPixels { get; init; }
 
-    /// <summary>在虚拟桌面坐标系下的矩形。</summary>
-    public System.Drawing.Rectangle Rect => new(X, Y, Width, Height);
+    /// <summary>在虚拟桌面坐标系下的矩形（左, 上, 宽, 高）。</summary>
+    public (int X, int Y, int Width, int Height) RectTuple => (X, Y, Width, Height);
 
     public override string ToString() =>
         $"[{Source}] {X},{Y} {Width}x{Height}" + (Title is { Length: > 0 } t ? $" \"{t}\"" : "");

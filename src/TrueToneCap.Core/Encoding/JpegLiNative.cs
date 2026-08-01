@@ -29,7 +29,7 @@ public static class JpegLiNative
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = exePath,
-                    Arguments = "--version",
+                    Arguments = "-h",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
@@ -40,7 +40,8 @@ public static class JpegLiNative
                 proc.StandardOutput.ReadToEnd();
                 proc.StandardError.ReadToEnd();
                 proc.WaitForExit(5000);
-                _available = proc.ExitCode == 0;
+                // cjpegli -h 返回 exit code 1，但我们只关心能否启动
+                _available = true;
             }
             catch { _available = false; }
             return _available.Value;
@@ -64,7 +65,7 @@ public static class JpegLiNative
             // 回退到 PATH
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo("cjpegli.exe", "--version")
+                var psi = new System.Diagnostics.ProcessStartInfo("cjpegli.exe", "-h")
                 {
                     UseShellExecute = false,
                     RedirectStandardOutput = true,

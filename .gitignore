@@ -44,9 +44,14 @@ NuGet.Config
 *.cso
 *.dxbc
 
-# ── Publish Output (keep PACKAGE.md) ──
+# ── Publish Output (keep PACKAGE.md + PLAN) ──
 publish/*
 !publish/PACKAGE.md
+!publish/PLAN/
+!publish/PLAN/**
+
+# ── .NET 11 Migration Backup ──
+.net10-backup/
 
 # ── OS junk ──
 .DS_Store

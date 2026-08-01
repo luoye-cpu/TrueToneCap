@@ -8,7 +8,7 @@ using TrueToneCap.Core.Capture;
 namespace TrueToneCap.Core.Metadata;
 
 /// <summary>元数据收集器 — 获取前台窗口、光标、显示器等信息。</summary>
-public static class MetadataCollector
+public static partial class MetadataCollector
 {
     /// <summary>收集当前环境元数据。</summary>
     public static Encoding.ImageMetadata Collect(DisplayInfo? display = null)
@@ -77,25 +77,25 @@ public static class MetadataCollector
 
     // ────────────── P/Invoke ──────────────
 
-    [DllImport("user32.dll")]
-    private static extern nint GetForegroundWindow();
+    [LibraryImport("user32.dll")]
+    private static partial nint GetForegroundWindow();
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowTextW(nint hWnd, char[] text, int count);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int GetWindowTextW(nint hWnd, char[] text, int count);
 
-    [DllImport("user32.dll")]
-    private static extern int GetWindowTextLengthW(nint hWnd);
+    [LibraryImport("user32.dll")]
+    private static partial int GetWindowTextLengthW(nint hWnd);
 
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+    [LibraryImport("user32.dll")]
+    private static partial uint GetWindowThreadProcessId(nint hWnd, out uint processId);
 
-    [DllImport("user32.dll")]
+    [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetCursorPos(out POINT lpPoint);
+    private static partial bool GetCursorPos(out POINT lpPoint);
 
-    [DllImport("user32.dll")]
+    [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetCursorInfo(ref CURSORINFO pci);
+    private static partial bool GetCursorInfo(ref CURSORINFO pci);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X, Y; }

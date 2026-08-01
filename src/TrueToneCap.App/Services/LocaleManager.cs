@@ -87,6 +87,26 @@ public static class LocaleManager
     public static string AutoStart => s_lang == AppLanguage.Chinese ? "开机自动启动" : "Start with Windows";
     public static string MinimizeTray => s_lang == AppLanguage.Chinese ? "关闭时最小化到托盘" : "Minimize to tray on close";
 
+    // ── Toast 通知 ──
+    public static string ToastTitle => s_lang == AppLanguage.Chinese ? "通知" : "Notifications";
+    public static string ToastOnCapture => s_lang == AppLanguage.Chinese ? "截图后提示" : "Toast on capture";
+    public static string ToastOnSilent => s_lang == AppLanguage.Chinese ? "无感截图后提示" : "Toast on silent capture";
+    public static string ToastOnRecording => s_lang == AppLanguage.Chinese ? "录制后提示" : "Toast on recording";
+    public static string ToastPositionLabel => s_lang == AppLanguage.Chinese ? "通知位置" : "Notification position";
+    public static string ToastPosBottomRight => s_lang == AppLanguage.Chinese ? "右下角" : "Bottom Right";
+    public static string ToastPosTopRight => s_lang == AppLanguage.Chinese ? "右上角" : "Top Right";
+    public static string ToastPosTopLeft => s_lang == AppLanguage.Chinese ? "左上角" : "Top Left";
+    public static string ToastPosBottomLeft => s_lang == AppLanguage.Chinese ? "左下角" : "Bottom Left";
+    public static string ToastPosWindows => s_lang == AppLanguage.Chinese ? "Windows 自带通知" : "Windows Notification";
+
+    // ── 字体 ──
+    public static string FontTitle => s_lang == AppLanguage.Chinese ? "界面字体" : "Interface Font";
+    public static string FontLabel => s_lang == AppLanguage.Chinese ? "字体" : "Font";
+    public static string FontDefault => s_lang == AppLanguage.Chinese ? "默认 (微软雅黑)" : "Default (Microsoft YaHei)";
+    public static string FontCustom => s_lang == AppLanguage.Chinese ? "自定义..." : "Custom...";
+    public static string FontCustomPlaceholder => s_lang == AppLanguage.Chinese ? "输入系统已安装的字体名称" : "Enter installed font name";
+    public static string FontDesc => s_lang == AppLanguage.Chinese ? "界面字体仅影响应用外观，不影响截图像素。选择已安装的字体后需重启应用生效。" : "Font only affects UI appearance, not captured pixels. Restart required after change.";
+
     // ── 状态栏 ──
     public static string Ready => s_lang == AppLanguage.Chinese ? "就绪" : "Ready";
     public static string AreaCapture => s_lang == AppLanguage.Chinese ? "区域截图" : "Area Capture";

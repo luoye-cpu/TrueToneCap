@@ -17,7 +17,7 @@ public static class NativeLibraryResolver
     private static volatile bool _initialized;
 
     /// <summary>需要提取的原生可执行文件清单。</summary>
-    private static readonly string[] EmbeddedExeNames = ["avifenc.exe", "cwebp.exe"];
+    private static readonly string[] EmbeddedExeNames = ["avifenc.exe", "cwebp.exe", "cjpegli.exe"];
 
     static NativeLibraryResolver()
     {
@@ -35,7 +35,10 @@ public static class NativeLibraryResolver
             try
             {
                 Directory.CreateDirectory(NativeDir);
-                var asm = Assembly.GetExecutingAssembly();
+                // ═══ 使用 typeof 所在程序集（Core），而非调用方程序集（Test）═══
+                // Assembly.GetExecutingAssembly() 在测试项目中返回 Test 程序集，
+                // 而嵌入资源在 Core 程序集中，导致 cjpegli.exe 等无法提取。
+                var asm = Assembly.GetAssembly(typeof(NativeLibraryResolver))!;
                 var allResNames = asm.GetManifestResourceNames();
 
                 foreach (var exeName in EmbeddedExeNames)
@@ -55,12 +58,14 @@ public static class NativeLibraryResolver
 
                     if (resName is null)
                     {
-                        // 回退：从文件系统拷贝
-                        string srcPath = Path.Combine(AppContext.BaseDirectory, "data", "Tools", exeName);
+                        // 回退：从文件系统拷贝（使用 BaseDirectory，而非 Assembly.Location）
+                        // 注意: Assembly.Location 在 AOT 单文件发布中返回空字符串
+                        string coreDir = AppContext.BaseDirectory;
+                        string srcPath = Path.Combine(coreDir, "Resources", exeName);
                         if (!File.Exists(srcPath))
                             srcPath = Path.Combine(AppContext.BaseDirectory, "Resources", exeName);
                         if (!File.Exists(srcPath))
-                            srcPath = Path.Combine(Path.GetDirectoryName(asm.Location)!, "Resources", exeName);
+                            srcPath = Path.Combine(AppContext.BaseDirectory, "data", "Tools", exeName);
 
                         if (File.Exists(srcPath))
                         {

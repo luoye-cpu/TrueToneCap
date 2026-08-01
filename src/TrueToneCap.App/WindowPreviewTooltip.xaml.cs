@@ -17,12 +17,13 @@ public sealed partial class WindowPreviewTooltip : Window
     private bool _isVisible;
     private nint _hwnd;
 
-    [DllImport("user32.dll")]
-    private static extern int GetWindowLong(nint hWnd, int nIndex);
-    [DllImport("user32.dll")]
-    private static extern int SetWindowLong(nint hWnd, int nIndex, int dwNewLong);
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(nint hWnd, int nCmdShow);
+    [LibraryImport("user32.dll")]
+    private static partial int GetWindowLongW(nint hWnd, int nIndex);
+    [LibraryImport("user32.dll")]
+    private static partial int SetWindowLongW(nint hWnd, int nIndex, int dwNewLong);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ShowWindow(nint hWnd, int nCmdShow);
 
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -46,8 +47,16 @@ public sealed partial class WindowPreviewTooltip : Window
         appWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
 
         // 工具窗口 + 置顶 + 不抢焦点 + 鼠标穿透（事件透传到下方窗口）
-        int exStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
-        SetWindowLong(_hwnd, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TRANSPARENT);
+        // ═══ Win32 窗口样式设置（非致命）═══
+        try
+        {
+            int exStyle = GetWindowLongW(_hwnd, GWL_EXSTYLE);
+            SetWindowLongW(_hwnd, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TRANSPARENT);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[PreviewTooltip] 窗口样式设置失败（非致命）: {ex.Message}");
+        }
 
         // 设置窗口大小
         try { appWindow.Resize(new SizeInt32(300, 200)); } catch { }
