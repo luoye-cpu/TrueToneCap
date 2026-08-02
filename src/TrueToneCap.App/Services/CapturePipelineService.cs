@@ -28,8 +28,10 @@ public sealed class CapturePipelineService
         if (!iccBakeEnabled)
             return (bgra, null);
 
-        var targetCs = ColorProfileProvider.MapColorSpaceTag(colorSpaceTag);
-        bool isSRgbTarget = colorSpaceTag is "System" or "sRGB";
+        // 将 "System" 解析为实际色域（SDR 模式下 WGC 输出 sRGB）
+        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false);
+        var targetCs = ColorProfileProvider.MapColorSpaceTag(resolvedTag);
+        bool isSRgbTarget = resolvedTag is "sRGB";
 
         byte[]? displayIcc = null;
         try
@@ -71,16 +73,19 @@ public sealed class CapturePipelineService
         bool iccBakeEnabled, string colorSpaceTag,
         TrueToneCap.Core.Processing.ToneMappingParams toneParams)
     {
+        // 将 "System" 解析为实际色域（SDR 模式下 WGC 输出 sRGB）
+        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false);
+
         // 1. 色域转换 + 色调映射到 BGRA8
         var bgra = ColorSpaceConverter.ConvertFloat16ToSdrBgra(
-            hdrPixels, w, h, colorSpaceTag, toneParams);
+            hdrPixels, w, h, resolvedTag, toneParams);
 
         // 2. ICC 色彩管理（嵌入元数据）
-        bool isSRgbTarget = colorSpaceTag is "System" or "sRGB";
+        bool isSRgbTarget = resolvedTag is "sRGB";
         if (!iccBakeEnabled || isSRgbTarget)
             return (bgra, null);
 
-        var targetCs = ColorProfileProvider.MapColorSpaceTag(colorSpaceTag);
+        var targetCs = ColorProfileProvider.MapColorSpaceTag(resolvedTag);
         var targetIcc = ColorProfileProvider.GetStandardIccProfile(targetCs);
         return (bgra, targetIcc);
     }
@@ -125,8 +130,9 @@ public sealed class CapturePipelineService
             GainMapMode = s.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
             Metadata = meta,
             PreferGpuEncode = true,
-            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Hable },
-            ColorSpaceTag = colorSpaceTag ?? "System"
+            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Aces },
+            // 解析 "System" 为实际色域，确保编码器能正确判断 ICC/CICP 策略
+            ColorSpaceTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag ?? "System", hdrOutput)
         };
 
         LogService.Info("Pipeline", $"编码设置: {format} HDR={hdrOutput} 质量={s.Quality:F1} 位深={bitDepth} 色度={chroma} AVIF后端={avifBackend}");
@@ -179,6 +185,11 @@ public sealed class CapturePipelineService
     }
 
     /// <summary>编码并保存 SDR 像素到文件（同步编码，在后台线程执行）。</summary>
+    /// <remarks>
+    /// 注意: 输入为 byte[] BGRA8 像素，始终走 SDR 编码路径。
+    /// 即使 hdrOutput=true，byte[] 输入也不应转为 HDR PQ 路径（因为没有实际的 HDR float 数据）。
+    /// 真正的 HDR 编码请使用 EncodeHdrFrameAsync（接收 HdrFrameData float 像素）。
+    /// </remarks>
     public async Task<string> EncodeAndSaveAsync(
         byte[] bgra, int w, int h, OutputFormat format,
         bool hdrOutput, bool iccBakeEnabled, string colorSpaceTag,
@@ -203,22 +214,9 @@ public sealed class CapturePipelineService
             if (iccProfile is not null)
                 settings.IccProfile = iccProfile;
 
-            if (hdrOutput && encoder.SupportsHdr)
-            {
-                var hdrFrame = new HdrFrameData
-                {
-                    Pixels = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(pixels, w, h),
-                    Width = w, Height = h,
-                    IccProfile = settings.IccProfile,
-                    GpuTexture = gpuTexture
-                };
-                // 同步执行：Task.Run 内已在后台线程，直接调用同步包装
-                EncodeSync(encoder, hdrFrame, settings, path, ct);
-            }
-            else
-            {
-                EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
-            }
+            // 始终走 SDR 路径：byte[] 输入是 SDR BGRA8 像素，不应转为 HDR float16 编码
+            // 如需 HDR 编码，使用 EncodeHdrFrameAsync 传入 HdrFrameData
+            EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
         }, ct);
         }
         finally { PowerManager.AllowSleep(); }
@@ -241,6 +239,10 @@ public sealed class CapturePipelineService
     }
 
     /// <summary>编码并保存（使用调用方提供的显式设置，供 MainWindow UI 路径使用）。</summary>
+    /// <remarks>
+    /// 注意: 输入为 byte[] BGRA8 像素，始终走 SDR 编码路径，忽略 settings.HdrOutput。
+    /// 真正的 HDR 编码请使用 EncodeHdrFrameAsync。
+    /// </remarks>
     public async Task<string> EncodeAndSaveAsync(
         byte[] bgra, int w, int h, EncodingSettings settings,
         bool iccBakeEnabled, string colorSpaceTag,
@@ -252,7 +254,7 @@ public sealed class CapturePipelineService
         var outDir = GetEffectiveOutputDir();
         var path = BuildOutputPath(settings.Format, outDir);
 
-        LogService.Info("Pipeline", $"开始编码: {settings.Format} {w}x{h} HDR={settings.HdrOutput} → {Path.GetFileName(path)}");
+        LogService.Info("Pipeline", $"开始编码: {settings.Format} {w}x{h} → {Path.GetFileName(path)}");
 
         PowerManager.PreventSleep();
         try
@@ -265,21 +267,8 @@ public sealed class CapturePipelineService
                 settings.IccProfile = iccProfile;
 
             ct.ThrowIfCancellationRequested();
-            if (settings.HdrOutput && encoder.SupportsHdr)
-            {
-                var hdrFrame = new HdrFrameData
-                {
-                    Pixels = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(pixels, w, h),
-                    Width = w, Height = h,
-                    IccProfile = settings.IccProfile,
-                    GpuTexture = gpuTexture
-                };
-                EncodeSync(encoder, hdrFrame, settings, path, ct);
-            }
-            else
-            {
-                EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
-            }
+            // 始终走 SDR 路径
+            EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
         }, ct);
         }
         finally { PowerManager.AllowSleep(); }

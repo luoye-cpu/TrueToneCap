@@ -57,12 +57,12 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="格式" VerticalAlignment="Center"/><ComboBox x:Name="FormatCbo" Grid.Column="1" SelectionChanged="OnFormatChanged"/></Grid>
                                 <TextBlock x:Name="FormatHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
                                 <Grid ColumnDefinitions="120,*,50,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
-                                <Grid ColumnDefinitions="120,*,50"><TextBlock Text="保存路径" VerticalAlignment="Center"/><TextBox x:Name="PathTxt" Grid.Column="1"/><Button Grid.Column="2" Content="..." Click="OnBrowsePath" Width="40" Margin="4,0,0,0"/></Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="文件名前缀" VerticalAlignment="Center"/><TextBox x:Name="PrefixTxt" Grid.Column="1"/></Grid>
+                                <Grid ColumnDefinitions="120,*,50"><TextBlock Text="保存路径" VerticalAlignment="Center"/><TextBox x:Name="PathTxt" Grid.Column="1" LostFocus="OnPathLostFocus"/><Button Grid.Column="2" Content="..." Click="OnBrowsePath" Width="40" Margin="4,0,0,0"/></Grid>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="文件名前缀" VerticalAlignment="Center"/><TextBox x:Name="PrefixTxt" Grid.Column="1" LostFocus="OnPrefixLostFocus"/></Grid>
                                 <CheckBox x:Name="ArchiveChk" Content="启用文件归档" Checked="OnArchiveChanged" Unchecked="OnArchiveChanged"/>
                                 <Grid x:Name="ArchiveModePanel" ColumnDefinitions="120,*" Visibility="Collapsed">
                                     <TextBlock Text="归档方式" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="ArchiveModeCbo" Grid.Column="1">
+                                    <ComboBox x:Name="ArchiveModeCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="Year">按年 (2026)</ComboBoxItem>
                                         <ComboBoxItem Tag="Month" IsSelected="True">按月 (2026-07)</ComboBoxItem>
                                         <ComboBoxItem Tag="Day">按日 (2026-07-04)</ComboBoxItem>
@@ -81,11 +81,11 @@
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="AvifChromaCbo" Grid.Column="1">
+                                    <ComboBox x:Name="AvifChromaCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="444">4:4:4 ✓ 截图推荐</ComboBoxItem><ComboBoxItem Tag="422">4:2:2</ComboBoxItem><ComboBoxItem Tag="420">4:2:0 (体积最小)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <CheckBox x:Name="AvifPngSuffixChk" Content="添加 .avif.png 双后缀（兼容旧软件）"/>
+                                <CheckBox x:Name="AvifPngSuffixChk" Content="添加 .avif.png 双后缀（兼容旧软件）" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                             </StackPanel>
                         </Border>
 
@@ -94,7 +94,7 @@
                             <StackPanel Spacing="12">
                                 <TextBlock Text="AVIF 位深" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="BdAvifCbo" Grid.Column="1">
+                                    <ComboBox x:Name="BdAvifCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="10">10-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
@@ -125,7 +125,7 @@
                             <StackPanel Spacing="12">
                                 <TextBlock Text="PNG 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="BdPngCbo" Grid.Column="1">
+                                    <ComboBox x:Name="BdPngCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="10">10-bit (PNG 3.0)</ComboBoxItem>
                                         <ComboBoxItem Tag="12">12-bit (PNG 3.0)</ComboBoxItem>
@@ -141,14 +141,14 @@
                             <StackPanel Spacing="12">
                                 <TextBlock Text="JPEG XL 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="BdJpegXlCbo" Grid.Column="1">
+                                    <ComboBox x:Name="BdJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="10">10-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="ChromaJpegXlCbo" Grid.Column="1">
+                                    <ComboBox x:Name="ChromaJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
                                         <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
                                     </ComboBox>
@@ -161,7 +161,7 @@
                             <StackPanel Spacing="12">
                                 <TextBlock Text="WebP 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="ChromaWebPCbo" Grid.Column="1">
+                                    <ComboBox x:Name="ChromaWebPCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
                                         <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
                                     </ComboBox>
@@ -173,7 +173,7 @@
                             <StackPanel Spacing="12">
                                 <TextBlock Text="TIFF 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="BdTiffCbo" Grid.Column="1">
+                                    <ComboBox x:Name="BdTiffCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="16">16-bit</ComboBoxItem>
                                     </ComboBox>
@@ -192,7 +192,7 @@
                                     <TextBlock x:Name="HdrHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
                                 <StackPanel Spacing="4">
-                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="ICC 烘焙" VerticalAlignment="Center"/><ToggleSwitch x:Name="IccBakeSwitch" Grid.Column="1"/></Grid>
+                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="ICC 烘焙" VerticalAlignment="Center"/><ToggleSwitch x:Name="IccBakeSwitch" Grid.Column="1" Toggled="OnIccBakeToggled"/></Grid>
                                     <TextBlock x:Name="IccHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
                                 <Grid ColumnDefinitions="120,*"><TextBlock x:Name="ColorSpaceLabel" Text="目标色域" VerticalAlignment="Center"/>
@@ -455,9 +455,9 @@
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
                                 <TextBlock x:Name="ToastTitle" Text="通知" FontSize="14" FontWeight="SemiBold"/>
-                                <CheckBox x:Name="ToastCaptureChk" Content="截图后提示" IsChecked="True"/>
-                                <CheckBox x:Name="ToastSilentChk" Content="无感截图后提示" IsChecked="True"/>
-                                <CheckBox x:Name="ToastRecordChk" Content="录制后提示" IsChecked="True"/>
+                                <CheckBox x:Name="ToastCaptureChk" Content="截图后提示" IsChecked="True" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
+                                <CheckBox x:Name="ToastSilentChk" Content="无感截图后提示" IsChecked="True" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
+                                <CheckBox x:Name="ToastRecordChk" Content="录制后提示" IsChecked="True" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                                 <Grid ColumnDefinitions="120,*">
                                     <TextBlock x:Name="ToastPositionLabel" Text="通知位置" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="ToastPositionCbo" Grid.Column="1" SelectionChanged="OnToastPositionChanged">
@@ -473,8 +473,8 @@
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
                                 <TextBlock x:Name="BehaviorTitle" Text="行为" FontSize="14" FontWeight="SemiBold"/>
-                                <CheckBox x:Name="AutoStartChk" Content="开机自动启动"/>
-                                <CheckBox x:Name="MinimizeTrayChk" Content="关闭时最小化到托盘" IsChecked="True"/>
+                                <CheckBox x:Name="AutoStartChk" Content="开机自动启动" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
+                                <CheckBox x:Name="MinimizeTrayChk" Content="关闭时最小化到托盘" IsChecked="True" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>

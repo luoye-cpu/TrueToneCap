@@ -19,19 +19,29 @@ public sealed class PngEncoder : ImageEncoder
     {
         if (s.HdrOutput)
         {
-            // HDR: scRGB → 目标色域线性 → PQ → PNG (10/12/16-bit) + cICP
-            await Task.Run(() =>
+            if (s.OutputBitDepth <= 8)
             {
-                ct.ThrowIfCancellationRequested();
-                var csTag = s.ColorSpaceTag ?? "sRGB";
-                var p16 = FormatHelper.HdrToPq16(f, csTag);
-                var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
-                byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
-                byte[] cicp = [primaries, 16, 0, 1]; // PQ transfer=16
-                int hdrBitDepth = s.OutputBitDepth switch { 10 => 10, 12 => 12, _ => 16 };
-                // IHDR 始终为 16-bit，sBIT 标记实际位深 (PNG 3.0 Table 12: color type 6 仅允许 8/16)
-                ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, bitDepth: hdrBitDepth);
-            }, ct);
+                // 用户选择 8-bit → 色调映射到 SDR，走 SDR 编码路径
+                var d = FormatHelper.ToSdr(f, s);
+                await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
+            }
+            else
+            {
+                // HDR: scRGB → 目标色域线性 → PQ → PNG (10/12/16-bit) + cICP
+                await Task.Run(() =>
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var csTag = s.ColorSpaceTag ?? "sRGB";
+                    int hdrBitDepth = s.OutputBitDepth switch { 10 => 10, 12 => 12, _ => 16 };
+                    // HdrToPq16 直接量化到目标位深，再左对齐到 16-bit 容器
+                    var p16 = FormatHelper.HdrToPq16(f, csTag, hdrBitDepth);
+                    var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
+                    byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
+                    byte[] cicp = [primaries, 16, 0, 1]; // PQ transfer=16
+                    // IHDR 始终为 16-bit，sBIT 标记实际位深 (PNG 3.0 Table 12: color type 6 仅允许 8/16)
+                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, bitDepth: hdrBitDepth);
+                }, ct);
+            }
         }
         else
         {
@@ -41,12 +51,19 @@ public sealed class PngEncoder : ImageEncoder
     }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
-        // SDR PNG 始终使用 8-bit：8-bit 输入扩展到 10/12/16-bit 只会徒增体积而无精度收益
+        // 完全尊重用户设置的 OutputBitDepth
+        int bitDepth = s.OutputBitDepth switch
+        {
+            10 => 10,
+            12 => 12,
+            >= 16 => 16,
+            _ => 8,
+        };
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
             var (icc, cicp) = FormatHelper.GetColorMetadata(s);
-            ManagedPngEncoder.Encode(px, w, h, path, 8, icc, cicp);
+            ManagedPngEncoder.Encode(px, w, h, path, bitDepth, icc, cicp);
         }, ct);
     }
 }
@@ -92,7 +109,8 @@ public sealed class JpegXlEncoder : ImageEncoder
             {
                 ct.ThrowIfCancellationRequested();
                 var csTag = s.ColorSpaceTag ?? "sRGB";
-                var pq16 = FormatHelper.HdrToPq16(f, csTag);
+                // JXL HDR 固定 16-bit 全精度
+                var pq16 = FormatHelper.HdrToPq16(f, csTag, 16);
                 var icc = s.IccProfile;
                 NativeJxlEncoder.EncodeHdr(pq16, f.Width, f.Height, path, s.Quality, icc, 10000f);
             }, ct);
@@ -130,7 +148,8 @@ public sealed class AvifEncoder : ImageEncoder
             {
                 ct.ThrowIfCancellationRequested();
                 var csTag = s.ColorSpaceTag ?? "sRGB";
-                var p16 = FormatHelper.HdrToPq16(f, csTag);
+                // AVIF HDR 固定 10-bit 全精度
+                var p16 = FormatHelper.HdrToPq16(f, csTag, 10);
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
                 byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
                 byte[] cicpHdr = [primaries, 16, 0, 1]; // PQ transfer
@@ -200,7 +219,8 @@ public sealed class TiffEncoder : ImageEncoder
             {
                 ct.ThrowIfCancellationRequested();
                 var csTag = s.ColorSpaceTag ?? "sRGB";
-                var pq16 = FormatHelper.HdrToPq16(f, csTag);
+                // TIFF HDR 固定 16-bit 全精度
+                var pq16 = FormatHelper.HdrToPq16(f, csTag, 16);
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(pq16, f.Width, f.Height);
                 ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, s.IccProfile);
             }, ct);
@@ -502,15 +522,32 @@ public static class FormatHelper
         return (icc, cicp);
     }
 
-    /// <summary>HDR scRGB → PQ 16-bit RGBA 数组（精确 10→16 bit 映射）。
-    /// 在 PQ 编码前先将 scRGB (BT.709) 转换到目标色域线性空间，
-    /// 确保像素值色域与 CICP/ICC 元数据一致。
-    /// 融合色域转换 + PQ 编码，消除中间 float[] 分配（4K 节省 ~33MB 临时内存）。</summary>
+    /// <summary>HDR scRGB → PQ 16-bit RGBA 数组。
+    /// 根据目标位深直接量化到正确精度，然后左对齐到 16-bit 容器。
+    /// 确保 16-bit 容器中真正存放的是 10/12-bit 数据（左对齐），而非完整 16-bit 数据被截断。</summary>
     /// <param name="f">HDR 帧数据（scRGB 线性浮点像素）。</param>
     /// <param name="colorSpaceTag">目标色域标签，null/sRGB 时不转换。</param>
-    public static ushort[] HdrToPq16(HdrFrameData f, string? colorSpaceTag = null)
+    /// <param name="bitDepth">目标位深: 10/12/16。10-bit 量化到 0-1023 后左移 6 位。</param>
+    public static ushort[] HdrToPq16(HdrFrameData f, string? colorSpaceTag = null, int bitDepth = 16)
     {
         int pixelCount = f.Width * f.Height;
+
+        // ── 根据目标位深确定量化范围 ──
+        // 10-bit: 0-1023, 左移到 16-bit 容器高位 (<<6)
+        // 12-bit: 0-4095, 左移到 16-bit 容器高位 (<<4)
+        // 16-bit: 0-65535, 全精度
+        int maxValue = bitDepth switch
+        {
+            10 => 1023,
+            12 => 4095,
+            _ => 65535,
+        };
+        int shift = bitDepth switch
+        {
+            10 => 6,
+            12 => 4,
+            _ => 0,
+        };
 
         // ═══ 色域转换矩阵（scRGB BT.709 → 目标色域线性）═══
         var matrix = ColorManagement.ColorSpaceConverter.GetMatrix(colorSpaceTag ?? "sRGB");
@@ -545,16 +582,25 @@ public static class FormatHelper
                 r = rr; g = gg; b = bb;
             }
 
-            // PQ 编码
+            // PQ 编码 → 直接量化到目标位深 → 左对齐到 16-bit 容器
             float pqR = LinearToPQ(r);
             float pqG = LinearToPQ(g);
             float pqB = LinearToPQ(b);
             a = Math.Clamp(a, 0f, 1f);
-            // M5 fix: 精确 10→16 bit 映射 (pq10 * 65535 / 1023)，而非 *64 截断
-            p16[i]     = (ushort)Math.Clamp((int)Math.Round(pqR * 65535f), 0, 65535);
-            p16[i + 1] = (ushort)Math.Clamp((int)Math.Round(pqG * 65535f), 0, 65535);
-            p16[i + 2] = (ushort)Math.Clamp((int)Math.Round(pqB * 65535f), 0, 65535);
-            p16[i + 3] = (ushort)Math.Clamp((int)Math.Round(a * 65535f), 0, 65535);
+
+            // 量化到 maxValue 范围，然后左移到 16-bit 容器高位
+            // 10-bit: 0-1023 → <<6 → 0-65520 (高位 10-bit 有效)
+            // 12-bit: 0-4095 → <<4 → 0-65520 (高位 12-bit 有效)
+            // 16-bit: 0-65535 → 直通
+            int qiR = (int)Math.Round(pqR * maxValue);
+            int qiG = (int)Math.Round(pqG * maxValue);
+            int qiB = (int)Math.Round(pqB * maxValue);
+            int qiA = (int)Math.Round(Math.Clamp(a, 0f, 1f) * maxValue);
+
+            p16[i]     = (ushort)Math.Clamp(qiR << shift, 0, 65535);
+            p16[i + 1] = (ushort)Math.Clamp(qiG << shift, 0, 65535);
+            p16[i + 2] = (ushort)Math.Clamp(qiB << shift, 0, 65535);
+            p16[i + 3] = (ushort)Math.Clamp(qiA << shift, 0, 65535);
         });
         return p16;
     }

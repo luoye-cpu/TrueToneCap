@@ -68,14 +68,9 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     private async Task EncodeGainMapAsync(HdrFrameData frame, EncodingSettings settings,
         string outputPath, CancellationToken ct)
     {
-        // 整体 30s 硬超时保护
-        using var hardCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        hardCts.CancelAfter(TimeSpan.FromSeconds(30));
-
         await Task.Run(() =>
         {
-            var token = hardCts.Token;
-            token.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
             int w = frame.Width, h = frame.Height;
             int pixelCount = w * h;
 
@@ -89,16 +84,16 @@ public sealed class JpegGainMapEncoder : ImageEncoder
 
             // ── 1. Tone Map HDR → SDR ──
             byte[] sdrBgra = ToneMapper.FloatToSRgbBytes(hdrTarget, w, h, settings.ToneMappingParams);
-            token.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
 
             float[] sdrLinear = new float[pixelCount * 4];
             Array.Copy(hdrTarget, sdrLinear, hdrTarget.Length);
             ToneMapper.ApplyToneMapping(sdrLinear, w, h, settings.ToneMappingParams);
-            token.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
 
             // ── 2. 编码 Base JPEG（带 ICC 嵌入）──
             byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, settings.Quality, icc);
-            token.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
 
             // 从 settings 读取增益图模式（线程安全，无实例状态）
             var gainMapMode = settings.GainMapMode;
@@ -106,13 +101,13 @@ public sealed class JpegGainMapEncoder : ImageEncoder
 
             // ── 3. 计算增益图 ──
             byte[] gainMapPixels = ComputeGainMap(hdrTarget, sdrLinear, w, h, gainMapMode);
-            token.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
 
             // ── 4. 增益图缩放 + 编码 ──
             byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, gainMapMode, out int gmSW, out int gmSH);
             byte[] gainMapJpegBytes = EncodeGainMapToJpegBytesSafe(gainMapScaled, gmSW, gmSH,
                 gainMapMode, gainMapJpegQuality);
-            token.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
 
             // ── 5. MPF 封装 ──
             WriteJpegGainMapFile(baseJpegBytes, gainMapJpegBytes, w, h, gmSW, gmSH,
@@ -121,7 +116,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             System.Diagnostics.Debug.WriteLine(
                 $"[GainMap] 输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({gainMapMode}), " +
                 $"Base={baseJpegBytes.Length / 1024}KB, GainMap={gainMapJpegBytes.Length / 1024}KB");
-        }, hardCts.Token);
+        }, ct);
     }
 
     // ═══════════════════════════════════════
