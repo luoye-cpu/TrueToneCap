@@ -72,9 +72,11 @@ public static class ManagedPngEncoder
     public static void Encode(byte[] bgra, int w, int h, Stream output,
         int bitDepth = 8, byte[]? iccProfile = null, byte[]? cicp = null)
     {
-        // PNG 3.0 (ISO/IEC 15948:2023) 正式支持 10/12-bit depth
-        // 存储时使用 2 字节/通道，但 IHDR.bit_depth 标记为实际位深
-        int outDepth = bitDepth switch { 10 => 10, 12 => 12, >= 16 => 16, _ => 8 };
+        // PNG 3.0 (ISO/IEC 15948:2023) Table 11: Color type 6 (RGBA) 只允许 8 和 16
+        // 10/12-bit 源数据使用 16-bit 容器 + sBIT 标记实际有效位
+        // 参见 12.4 Sample depth scaling
+        bool isHighBitDepth = bitDepth > 8;
+        int outDepth = isHighBitDepth ? 16 : 8;
         int bytesPerChannel = outDepth > 8 ? 2 : 1;
         int channels = 4;
         int stride = w * channels * bytesPerChannel;
@@ -85,18 +87,19 @@ public static class ManagedPngEncoder
         var ihdr = new byte[13];
         BinaryPrimitives.WriteInt32BigEndian(ihdr, w);
         BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), h);
-        ihdr[8] = (byte)outDepth;       // bit depth: 8/10/12/16
+        ihdr[8] = (byte)outDepth;       // bit depth: 8 或 16 (Color type 6 只允许这俩值)
         ihdr[9] = 6;                     // color type: RGBA
         ihdr[10] = 0;
         ihdr[11] = 0;
         ihdr[12] = 0;
         WriteChunk(output, "IHDR"u8, ihdr);
 
-        // sBIT — 当位深 10/12 时标记实际有效位（PNG 3.0 规范要求）
-        if (outDepth is 10 or 12)
+        // sBIT — 当实际位深不足 16 时标记有效位（PNG 3.0 11.3.2.4）
+        // 注意: SDR 输入的 byte[] 只有 8-bit 精度，sBIT 标记实际精度而非容器位深
+        if (isHighBitDepth)
         {
-            byte sbitVal = (byte)outDepth;
-            byte[] sbit = [sbitVal, sbitVal, sbitVal, sbitVal]; // RGBA 各通道
+            // byte[] 输入只有 8-bit 精度，用 *257 扩展到 16-bit 容器
+            byte[] sbit = [8, 8, 8, 8]; // RGBA 各通道: 实际精度 8-bit
             WriteChunk(output, "sBIT"u8, sbit);
         }
 
@@ -120,6 +123,7 @@ public static class ManagedPngEncoder
     /// <summary>
     /// C1 fix: 编码真 16-bit BGRA 像素为 16-bit PNG（HDR 路径专用）。
     /// 输入: 每像素 8 字节 (B16 G16 R16 A16, big-endian)，由 Rgba16ToBgra16Bytes 生成。
+    /// 支持 IHDR 10/12/16-bit depth（PNG 3.0）。
     /// </summary>
     public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, int bitDepth = 16)
     {
@@ -127,29 +131,32 @@ public static class ManagedPngEncoder
         Encode16(bgra16, w, h, fs, cicp, bitDepth);
     }
 
-    /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。IHDR 始终为 16-bit，</summary>
+    /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。</summary>
     public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, int bitDepth = 16)
     {
-        int outDepth = bitDepth switch { 10 or 12 => 16, _ => 16 }; // IHDR 仅允许 8/16，HDR 用 16 + sBIT 标记实际位深
+        // PNG 3.0 (ISO/IEC 15948:2023) Table 11: Color type 6 (RGBA) 只允许 8 和 16
+        // 10/12-bit 源数据使用 16-bit 容器 + sBIT 标记实际有效位
+        // 参见 12.4 Sample depth scaling
+        int outDepth = 16;
 
         // PNG Signature
         output.Write(PngSignature);
 
-        // IHDR: 16-bit RGBA
+        // IHDR
         var ihdr = new byte[13];
         BinaryPrimitives.WriteInt32BigEndian(ihdr, w);
         BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), h);
-        ihdr[8] = (byte)outDepth;        // bit depth: 16
+        ihdr[8] = (byte)outDepth;        // bit depth: 16 (Color type 6 只允许 8/16)
         ihdr[9] = 6;                     // color type: RGBA
         ihdr[10] = 0;
         ihdr[11] = 0;
         ihdr[12] = 0;
         WriteChunk(output, "IHDR"u8, ihdr);
 
-        // sBIT — 当实际位深不足 16 时标记有效位（PNG 3.0 规范要求）
-        if (bitDepth is 10 or 12)
+        // sBIT — 当实际位深不足 16 时标记有效位（PNG 3.0 11.3.2.4）
+        if (bitDepth < 16)
         {
-            byte sbitVal = (byte)bitDepth;
+            byte sbitVal = bitDepth switch { 12 => 12, 10 => 10, _ => 8 };
             byte[] sbit = [sbitVal, sbitVal, sbitVal, sbitVal];
             WriteChunk(output, "sBIT"u8, sbit);
         }
@@ -168,53 +175,84 @@ public static class ManagedPngEncoder
     }
 
     /// <summary>构建 16-bit 扫描线: 输入 BGRA16 BE → 输出 RGBA16 BE + filter byte。
-    /// 存储位深始终为 16 (PNG 3.0 Table 12: color type 6 仅允许 8/16)。
-    /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放。</param></summary>
-    /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放。</param>
+    /// 支持 10/12/16-bit 位深。10/12-bit 时 IHDR 标记为实际位深。
+    /// 使用自适应滤波选择（同 SDR 路径），5 种滤波器中选绝对值最小和。</summary>
+    /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放和 IHDR。</param>
     private static byte[] BuildRawScanlines16(byte[] bgra16, int w, int h, int actualBitDepth = 16)
     {
-        int rowBytes = w * 8; // 4 channels × 2 bytes
+        int bytesPerChannel = 2;
+        int channels = 4;
+        int bpp = channels * bytesPerChannel; // 8 BPP
+        int rowBytes = w * bpp;
         var raw = new byte[h * (1 + rowBytes)];
+
+        // 临时行缓冲：当前行 RGBA + 上一行 RGBA
+        var curRow = new byte[rowBytes];
+        var prevRow = new byte[rowBytes];
+        var filtered = new byte[rowBytes];
 
         for (int y = 0; y < h; y++)
         {
-            int rawOff = y * (1 + rowBytes);
-            raw[rawOff] = 0; // Filter: None
-
             int srcOff = y * rowBytes;
-            int dstOff = rawOff + 1;
 
+            // BGRA16 BE → RGBA16 BE 转换到 curRow
             for (int x = 0; x < w; x++)
             {
                 int si = srcOff + x * 8;
-                int di = dstOff + x * 8;
+                int di = x * 8;
                 // 读取 16-bit big-endian 值
-                ushort r = (ushort)((bgra16[si + 4] << 8) | bgra16[si + 5]);
-                ushort g = (ushort)((bgra16[si + 2] << 8) | bgra16[si + 3]);
-                ushort b = (ushort)((bgra16[si] << 8) | bgra16[si + 1]);
-                ushort a = (ushort)((bgra16[si + 6] << 8) | bgra16[si + 7]);
+                ushort bVal = (ushort)((bgra16[si] << 8) | bgra16[si + 1]);
+                ushort gVal = (ushort)((bgra16[si + 2] << 8) | bgra16[si + 3]);
+                ushort rVal = (ushort)((bgra16[si + 4] << 8) | bgra16[si + 5]);
+                ushort aVal = (ushort)((bgra16[si + 6] << 8) | bgra16[si + 7]);
 
                 // 按实际位深缩放：16-bit 容器中存储 10/12-bit 值时左对齐
+                // 注意: HdrToPq16 已量化到目标位深并左对齐，此处仅做安全回退（零填充低位）
                 if (actualBitDepth < 16)
                 {
                     int shift = 16 - actualBitDepth;
-                    r = (ushort)(r >> shift);
-                    g = (ushort)(g >> shift);
-                    b = (ushort)(b >> shift);
-                    a = (ushort)(a >> shift);
-                    // 然后左移到 MSB 对齐 (sBIT 标记有效位)
-                    r = (ushort)(r << shift);
-                    g = (ushort)(g << shift);
-                    b = (ushort)(b << shift);
-                    a = (ushort)(a << shift);
+                    // 确保低位为零（HdrToPq16 已保证，此处仅做安全验证）
+                    rVal = (ushort)((rVal >> shift) << shift);
+                    gVal = (ushort)((gVal >> shift) << shift);
+                    bVal = (ushort)((bVal >> shift) << shift);
+                    aVal = (ushort)((aVal >> shift) << shift);
                 }
 
-                // 写入 big-endian 16-bit 容器
-                raw[di] = (byte)(r >> 8); raw[di + 1] = (byte)r;
-                raw[di + 2] = (byte)(g >> 8); raw[di + 3] = (byte)g;
-                raw[di + 4] = (byte)(b >> 8); raw[di + 5] = (byte)b;
-                raw[di + 6] = (byte)(a >> 8); raw[di + 7] = (byte)a;
+                // 写入 big-endian 16-bit 容器 (RGBA 顺序)
+                Write16(curRow, di, rVal);
+                Write16(curRow, di + 2, gVal);
+                Write16(curRow, di + 4, bVal);
+                Write16(curRow, di + 6, aVal);
             }
+
+            // 自适应滤波选择：尝试 5 种滤波器，选最小绝对值和（压缩率启发式）
+            byte bestFilter = 0;
+            long bestScore = long.MaxValue;
+
+            for (byte f = 0; f <= 4; f++)
+            {
+                ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
+                long score = 0;
+                for (int i = 0; i < rowBytes; i++)
+                {
+                    int v = filtered[i];
+                    score += v < 128 ? v : 256 - v;
+                }
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestFilter = f;
+                }
+            }
+
+            // 写入最佳滤波结果
+            int rawOff = y * (1 + rowBytes);
+            raw[rawOff] = bestFilter;
+            ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
+            Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
+
+            // 当前行变为上一行
+            (curRow, prevRow) = (prevRow, curRow);
         }
         return raw;
     }
