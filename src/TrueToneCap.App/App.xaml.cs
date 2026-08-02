@@ -184,7 +184,9 @@ public partial class App : Application
     {
         try
         {
-            var settingsPath = Path.Combine(AppContext.BaseDirectory, "TrueToneCap.settings.json");
+            var settingsPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "TrueToneCap", "TrueToneCap.settings.json");
             if (File.Exists(settingsPath))
             {
                 var json = File.ReadAllText(settingsPath);

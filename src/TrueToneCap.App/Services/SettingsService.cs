@@ -10,7 +10,9 @@ namespace TrueToneCap.App.Services;
 public sealed class SettingsService
 {
     private static readonly string SettingsPath =
-        Path.Combine(AppContext.BaseDirectory, "TrueToneCap.settings.json");
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "TrueToneCap", "TrueToneCap.settings.json");
 
     // ═══ AOT 兼容：使用源生成器上下文，避免运行时反射 ═══
     private static readonly AppJsonContext s_jsonContext = AppJsonContext.Default;

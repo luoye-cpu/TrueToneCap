@@ -17,14 +17,24 @@ public sealed class DisplayInfo
     public int Width { get; init; }
     public int Height { get; init; }
     public bool IsPrimary { get; init; }
+
+    /// <summary>当前 HDR 是否处于启用状态（DWM 色彩空间为 PQ/HLG）。</summary>
     public bool IsHdr { get; init; }
+
+    /// <summary>显示器硬件是否支持 HDR（即使当前未启用）。
+    /// 通过 BitsPerColor >= 10 且 MaxLuminance > 200 nits 判断。</summary>
+    public bool SupportsHdr { get; init; }
+
     public int BitsPerColor { get; init; } = 8; // 8 (SDR) / 10 (HDR)
     public ColorSpaceType ColorSpace { get; init; }
     public Format SupportedFormat { get; init; }
     public string AdapterName { get; init; } = "";
 
+    /// <summary>显示器峰值亮度（nits）。HDR 显示器通常 > 400 nits。</summary>
+    public float MaxLuminance { get; init; }
+
     public override string ToString() =>
-        $"[{Index}] {Name} ({Width}x{Height}) {(IsHdr ? "HDR" : "SDR")} {(IsPrimary ? "(主)" : "")}";
+        $"[{Index}] {Name} ({Width}x{Height}) {(IsHdr ? "HDR" : (SupportsHdr ? "HDR Capable" : "SDR"))} {(IsPrimary ? "(主)" : "")}";
 }
 
 /// <summary>显示器枚举器。通过 DXGI 枚举所有活动显示器。</summary>
@@ -120,9 +130,18 @@ public static partial class DisplayEnumerator
                         var output6 = output.QueryInterface<IDXGIOutput6>();
                         var desc1 = output6.Description1;
 
-                        // 判断 HDR: DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 = 12
+                        // 判断 HDR 当前是否启用: DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 = 12
                         var cs = desc1.ColorSpace;
                         bool isHdr = (int)cs == 12 || (int)cs == 9; // HDR10/ST.2084 or HLG
+
+                        // 判断显示器硬件是否支持 HDR（即使当前 HDR 未开启）:
+                        // 标准: BitsPerColor >= 10 且 MaxLuminance > 200 nits
+                        // DXGI_OUTPUT_DESC1.MaxLuminance 单位是 nits，HDR 显示器通常 > 400
+                        bool supportsHdr = desc1.BitsPerColor >= 10 && desc1.MaxLuminance > 200f;
+
+                        // 如果 ColorSpace 本身就是 PQ/HLG，那肯定支持 HDR
+                        if (isHdr) supportsHdr = true;
+
                         Format fmt = Format.B8G8R8A8_UNorm;
 
                         // 尝试 Float16 检测
@@ -143,10 +162,12 @@ public static partial class DisplayEnumerator
                             Height = desc.DesktopCoordinates.Bottom - desc.DesktopCoordinates.Top,
                             IsPrimary = IsMonitorPrimary(desc.Monitor),
                             IsHdr = isHdr,
+                            SupportsHdr = supportsHdr,
                             BitsPerColor = (int)desc1.BitsPerColor,
                             ColorSpace = cs,
                             SupportedFormat = fmt,
-                            AdapterName = adapterDesc.Description
+                            AdapterName = adapterDesc.Description,
+                            MaxLuminance = desc1.MaxLuminance
                         });
                     }
                     finally { output.Dispose(); }

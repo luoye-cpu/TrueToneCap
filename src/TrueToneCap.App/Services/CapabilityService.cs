@@ -12,15 +12,20 @@ namespace TrueToneCap.App.Services;
 /// <summary>系统能力检测结果。</summary>
 public sealed record CapabilityResult
 {
+    /// <summary>当前 HDR 是否启用（DWM 色彩空间为 PQ/HLG）。</summary>
     public bool SystemHdr { get; init; }
+
+    /// <summary>显示器硬件是否支持 HDR（即使当前 HDR 未开启）。</summary>
+    public bool SupportsHdr { get; init; }
+
     public bool SystemAcm { get; init; }
     public bool CustomIcc { get; init; }
     public bool NvencAvailable { get; init; }
     public bool QsvAvailable { get; init; }
     public int DisplayBitDepth { get; init; } = 8;
 
-    /// <summary>ACM 开启时 ICC 烘焙仍可用（用户可能需要输出到显示器色域以外的目标）。</summary>
-    public bool IccBakeAvailable => CustomIcc;
+    /// <summary>ACM 或自定义 ICC 时 ICC 烘焙可用（用户可能需要输出到显示器色域以外的目标）。</summary>
+    public bool IccBakeAvailable => SupportsHdr || SystemAcm || CustomIcc;
 }
 
 /// <summary>系统能力检测服务（HDR / ACM / ICC / 硬件编码器）。</summary>
@@ -29,7 +34,7 @@ public sealed class CapabilityService
     /// <summary>一次性检测所有系统能力。</summary>
     public async Task<CapabilityResult> DetectAllAsync(CancellationToken ct = default)
     {
-        var (sysHdr, sysAcm) = DetectDisplayState();
+        var (sysHdr, sysAcm, supportsHdr) = DetectDisplayState();
 
         bool customIcc = false;
         try
@@ -49,11 +54,13 @@ public sealed class CapabilityService
 
         var displays = DisplayEnumerator.EnumerateDisplays();
         int bitDepth = displays.FirstOrDefault(d => d.IsHdr)?.BitsPerColor
+            ?? displays.FirstOrDefault(d => d.SupportsHdr)?.BitsPerColor
             ?? displays.FirstOrDefault()?.BitsPerColor ?? 8;
 
         return new CapabilityResult
         {
             SystemHdr = sysHdr,
+            SupportsHdr = supportsHdr,
             SystemAcm = sysAcm,
             CustomIcc = customIcc,
             NvencAvailable = nvenc,
@@ -62,15 +69,16 @@ public sealed class CapabilityService
         };
     }
 
-    /// <summary>检测系统显示状态：HDR 是否启用、ACM 是否启用。</summary>
-    public static (bool hdr, bool acm) DetectDisplayState()
+    /// <summary>检测系统显示状态：HDR 是否启用、ACM 是否启用、硬件是否支持 HDR。</summary>
+    public static (bool hdr, bool acm, bool supportsHdr) DetectDisplayState()
     {
-        bool hdr = false, acm = false;
+        bool hdr = false, acm = false, supportsHdr = false;
         try
         {
             var displays = DisplayEnumerator.EnumerateDisplays();
             hdr = displays.Any(d => d.IsHdr);
-            LogService.Info("Capability", $"显示器枚举: {displays.Count} 个, HDR={hdr}");
+            supportsHdr = displays.Any(d => d.SupportsHdr);
+            LogService.Info("Capability", $"显示器枚举: {displays.Count} 个, HDR当前启用={hdr}, HDR硬件支持={supportsHdr}");
 
             // ACM 检测策略 (Windows 11 22H2+):
             // 1. 检查 HKLM ICM 全局开关
@@ -130,7 +138,7 @@ public sealed class CapabilityService
         {
             LogService.Warn("Capability", $"显示状态检测异常: {ex.Message}");
         }
-        return (hdr, acm);
+        return (hdr, acm, supportsHdr);
     }
 
     /// <summary>检测当前显示器是否使用自定义 ICC 配置文件。</summary>
@@ -158,9 +166,10 @@ public sealed class CapabilityService
     }
 
     /// <summary>根据 HDR/ACM/ICC 状态决定最佳色彩空间默认值。</summary>
-    public static int DetectBestColorSpace(bool hdr, bool acm, bool customIcc)
+    public static int DetectBestColorSpace(bool hdr, bool supportsHdr, bool acm, bool customIcc)
     {
-        if (hdr) return 5;       // HDR → BT.2020
+        if (hdr) return 5;       // HDR 当前启用 → BT.2020
+        if (supportsHdr) return 5; // 硬件支持 HDR（即使未启用）→ 也默认 BT.2020
         if (acm) return 0;       // ACM → 跟随系统
         if (customIcc) return 0; // 自定义 ICC → 跟随系统
         return 0;

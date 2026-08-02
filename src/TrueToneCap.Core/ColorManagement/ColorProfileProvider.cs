@@ -717,6 +717,30 @@ public static partial class ColorProfileProvider
         _ => "sRGB"
     };
 
+    /// <summary>
+    /// 解析色彩空间标签：当用户选择 "System"（跟随系统）时，
+    /// 根据当前 HDR 状态自动解析为实际色域。
+    /// </summary>
+    /// <param name="tag">用户选择的色彩空间标签。</param>
+    /// <param name="hdrOutput">是否启用 HDR 输出。</param>
+    /// <returns>解析后的实际色彩空间标签。</returns>
+    /// <remarks>
+    /// 解析规则:
+    /// - HDR 开启 → "BT2020"（HDR10 标准色域）
+    /// - HDR 关闭 → "sRGB"（WGC SDR 会话始终输出 DWM 色调映射后的 sRGB 数据）
+    /// </remarks>
+    public static string ResolveColorSpaceTag(string tag, bool hdrOutput)
+    {
+        if (tag != "System") return tag;
+
+        if (hdrOutput)
+            return "BT2020"; // HDR10/PQ 标准色域
+
+        // HDR 关闭时 WGC SDR 会话输出 DWM 色调映射后的 sRGB
+        // 即使显示器硬件支持广色域，SDR 模式下 WGC 也只返回 sRGB 数据
+        return "sRGB";
+    }
+
     /// <summary>使用 Magick.NET 将 BGRA 像素通过 ICC 配置文件烘焙为 sRGB（便捷方法）。
     /// 烘焙后像素值已转换为 sRGB，不应再嵌入 ICC profile。</summary>
     public static byte[]? BakeIccToSrgb(byte[] bgra, int w, int h, byte[] iccProfile)
@@ -733,7 +757,7 @@ public static partial class ColorProfileProvider
         "DisplayP3" => "Display P3",
         "DCI_P3" => "DCI-P3",
         "AdobeRGB" => "Adobe RGB (1998)",
-        "BT2020" => "BT.2020",
+        "BT2020" => "BT.2020 (HDR)",
         _ => "sRGB"
     };
 
