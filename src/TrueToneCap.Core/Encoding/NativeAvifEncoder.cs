@@ -54,12 +54,22 @@ public static class NativeAvifEncoder
     public static void Encode(byte[] bgra, int w, int h, string path,
         int crf = 30, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null)
     {
-        Encode(bgra, w, h, path, crf, isHdr: false, chroma, bitDepth, iccProfile);
+        Encode(bgra, w, h, path, crf, isHdr: false, chroma, bitDepth, iccProfile, null);
     }
 
-    /// <summary>编码 BGRA 像素为 AVIF 文件，通过临时 PNG 文件（替代 Y4M，兼容性更佳）。</summary>
+    /// <summary>编码 BGRA 像素为 AVIF 文件，通过临时 PNG 文件。</summary>
     public static void Encode(byte[] bgra, int w, int h, string path,
-        int crf, bool isHdr, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null)
+        int crf, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null,
+        string? colorSpaceTag = null)
+    {
+        Encode(bgra, w, h, path, crf, isHdr: false, chroma, bitDepth, iccProfile, colorSpaceTag);
+    }
+
+    /// <summary>编码 BGRA 像素为 AVIF 文件，通过临时 PNG 文件（替代 Y4M，兼容性更佳）。
+    /// 支持动态 CICP 参数，根据 colorSpaceTag 和 isHdr 自动选择。</summary>
+    public static void Encode(byte[] bgra, int w, int h, string path,
+        int crf, bool isHdr, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null,
+        string? colorSpaceTag = null)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用 请将 avifenc.exe 放入 native/ 目录");
@@ -74,8 +84,8 @@ public static class NativeAvifEncoder
             var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
             int q = CrfToQuality(crf);
 
-            // 构建 CICP 参数：根据 isHdr 和色彩空间选择
-            string cicpArgs = isHdr ? "--cicp 9/16/0 --depth 10" : "--cicp 1/13/0";
+            // 构建 CICP 参数：根据 colorSpaceTag 和 isHdr 动态选择
+            string cicpArgs = BuildCicpArgs(isHdr, colorSpaceTag);
 
             // 色度采样参数
             string chromaArg = chroma switch
@@ -129,8 +139,23 @@ public static class NativeAvifEncoder
     private static int CrfToQuality(int crf) =>
         (int)Math.Clamp(100 - (crf * 100.0 / 63.0), 0, 100);
 
+    /// <summary>根据 isHdr 和 colorSpaceTag 构建 CICP 参数。</summary>
+    private static string BuildCicpArgs(bool isHdr, string? colorSpaceTag)
+    {
+        if (isHdr)
+        {
+            byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(colorSpaceTag ?? "BT2020");
+            return $"--cicp {primaries}/16/0 --depth 10";
+        }
+
+        // SDR: 根据 colorSpaceTag 选择原色
+        byte prim = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(colorSpaceTag ?? "sRGB");
+        return $"--cicp {prim}/13/0";
+    }
+
     /// <summary>直接从 PNG 文件编码为 AVIF，支持 CICP 参数。</summary>
-    public static void EncodeFile(string pngPath, string avifPath, int crf, byte[]? cicp = null)
+    public static void EncodeFile(string pngPath, string avifPath, int crf, byte[]? cicp = null,
+        string? colorSpaceTag = null)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
@@ -145,6 +170,11 @@ public static class NativeAvifEncoder
             cicpArgs = $"--cicp {cicp[0]}/{cicp[1]}/{cicp[2]}";
             if (cicp[1] == 16) // ST.2084 PQ → 10-bit
                 cicpArgs += " --depth 10";
+        }
+        else if (!string.IsNullOrEmpty(colorSpaceTag))
+        {
+            // 没有 CICP 字节数组但有 colorSpaceTag 时动态构建
+            cicpArgs = BuildCicpArgs(cicp?[1] == 16, colorSpaceTag);
         }
 
         var psi = new System.Diagnostics.ProcessStartInfo

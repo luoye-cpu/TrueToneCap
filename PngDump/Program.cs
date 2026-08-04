@@ -49,7 +49,7 @@ foreach (int bd in new[] { 10, 12, 16 })
     var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(pq16, 16, 16);
     byte[] cicp = [9, 16, 0, 1];
     var path = Path.Combine(outDir, $"hdr_{bd}bit.png");
-    ManagedPngEncoder.Encode16(bgra16, 16, 16, path, cicp, bd);
+    ManagedPngEncoder.Encode16(bgra16, 16, 16, path, cicp: cicp, bitDepth: bd);
     Console.WriteLine($"HDR {bd}-bit: {new FileInfo(path).Length} bytes");
 
     // 验证像素值精度: 检查低 6/4 位是否为 0

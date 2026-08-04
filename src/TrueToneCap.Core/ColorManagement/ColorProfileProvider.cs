@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 
 namespace TrueToneCap.Core.ColorManagement;
 
@@ -718,26 +719,184 @@ public static partial class ColorProfileProvider
     };
 
     /// <summary>
+    /// 从显示器 EDID 读取原生色度坐标，判断显示器原生色域。
+    /// 优先读取注册表中的 EDID 数据（硬件真实原色，不受 ACM 影响），
+    /// 回退到从 ICC profile 提取矩阵。
+    /// </summary>
+    /// <param name="monitorHandle">显示器 HMONITOR 句柄。</param>
+    /// <returns>色域标签: "sRGB" / "DisplayP3" / "AdobeRGB" / "BT2020"。</returns>
+    public static string GetDisplayNativeGamutTag(nint monitorHandle)
+    {
+        try
+        {
+            // 策略1: 从注册表读取 EDID 硬件原色（不受 ACM 影响）
+            var edid = ReadEdidFromRegistry(monitorHandle);
+            if (edid is not null && edid.Length >= 128)
+            {
+                var (rx, ry, gx, gy) = ParseEdidChromaticity(edid);
+                if (rx > 0 || gx > 0) // 有效数据
+                {
+                    var result = ClassifyGamutByChromaticity(rx, ry, gx, gy);
+                    System.Diagnostics.Debug.WriteLine($"[ICC] EDID 原生色域: R({rx:F4},{ry:F4}) G({gx:F4},{gy:F4}) -> {result}");
+                    return result;
+                }
+            }
+
+            // 策略2: 从 ICC profile 提取矩阵（备用，ACM 下可能被修改）
+            var icc = GetDisplayIccProfile(monitorHandle);
+            if (icc is not null && icc.Length >= 500)
+            {
+                var matrix = ExtractRgbToXyzMatrix(icc);
+                if (matrix is not null)
+                {
+                    float rX = matrix[0];
+                    float gX = matrix[1];
+                    var result = ClassifyGamutByXyzMatrix(rX, gX);
+                    System.Diagnostics.Debug.WriteLine($"[ICC] ICC 矩阵色域: rX={rX:F4} gX={gX:F4} -> {result}");
+                    return result;
+                }
+            }
+
+            return "sRGB";
+        }
+        catch
+        {
+            return "sRGB";
+        }
+    }
+
+    /// <summary>从注册表读取显示器 EDID 数据。</summary>
+    private static byte[]? ReadEdidFromRegistry(nint monitorHandle)
+    {
+        try
+        {
+            // 遍历注册表 DISPLAY 键，查找匹配的显示器
+            using var displayKey = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Enum\DISPLAY");
+            if (displayKey is null) return null;
+
+            foreach (var subKeyName in displayKey.GetSubKeyNames())
+            {
+                using var subKey = displayKey.OpenSubKey(subKeyName);
+                if (subKey is null) continue;
+
+                foreach (var instanceName in subKey.GetSubKeyNames())
+                {
+                    using var instanceKey = subKey.OpenSubKey(instanceName);
+                    if (instanceKey is null) continue;
+
+                    using var devParams = instanceKey.OpenSubKey("Device Parameters");
+                    if (devParams is null) continue;
+
+                    var edidRaw = devParams.GetValue("EDID");
+                    if (edidRaw is byte[] edidBytes && edidBytes.Length >= 128)
+                    {
+                        // 验证 EDID header: 00 FF FF FF FF FF FF 00
+                        if (edidBytes[0] == 0x00 && edidBytes[1] == 0xFF &&
+                            edidBytes[2] == 0xFF && edidBytes[3] == 0xFF &&
+                            edidBytes[4] == 0xFF && edidBytes[5] == 0xFF &&
+                            edidBytes[6] == 0xFF && edidBytes[7] == 0x00)
+                        {
+                            return edidBytes;
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>解析 EDID 1.x 色度数据 (block 0, bytes 0x19-0x26)。</summary>
+    private static (float rx, float ry, float gx, float gy) ParseEdidChromaticity(byte[] edid)
+    {
+        // EDID 1.3/1.4 规范:
+        // byte 0x19: bits 1-0 = Rx LSB, bits 3-2 = Ry LSB, bits 5-4 = Gx LSB, bits 7-6 = Gy LSB
+        // byte 0x1A: bits 1-0 = Bx LSB, bits 3-2 = By LSB, bits 5-4 = Wx LSB, bits 7-6 = Wy LSB
+        // 0x1B: Rx MSB (8-bit), 0x1C: Ry MSB, 0x1D: Gx MSB, 0x1E: Gy MSB
+        // 最终值: (MSB << 2) | LSB, 除以 1024
+
+        uint b19 = edid[0x19];
+
+        float rx = ((edid[0x1B] << 2) | (int)(b19 & 0x03)) / 1024.0f;
+        float ry = ((edid[0x1C] << 2) | (int)((b19 >> 2) & 0x03)) / 1024.0f;
+        float gx = ((edid[0x1D] << 2) | (int)((b19 >> 4) & 0x03)) / 1024.0f;
+        float gy = ((edid[0x1E] << 2) | (int)((b19 >> 6) & 0x03)) / 1024.0f;
+
+        return (rx, ry, gx, gy);
+    }
+
+    /// <summary>根据 EDID 色度坐标判断色域。</summary>
+    private static string ClassifyGamutByChromaticity(float rx, float ry, float gx, float gy)
+    {
+        // 标准色域原色:
+        // sRGB:      R(0.640, 0.330) G(0.300, 0.600)
+        // Display P3: R(0.680, 0.320) G(0.265, 0.690)
+        // AdobeRGB:  R(0.640, 0.330) G(0.210, 0.710)
+        // BT.2020:   R(0.708, 0.292) G(0.170, 0.797)
+
+        if (rx > 0.69f && gx < 0.20f) return "BT2020";
+        if (gx <= 0.22f && gy >= 0.70f) return "AdobeRGB";
+        if (rx > 0.66f && gx <= 0.28f) return "DisplayP3";
+        if (rx > 0.65f && gx <= 0.30f) return "DisplayP3";
+        return "sRGB";
+    }
+
+    /// <summary>根据 ICC XYZ 矩阵值判断色域（备用方案）。</summary>
+    private static string ClassifyGamutByXyzMatrix(float rX, float gX)
+    {
+        if (gX < 0.18f) return "AdobeRGB";
+        if (rX > 0.58f) return "BT2020";
+        if (rX > 0.47f) return "DisplayP3";
+        return "sRGB";
+    }
+
+    /// <summary>
     /// 解析色彩空间标签：当用户选择 "System"（跟随系统）时，
-    /// 根据当前 HDR 状态自动解析为实际色域。
+    /// 根据 HDR 状态和 ACM 状态自动解析为实际色域。
     /// </summary>
     /// <param name="tag">用户选择的色彩空间标签。</param>
     /// <param name="hdrOutput">是否启用 HDR 输出。</param>
+    /// <param name="acmEnabled">系统 ACM 是否启用。</param>
+    /// <param name="monitorHandle">可选显示器 HMONITOR，用于 ACM 下检测原生色域。</param>
     /// <returns>解析后的实际色彩空间标签。</returns>
     /// <remarks>
     /// 解析规则:
-    /// - HDR 开启 → "BT2020"（HDR10 标准色域）
-    /// - HDR 关闭 → "sRGB"（WGC SDR 会话始终输出 DWM 色调映射后的 sRGB 数据）
+    /// - HDR 开启 + "System" → "BT2020"（HDR10 标准容器色域）
+    /// - HDR 开启 + 显式色域 → 保留用户选择（如 P3/AdobeRGB），通过 3×3 矩阵转换到目标色域线性空间
+    /// - HDR 开启 + sRGB → 保留（色调映射到 SDR 输出）
+    /// - ACM 启用 + 广色域显示器 → 显示器原生色域 (DisplayP3/BT2020/AdobeRGB)
+    /// - 其他 → "sRGB"（WGC SDR 会话输出 DWM 色调映射后的 sRGB 数据）
     /// </remarks>
-    public static string ResolveColorSpaceTag(string tag, bool hdrOutput)
+    public static string ResolveColorSpaceTag(string tag, bool hdrOutput, bool acmEnabled = false, nint? monitorHandle = null)
     {
+        if (hdrOutput)
+        {
+            // HDR 开启时"System"解析为 BT.2020（HDR10 标准容器色域）
+            if (tag == "System")
+                return "BT2020";
+
+            // 用户显式选择的色域、sRGB 均保留
+            return tag;
+        }
+
+        // ── SDR 模式 ──
         if (tag != "System") return tag;
 
-        if (hdrOutput)
-            return "BT2020"; // HDR10/PQ 标准色域
+        // ACM 启用 → 尝试检测显示器原生色域（可能是广色域）
+        if (acmEnabled && monitorHandle.HasValue)
+        {
+            var nativeGamut = GetDisplayNativeGamutTag(monitorHandle.Value);
+            if (nativeGamut is not "sRGB")
+                return nativeGamut;
+        }
 
         // HDR 关闭时 WGC SDR 会话输出 DWM 色调映射后的 sRGB
-        // 即使显示器硬件支持广色域，SDR 模式下 WGC 也只返回 sRGB 数据
+        // 即使显示器硬件支持广色域，无 ACM 时 SDR 模式下 WGC 也只返回 sRGB 数据
         return "sRGB";
     }
 
@@ -811,6 +970,27 @@ public static class ColorSpaceConverter
         { 0.000000f, 0.041169f, 0.958831f }
     };
 
+    /// <summary>scRGB (BT.709) → ACES AP1 (ACEScg) 线性转换矩阵。</summary>
+    /// <remarks>
+    /// 来源: ACES 1.0.3 规范 (SMPTE ST 2065-1:2012)
+    /// 链: BT.709 linear → XYZ(D65) → XYZ(D60) → AP1(ACEScg)
+    /// BT.709 和 sRGB 使用相同原色，因此矩阵相同。
+    /// </remarks>
+    public static readonly float[,] SrgbToAcesAp1 = new float[3, 3]
+    {
+        { 0.613132f, 0.339538f, 0.047416f },
+        { 0.070124f, 0.916324f, 0.013452f },
+        { 0.020445f, 0.109548f, 0.870006f }
+    };
+
+    /// <summary>ACES AP1 → scRGB (BT.709) 线性转换矩阵（SrgbToAcesAp1 的逆）。</summary>
+    public static readonly float[,] AcesAp1ToSrgb = new float[3, 3]
+    {
+        { 1.704579f, -0.625505f, -0.078038f },
+        { -0.129701f,  1.139240f, -0.009570f },
+        { -0.019717f, -0.128087f,  1.147935f }
+    };
+
     /// <summary>根据色彩空间标签获取 scRGB→目标色域 3×3 矩阵。</summary>
     public static float[,]? GetMatrix(string colorSpaceTag) => colorSpaceTag switch
     {
@@ -841,6 +1021,8 @@ public static class ColorSpaceConverter
     /// 将 scRGB Float16 线性浮点像素转换到目标色域线性空间并做色调映射到 SDR BGRA8。
     /// 用于 HDR 关闭 + 广色域目标场景：
     ///   WGC Float16 包含完整广色域数据 → 色域矩阵转换 → 色调映射 → sRGB gamma → BGRA8
+    /// 注意: ACES 色调映射模式内部已包含 scRGB→AP1→ACES→sRGB 完整管线，
+    /// 输出始终为 sRGB 色域，无需额外色域转换。
     /// </summary>
     /// <param name="hdrPixels">scRGB 线性 RGBA 浮点像素 (WGC Float16 会话)。</param>
     /// <param name="w">宽度。</param>
@@ -851,12 +1033,24 @@ public static class ColorSpaceConverter
     public static byte[] ConvertFloat16ToSdrBgra(float[] hdrPixels, int w, int h,
         string? colorSpaceTag, Processing.ToneMappingParams toneParams)
     {
+        // ACES 模式：FloatToSRgbBytes 融合内核内部已处理 scRGB→AP1→ACES→sRGB 完整管线
+        // 输出始终为 sRGB 色域。如果目标不是 sRGB，需要做 sRGB→目标色域后处理
+        if (toneParams.Mode == Processing.ToneMapMode.Aces)
+        {
+            var srgb = Processing.ToneMapper.FloatToSRgbBytes(hdrPixels, w, h, toneParams);
+            if (colorSpaceTag is not null and not "sRGB")
+                return ApplySrgbToTargetGamut(srgb, w, h, colorSpaceTag);
+            return srgb;
+        }
+
+        // 非 ACES 模式 (Reinhard/Hable)：先做色域转换，再做色调映射
         // 1. 色域转换：scRGB (BT.709) → 目标色域线性
         var matrix = GetMatrix(colorSpaceTag ?? "sRGB");
         var converted = ConvertScrgbToTarget(hdrPixels, w, h, matrix);
 
         // 2. 复用 ToneMapper 融合内核：色调映射 + gamma + swizzle → BGRA8
-        return Processing.ToneMapper.FloatToSRgbBytes(converted, w, h, toneParams);
+        // 传递 colorSpaceTag 以使用正确的动态亮度权重
+        return Processing.ToneMapper.FloatToSRgbBytes(converted, w, h, toneParams, colorSpaceTag);
     }
 
     /// <summary>将 scRGB 线性浮点像素转换到目标色域线性空间。</summary>
@@ -915,6 +1109,58 @@ public static class ColorSpaceConverter
                 : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
         }
         return pixels;
+    }
+
+    // ── sRGB gamma 解码/编码标量（用于字节级转换） ──
+
+    /// <summary>sRGB gamma 解码: byte [0,1] → linear [0,1]</summary>
+    private static float SrgbToLinear(float v) =>
+        v <= 0.04045f ? v / 12.92f : MathF.Pow((v + 0.055f) / 1.055f, 2.4f);
+
+    /// <summary>sRGB gamma 编码: linear [0,1] → [0,1]</summary>
+    private static float LinearToSrgb(float v)
+    {
+        v = Math.Clamp(v, 0f, 1f);
+        return v <= 0.0031308f ? 12.92f * v : 1.055f * MathF.Pow(v, 1f / 2.4f) - 0.055f;
+    }
+
+    /// <summary>
+    /// 将 sRGB 线性 byte BGRA8 像素转换到目标色域。
+    /// 用于 ACES 色调映射后：ACES 输出在 sRGB 色域，
+    /// 但用户选择 P3/BT.2020 目标时，需要将像素值转换到目标色域。
+    /// 流程: byte BGRA8 → 去 sRGB gamma → 3×3 矩阵 → 目标 gamma → byte BGRA8
+    /// </summary>
+    public static byte[] ApplySrgbToTargetGamut(byte[] bgra, int w, int h, string colorSpaceTag)
+    {
+        var matrix = GetMatrix(colorSpaceTag);
+        if (matrix is null) return bgra; // sRGB 目标无需转换
+
+        int pixelCount = w * h;
+        float m00 = matrix[0, 0], m01 = matrix[0, 1], m02 = matrix[0, 2];
+        float m10 = matrix[1, 0], m11 = matrix[1, 1], m12 = matrix[1, 2];
+        float m20 = matrix[2, 0], m21 = matrix[2, 1], m22 = matrix[2, 2];
+
+        var result = new byte[bgra.Length];
+        System.Threading.Tasks.Parallel.For(0, pixelCount, i =>
+        {
+            int idx = i * 4;
+            // BGRA → linear (去 sRGB gamma)
+            float bLin = SrgbToLinear(bgra[idx] / 255f);
+            float gLin = SrgbToLinear(bgra[idx + 1] / 255f);
+            float rLin = SrgbToLinear(bgra[idx + 2] / 255f);
+
+            // 矩阵转换 (sRGB linear → 目标色域 linear)
+            float rOut = rLin * m00 + gLin * m01 + bLin * m02;
+            float gOut = rLin * m10 + gLin * m11 + bLin * m12;
+            float bOut = rLin * m20 + gLin * m21 + bLin * m22;
+
+            // 目标 gamma + 量化
+            result[idx]     = (byte)Math.Clamp((int)(LinearToSrgb(bOut) * 255f + 0.5f), 0, 255);
+            result[idx + 1] = (byte)Math.Clamp((int)(LinearToSrgb(gOut) * 255f + 0.5f), 0, 255);
+            result[idx + 2] = (byte)Math.Clamp((int)(LinearToSrgb(rOut) * 255f + 0.5f), 0, 255);
+            result[idx + 3] = bgra[idx + 3];
+        });
+        return result;
     }
 
     /// <summary>线性 scRGB → Display P3。</summary>
