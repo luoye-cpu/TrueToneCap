@@ -61,7 +61,7 @@ public sealed class GpuToneMapper : IDisposable
             // 采样器
             var samplerDesc = new SamplerDescription
             {
-                Filter = Filter.MinMagMipLinear,
+                Filter = Filter.MinMagMipPoint,
                 AddressU = TextureAddressMode.Clamp,
                 AddressV = TextureAddressMode.Clamp,
                 AddressW = TextureAddressMode.Clamp,
@@ -299,6 +299,7 @@ public sealed class GpuToneMapper : IDisposable
 
         // ═══ 读回结果 ═══
         ctx.CopyResource(_pooledStagingTex!, _pooledOutputTex!);
+        ctx.Flush();
 
         var mappedOut = ctx.Map(_pooledStagingTex!, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         var result = new byte[width * height * 4];

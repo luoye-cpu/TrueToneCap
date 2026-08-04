@@ -17,7 +17,7 @@ public static class NativeLibraryResolver
     private static volatile bool _initialized;
 
     /// <summary>需要提取的原生可执行文件清单。</summary>
-    private static readonly string[] EmbeddedExeNames = ["avifenc.exe", "cwebp.exe", "cjpegli.exe"];
+    private static readonly string[] EmbeddedExeNames = ["avifenc.exe", "cwebp.exe", "cjpegli.exe", "cjxl.exe"];
 
     static NativeLibraryResolver()
     {
@@ -66,6 +66,8 @@ public static class NativeLibraryResolver
                             srcPath = Path.Combine(AppContext.BaseDirectory, "Resources", exeName);
                         if (!File.Exists(srcPath))
                             srcPath = Path.Combine(AppContext.BaseDirectory, "data", "Tools", exeName);
+                        if (!File.Exists(srcPath))
+                            srcPath = Path.Combine(AppContext.BaseDirectory, "PLAN", "tools", exeName);
 
                         if (File.Exists(srcPath))
                         {
@@ -115,7 +117,7 @@ public static class NativeLibraryResolver
         string path = Path.Combine(NativeDir, exeName);
         if (!File.Exists(path))
             throw new DllNotFoundException(
-                $"[NativeResolver] {exeName} 未找到 (期望路径: {path})。请确保文件已正确嵌入 Resources/ 目录。");
+                $"[NativeResolver] {exeName} 未找到 (期望路径: {path})。请确保文件已嵌入 Resources/ 目录或位于 PLAN/tools/ 目录。");
         return path;
     }
 

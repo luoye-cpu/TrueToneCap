@@ -70,6 +70,14 @@ public static class ColorPipelineTests
         GamutMap_SrgbToP3_Identity();
         GamutMap_HdrToSdr_OutputRange();
 
+        // ─── 8. 色域转换矩阵精度验证 ───
+        Console.WriteLine("\n── 8. 色域转换矩阵精度 ──");
+        ColorMatrix_ScrgbToP3_Accuracy();
+        ColorMatrix_ScrgbToBt2020_Accuracy();
+        ColorMatrix_ScrgbToAdobeRgb_Accuracy();
+        ColorMatrix_SrgbToAcesAp1_Roundtrip();
+        ColorMatrix_ApplySrgbToTargetGamut();
+
         sw.Stop();
         Console.WriteLine($"\n══════════════════════════════════════════════");
         Console.WriteLine($"  完成: {_passed} 通过, {_failed} 失败, {sw.ElapsedMilliseconds}ms");
@@ -483,6 +491,133 @@ public static class ColorPipelineTests
             bool inRange = bytes.All(b => b >= 0 && b <= 255);
             Assert($"GamutMap.HdrToSRgb: {mode} 输出在 [0,255]", inRange);
         }
+    }
+
+    // ═══════════════════════════════════════════════
+    //  8. 色域转换矩阵精度验证
+    // ═══════════════════════════════════════════════
+
+    static void ColorMatrix_ScrgbToP3_Accuracy()
+    {
+        // 验证 SrgbToDisplayP3 矩阵: P3 原色在 scRGB 中 → 矩阵 → 应回 P3 原色
+        // P3 红在 scRGB (BT.709 原色) 中的精确坐标:
+        // 由 SrgbToDisplayP3 的逆矩阵算出: [1.0, 0, 0]^T × inv(SrgbToDisplayP3)
+        // 简化验证: 检查矩阵的行和 ≈ 1.0
+        float[] rowSums = {
+            ColorSpaceConverter.SrgbToDisplayP3[0,0] + ColorSpaceConverter.SrgbToDisplayP3[0,1] + ColorSpaceConverter.SrgbToDisplayP3[0,2],
+            ColorSpaceConverter.SrgbToDisplayP3[1,0] + ColorSpaceConverter.SrgbToDisplayP3[1,1] + ColorSpaceConverter.SrgbToDisplayP3[1,2],
+            ColorSpaceConverter.SrgbToDisplayP3[2,0] + ColorSpaceConverter.SrgbToDisplayP3[2,1] + ColorSpaceConverter.SrgbToDisplayP3[2,2],
+        };
+        bool allRowSumClose = true;
+        for (int i = 0; i < 3; i++)
+            if (MathF.Abs(rowSums[i] - 1.0f) > 0.001f) allRowSumClose = false;
+        Assert("SrgbToP3: 所有行和 ≈ 1.0", allRowSumClose);
+
+        // 验证 BT.709 纯色在 [0,1] 范围内转换后无负值
+        var bgra = new byte[16 * 16 * 4];
+        float minVal = float.MaxValue;
+        float maxVal = float.MinValue;
+        // 遍历 [0,1]^3 采样点
+        for (int ri = 0; ri <= 4; ri++)
+        for (int gi = 0; gi <= 4; gi++)
+        for (int bi = 0; bi <= 4; bi++)
+        {
+            float r = ri / 4f, g = gi / 4f, b = bi / 4f;
+            float rr = r * ColorSpaceConverter.SrgbToDisplayP3[0,0] + g * ColorSpaceConverter.SrgbToDisplayP3[0,1] + b * ColorSpaceConverter.SrgbToDisplayP3[0,2];
+            float gg = r * ColorSpaceConverter.SrgbToDisplayP3[1,0] + g * ColorSpaceConverter.SrgbToDisplayP3[1,1] + b * ColorSpaceConverter.SrgbToDisplayP3[1,2];
+            float bb = r * ColorSpaceConverter.SrgbToDisplayP3[2,0] + g * ColorSpaceConverter.SrgbToDisplayP3[2,1] + b * ColorSpaceConverter.SrgbToDisplayP3[2,2];
+            minVal = MathF.Min(MathF.Min(MathF.Min(minVal, rr), gg), bb);
+            maxVal = MathF.Max(MathF.Max(MathF.Max(maxVal, rr), gg), bb);
+        }
+        Assert("SrgbToP3: BT.709 [0,1]^3 转换后无负值", minVal >= -0.001f);
+        Assert("SrgbToP3: BT.709 [0,1]^3 转换后 ≤ 1.0", maxVal <= 1.001f);
+    }
+
+    static void ColorMatrix_ScrgbToBt2020_Accuracy()
+    {
+        float[] rowSums = {
+            ColorSpaceConverter.SrgbToBt2020[0,0] + ColorSpaceConverter.SrgbToBt2020[0,1] + ColorSpaceConverter.SrgbToBt2020[0,2],
+            ColorSpaceConverter.SrgbToBt2020[1,0] + ColorSpaceConverter.SrgbToBt2020[1,1] + ColorSpaceConverter.SrgbToBt2020[1,2],
+            ColorSpaceConverter.SrgbToBt2020[2,0] + ColorSpaceConverter.SrgbToBt2020[2,1] + ColorSpaceConverter.SrgbToBt2020[2,2],
+        };
+        bool allRowSumClose = true;
+        for (int i = 0; i < 3; i++)
+            if (MathF.Abs(rowSums[i] - 1.0f) > 0.001f) allRowSumClose = false;
+        Assert("SrgbToBT2020: 所有行和 ≈ 1.0", allRowSumClose);
+
+        // BT.709 [0,1]^3 应映射到 BT.2020 范围内
+        float minVal = float.MaxValue;
+        for (int ri = 0; ri <= 4; ri++)
+        for (int gi = 0; gi <= 4; gi++)
+        for (int bi = 0; bi <= 4; bi++)
+        {
+            float r = ri / 4f, g = gi / 4f, b = bi / 4f;
+            float rr = r * ColorSpaceConverter.SrgbToBt2020[0,0] + g * ColorSpaceConverter.SrgbToBt2020[0,1] + b * ColorSpaceConverter.SrgbToBt2020[0,2];
+            float gg = r * ColorSpaceConverter.SrgbToBt2020[1,0] + g * ColorSpaceConverter.SrgbToBt2020[1,1] + b * ColorSpaceConverter.SrgbToBt2020[1,2];
+            float bb = r * ColorSpaceConverter.SrgbToBt2020[2,0] + g * ColorSpaceConverter.SrgbToBt2020[2,1] + b * ColorSpaceConverter.SrgbToBt2020[2,2];
+            minVal = MathF.Min(MathF.Min(MathF.Min(minVal, rr), gg), bb);
+        }
+        Assert("SrgbToBT2020: BT.709 [0,1]^3 无负值", minVal >= -0.001f);
+    }
+
+    static void ColorMatrix_ScrgbToAdobeRgb_Accuracy()
+    {
+        float[] rowSums = {
+            ColorSpaceConverter.SrgbToAdobeRgb[0,0] + ColorSpaceConverter.SrgbToAdobeRgb[0,1] + ColorSpaceConverter.SrgbToAdobeRgb[0,2],
+            ColorSpaceConverter.SrgbToAdobeRgb[1,0] + ColorSpaceConverter.SrgbToAdobeRgb[1,1] + ColorSpaceConverter.SrgbToAdobeRgb[1,2],
+            ColorSpaceConverter.SrgbToAdobeRgb[2,0] + ColorSpaceConverter.SrgbToAdobeRgb[2,1] + ColorSpaceConverter.SrgbToAdobeRgb[2,2],
+        };
+        bool allRowSumClose = true;
+        for (int i = 0; i < 3; i++)
+            if (MathF.Abs(rowSums[i] - 1.0f) > 0.001f) allRowSumClose = false;
+        Assert("SrgbToAdobeRGB: 所有行和 ≈ 1.0", allRowSumClose);
+    }
+
+    static void ColorMatrix_SrgbToAcesAp1_Roundtrip()
+    {
+        // 验证 SrgbToAcesAp1 和 AcesAp1ToSrgb 互为逆矩阵
+        // 测试几个关键值
+        var testColors = new (float r, float g, float b)[]
+        {
+            (1.0f, 0.0f, 0.0f),  // 红
+            (0.0f, 1.0f, 0.0f),  // 绿
+            (0.0f, 0.0f, 1.0f),  // 蓝
+            (0.5f, 0.5f, 0.5f),  // 灰
+            (1.0f, 1.0f, 1.0f),  // 白
+        };
+        bool allClose = true;
+        foreach (var (r, g, b) in testColors)
+        {
+            // 正向: sRGB → AP1
+            float ar = r * ColorSpaceConverter.SrgbToAcesAp1[0,0] + g * ColorSpaceConverter.SrgbToAcesAp1[0,1] + b * ColorSpaceConverter.SrgbToAcesAp1[0,2];
+            float ag = r * ColorSpaceConverter.SrgbToAcesAp1[1,0] + g * ColorSpaceConverter.SrgbToAcesAp1[1,1] + b * ColorSpaceConverter.SrgbToAcesAp1[1,2];
+            float ab = r * ColorSpaceConverter.SrgbToAcesAp1[2,0] + g * ColorSpaceConverter.SrgbToAcesAp1[2,1] + b * ColorSpaceConverter.SrgbToAcesAp1[2,2];
+            // 逆向: AP1 → sRGB
+            float rr = ar * ColorSpaceConverter.AcesAp1ToSrgb[0,0] + ag * ColorSpaceConverter.AcesAp1ToSrgb[0,1] + ab * ColorSpaceConverter.AcesAp1ToSrgb[0,2];
+            float gg = ar * ColorSpaceConverter.AcesAp1ToSrgb[1,0] + ag * ColorSpaceConverter.AcesAp1ToSrgb[1,1] + ab * ColorSpaceConverter.AcesAp1ToSrgb[1,2];
+            float bb = ar * ColorSpaceConverter.AcesAp1ToSrgb[2,0] + ag * ColorSpaceConverter.AcesAp1ToSrgb[2,1] + ab * ColorSpaceConverter.AcesAp1ToSrgb[2,2];
+            if (MathF.Abs(rr - r) > 0.01f || MathF.Abs(gg - g) > 0.01f || MathF.Abs(bb - b) > 0.01f)
+                allClose = false;
+        }
+        Assert("ACES AP1: 正向+逆向往返精度 < 0.01", allClose);
+    }
+
+    static void ColorMatrix_ApplySrgbToTargetGamut()
+    {
+        // 验证 ApplySrgbToTargetGamut: BGRA 纯红 → P3 后红通道保持高值
+        // BGRA 格式: [B, G, R, A, B, G, R, A]
+        // 像素0: 纯红 (B=0, G=0, R=255, A=255)
+        // 像素1: 纯黑 (B=0, G=0, R=0, A=255)
+        var bgra = new byte[] { 0, 0, 255, 255, 0, 0, 0, 255 };
+        var result = ColorSpaceConverter.ApplySrgbToTargetGamut(bgra, 2, 1, "DisplayP3");
+        Assert("ApplySrgbToTargetGamut: 输出长度正确", result.Length == 8);
+        // 像素0 (纯红) 在 P3 中 R 通道应保持高值
+        Assert("ApplySrgbToTargetGamut: 红通道保持高值", result[2] > 200);
+        // 像素1 (纯黑) 应为全黑
+        Assert("ApplySrgbToTargetGamut: 黑色保持", result[4] == 0 && result[5] == 0 && result[6] == 0);
+        // sRGB 目标 → 应返回原始数组引用
+        var sameRef = ColorSpaceConverter.ApplySrgbToTargetGamut(bgra, 2, 1, "sRGB");
+        Assert("ApplySrgbToTargetGamut: sRGB 目标返回原始引用", object.ReferenceEquals(sameRef, bgra));
     }
 
     // ═══════════════════════════════════════════════

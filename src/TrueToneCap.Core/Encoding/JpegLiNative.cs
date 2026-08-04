@@ -108,7 +108,10 @@ public static class JpegLiNative
         {
             WriteBgraToPpm(bgra, width, height, tmpPpm);
 
-            int distQ4 = (int)Math.Round(Math.Clamp(distance, 0.1f, 15f) * 4);
+            // 直接传递浮点 distance 值（无需 Q4 整数转换）
+            // cjpegli 的 --distance 接受浮点值，如 1.0, 0.5, 3.0
+            // 传整数 4 会被解释为 d4.000（极低质量），而非 d1.000（近无损）
+            string distArg = $"{distance:F4}";
             string chromaArg = chromaSubsampling switch
             {
                 "420" => "--chroma_subsampling 420",
@@ -127,7 +130,7 @@ public static class JpegLiNative
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {distQ4} {chromaArg} {iccArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"--distance {distArg} {chromaArg} {iccArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

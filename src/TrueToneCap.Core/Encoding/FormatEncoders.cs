@@ -22,7 +22,10 @@ public sealed class PngEncoder : ImageEncoder
             if (s.OutputBitDepth <= 8)
             {
                 // 用户选择 8-bit → 色调映射到 SDR，走 SDR 编码路径
+                // 注意: ToSdr 输出已为 sRGB 色域，必须覆盖 ColorSpaceTag
                 var d = FormatHelper.ToSdr(f, s);
+                s.ColorSpaceTag = "sRGB";
+                s.HdrOutput = false;
                 await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
             }
             else
@@ -38,8 +41,9 @@ public sealed class PngEncoder : ImageEncoder
                     var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
                     byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
                     byte[] cicp = [primaries, 16, 0, 1]; // PQ transfer=16
+                    byte[]? icc = s.IccProfile; // 同时嵌入 ICC（如有）
                     // IHDR 始终为 16-bit，sBIT 标记实际位深 (PNG 3.0 Table 12: color type 6 仅允许 8/16)
-                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, bitDepth: hdrBitDepth);
+                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, iccProfile: icc, bitDepth: hdrBitDepth);
                 }, ct);
             }
         }
@@ -76,7 +80,14 @@ public sealed class JpegLiEncoder : ImageEncoder
     public override (float, float, float, string) GetQualityRange() => (0.5f, 3.0f, 1.0f, "butteraugli 距离 (0.5-3.0)");
     public override string GetQualityDescription(float q) => $"距离: {q:F1} (越小越清晰)";
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
-    { var d = FormatHelper.ToSdr(f, s); await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct); }
+    {
+        // JPEG LI 不支持 HDR，始终降级到 SDR
+        // 色调映射后像素为 sRGB 色域，覆盖 ColorSpaceTag
+        var d = FormatHelper.ToSdr(f, s);
+        s.ColorSpaceTag = "sRGB";
+        s.HdrOutput = false;
+        await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
+    }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
         await Task.Run(() =>
@@ -85,7 +96,7 @@ public sealed class JpegLiEncoder : ImageEncoder
             var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
 
             if (!JpegLiNative.IsAvailable)
-                throw new InvalidOperationException("JPEG LI 编码需要 cjpegli.exe (Google jpegli)，请将 cjpegli.exe 放入 native/ 目录或系统 PATH。");
+                throw new InvalidOperationException("JPEG LI 编码需要 cjpegli.exe (Google jpegli)，请将 cjpegli.exe 放入 native/ 目录、PLAN/tools/ 目录或系统 PATH。");
 
             var jpegBytes = JpegLiNative.Encode(px, w, h, s.Quality, s.ChromaSubsampling, icc);
             File.WriteAllBytes(path, jpegBytes);
@@ -153,11 +164,12 @@ public sealed class AvifEncoder : ImageEncoder
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
                 byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
                 byte[] cicpHdr = [primaries, 16, 0, 1]; // PQ transfer
+                byte[]? iccHdr = s.IccProfile;
                 var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_avif_hdr_{Guid.NewGuid():N}.png");
                 try
                 {
-                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, tmpPng, cicp: cicpHdr);
-                    NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr);
+                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, tmpPng, cicp: cicpHdr, iccProfile: iccHdr);
+                    NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr, csTag);
                 }
                 finally { try { File.Delete(tmpPng); } catch { } }
             }, ct);
@@ -180,7 +192,14 @@ public sealed class WebPEncoder : ImageEncoder
     public override (float, float, float, string) GetQualityRange() => (50f, 100f, 92f, "质量 (50-100)");
     public override string GetQualityDescription(float q) => q >= 100 ? "无损" : $"{(int)q}%";
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
-    { var d = FormatHelper.ToSdr(f, s); await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct); }
+    {
+        // WebP 不支持 HDR，始终降级到 SDR
+        // 色调映射后像素为 sRGB 色域，覆盖 ColorSpaceTag
+        var d = FormatHelper.ToSdr(f, s);
+        s.ColorSpaceTag = "sRGB";
+        s.HdrOutput = false;
+        await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
+    }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
         await Task.Run(() =>
@@ -286,7 +305,7 @@ public sealed class LibAomAvifBackend : IAvifEncoder
         {
             ct.ThrowIfCancellationRequested();
             var icc = (colorSpaceTag is not (null or "System" or "sRGB")) ? iccProfile : null;
-            NativeAvifEncoder.Encode(bgra, w, h, path, crf, chroma, displayBitDepth, icc);
+            NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag);
         }, ct);
     }
 }
@@ -470,7 +489,7 @@ file static class AvifFallbackHelper
         try
         {
             var icc = (colorSpaceTag is not (null or "System" or "sRGB")) ? iccProfile : null;
-            NativeAvifEncoder.Encode(bgra, w, h, path, crf, chroma, displayBitDepth, icc);
+            NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag);
         }
         catch (Exception ex)
         {
@@ -494,12 +513,12 @@ file static class AvifFallbackHelper
 // ────── 辅助 ──────
 public static class FormatHelper
 {
-    public static byte[] ToSdr(HdrFrameData f, EncodingSettings s) => Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams);
+    public static byte[] ToSdr(HdrFrameData f, EncodingSettings s) => Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams, s.ColorSpaceTag);
 
     /// <summary>将 HDR 帧转换为 SDR BGRA8，写入预分配的目标缓冲区（避免额外分配）。</summary>
     public static void ToSdr(HdrFrameData f, EncodingSettings s, byte[] destination)
     {
-        var result = Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams);
+        var result = Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams, s.ColorSpaceTag);
         if (result.Length == destination.Length)
             Buffer.BlockCopy(result, 0, destination, 0, result.Length);
     }
@@ -510,14 +529,11 @@ public static class FormatHelper
         bool isSRgb = s.ColorSpaceTag is null or "System" or "sRGB";
         byte[]? icc = (!isSRgb && s.IccProfile is { Length: > 400 }) ? s.IccProfile : null;
 
-        // CICP: 有 ICC 时不写 cICP（互斥策略）
-        byte[]? cicp = null;
-        if (icc is null)
-        {
-            byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(s.ColorSpaceTag ?? "sRGB");
-            byte transfer = ColorManagement.ColorSpaceConverter.GetCicpTransfer(s.ColorSpaceTag ?? "sRGB", hdrOutput: false);
-            cicp = [primaries, transfer, 0, 1];
-        }
+        // 始终写入 cICP chunk（PNG 3.0 RFC 9327 推荐两者都写）
+        // cICP 优先于 iCCP，但两者都写可确保向现代和老旧解码器的兼容性
+        byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(s.ColorSpaceTag ?? "sRGB");
+        byte transfer = ColorManagement.ColorSpaceConverter.GetCicpTransfer(s.ColorSpaceTag ?? "sRGB", hdrOutput: false);
+        byte[] cicp = [primaries, transfer, 0, 1];
 
         return (icc, cicp);
     }

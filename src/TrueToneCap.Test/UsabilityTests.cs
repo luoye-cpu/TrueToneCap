@@ -123,7 +123,7 @@ public static class UsabilityTests
         Console.WriteLine("\n── 10. PNG 编码器专项 ──");
         Png_AllBitDepths();
         Png_16bit_Roundtrip();
-        Png_IccAndCicp_MutualExclusion();
+        Png_IccAndCicp_Coexistence();
         Png_StreamOutput();
 
         // ─── 11. ManagedBmpEncoder 专项测试 ───
@@ -1004,22 +1004,27 @@ public static class UsabilityTests
         Assert($"PNG 16-bit: {fi.Length}B", fi.Exists && fi.Length > 0);
     }
 
-    static void Png_IccAndCicp_MutualExclusion()
+    static void Png_IccAndCicp_Coexistence()
     {
         var bgra = new byte[8 * 8 * 4];
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 128; bgra[i + 1] = 128; bgra[i + 2] = 128; bgra[i + 3] = 255; }
 
-        // ICC 优先于 CICP: 有 ICC 时不应写 CICP
+        // PNG 3.0 RFC 9327: cICP 与 iCCP 可以共存，cICP 优先
+        // 验证两者都写时文件仍有效
         var icc = ColorProfileProvider.GetDefaultSRgbIcc();
         byte[] cicp = [1, 13, 0, 1];
 
-        string pathIcc = Path.Combine(OutDir, "png_icc_only.png");
-        ManagedPngEncoder.Encode(bgra, 8, 8, pathIcc, 8, icc, null); // ICC 有, CICP 无
-        Assert($"PNG ICC: {new FileInfo(pathIcc).Length}B", new FileInfo(pathIcc).Exists && new FileInfo(pathIcc).Length > 0);
+        string pathIccCicp = Path.Combine(OutDir, "png_icc_cicp.png");
+        ManagedPngEncoder.Encode(bgra, 8, 8, pathIccCicp, 8, icc, cicp); // ICC + CICP 共存
+        Assert($"PNG ICC+CICP: {new FileInfo(pathIccCicp).Length}B", new FileInfo(pathIccCicp).Exists && new FileInfo(pathIccCicp).Length > 0);
 
-        string pathCicp = Path.Combine(OutDir, "png_cicp_only.png");
-        ManagedPngEncoder.Encode(bgra, 8, 8, pathCicp, 8, null, cicp); // ICC 无, CICP 有
-        Assert($"PNG CICP: {new FileInfo(pathCicp).Length}B", new FileInfo(pathCicp).Exists && new FileInfo(pathCicp).Length > 0);
+        string pathIccOnly = Path.Combine(OutDir, "png_icc_only.png");
+        ManagedPngEncoder.Encode(bgra, 8, 8, pathIccOnly, 8, icc, null); // ICC 有, CICP 无
+        Assert($"PNG ICC: {new FileInfo(pathIccOnly).Length}B", new FileInfo(pathIccOnly).Exists && new FileInfo(pathIccOnly).Length > 0);
+
+        string pathCicpOnly = Path.Combine(OutDir, "png_cicp_only.png");
+        ManagedPngEncoder.Encode(bgra, 8, 8, pathCicpOnly, 8, null, cicp); // ICC 无, CICP 有
+        Assert($"PNG CICP: {new FileInfo(pathCicpOnly).Length}B", new FileInfo(pathCicpOnly).Exists && new FileInfo(pathCicpOnly).Length > 0);
     }
 
     static void Png_StreamOutput()
@@ -1327,12 +1332,12 @@ public static class UsabilityTests
 
     static void Pipeline_ColorSpace_WithIcc_NonSrgbTarget()
     {
-        // 非 sRGB 目标 + IccProfile 设置 → 应返回 ICC
+        // 非 sRGB 目标 + IccProfile 设置 → 应返回 ICC + CICP 两者
         var srgbIcc = ColorProfileProvider.GetDefaultSRgbIcc();
         var settings = new EncodingSettings { ColorSpaceTag = "DisplayP3", IccProfile = srgbIcc };
         var (icc, cicp) = FormatHelper.GetColorMetadata(settings);
-        bool ok = icc is { Length: > 128 } && cicp is null;
-        Assert("Pipeline: DisplayP3+ICC→返回ICC, 无CICP", ok);
+        bool ok = icc is { Length: > 128 } && cicp is { Length: 4 };
+        Assert("Pipeline: DisplayP3+ICC→返回ICC+CICP", ok);
     }
 
     // ═══════════════════════════════════════════════════════════════

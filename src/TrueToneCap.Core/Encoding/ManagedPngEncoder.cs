@@ -103,8 +103,9 @@ public static class ManagedPngEncoder
             WriteChunk(output, "sBIT"u8, sbit);
         }
 
-        // cICP / iCCP
-        if (cicp is { Length: 4 } && iccProfile is null)
+        // cICP / iCCP — 两者都写（PNG 3.0 RFC 9327 推荐）
+        // cICP 为现代解码器提供紧凑色彩描述，iCCP 为老旧解码器提供回退
+        if (cicp is { Length: 4 })
             WriteChunk(output, "cICP"u8, cicp);
         if (iccProfile is { Length: > 0 })
         {
@@ -125,14 +126,14 @@ public static class ManagedPngEncoder
     /// 输入: 每像素 8 字节 (B16 G16 R16 A16, big-endian)，由 Rgba16ToBgra16Bytes 生成。
     /// 支持 IHDR 10/12/16-bit depth（PNG 3.0）。
     /// </summary>
-    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, int bitDepth = 16)
+    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16)
     {
         using var fs = File.Create(path);
-        Encode16(bgra16, w, h, fs, cicp, bitDepth);
+        Encode16(bgra16, w, h, fs, cicp, iccProfile, bitDepth);
     }
 
     /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。</summary>
-    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, int bitDepth = 16)
+    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16)
     {
         // PNG 3.0 (ISO/IEC 15948:2023) Table 11: Color type 6 (RGBA) 只允许 8 和 16
         // 10/12-bit 源数据使用 16-bit 容器 + sBIT 标记实际有效位
@@ -164,6 +165,13 @@ public static class ManagedPngEncoder
         // cICP
         if (cicp is { Length: 4 })
             WriteChunk(output, "cICP"u8, cicp);
+
+        // iCCP（与 cICP 共存，RFC 9327 推荐）
+        if (iccProfile is { Length: > 0 })
+        {
+            var iccpData = BuildIccpChunk(iccProfile);
+            WriteChunk(output, "iCCP"u8, iccpData);
+        }
 
         // IDAT
         var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth);
