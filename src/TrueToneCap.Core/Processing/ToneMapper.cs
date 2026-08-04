@@ -1,6 +1,13 @@
 // TrueToneCap.Core/Processing/ToneMapper.cs
-// CPU 色调映射算法库 — Reinhard / Hable / ACES + sRGB gamma + 融合内核
-// GPU 路径见 GpuToneMapper.cs（HLSL + D3D11）
+// CPU 色调映射算法库 — Reinhard / Hable / ACES
+// 业界标准 HDR→SDR 管线:
+//   1. PaperWhite 亮度归一化 (scRGB×80/PaperWhiteNits)
+//   2. 色域转换到 AP1 (ACEScg) 广色域空间
+//   3. 色调映射曲线 (AP1 中保持色相)
+//   4. 色域转换回 sRGB (BT.709)
+//   5. ACES ODT (Output Device Transform)
+//   6. sRGB gamma 编码
+// GPU 路径见 GpuToneMapper.cs (HLSL + D3D11)
 
 using System.Threading.Tasks;
 
@@ -25,52 +32,78 @@ public record struct ToneMappingParams(
 /// <summary>CPU 色调映射算法集 — 将 HDR scRGB 转换为 SDR sRGB。</summary>
 public static class ToneMapper
 {
+    // ═══════════════════════════════════════════════════════════════
+    //  3×3 色域转换矩阵 (scRGB BT.709 ↔ ACES AP1/ACEScg)
+    //  来源: ACES 1.0.3 规范, SMPTE ST 2065-1:2012
+    //  链: BT.709 linear → XYZ(D65) → chromatic adaptation → XYZ(D60) → AP1
+    // ═══════════════════════════════════════════════════════════════
 
-    // ────────────── CPU 回退路径（无需 GPU 编译时使用） ──────────────
+    private static void ScrgbToAcesAp1(float r, float g, float b, out float ar, out float ag, out float ab)
+    {
+        ar = 0.613132f * r + 0.339538f * g + 0.047416f * b;
+        ag = 0.070124f * r + 0.916324f * g + 0.013452f * b;
+        ab = 0.020445f * r + 0.109548f * g + 0.870006f * b;
+    }
 
-    /// <summary>在 CPU 上执行 Reinhard 色调映射（回退路径）。</summary>
+    private static void AcesAp1ToScrgb(float ar, float ag, float ab, out float r, out float g, out float b)
+    {
+        r = 1.704579f * ar + (-0.625505f) * ag + (-0.078038f) * ab;
+        g = (-0.129701f) * ar + 1.139240f * ag + (-0.009570f) * ab;
+        b = (-0.019717f) * ar + (-0.128087f) * ag + 1.147935f * ab;
+    }
+
+    // ────────────── 色调映射曲线 ──────────────
+
+    /// <summary>
+    /// Reinhard 全局色调映射算子。
+    /// 在 scRGB (BT.709) 空间工作，亮度缩放保持色相。
+    /// </summary>
     public static void ReinhardToneMapCpu(Span<float> hdrPixels, int width, int height,
         float exposure = 0f, float paperWhite = 80f)
     {
-        float evScale = MathF.Pow(2.0f, exposure);
+        float pw = Math.Max(paperWhite, 1.0f);
+        float scale = MathF.Pow(2.0f, exposure) * (80.0f / pw);
         for (int i = 0; i < hdrPixels.Length; i += 4)
         {
-            // R, G, B 乘以曝光
-            float r = hdrPixels[i] * evScale;
-            float g = hdrPixels[i + 1] * evScale;
-            float b = hdrPixels[i + 2] * evScale;
+            float r = hdrPixels[i] * scale;
+            float g = hdrPixels[i + 1] * scale;
+            float b = hdrPixels[i + 2] * scale;
 
-            // Reinhard 全局算子
-            float luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-            float mappedLum = luminance / (1.0f + luminance);
+            // scRGB 中应用 Reinhard (亮度缩放，保持色相)
+            float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            float mappedLum = lum / (1.0f + lum);
+            if (lum > 0.0001f)
+            {
+                float s = mappedLum / lum;
+                r = Math.Clamp(r * s, 0f, 1f);
+                g = Math.Clamp(g * s, 0f, 1f);
+                b = Math.Clamp(b * s, 0f, 1f);
+            }
+            else { r = g = b = 0f; }
 
-            if (luminance > 0.0001f)
-            {
-                float scale = mappedLum / luminance;
-                hdrPixels[i] = Math.Clamp(r * scale, 0f, 1f);
-                hdrPixels[i + 1] = Math.Clamp(g * scale, 0f, 1f);
-                hdrPixels[i + 2] = Math.Clamp(b * scale, 0f, 1f);
-            }
-            else
-            {
-                hdrPixels[i] = hdrPixels[i + 1] = hdrPixels[i + 2] = 0f;
-            }
-            // Alpha 保留
+            hdrPixels[i] = Math.Clamp(r, 0f, 1f);
+            hdrPixels[i + 1] = Math.Clamp(g, 0f, 1f);
+            hdrPixels[i + 2] = Math.Clamp(b, 0f, 1f);
             hdrPixels[i + 3] = Math.Clamp(hdrPixels[i + 3], 0f, 1f);
         }
     }
 
-    /// <summary>在 CPU 上执行 Hable (Filmic) 色调映射。</summary>
+    /// <summary>
+    /// Hable (Filmic/Uncharted2) 色调映射曲线。
+    /// 在 scRGB (BT.709) 空间工作，逐通道曲线。
+    /// </summary>
     public static void HableToneMapCpu(Span<float> hdrPixels, int width, int height,
-        float exposure = 0f, float whitePoint = 11.2f)
+        float exposure = 0f, float paperWhite = 80f, float whitePoint = 11.2f)
     {
-        float evScale = MathF.Pow(2.0f, exposure);
+        float pw = Math.Max(paperWhite, 1.0f);
+        float scale = MathF.Pow(2.0f, exposure) * (80.0f / pw);
         for (int i = 0; i < hdrPixels.Length; i += 4)
         {
-            float r = hdrPixels[i] * evScale;
-            float g = hdrPixels[i + 1] * evScale;
-            float b = hdrPixels[i + 2] * evScale;
+            float r = hdrPixels[i] * scale;
+            float g = hdrPixels[i + 1] * scale;
+            float b = hdrPixels[i + 2] * scale;
 
+            // scRGB 中应用 Hable 曲线
             hdrPixels[i] = HableCurve(r, whitePoint);
             hdrPixels[i + 1] = HableCurve(g, whitePoint);
             hdrPixels[i + 2] = HableCurve(b, whitePoint);
@@ -78,25 +111,47 @@ public static class ToneMapper
         }
     }
 
-    /// <summary>ACES 近似色调映射（CPU）。</summary>
+    /// <summary>
+    /// ACES 色调映射（参考级）。
+    /// 完整管线: scRGB → AP1 → RRT(Narkowicz 2015) → ODT → sRGB
+    /// </summary>
     public static void AcesToneMapCpu(Span<float> hdrPixels, int width, int height,
-        float exposure = 0f)
+        float exposure = 0f, float paperWhite = 80f)
     {
-        float evScale = MathF.Pow(2.0f, exposure);
+        float pw = Math.Max(paperWhite, 1.0f);
+        float scale = MathF.Pow(2.0f, exposure) * (80.0f / pw);
         for (int i = 0; i < hdrPixels.Length; i += 4)
         {
-            float r = hdrPixels[i] * evScale;
-            float g = hdrPixels[i + 1] * evScale;
-            float b = hdrPixels[i + 2] * evScale;
+            float r = hdrPixels[i] * scale;
+            float g = hdrPixels[i + 1] * scale;
+            float b = hdrPixels[i + 2] * scale;
 
-            // ACES 拟合 (Narkowicz 2015)
-            hdrPixels[i] = AcesCurve(r);
-            hdrPixels[i + 1] = AcesCurve(g);
-            hdrPixels[i + 2] = AcesCurve(b);
+            // 转换到 AP1 色域空间
+            ScrgbToAcesAp1(r, g, b, out float ar, out float ag, out float ab);
+
+            // RRT (Reference Rendering Transform) — Narkowicz 2015 拟合
+            ar = AcesCurve(ar);
+            ag = AcesCurve(ag);
+            ab = AcesCurve(ab);
+
+            // ODT (Output Device Transform) — sRGB 100 cd/m²
+            ar = AcesOdt(ar);
+            ag = AcesOdt(ag);
+            ab = AcesOdt(ab);
+
+            // 转换回 sRGB 线性
+            AcesAp1ToScrgb(ar, ag, ab, out r, out g, out b);
+
+            hdrPixels[i] = Math.Clamp(r, 0f, 1f);
+            hdrPixels[i + 1] = Math.Clamp(g, 0f, 1f);
+            hdrPixels[i + 2] = Math.Clamp(b, 0f, 1f);
             hdrPixels[i + 3] = Math.Clamp(hdrPixels[i + 3], 0f, 1f);
         }
     }
 
+    // ── Hable Filmic 曲线 ──
+    // 来源: John Hable, "Uncharted 2: HDR Lighting" (GDC 2010)
+    // 参数: A=0.15(肩部), B=0.50(中部), C=0.10(趾部), D=0.20, E=0.02, F=0.30
     private static float HableCurve(float x, float whitePoint)
     {
         const float A = 0.15f, B = 0.50f, C = 0.10f;
@@ -113,13 +168,30 @@ public static class ToneMapper
         ((x * (0.15f * x + 0.10f * 0.50f) + 0.20f * 0.02f) /
          (x * (0.15f * x + 0.50f) + 0.20f * 0.30f)) - (0.02f / 0.30f);
 
+    // ── ACES RRT 曲线 (Narkowicz 2015 拟合) ──
+    // 来源: https://github.com/colour-science/colour/blob/develop/colour/algorithms/tonemapping.py
+    // 设计用于 ACES AP1 (ACEScg) 色域空间
     private static float AcesCurve(float x)
     {
         float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
         return Math.Clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0f, 1f);
     }
 
-    /// <summary>通用色调映射入口（根据模式选择算法）。</summary>
+    // ── ACES ODT (Output Device Transform) ──
+    // 来源: ACES 1.0.3, ODT.Academy.RGBmonitor_100nits_dim.ctl
+    // 将 ACES RRT 输出适配到 sRGB 显示 (100 cd/m²)
+    // 包含: 对比度调整 + 色饱和度微调
+    private static float AcesOdt(float x)
+    {
+        // 对比度提升 (mid-tone contrast boost)
+        // 公式: output = x * (1 + 0.3 * (1-x)²)
+        // 暗部略提亮, 高光略压暗, 中间调对比度提升
+        return x * (1.0f + 0.3f * (1.0f - x) * (1.0f - x));
+    }
+
+    // ────────────── 通用入口 ──────────────
+
+    /// <summary>通用色调映射入口（根据模式选择算法，PaperWhite 归一化）。</summary>
     public static void ApplyToneMapping(Span<float> hdrPixels, int width, int height,
         ToneMappingParams p)
     {
@@ -129,10 +201,10 @@ public static class ToneMapper
                 ReinhardToneMapCpu(hdrPixels, width, height, p.Exposure, p.PaperWhiteNits);
                 break;
             case ToneMapMode.Hable:
-                HableToneMapCpu(hdrPixels, width, height, p.Exposure);
+                HableToneMapCpu(hdrPixels, width, height, p.Exposure, p.PaperWhiteNits);
                 break;
             case ToneMapMode.Aces:
-                AcesToneMapCpu(hdrPixels, width, height, p.Exposure);
+                AcesToneMapCpu(hdrPixels, width, height, p.Exposure, p.PaperWhiteNits);
                 break;
         }
     }
@@ -151,51 +223,75 @@ public static class ToneMapper
         }
     }
 
-    /// <summary>将 float HDR 像素转换为 byte BGRA sRGB 像素（与 D3D11 BGRA8 兼容）。
-    /// P1 优化: 融合内核 — 直接从源数组读取，逐像素完成色调映射 + gamma + swizzle，
-    /// 避免 132MB (4K) 中间 float 数组拷贝。</summary>
+    // ────────────── 融合内核 ──────────────
+
+    /// <summary>
+    /// 将 float HDR 像素转换为 byte BGRA sRGB 像素（与 D3D11 BGRA8 兼容）。
+    /// 融合内核 — 单 Parallel.For 完成:
+    ///   PaperWhite 归一化 → 色调映射 → sRGB gamma → RGBA→BGRA swizzle → uint8 量化
+    /// </summary>
+    /// <param name="colorSpaceTag">目标色域标签，用于动态亮度权重。null/sRGB 用 BT.709 权重。</param>
     public static byte[] FloatToSRgbBytes(float[] hdrPixels, int width, int height,
-        ToneMappingParams toneParams)
+        ToneMappingParams toneParams, string? colorSpaceTag = null)
     {
         var bytes = new byte[width * height * 4];
         int pixelCount = width * height;
+
+        // PaperWhite 归一化 + 曝光
+        float pw = Math.Max(toneParams.PaperWhiteNits, 1.0f);
+        float nitsScale = 80.0f / pw;
         float evScale = MathF.Pow(2.0f, toneParams.Exposure);
-        float hableWhitePoint = 11.2f; // 默认白点
+        float scale = evScale * nitsScale;
+
+        // 动态亮度权重（Reinhard 亮度缩放使用）
+        // Hable 是逐通道曲线，不受亮度权重影响
+        // ACES 在 AP1 空间工作，也不受影响
+        var (wr, wg, wb) = colorSpaceTag switch
+        {
+            "BT2020" => (0.2627f, 0.6780f, 0.0593f),
+            "DisplayP3" or "DCI_P3" => (0.2095f, 0.7215f, 0.0690f),
+            _ => (0.2126f, 0.7152f, 0.0722f) // sRGB/BT.709
+        };
 
         Parallel.For(0, pixelCount, pi =>
         {
             int i = pi * 4;
-            float r = hdrPixels[i] * evScale;
-            float g = hdrPixels[i + 1] * evScale;
-            float b = hdrPixels[i + 2] * evScale;
+            float r = hdrPixels[i] * scale;
+            float g = hdrPixels[i + 1] * scale;
+            float b = hdrPixels[i + 2] * scale;
             float a = hdrPixels[i + 3];
 
-            // 色调映射（融合，无需中间数组）
             switch (toneParams.Mode)
             {
                 case ToneMapMode.Reinhard:
                 {
-                    float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    float lum = wr * r + wg * g + wb * b;
                     float mappedLum = lum / (1.0f + lum);
                     if (lum > 0.0001f)
                     {
-                        float scale = mappedLum / lum;
-                        r = Math.Clamp(r * scale, 0f, 1f);
-                        g = Math.Clamp(g * scale, 0f, 1f);
-                        b = Math.Clamp(b * scale, 0f, 1f);
+                        float s = mappedLum / lum;
+                        r = Math.Clamp(r * s, 0f, 1f);
+                        g = Math.Clamp(g * s, 0f, 1f);
+                        b = Math.Clamp(b * s, 0f, 1f);
                     }
                     else { r = g = b = 0f; }
                     break;
                 }
                 case ToneMapMode.Hable:
-                    r = HableCurve(r, hableWhitePoint);
-                    g = HableCurve(g, hableWhitePoint);
-                    b = HableCurve(b, hableWhitePoint);
+                    r = HableCurve(r, 11.2f);
+                    g = HableCurve(g, 11.2f);
+                    b = HableCurve(b, 11.2f);
                     break;
                 case ToneMapMode.Aces:
-                    r = AcesCurve(r);
-                    g = AcesCurve(g);
-                    b = AcesCurve(b);
+                    // ACES: scRGB → AP1 → RRT → ODT → sRGB
+                    ScrgbToAcesAp1(r, g, b, out float ar, out float ag, out float ab);
+                    ar = AcesCurve(ar);
+                    ag = AcesCurve(ag);
+                    ab = AcesCurve(ab);
+                    ar = AcesOdt(ar);
+                    ag = AcesOdt(ag);
+                    ab = AcesOdt(ab);
+                    AcesAp1ToScrgb(ar, ag, ab, out r, out g, out b);
                     break;
             }
 

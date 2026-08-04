@@ -23,13 +23,14 @@ public sealed class CapturePipelineService
 
     /// <summary>ICC 色彩管理准备（后台线程安全，不访问 UI 控件）。</summary>
     public static (byte[] pixels, byte[]? iccProfile) PreparePixelsWithIcc(
-        byte[] bgra, int w, int h, bool iccBakeEnabled, string colorSpaceTag)
+        byte[] bgra, int w, int h, bool iccBakeEnabled, string colorSpaceTag,
+        bool acmEnabled = false, nint? monitorHandle = null)
     {
         if (!iccBakeEnabled)
             return (bgra, null);
 
-        // 将 "System" 解析为实际色域（SDR 模式下 WGC 输出 sRGB）
-        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false);
+        // 将 "System" 解析为实际色域（ACM 感知）
+        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acmEnabled, monitorHandle);
         var targetCs = ColorProfileProvider.MapColorSpaceTag(resolvedTag);
         bool isSRgbTarget = resolvedTag is "sRGB";
 
@@ -71,10 +72,11 @@ public sealed class CapturePipelineService
     public static (byte[] pixels, byte[]? iccProfile) PrepareFloat16WithIcc(
         float[] hdrPixels, int w, int h,
         bool iccBakeEnabled, string colorSpaceTag,
-        TrueToneCap.Core.Processing.ToneMappingParams toneParams)
+        TrueToneCap.Core.Processing.ToneMappingParams toneParams,
+        bool acmEnabled = false, nint? monitorHandle = null)
     {
-        // 将 "System" 解析为实际色域（SDR 模式下 WGC 输出 sRGB）
-        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false);
+        // 将 "System" 解析为实际色域（ACM 感知）
+        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acmEnabled, monitorHandle);
 
         // 1. 色域转换 + 色调映射到 BGRA8
         var bgra = ColorSpaceConverter.ConvertFloat16ToSdrBgra(
@@ -92,9 +94,10 @@ public sealed class CapturePipelineService
 
     /// <summary>构建编码设置。</summary>
     public EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta,
-        string? colorSpaceTag = null)
+        string? colorSpaceTag = null, bool? acmEnabled = null)
     {
         var s = _settings.Current;
+        bool acm = acmEnabled ?? s.AcmeDetected;
         var avifBackend = s.AvifBackendIndex switch
         {
             1 => AvifEncoderBackend.LibAom,
@@ -131,12 +134,32 @@ public sealed class CapturePipelineService
             Metadata = meta,
             PreferGpuEncode = true,
             ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Aces },
-            // 解析 "System" 为实际色域，确保编码器能正确判断 ICC/CICP 策略
-            ColorSpaceTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag ?? "System", hdrOutput)
         };
 
-        LogService.Info("Pipeline", $"编码设置: {format} HDR={hdrOutput} 质量={s.Quality:F1} 位深={bitDepth} 色度={chroma} AVIF后端={avifBackend}");
+        // 解析 "System" 为实际色域（ACM 感知），确保编码器能正确判断 ICC/CICP 策略
+        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag ?? "System", hdrOutput, acm, GetMonitorHandle());
+        settings.ColorSpaceTag = resolvedTag;
+
+        // 关键修复: HDR 开启 + sRGB 目标 → 色调映射到 SDR 输出
+        // 用户显式选择 sRGB 意味着需要 SDR 兼容输出，而非 HDR PQ 编码
+        // 此时 HdrOutput 设为 false，触发色调映射降级路径
+        if (hdrOutput && resolvedTag == "sRGB")
+        {
+            settings.HdrOutput = false;
+            LogService.Info("Pipeline", $"HDR 开启 + sRGB 目标 → 自动降级为 SDR 色调映射输出");
+        }
+        // HDR 开启 + 广色域目标 (P3/AdobeRGB/BT.2020) → 保留 HDR 直通编码
+        // 用户选择广色域目标意味着要保留 HDR 动态范围
+
+        LogService.Info("Pipeline", $"编码设置: {format} HDR={settings.HdrOutput} 质量={s.Quality:F1} 位深={bitDepth} 色度={chroma} AVIF后端={avifBackend} 色域={resolvedTag}");
         return settings;
+    }
+
+    /// <summary>获取当前鼠标所在显示器句柄。</summary>
+    private static nint? GetMonitorHandle()
+    {
+        try { return DisplayEnumerator.GetMonitorUnderCursor(); }
+        catch { return null; }
     }
 
     /// <summary>构建输出文件路径。</summary>
@@ -287,7 +310,7 @@ public sealed class CapturePipelineService
         var outDir = GetEffectiveOutputDir();
         var path = BuildOutputPath(settings.Format, outDir);
 
-        LogService.Info("Pipeline", $"HDR 编码启动: {settings.Format} {hdrFrame.Width}x{hdrFrame.Height} → {Path.GetFileName(path)}");
+        LogService.Info("Pipeline", $"HDR 编码启动: {settings.Format} {hdrFrame.Width}x{hdrFrame.Height} HDR={settings.HdrOutput} 色域={settings.ColorSpaceTag} → {Path.GetFileName(path)}");
 
         PowerManager.PreventSleep();
         try
@@ -295,6 +318,22 @@ public sealed class CapturePipelineService
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
+
+            // HDR 关闭 + scRGB 数据 → 色调映射到 SDR
+            // 场景: HDR ON + sRGB 目标 (已在 BuildEncodingSettings 中设为 HdrOutput=false)
+            //       或编码器不支持 HDR 的降级
+            if (!settings.HdrOutput)
+            {
+                LogService.Info("Pipeline", $"HDR 帧降级到 SDR 色调映射: {settings.Format}");
+                var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
+                if (hdrFrame.GpuTexture is not null)
+                    settings.GpuTexture = hdrFrame.GpuTexture;
+                // 色调映射后像素为 sRGB 色域
+                settings.ColorSpaceTag = "sRGB";
+                EncodeSyncSdr(encoder, sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
+                return;
+            }
+
             if (encoder.SupportsHdr)
             {
                 LogService.Debug("Pipeline", $"HDR 直通编码: {settings.Format}");
@@ -305,9 +344,10 @@ public sealed class CapturePipelineService
                 // 编码器不支持 HDR → 色调映射到 SDR
                 LogService.Info("Pipeline", $"编码器不支持 HDR，色调映射到 SDR: {settings.Format}");
                 var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
-                // 传递 GPU 纹理到 SDR 编码路径
                 if (hdrFrame.GpuTexture is not null)
                     settings.GpuTexture = hdrFrame.GpuTexture;
+                settings.ColorSpaceTag = "sRGB";
+                settings.HdrOutput = false;
                 EncodeSyncSdr(encoder, sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
             }
         }, ct);

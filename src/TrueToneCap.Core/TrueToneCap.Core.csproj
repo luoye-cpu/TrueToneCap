@@ -11,15 +11,15 @@
     <NoWarn>$(NoWarn);MSB3884</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="JxlNet" Version="0.11.2.2" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
   </ItemGroup>
-  <!-- 嵌入原生工具链 (avifenc.exe / cwebp.exe / cjpegli.exe) 作为嵌入资源 -->
+  <!-- 嵌入原生工具链 (avifenc.exe / cwebp.exe / cjpegli.exe / cjxl.exe) 作为嵌入资源 -->
   <ItemGroup>
     <EmbeddedResource Include="Resources\avifenc.exe" />
     <EmbeddedResource Include="Resources\cwebp.exe" />
     <EmbeddedResource Include="Resources\cjpegli.exe" />
+    <EmbeddedResource Include="Resources\cjxl.exe" />
   </ItemGroup>
 </Project>

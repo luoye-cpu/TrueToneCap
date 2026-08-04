@@ -570,6 +570,7 @@ public sealed partial class MainWindow : Window
     private void OnHdrToggled(object sender, RoutedEventArgs e)
     {
         _settings.HdrEnabled = HdrSwitch.IsOn;
+
         // 选 System 时检测显示器真实色域
         if (GetSelectedColorSpaceTag() == "System")
             DetectAndShowSourceGamut();
@@ -586,6 +587,7 @@ public sealed partial class MainWindow : Window
     private void OnColorSpaceChanged(object sender, SelectionChangedEventArgs e)
     {
         var tag = GetSelectedColorSpaceTag();
+        bool hdrOn = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
         bool isSRgb = tag is "System" or "sRGB";
 
         // 选 System 时检测显示器真实色域
@@ -621,7 +623,18 @@ public sealed partial class MainWindow : Window
         SaveSettingsQuiet();
     }
 
-    /// <summary>检测当前显示器色域并显示在 UI 中。</summary>
+    /// <summary>获取当前鼠标所在显示器的原生色域标签（ACM 感知）。</summary>
+    private string GetDisplayNativeGamut()
+    {
+        try
+        {
+            var monitor = DisplayEnumerator.GetMonitorUnderCursor();
+            return ColorProfileProvider.GetDisplayNativeGamutTag(monitor);
+        }
+        catch { return "sRGB"; }
+    }
+
+    /// <summary>检测当前显示器色域并显示在 UI 中（ACM 感知）。</summary>
     private void DetectAndShowSourceGamut()
     {
         try
@@ -633,19 +646,20 @@ public sealed partial class MainWindow : Window
                 string csName;
                 if (primary.IsHdr)
                 {
-                    // HDR 启用状态
-                    csName = primary.BitsPerColor >= 12
-                        ? $"HDR (BT.2020/PQ, {primary.BitsPerColor}-bit)"
-                        : $"HDR (BT.2020/PQ, {primary.BitsPerColor}-bit)";
+                    csName = $"HDR (BT.2020/PQ, {primary.BitsPerColor}-bit)";
                 }
                 else if (primary.SupportsHdr)
                 {
-                    // 硬件支持 HDR 但未启用
                     csName = $"HDR 未开启 (BT.2020 硬件, {primary.BitsPerColor}-bit)";
+                }
+                else if (_settings.AcmeDetected)
+                {
+                    // ACM 启用时检测显示器原生色域
+                    var nativeGamut = GetDisplayNativeGamut();
+                    csName = $"SDR ({nativeGamut}, ACM, {primary.BitsPerColor}bit)";
                 }
                 else
                 {
-                    // SDR 显示器
                     csName = $"SDR (sRGB, {primary.BitsPerColor}bit)";
                 }
                 SourceGamutTxt.Text = csName;
@@ -661,22 +675,34 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>更新色域映射 UI。</summary>
+    /// <summary>更新色域映射 UI（HDR 感知 + ACM 感知）。</summary>
     private void UpdateGamutMappingUI()
     {
         var sourceTag = SourceGamutTxt.Text;
         var targetTag = (ColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "System";
+        bool hdrOn = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
 
         // 判断源显示器特性
-        bool sourceIsHdr = sourceTag.Contains("HDR (BT.2020/PQ"); // HDR 当前启用
-        bool sourceIsHdrCapable = sourceTag.Contains("HDR 未开启"); // 硬件支持但未启用
+        bool sourceIsHdr = sourceTag.Contains("HDR (BT.2020/PQ");
+        bool sourceIsHdrCapable = sourceTag.Contains("HDR 未开启");
+        bool sourceIsAcm = sourceTag.Contains("ACM");
         bool sourceIsWide = sourceIsHdr || sourceIsHdrCapable
-            || sourceTag.Contains("P3") || sourceTag.Contains("BT.2020");
+            || sourceTag.Contains("P3") || sourceTag.Contains("BT.2020") || sourceTag.Contains("AdobeRGB");
+
+        // 有效目标色域：HDR 开启时 "System" 解析为 BT.2020
+        string effectiveTarget = targetTag == "System" && hdrOn ? "BT2020" : targetTag;
+        bool targetIsExplicitWide = effectiveTarget is "BT2020" or "DisplayP3" or "DCI_P3" or "AdobeRGB";
+        bool targetIsSystem = effectiveTarget == "System";
+        bool targetIsSystemWide = targetIsSystem && sourceIsAcm && sourceIsWide;
+        bool targetIsWide = targetIsExplicitWide || targetIsSystemWide;
 
         // 构造目标色域显示名
         string targetName = targetTag switch
         {
-            "System" => sourceIsHdr ? "sRGB (色调映射)" : sourceTag.Contains("HDR") ? "sRGB" : sourceTag,
+            "System" when hdrOn => "BT.2020 (HDR10)",
+            "System" when sourceIsHdr => "sRGB (色调映射)",
+            "System" when sourceIsAcm && sourceIsWide => sourceTag.Replace("SDR (", "").Replace(", ACM", "").Replace(", 8bit)", "").Replace(", 10bit)", ""),
+            "System" => sourceTag.Contains("HDR") ? "sRGB" : sourceTag,
             "sRGB" => "sRGB",
             "DisplayP3" => "Display P3",
             "DCI_P3" => "DCI-P3",
@@ -686,26 +712,32 @@ public sealed partial class MainWindow : Window
         };
         TargetGamutTxt.Text = targetName;
 
-        bool hdrOn = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
-        bool targetIsWide = targetTag is "BT2020" or "DisplayP3" or "DCI_P3" or "AdobeRGB";
-        bool needsMapping = targetIsWide || (targetTag == "System" && (sourceIsHdr || sourceIsHdrCapable));
-
-        if (hdrOn && targetIsWide)
+        if (hdrOn)
         {
-            // HDR 开启 + 广色域目标 → HDR 直通编码（scRGB→目标色域→PQ）
-            MappingArrow.Text = "→ HDR 直通（保留动态范围）";
-            GamutMapHintTxt.Text = $"HDR 编码路径：WGC Float16 → 色域矩阵 → PQ → {targetName}，保留完整高动态范围。";
+            // HDR 开启 → 色域矩阵 → PQ → CICP，保留用户选择的色域
+            string matrixDesc = targetTag switch
+            {
+                "DisplayP3" or "DCI_P3" => "scRGB→P3 矩阵",
+                "AdobeRGB" => "scRGB→AdobeRGB 矩阵",
+                "BT2020" => "scRGB→BT.2020 矩阵",
+                _ => "scRGB→BT.2020 矩阵"
+            };
+            byte cicpP = targetTag switch
+            {
+                "DisplayP3" or "DCI_P3" => 12,
+                "AdobeRGB" => 1,
+                _ => 9  // BT.2020 / System
+            };
+            MappingArrow.Text = $"→ HDR 直通 ({targetName})";
+            GamutMapHintTxt.Text = $"HDR 编码路径：WGC Float16 → {matrixDesc} → PQ ST.2084 → CICP(primaries={cicpP}, transfer=16)。"
+                + (targetTag is "DisplayP3" or "DCI_P3" or "AdobeRGB"
+                    ? "\n⚠ 注意：HDR 输出使用非标准 HDR10 容器色域。部分播放器/显示器可能无法正确解析。"
+                    : "");
         }
-        else if (hdrOn && !targetIsWide)
-        {
-            // HDR 开启 + sRGB 目标 → 色调映射到 SDR
-            MappingArrow.Text = "→ HDR 色调映射到 SDR";
-            GamutMapHintTxt.Text = "HDR 帧 → GPU/CPU 色调映射 → sRGB 输出。";
-        }
-        else if (!hdrOn && targetIsWide)
+        else if (targetIsWide)
         {
             // HDR 关闭 + 广色域目标 → WGC Float16 捕获 → 色域转换 → 色调映射到 SDR
-            bool canUseFloat16 = sourceIsWide || _settings.AcmeDetected || _settings.IccBakeEnabled;
+            bool canUseFloat16 = sourceIsWide || sourceIsAcm || _settings.IccBakeEnabled;
             if (canUseFloat16)
             {
                 MappingArrow.Text = "→ Float16 广色域捕获 → 色域映射";
@@ -719,7 +751,7 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            // SDR 直通或 ICC 烘焙
+            bool needsMapping = targetIsWide || (targetTag == "System" && (sourceIsHdr || sourceIsHdrCapable));
             MappingArrow.Text = needsMapping ? "→ ACES 缩限到" : "→ 直通（同色域）";
             GamutMapHintTxt.Text = needsMapping
                 ? $"SDR 捕获 → ICC 烘焙 → {targetName}。"
@@ -800,12 +832,22 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>判断是否应使用 Float16 捕获来获取广色域数据（HDR 关闭 + 广色域目标时）。</summary>
+    /// <summary>判断是否应使用 Float16 捕获来获取广色域数据（ACM 感知）。</summary>
     private bool ShouldUseFloat16ForWideGamut()
     {
         if (HdrSwitch.IsOn && HdrSwitch.IsEnabled) return false; // HDR 开启时走 HDR 路径
         var tag = GetSelectedColorSpaceTag();
-        return tag is "BT2020" or "DisplayP3" or "DCI_P3" or "AdobeRGB";
+        if (tag is "BT2020" or "DisplayP3" or "DCI_P3" or "AdobeRGB")
+            return true;
+
+        // ACM 启用 + "System" → 如果显示器原生为广色域，也需要 Float16 捕获广色域数据
+        if (tag == "System" && _settings.AcmeDetected)
+        {
+            var nativeGamut = GetDisplayNativeGamut();
+            return nativeGamut is not "sRGB";
+        }
+
+        return false;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1063,8 +1105,10 @@ public sealed partial class MainWindow : Window
         return result;
     }
 
-    /// <summary>HDR 编码保存：直接使用 scRGB linear 浮点像素编码为 HDR 格式。</summary>
-    private async Task EncodeAndSaveHdrAsync(float[] hdrPixels, int w, int h)
+    /// <summary>HDR 编码保存：直接使用 scRGB linear 浮点像素编码为 HDR 格式。
+    /// 对齐无感截图路径，传递 ICC、GPU 纹理、色域标签等参数。</summary>
+    private async Task EncodeAndSaveHdrAsync(float[] hdrPixels, int w, int h,
+        byte[]? iccProfile = null, ID3D11Texture2D? gpuTexture = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         LogService.Info("MainWindow", $"HDR 编码启动: {w}x{h} 格式={_formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)].Format}");
@@ -1082,25 +1126,56 @@ public sealed partial class MainWindow : Window
             var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
             var cursorMonitor = DisplayEnumerator.GetMonitorUnderCursor();
             var meta = MetadataCollector.Collect(DisplayEnumerator.FindDisplayByMonitor(cursorMonitor));
-            LogService.Info("MainWindow", $"HDR 元数据: 显示器={cursorMonitor} 尺寸={w}x{h}");
-            var settings = BuildEncodingSettings(format, true, meta);
+            var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
+            var iccBakeEnabled = IccBakeSwitch.IsOn;
+            var colorSpaceTag = GetSelectedColorSpaceTag();
+            var settings = BuildEncodingSettings(format, hdrOutput, meta);
+            settings.IccProfile ??= iccProfile;
 
-            LogService.Info("MainWindow", $"HDR 直通编码: {format} {w}x{h} → scRGB linear");
-            var path = await AppServices.Pipeline.EncodeHdrFrameAsync(
-                new HdrFrameData
-                {
-                    Pixels = hdrPixels,
-                    Width = w, Height = h,
-                    Metadata = meta
-                }, settings, ct);
+            LogService.Info("MainWindow", $"HDR 编码: {format} {w}x{h} HDR={hdrOutput} ICC烘焙={iccBakeEnabled} 色域={colorSpaceTag}");
 
-            sw.Stop();
-            LogService.Info("MainWindow", $"HDR 编码完成: {Path.GetFileName(path)} ({sw.ElapsedMilliseconds}ms)");
-            DispatcherQueue.TryEnqueue(async () =>
+            if (hdrOutput)
             {
-                await CopyFileToClipboardAsync(path);
-                ShowSaveToast(path, sw.ElapsedMilliseconds);
-            });
+                // HDR 直通编码（同无感截图路径）
+                var path = await AppServices.Pipeline.EncodeHdrFrameAsync(
+                    new HdrFrameData
+                    {
+                        Pixels = hdrPixels,
+                        Width = w, Height = h,
+                        IccProfile = iccProfile,
+                        Metadata = meta,
+                        GpuTexture = gpuTexture
+                    }, settings, ct);
+
+                sw.Stop();
+                LogService.Info("MainWindow", $"HDR 编码完成: {Path.GetFileName(path)} ({sw.ElapsedMilliseconds}ms)");
+                DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await CopyFileToClipboardAsync(path);
+                    ShowSaveToast(path, sw.ElapsedMilliseconds);
+                });
+            }
+            else
+            {
+                // Float16 广色域 → 色域转换 → 色调映射 → SDR 编码（同无感截图路径）
+                LogService.Info("MainWindow", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
+                var (sdrPixels, iccP) = CapturePipelineService.PrepareFloat16WithIcc(
+                    hdrPixels, w, h, iccBakeEnabled, colorSpaceTag,
+                    new ToneMappingParams { Mode = ToneMapMode.Aces });
+                if (iccP is not null)
+                    settings.IccProfile = iccP;
+                settings.HdrOutput = false;
+                var path = await AppServices.Pipeline.EncodeAndSaveAsync(
+                    sdrPixels, w, h, settings, false, colorSpaceTag, ct, gpuTexture);
+
+                sw.Stop();
+                LogService.Info("MainWindow", $"SDR 编码完成: {Path.GetFileName(path)} ({sw.ElapsedMilliseconds}ms)");
+                DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await CopyFileToClipboardAsync(path);
+                    ShowSaveToast(path, sw.ElapsedMilliseconds);
+                });
+            }
         }
         catch (OperationCanceledException)
         {
@@ -1235,7 +1310,8 @@ public sealed partial class MainWindow : Window
                         case HdrCaptureAction.Save:
                             LogService.Info("MainWindow", "HDR 选区保存");
                             if (hdrRegion is not null)
-                                await EncodeAndSaveHdrAsync(hdrRegion, rw, rh);
+                                await EncodeAndSaveHdrAsync(hdrRegion, rw, rh,
+                                    captureResult.IccProfile, captureResult.GpuTexture);
                             else if (sdrRegion is not null)
                                 await EncodeAndSaveAsync(sdrRegion, rw, rh);
                             break;
@@ -1615,7 +1691,8 @@ public sealed partial class MainWindow : Window
     /// <summary>构建编码设置（委托给 CapturePipelineService，减少重复逻辑）。</summary>
     private EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta)
     {
-        var settings = AppServices.Pipeline.BuildEncodingSettings(format, hdrOutput, meta, GetSelectedColorSpaceTag());
+        var tag = GetSelectedColorSpaceTag();
+        var settings = AppServices.Pipeline.BuildEncodingSettings(format, hdrOutput, meta, tag, _settings.AcmeDetected);
         // 覆盖 UI 特有的设置
         settings.Quality = (float)QualitySld.Value;
         settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;

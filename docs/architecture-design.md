@@ -4,7 +4,6 @@
 >
 > **管线审查日期**：2026-08-01 | **总测试**：192/192 ✅ 100%
 >
-> **迁移计划**：参见 [dotnet11-migration-plan.md](dotnet11-migration-plan.md) (.NET 10 → .NET 11)
 
 ---
 
@@ -48,7 +47,7 @@
 │                    │                                                       │
 │                    ▼                                                       │
 │          [EncoderFactory → 8 编码器]                                       │
-│          ├─ PNG (托管)     8/10/12/16-bit  ICC/CICP 互斥                    │
+│          ├─ PNG (托管)     8/10/12/16-bit  ICC/CICP 共存                    │
 │          ├─ JPEG LI (jpegli) 8-bit  butteraugli 0.5-3.0                    │
 │          ├─ JPEG XL (JxlNet) 8/10/12-bit  HDR: PQ 16-bit                  │
 │          ├─ AVIF (MFT>NVENC>QSV>libaom) 8/10/12-bit  HDR: PNG 中转         │
@@ -374,7 +373,7 @@ HDR 关闭 + sRGB:
 
 | 格式 | 后端 | HDR | 质量参数 | 色度控制 | 位深 | 备注 |
 |------|------|-----|---------|---------|------|------|
-| PNG | 托管编码器 | ✅ | 无损 | ✅ (444) | 8/10/12/16 | ICC/CICP 互斥 |
+| PNG | 托管编码器 | ✅ | 无损 | ✅ (444) | 8/10/12/16 | ICC/CICP 共存 |
 | JPEG LI | jpegli P/Invoke | ❌ | butteraugli 0.5-3.0 | ✅ 420/422/444 | 8 | 回退→ManagedJpegEncoder |
 | JPEG Gain Map | jpegli + 增益图 | ✅ | butteraugli 距离 | ❌ | 8 | HDR: 增益比+ICC 嵌入 |
 | JPEG XL | JxlNet | ✅ | butteraugli 0.1-4.0 | ❌ (API 内部) | 8/10/12 | HDR: PQ 16-bit |
@@ -423,7 +422,7 @@ scRGB float[] → LinearToPQ (ST.2084) → ushort[] PQ16 → RGBA16→BGRA16 →
 |------|------|
 | `HdrToPq16` | scRGB → 色域矩阵 → PQ 16-bit (精确 10→16 bit 映射) |
 | `Rgba16ToBgra16Bytes` | RGBA 16-bit → BGRA 16-bit 大端字节序 |
-| `GetColorMetadata` | ICC/CICP 互斥策略 |
+| `GetColorMetadata` | ICC/CICP 共存策略 |
 | `ToSdr` | HDR→SDR 转换 (FloatToSRgbBytes + 格式参数) |
 
 ---
@@ -606,7 +605,7 @@ s_captureLock (SemaphoreSlim 1,1) — 防止并发截图
 | AnnotationManager (标注) | 7 | 8种图层, 撤销/重做, 边界条件 |
 | FormatEncoders (编码器) | 28 | 7格式创建, SDR组合, HDR输出, 质量范围 |
 | JPEG专项 | 13 | 7种质量, 3种色度, ICC嵌入, SOI/EOI验证 |
-| PNG专项 | 7 | 8/10/12/16-bit, ICC/CICP互斥 |
+| PNG专项 | 7 | 8/10/12/16-bit, ICC/CICP共存 |
 | BMP专项 | 7 | 6种尺寸, BM签名验证 |
 | Gain Map | 5 | Gray/RGB模式, 质量设置 |
 | FormatHelper | 11 | HdrToPq16, Rgba16ToBgra16, GetColorMetadata, ToSdr |

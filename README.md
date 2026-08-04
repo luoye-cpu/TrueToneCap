@@ -87,7 +87,7 @@ dotnet run --project src\TrueToneCap.App -c Release
 - 🏗️ DI: AppServices 重构为 Microsoft.Extensions.DependencyInjection 容器 / Refactored to DI container
 - 🧹 Cleanup: ToneMapper.cs 移除死代码 D3D11 占位符，转为纯静态 CPU 算法库 / Removed dead D3D11 placeholder code
 - 🐧 Platform: 新增 `Platform/` 抽象层 (ICaptureBackend / IGpuRenderer / IPlatformServices) 为 Linux 迁移预留 / Added platform abstraction for Linux migration
-- 📄 Docs: 新增 `docs/linux-migration-guide.md` 迁移指南 / Added Linux migration guide
+- 📄 Docs: 新增架构设计文档和色彩管线分析
 - 🔢 Version: 统一全项目版本引用至 v0.2.0 / Unified version references to v0.2.0
 - 📷 Capture: 捕获后端统一为 WGC (Windows.Graphics.Capture)，README 更新 / Unified capture backend to WGC
 
