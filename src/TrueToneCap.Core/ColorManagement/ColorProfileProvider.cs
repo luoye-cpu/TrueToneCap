@@ -900,14 +900,6 @@ public static partial class ColorProfileProvider
         return "sRGB";
     }
 
-    /// <summary>使用 Magick.NET 将 BGRA 像素通过 ICC 配置文件烘焙为 sRGB（便捷方法）。
-    /// 烘焙后像素值已转换为 sRGB，不应再嵌入 ICC profile。</summary>
-    public static byte[]? BakeIccToSrgb(byte[] bgra, int w, int h, byte[] iccProfile)
-    {
-        var (pixels, _) = BakeIccToTarget(bgra, w, h, iccProfile, "sRGB");
-        return pixels;
-    }
-
     /// <summary>获取当前所选色彩空间的用户友好名称。</summary>
     public static string GetColorSpaceDisplayName(string tag) => tag switch
     {
@@ -1085,32 +1077,6 @@ public static class ColorSpaceConverter
         return result;
     }
 
-    /// <summary>线性 scRGB → sRGB（gamma 编码）。</summary>
-    public static Span<float> ScRgbToSRgb(Span<float> pixels)
-    {
-        for (int i = 0; i < pixels.Length; i++)
-        {
-            float c = pixels[i];
-            pixels[i] = c <= 0.0031308f
-                ? 12.92f * c
-                : 1.055f * MathF.Pow(c, 1.0f / 2.4f) - 0.055f;
-        }
-        return pixels;
-    }
-
-    /// <summary>sRGB → 线性 scRGB（gamma 解码）。</summary>
-    public static Span<float> SRgbToScRgb(Span<float> pixels)
-    {
-        for (int i = 0; i < pixels.Length; i++)
-        {
-            float c = pixels[i];
-            pixels[i] = c <= 0.04045f
-                ? c / 12.92f
-                : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
-        }
-        return pixels;
-    }
-
     // ── sRGB gamma 解码/编码标量（用于字节级转换） ──
 
     /// <summary>sRGB gamma 解码: byte [0,1] → linear [0,1]</summary>
@@ -1163,18 +1129,6 @@ public static class ColorSpaceConverter
         return result;
     }
 
-    /// <summary>线性 scRGB → Display P3。</summary>
-    public static Span<float> ScRgbToDisplayP3(Span<float> pixels)
-    {
-        for (int i = 0; i < pixels.Length; i += 4)
-        {
-            float r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-            pixels[i] = 0.8225f * r + 0.1774f * g + 0.0001f * b;
-            pixels[i + 1] = -0.0332f * r + 1.0334f * g - 0.0002f * b;
-            pixels[i + 2] = 0.0171f * r - 0.0575f * g + 1.0404f * b;
-        }
-        return pixels;
-    }
 }
 
 // ═══════════════════════════════════════
@@ -1237,7 +1191,7 @@ public static class IccProfileBuilder
         w.Write(new byte[4]);
         WriteBE(w, 0x02300000u);
         WriteBE(w, 0x6D6E7472u); WriteBE(w, 0x52474220u); WriteBE(w, 0x58595A20u);
-        w.Write(new byte[12]); WriteBE(w, 0x61636220u);
+        w.Write(new byte[12]); WriteBE(w, 0x61637370u); // "acsp" (ICC profile file signature)
         w.Write(new byte[4]); w.Write(new byte[4]); w.Write(new byte[4]); w.Write(new byte[4]);
         WriteBE(w, 0UL); WriteBE(w, 0x00000001u);
         WriteS15F16(w, 0.9642f); WriteS15F16(w, 1.0f); WriteS15F16(w, 0.8249f);

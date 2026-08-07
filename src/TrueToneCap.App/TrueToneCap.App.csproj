@@ -41,6 +41,13 @@
     <TrimmerRootDescriptor Include="$(MSBuildProjectDirectory)\..\..\TrimmerRoots.xml" />
   </ItemGroup>
 
+  <!-- ═══ ReadyToRun: 已禁用（体积过大），如需启用取消注释 ═══
+  <PropertyGroup>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishReadyToRunComposite>true</PublishReadyToRunComposite>
+  </PropertyGroup>
+  -->
+
   <!-- ═══ 压制 XAML 运行时绑定裁剪警告（AOT 下日志面板绑定安全） ═══ -->
   <PropertyGroup>
     <SuppressXamlTrimWarnings>true</SuppressXamlTrimWarnings>

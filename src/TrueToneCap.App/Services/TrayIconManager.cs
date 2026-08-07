@@ -16,6 +16,7 @@ public sealed partial class TrayIconManager : IDisposable
     private uint _taskbarRestartMsg;
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool Shell_NotifyIconW(uint dwMessage, ref NOTIFYICONDATAW lpData);
 
     [LibraryImport("user32.dll", SetLastError = true)]

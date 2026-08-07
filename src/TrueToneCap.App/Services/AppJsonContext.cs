@@ -3,6 +3,7 @@
 // 替代运行时的 JsonSerializer.Serialize/Deserialize 反射调用
 
 using System.Text.Json.Serialization;
+using TrueToneCap.App.Models;
 
 namespace TrueToneCap.App.Services;
 

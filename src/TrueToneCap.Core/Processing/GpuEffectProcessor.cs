@@ -68,28 +68,7 @@ public sealed class GpuEffectProcessor : IDisposable
 
     private static byte[]? LoadShaderBytes(string name)
     {
-        try
-        {
-            var path = Path.Combine(AppContext.BaseDirectory, "data", "Shaders", name);
-            if (File.Exists(path)) return File.ReadAllBytes(path);
-
-            // 嵌入资源回退
-            var asm = System.Reflection.Assembly.GetExecutingAssembly();
-            var resName = asm.GetManifestResourceNames()
-                .FirstOrDefault(n => n.EndsWith(name, StringComparison.OrdinalIgnoreCase));
-            if (resName is not null)
-            {
-                using var stream = asm.GetManifestResourceStream(resName);
-                if (stream is not null)
-                {
-                    var bytes = new byte[stream.Length];
-                    stream.ReadExactly(bytes);
-                    return bytes;
-                }
-            }
-        }
-        catch { }
-        return null;
+        return ShaderLoader.Load(name);
     }
 
     /// <summary>GPU 马赛克处理（像素化）。</summary>

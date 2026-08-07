@@ -2,7 +2,6 @@
 // GPU 加速色调映射 — 使用预编译 HLSL 着色器 + D3D11 渲染管线
 // 需要先运行 shaders/CompileShaders.ps1 生成 ToneMapping.hlsl.cso + FullscreenVS.hlsl.cso
 
-using System.Reflection;
 using System.Runtime.InteropServices;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -99,55 +98,9 @@ public sealed class GpuToneMapper : IDisposable
 
             try
             {
-                // PS: 从文件系统加载（开发/发布模式）
-                if (s_cachedPixelShader is null)
-                {
-                    var psPath = Path.Combine(AppContext.BaseDirectory, "data", "Shaders", "ToneMapping.hlsl.cso");
-                    if (File.Exists(psPath))
-                        s_cachedPixelShader = File.ReadAllBytes(psPath);
-                }
-
-                // PS: 嵌入资源回退
-                if (s_cachedPixelShader is null)
-                {
-                    var asm = Assembly.GetExecutingAssembly();
-                    var psName = asm.GetManifestResourceNames()
-                        .FirstOrDefault(n => n.EndsWith("ToneMapping.hlsl.cso", StringComparison.OrdinalIgnoreCase));
-                    if (psName is not null)
-                    {
-                        using var psStream = asm.GetManifestResourceStream(psName);
-                        if (psStream is not null)
-                        {
-                            s_cachedPixelShader = new byte[psStream.Length];
-                            psStream.ReadExactly(s_cachedPixelShader);
-                        }
-                    }
-                }
-
-                // VS: 从文件系统加载 FullscreenVS.cso
-                if (s_cachedVertexShader is null)
-                {
-                    var vsPath = Path.Combine(AppContext.BaseDirectory, "data", "Shaders", "FullscreenVS.hlsl.cso");
-                    if (File.Exists(vsPath))
-                        s_cachedVertexShader = File.ReadAllBytes(vsPath);
-                }
-
-                // VS: 嵌入资源回退
-                if (s_cachedVertexShader is null)
-                {
-                    var asm = Assembly.GetExecutingAssembly();
-                    var vsName = asm.GetManifestResourceNames()
-                        .FirstOrDefault(n => n.EndsWith("FullscreenVS.hlsl.cso", StringComparison.OrdinalIgnoreCase));
-                    if (vsName is not null)
-                    {
-                        using var vsStream = asm.GetManifestResourceStream(vsName);
-                        if (vsStream is not null)
-                        {
-                            s_cachedVertexShader = new byte[vsStream.Length];
-                            vsStream.ReadExactly(s_cachedVertexShader);
-                        }
-                    }
-                }
+                // 使用 ShaderLoader 统一加载（文件系统优先，嵌入资源回退）
+                s_cachedPixelShader ??= ShaderLoader.Load("ToneMapping.hlsl.cso");
+                s_cachedVertexShader ??= ShaderLoader.Load("FullscreenVS.hlsl.cso");
 
                 if (s_cachedPixelShader is not null && s_cachedVertexShader is not null)
                     System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] 加载着色器成功: PS={s_cachedPixelShader.Length}B VS={s_cachedVertexShader.Length}B");
@@ -164,12 +117,19 @@ public sealed class GpuToneMapper : IDisposable
     }
 
     /// <summary>GPU 色调映射: Float16 HDR → BGRA8 SDR。</summary>
-    public Task<byte[]> ToneMapToSdrAsync(float[] hdrPixels, int width, int height, ToneMappingParams p)
+    /// <param name="colorSpaceTag">目标色域标签，用于 CPU 回退路径的动态亮度权重。</param>
+    /// <remarks>
+    /// GPU 路径始终输出 sRGB（HLSL 着色器固定使用 BT.709 权重），
+    /// 若需广色域输出，请使用 CPU 路径（ConvertFloat16ToSdrBgra）。
+    /// GPU 路径失败时自动回退 CPU，此时 colorSpaceTag 生效。
+    /// </remarks>
+    public Task<byte[]> ToneMapToSdrAsync(float[] hdrPixels, int width, int height, ToneMappingParams p,
+        string? colorSpaceTag = null)
     {
         if (!IsAvailable)
         {
             // CPU 回退
-            return Task.FromResult(ToneMapper.FloatToSRgbBytes(hdrPixels, width, height, p));
+            return Task.FromResult(ToneMapper.FloatToSRgbBytes(hdrPixels, width, height, p, colorSpaceTag));
         }
 
         return Task.Run(() =>
@@ -181,7 +141,7 @@ public sealed class GpuToneMapper : IDisposable
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] GPU 失败，CPU 回退: {ex.Message}");
-                return ToneMapper.FloatToSRgbBytes(hdrPixels, width, height, p);
+                return ToneMapper.FloatToSRgbBytes(hdrPixels, width, height, p, colorSpaceTag);
             }
         });
     }

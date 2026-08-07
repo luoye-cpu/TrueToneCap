@@ -515,14 +515,6 @@ public static class FormatHelper
 {
     public static byte[] ToSdr(HdrFrameData f, EncodingSettings s) => Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams, s.ColorSpaceTag);
 
-    /// <summary>将 HDR 帧转换为 SDR BGRA8，写入预分配的目标缓冲区（避免额外分配）。</summary>
-    public static void ToSdr(HdrFrameData f, EncodingSettings s, byte[] destination)
-    {
-        var result = Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams, s.ColorSpaceTag);
-        if (result.Length == destination.Length)
-            Buffer.BlockCopy(result, 0, destination, 0, result.Length);
-    }
-
     /// <summary>根据 EncodingSettings 计算 ICC 和 CICP 元数据。</summary>
     public static (byte[]? icc, byte[]? cicp) GetColorMetadata(EncodingSettings s)
     {

@@ -8,7 +8,7 @@ using Vortice.Direct3D11;
 namespace TrueToneCap.Core.Encoding;
 
 /// <summary>Media Foundation MFT 编码器 — 使用系统内置硬件编码器 (Intel QSV / NVIDIA / AMD)。</summary>
-public sealed unsafe class MftEncoderNative : IDisposable
+public sealed unsafe partial class MftEncoderNative : IDisposable
 {
     // ── MFT CLSIDs ──
     private static readonly Guid CLSID_AV1EncMFT = new(0x7A5E5A7B, 0x7B3F, 0x4C8E, 0x9F, 0x8A, 0x73, 0x7B, 0x6E, 0x4C, 0x6E, 0x7A);
@@ -191,30 +191,30 @@ public sealed unsafe class MftEncoderNative : IDisposable
     }
 
     // ═══════════ COM 互操作 ═══════════
-    [DllImport("ole32.dll")] private static extern int CoCreateInstance(ref Guid clsid, nint outer, uint ctx, [In] ref Guid iid, out nint ppv);
-    [DllImport("mfplat.dll")] private static extern int MFCreateMediaType(nint* ppType);
-    [DllImport("mfplat.dll")] private static extern int MFSetGUID(nint type, Guid key, Guid val);
-    [DllImport("mfplat.dll")] private static extern int MFSetUINT64(nint type, Guid key, ulong val);
-    [DllImport("mfplat.dll")] private static extern int MFSetUINT32(nint type, Guid key, uint val);
-    [DllImport("mfplat.dll")] private static extern int MFCreateSample(nint* ppSample);
-    [DllImport("mfplat.dll")] private static extern int MFCreateMemoryBuffer(uint cbMax, nint* ppBuf);
-    [DllImport("mfplat.dll")] private static extern int MFMapLock(nint buf, nint* ppData, uint* pcbMax, uint* pcbCur);
-    [DllImport("mfplat.dll")] private static extern int MFUnlock(nint buf);
-    [DllImport("mfplat.dll")] private static extern int MFSampleAddBuffer(nint sample, nint buf);
-    [DllImport("mfplat.dll")] private static extern int MFSampleGetBufferByIndex(nint sample, uint idx, nint* ppBuf);
+    [LibraryImport("ole32.dll")] private static partial int CoCreateInstance(ref Guid clsid, nint outer, uint ctx, ref Guid iid, out nint ppv);
+    [LibraryImport("mfplat.dll")] private static partial int MFCreateMediaType(nint* ppType);
+    [LibraryImport("mfplat.dll")] private static partial int MFSetGUID(nint type, Guid key, Guid val);
+    [LibraryImport("mfplat.dll")] private static partial int MFSetUINT64(nint type, Guid key, ulong val);
+    [LibraryImport("mfplat.dll")] private static partial int MFSetUINT32(nint type, Guid key, uint val);
+    [LibraryImport("mfplat.dll")] private static partial int MFCreateSample(nint* ppSample);
+    [LibraryImport("mfplat.dll")] private static partial int MFCreateMemoryBuffer(uint cbMax, nint* ppBuf);
+    [LibraryImport("mfplat.dll")] private static partial int MFMapLock(nint buf, nint* ppData, uint* pcbMax, uint* pcbCur);
+    [LibraryImport("mfplat.dll")] private static partial int MFUnlock(nint buf);
+    [LibraryImport("mfplat.dll")] private static partial int MFSampleAddBuffer(nint sample, nint buf);
+    [LibraryImport("mfplat.dll")] private static partial int MFSampleGetBufferByIndex(nint sample, uint idx, nint* ppBuf);
 
-    private void SetInputType(uint idx, nint type, uint flags) { var v = typeof(IMFTransform); IMFTransform_SetInputType(_mft, idx, type, flags); }
+    private void SetInputType(uint idx, nint type, uint flags) { IMFTransform_SetInputType(_mft, idx, type, flags); }
     private void SetOutputType(uint idx, nint type, uint flags) { IMFTransform_SetOutputType(_mft, idx, type, flags); }
     private int ProcessInput(uint idx, nint sample, uint flags) { return IMFTransform_ProcessInput(_mft, idx, sample, flags); }
     private int ProcessOutput(uint flags, uint count, nint samples, out uint status)
     { uint s = 0; int hr = IMFTransform_ProcessOutput(_mft, flags, count, samples, &s); status = s; return hr; }
     private int ProcessMessage(uint msg, nint param) { return IMFTransform_ProcessMessage(_mft, msg, param); }
 
-    [DllImport("mfplat.dll")] private static extern int IMFTransform_SetInputType(nint mft, uint idx, nint type, uint flags);
-    [DllImport("mfplat.dll")] private static extern int IMFTransform_SetOutputType(nint mft, uint idx, nint type, uint flags);
-    [DllImport("mfplat.dll")] private static extern int IMFTransform_ProcessInput(nint mft, uint idx, nint sample, uint flags);
-    [DllImport("mfplat.dll")] private static extern int IMFTransform_ProcessOutput(nint mft, uint flags, uint count, nint samples, uint* pStatus);
-    [DllImport("mfplat.dll")] private static extern int IMFTransform_ProcessMessage(nint mft, uint msg, nint param);
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_SetInputType(nint mft, uint idx, nint type, uint flags);
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_SetOutputType(nint mft, uint idx, nint type, uint flags);
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessInput(nint mft, uint idx, nint sample, uint flags);
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessOutput(nint mft, uint flags, uint count, nint samples, uint* pStatus);
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessMessage(nint mft, uint msg, nint param);
 
     [Guid("bf94c121-5b05-4e6f-8000-ba598961414d")]
     private interface IMFTransform { }

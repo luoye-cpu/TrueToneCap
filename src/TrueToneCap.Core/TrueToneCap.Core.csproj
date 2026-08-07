@@ -9,6 +9,9 @@
     <AssemblyName>TrueToneCap.Core</AssemblyName>
     <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
     <NoWarn>$(NoWarn);MSB3884</NoWarn>
+    <!-- ═══ Core 无 WinUI 依赖，可启用 AOT 编译 ═══ →
+         发布时 Publish.ps1 传递 -p:CorePublishAot=true
+         启用后 Core 以 NativeAOT 编译为本机代码，App 通过 JIT 桥接调用 ═══ -->
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />

@@ -78,6 +78,11 @@ public static class ColorPipelineTests
         ColorMatrix_SrgbToAcesAp1_Roundtrip();
         ColorMatrix_ApplySrgbToTargetGamut();
 
+        // ─── 9. Gain Map XMP 验证 ───
+        Console.WriteLine("\n── 9. Gain Map XMP 验证 ──");
+        GainMap_BuildXmpMetadata_Output();
+        GainMap_BuildIsoMetadata_Output();
+
         sw.Stop();
         Console.WriteLine($"\n══════════════════════════════════════════════");
         Console.WriteLine($"  完成: {_passed} 通过, {_failed} 失败, {sw.ElapsedMilliseconds}ms");
@@ -618,6 +623,69 @@ public static class ColorPipelineTests
         // sRGB 目标 → 应返回原始数组引用
         var sameRef = ColorSpaceConverter.ApplySrgbToTargetGamut(bgra, 2, 1, "sRGB");
         Assert("ApplySrgbToTargetGamut: sRGB 目标返回原始引用", object.ReferenceEquals(sameRef, bgra));
+    }
+
+    // ═══════════════════════════════════════════════
+    //  9. Gain Map XMP 验证
+    // ═══════════════════════════════════════════════
+
+    static void GainMap_BuildXmpMetadata_Output()
+    {
+        // 直接验证 BuildXmpMetadata 的输出长度和内容
+        var xmp = JpegGainMapEncoder.BuildXmpMetadata(1920, 1080, 481, 271, GainMapMode.Gray);
+        string xmpStr = System.Text.Encoding.UTF8.GetString(xmp);
+        bool hasGmVersion = xmpStr.Contains("hdrgm:Version");
+        bool hasBaseRendition = xmpStr.Contains("BaseRenditionIsHDR");
+        bool hasMinGain = xmpStr.Contains("GainMapMin");
+        bool hasMaxGain = xmpStr.Contains("GainMapMax");
+        bool hasGamma = xmpStr.Contains("Gamma");
+        bool hasContainer = xmpStr.Contains("Container:Directory") && xmpStr.Contains("Item:Semantic=\"Primary\"");
+        bool hasGainMapItem = xmpStr.Contains("Item:Semantic=\"GainMap\"");
+        bool hasXpacketEnd = xmpStr.Contains("xpacket end");
+        // 关键: GainMapMin/Max 必须是 log2 值 (默认 headroom=12.5 → max=log2(12.5)≈3.64)
+        bool minIsLog2 = xmpStr.Contains("GainMapMin>0.0");
+        bool maxIsLog2 = xmpStr.Contains("GainMapMax>3.64");
+        Assert($"BuildXmpMetadata: 长度={xmp.Length}字节", xmp.Length >= 500);
+        Assert("BuildXmpMetadata: 包含 hdrgm:Version", hasGmVersion);
+        Assert("BuildXmpMetadata: 包含 BaseRenditionIsHDR", hasBaseRendition);
+        Assert("BuildXmpMetadata: 包含 GainMapMin", hasMinGain);
+        Assert("BuildXmpMetadata: 包含 GainMapMax", hasMaxGain);
+        Assert("BuildXmpMetadata: 包含 Gamma", hasGamma);
+        Assert("BuildXmpMetadata: 包含 Container:Directory + Primary", hasContainer);
+        Assert("BuildXmpMetadata: 包含 GainMap Item", hasGainMapItem);
+        Assert("BuildXmpMetadata: GainMapMin 为 log2 值 (0)", minIsLog2);
+        Assert($"BuildXmpMetadata: GainMapMax 为 log2 值 ({MathF.Log2(12.5f):F2})", maxIsLog2);
+        Assert("BuildXmpMetadata: 包含 xpacket end", hasXpacketEnd);
+    }
+
+    static void GainMap_BuildIsoMetadata_Output()
+    {
+        // 验证 ISO 21496-1 二进制元数据
+        var iso = JpegGainMapEncoder.BuildIso21496Metadata(GainMapMode.Gray);
+        // 引出: u16 min_version + u16 writer_version + u8 flags + u32 denom + u32 baseHeadroom + u32 altHeadroom + 5*s32
+        int expectedLen = 2 + 2 + 1 + 4 + 4 + 4 + (5 * 4);
+        Assert($"ISO 元数据: 长度={iso.Length} (期望 {expectedLen})", iso.Length == expectedLen);
+        // min_version=0, writer_version=0
+        Assert("ISO 元数据: min_version=0", iso[0] == 0 && iso[1] == 0);
+        Assert("ISO 元数据: writer_version=0", iso[2] == 0 && iso[3] == 0);
+        // flags: common denominator (0x08) 且非多通道 (Gray)
+        Assert("ISO 元数据: flags 含 common denominator", (iso[4] & 0x08) != 0);
+        Assert("ISO 元数据: Gray 非多通道", (iso[4] & 0x80) == 0);
+        // denom = 64
+        Assert("ISO 元数据: denom=64", iso[5] == 0 && iso[6] == 0 && iso[7] == 0 && iso[8] == 64);
+        // gainMapMin = 0 (log2(1), Reinhard 保证增益≥1)
+        Assert("ISO 元数据: gainMapMin=0", iso[17] == 0 && iso[18] == 0 && iso[19] == 0 && iso[20] == 0);
+        // gainMapMax = log2(12.5) ≈ 3.64 → 3 (整数舍入)
+        int expectedMax = (int)Math.Round(MathF.Log2(12.5f));
+        Assert($"ISO 元数据: gainMapMax={expectedMax} (log2(12.5)≈3.64)", iso[21] == 0 && iso[22] == 0 && iso[23] == 0 && iso[24] == expectedMax);
+        // alternateHdrHeadroom = expectedMax (log2(capacity_max))
+        Assert($"ISO 元数据: altHeadroom={expectedMax}", iso[13] == 0 && iso[14] == 0 && iso[15] == 0 && iso[16] == expectedMax);
+
+        // RGB 模式: 多通道标志
+        var isoRgb = JpegGainMapEncoder.BuildIso21496Metadata(GainMapMode.Rgb);
+        int expectedRgb = 2 + 2 + 1 + 4 + 4 + 4 + (3 * 5 * 4);
+        Assert($"ISO 元数据 RGB: 长度={isoRgb.Length} (期望 {expectedRgb})", isoRgb.Length == expectedRgb);
+        Assert("ISO 元数据 RGB: 多通道标志", (isoRgb[4] & 0x80) != 0);
     }
 
     // ═══════════════════════════════════════════════

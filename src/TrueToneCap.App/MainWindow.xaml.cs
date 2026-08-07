@@ -41,6 +41,10 @@ public sealed partial class MainWindow : Window
     {
         this.InitializeComponent();
 
+        // ═══ 关键修复: _uiReady 在 InitializeComponent 后立即设为 true ═══
+        // 但 ApplySettingsToUI 会短暂设为 false 防止事件处理函数覆盖 _settings
+        _uiReady = true;
+
         // ── 拦截窗口关闭 → 最小化到托盘（WinUI 3 必须用 AppWindow.Closing）──
         var hwnd = WindowNative.GetWindowHandle(this);
         var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
@@ -98,7 +102,12 @@ public sealed partial class MainWindow : Window
 
         FormatCbo.ItemsSource = _formats.Select(f => f.Label).ToList();
         LoadSettings();             // 仅加载配置文件，不做检测
+
+        // ═══ 关键修复: ApplySettingsToUI 期间禁止事件覆盖 _settings ═══
+        _uiReady = false;
         ApplySettingsToUI();        // 将配置反映到 UI
+        _uiReady = true;
+
         // 同步窗口主题到 UI（启动时 ApplyTheme 已设置 Application.RequestedTheme，
         // 但窗口内容元素 fe.RequestedTheme 需要单独设置才能生效）
         SyncWindowTheme();
@@ -161,7 +170,7 @@ public sealed partial class MainWindow : Window
         var initLang = _settings.Language == "en" ? AppLanguage.English : AppLanguage.Chinese;
         LocaleManager.SetLanguage(initLang);
 
-        _uiReady = true;
+        // ═══ _uiReady 在 ApplySettingsToUI 之后已置为 true ═══
 
         // ── 订阅实时日志事件 ──
         SubscribeLogEvents();
@@ -194,6 +203,7 @@ public sealed partial class MainWindow : Window
         _settings.NvencAvailable = cap.NvencAvailable;
         _settings.QsvAvailable = cap.QsvAvailable;
         _settings.DisplayBitDepth = cap.DisplayBitDepth;
+        _settings.SystemSdrWhiteLevel = cap.DisplayPaperWhiteNits;
 
         // ACM 不再强制禁用 ICC 烘焙：用户可选择输出到任意色域，
         // ACM 仅保证显示器正确显示，不影响截图输出色彩空间。
@@ -304,8 +314,9 @@ public sealed partial class MainWindow : Window
         if (BdPngCbo is not null) SetComboByTag(BdPngCbo, _settings.BitDepthPng.ToString());
         if (BdJpegXlCbo is not null) SetComboByTag(BdJpegXlCbo, _settings.BitDepthJpegXl.ToString());
         if (BdAvifCbo is not null) SetComboByTag(BdAvifCbo, _settings.BitDepthAvif.ToString());
-        if (BdTiffCbo is not null) SetComboByTag(BdTiffCbo, _settings.BitDepthBmp.ToString());
+        if (BdTiffCbo is not null) SetComboByTag(BdTiffCbo, _settings.BitDepthTiff.ToString());
         if (ChromaJpegXlCbo is not null) SetComboByTag(ChromaJpegXlCbo, _settings.ChromaJpegXl);
+        if (ChromaJpegLiCbo is not null) SetComboByTag(ChromaJpegLiCbo, _settings.ChromaJpegLi);
         if (ChromaWebPCbo is not null) SetComboByTag(ChromaWebPCbo, _settings.ChromaWebP);
         RecordQualitySld.Value = _settings.RecordQuality;
         if (ArchiveChk is not null) ArchiveChk.IsChecked = _settings.ArchiveEnabled;
@@ -349,6 +360,7 @@ public sealed partial class MainWindow : Window
         {
             _settings.FormatIndex = FormatCbo.SelectedIndex;
             _settings.Quality = QualitySld.Value;
+            _settings.SetQuality(FormatCbo.SelectedIndex, QualitySld.Value);
             _settings.OutputPath = PathTxt.Text;
             _settings.FileNamePrefix = PrefixTxt.Text;
             _settings.HdrEnabled = HdrSwitch.IsOn;
@@ -377,20 +389,23 @@ public sealed partial class MainWindow : Window
             _settings.BitDepthAvif = int.TryParse((BdAvifCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var bdav) ? bdav : 10;
             _settings.BitDepthJpegLi = 8; // JPEG LI 固定 8-bit
             _settings.BitDepthWebP = 8;   // WebP 固定 8-bit
-            _settings.BitDepthBmp = int.TryParse((BdTiffCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var bdt) ? bdt : 8;
+            _settings.BitDepthTiff = int.TryParse((BdTiffCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var bdt) ? bdt : 8;
             _settings.BitDepthGainMap = 8; // Gain Map 基于 JPEG，固定 8-bit
             _settings.ChromaPng = "444";   // PNG 是 RGB 无损格式，不支持色度子采样
-            _settings.ChromaJpegLi = "420"; // JPEG LI 无独立 UI，默认 4:2:0
+            _settings.ChromaJpegLi = (ChromaJpegLiCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420"; // JPEG LI 色度
             _settings.ChromaAvif = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
             _settings.ChromaJpegXl = (ChromaJpegXlCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
             _settings.ChromaWebP = (ChromaWebPCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420";
-            _settings.ChromaBmp = "444";   // TIFF 无损，固定 4:4:4
+            _settings.ChromaTiff = "444";   // TIFF 无损，固定 4:4:4
             _settings.ChromaGainMap = "420";
             _settings.RecordQuality = RecordQualitySld.Value;
             _settings.AnimAvifBackendIndex = 0;
             _settings.ArchiveEnabled = ArchiveChk?.IsChecked == true;
             _settings.ArchiveMode = (ArchiveModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
             _settings.FirstRun = false;
+            _settings.ShowPreview = PreviewChk.IsChecked == true;
+            _settings.OcrEngineMode = (OcrEngineCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "OnnxGpu";
+            _settings.ThemeMode = (ThemeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Default";
             _settings.Language = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh";
 
             // 字体
@@ -406,6 +421,16 @@ public sealed partial class MainWindow : Window
             _settings.LlmSystemPrompt = LlmPromptTxt.Text;
             _settings.TargetLanguage = (TargetLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
             _settings.OcrLanguage = (OcrLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+
+            // OutputBitDepth 从每格式位深映射（SaveSettings 中的 BitDepth 已更新）
+            _settings.OutputBitDepth = _settings.FormatIndex switch
+            {
+                0 => _settings.BitDepthPng,         // PNG
+                3 => _settings.BitDepthJpegXl,        // JPEG XL
+                4 => _settings.BitDepthAvif,          // AVIF
+                6 => _settings.BitDepthTiff,          // TIFF
+                _ => 8,                                // 其他格式固定 8-bit
+            };
 
             // 通过 SettingsService 持久化
             AppServices.Settings.Save();
@@ -435,6 +460,7 @@ public sealed partial class MainWindow : Window
 
     private void OnFormatChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (!_uiReady) return;
         UpdateQualityPanel();
         _settings.FormatIndex = FormatCbo.SelectedIndex;
         AppServices.Settings.SaveQuiet();
@@ -476,6 +502,7 @@ public sealed partial class MainWindow : Window
         GainMapOptionsCard.Visibility = isGainMap ? Visibility.Visible : Visibility.Collapsed;
         PngOptionsCard.Visibility = format == OutputFormat.PNG ? Visibility.Visible : Visibility.Collapsed;
         JpegXlOptionsCard.Visibility = format == OutputFormat.JPEG_XL ? Visibility.Visible : Visibility.Collapsed;
+        JpegLiOptionsCard.Visibility = format == OutputFormat.JPEG_LI ? Visibility.Visible : Visibility.Collapsed;
         WebPOptionsCard.Visibility = format == OutputFormat.WebP ? Visibility.Visible : Visibility.Collapsed;
         TiffOptionsCard.Visibility = format == OutputFormat.TIFF ? Visibility.Visible : Visibility.Collapsed;
         // P1-3: AVIF 位深选项卡片（与 AvifOptionsCard 联动）
@@ -497,17 +524,22 @@ public sealed partial class MainWindow : Window
                 QualitySld.Minimum = Math.Max(min, 1.0);
         }
 
-        // Quality 优先使用已保存值
-        double savedQ = _settings.Quality;
+        // Quality 优先使用该格式已保存值（每格式独立，切换格式不互相覆盖）
+        int fmtIdx = FormatCbo.SelectedIndex;
+        double savedQ = _settings.GetQuality(fmtIdx);
         double useQ = (savedQ >= QualitySld.Minimum && savedQ <= QualitySld.Maximum) ? savedQ : def;
         QualitySld.Value = useQ;
-        QualityLbl.Text = encoder.GetQualityDescription((float)useQ);
+        QualityLbl.Text = useQ.ToString("F1");
         QualityTxt.Text = useQ.ToString("F1");
         QualityTxt.Visibility = precise ? Visibility.Visible : Visibility.Collapsed;
+        // 长质量描述放到独立整行（避免被窄列遮挡）
+        QualityDescTxt.Text = encoder.GetQualityDescription((float)useQ);
+        QualityDescTxt.Visibility = Visibility.Visible;
     }
 
     private void OnAvifBackendChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (!_uiReady) return;
         UpdateQualityPanel();
         _settings.AvifBackendIndex = AvifBackendCbo.SelectedIndex;
         AppServices.Settings.SaveQuiet();
@@ -515,6 +547,7 @@ public sealed partial class MainWindow : Window
 
     private void OnGainMapModeChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (!_uiReady) return;
         var tag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
         GainMapHintTxt.Text = tag == "Gray"
             ? "灰度增益：仅编码亮度差，体积最小。黑白文字/图标场景推荐。"
@@ -525,20 +558,37 @@ public sealed partial class MainWindow : Window
 
     private void OnArchiveChanged(object sender, RoutedEventArgs e)
     {
+        if (!_uiReady) return;
         ArchiveModePanel.Visibility = ArchiveChk.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         _settings.ArchiveEnabled = ArchiveChk.IsChecked == true;
         AppServices.Settings.SaveQuiet();
     }
 
+    private void OnRecordQualityChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.RecordQuality = Math.Round(RecordQualitySld.Value, 1);
+        AppServices.Settings.SaveQuiet();
+    }
+
+    private void OnTargetLangChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.TargetLanguage = (TargetLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
+        AppServices.Settings.SaveQuiet();
+    }
+
     private void OnQualityChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
-        if (FormatCbo.SelectedIndex < 0) return;
+        if (!_uiReady || FormatCbo.SelectedIndex < 0) return;
         var (format, _) = _formats[FormatCbo.SelectedIndex];
         var encoder = EncoderFactory.Create(format);
         double val = Math.Round(QualitySld.Value, 1);
-        QualityLbl.Text = encoder.GetQualityDescription((float)val);
+        QualityLbl.Text = val.ToString("F1");
         QualityTxt.Text = val.ToString("F1");
-        _settings.Quality = val;
+        QualityDescTxt.Text = encoder.GetQualityDescription((float)val);
+        // 保存到当前格式的独立质量字段（切换格式不互相覆盖）
+        _settings.SetQuality(FormatCbo.SelectedIndex, val);
         AppServices.Settings.SaveQuiet();
     }
 
@@ -559,7 +609,8 @@ public sealed partial class MainWindow : Window
             v = Math.Clamp(Math.Round(v, 1), QualitySld.Minimum, QualitySld.Maximum);
             QualityTxt.Text = v.ToString("F1");
             QualitySld.Value = v;
-            _settings.Quality = v;
+            QualityLbl.Text = v.ToString("F1");
+            _settings.SetQuality(FormatCbo.SelectedIndex, v);
             AppServices.Settings.SaveQuiet();
         }
         else QualityTxt.Text = QualitySld.Value.ToString("F1");
@@ -569,6 +620,7 @@ public sealed partial class MainWindow : Window
 
     private void OnHdrToggled(object sender, RoutedEventArgs e)
     {
+        if (!_uiReady) return;
         _settings.HdrEnabled = HdrSwitch.IsOn;
 
         // 选 System 时检测显示器真实色域
@@ -580,12 +632,14 @@ public sealed partial class MainWindow : Window
 
     private void OnIccBakeToggled(object sender, RoutedEventArgs e)
     {
+        if (!_uiReady) return;
         _settings.IccBakeEnabled = IccBakeSwitch.IsOn;
         AppServices.Settings.SaveQuiet();
     }
 
     private void OnColorSpaceChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (!_uiReady) return;
         var tag = GetSelectedColorSpaceTag();
         bool hdrOn = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
         bool isSRgb = tag is "System" or "sRGB";
@@ -613,12 +667,14 @@ public sealed partial class MainWindow : Window
 
     private void OnOverlayColorChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (!_uiReady) return;
         _settings.OverlayColor = (OverlayColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#99001833";
         SaveSettingsQuiet();
     }
 
     private void OnBorderColorChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (!_uiReady) return;
         _settings.BorderColor = (BorderColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#FF4488FF";
         SaveSettingsQuiet();
     }
@@ -915,7 +971,7 @@ public sealed partial class MainWindow : Window
                     LogService.Info("SilentCapture", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                     var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
                         captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
-                        new ToneMappingParams { Mode = ToneMapMode.Aces });
+                        new ToneMappingParams { Mode = ToneMapMode.Aces, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits) });
                     if (iccProfile is not null)
                         settings.IccProfile = iccProfile;
                     settings.HdrOutput = false;
@@ -1161,7 +1217,7 @@ public sealed partial class MainWindow : Window
                 LogService.Info("MainWindow", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                 var (sdrPixels, iccP) = CapturePipelineService.PrepareFloat16WithIcc(
                     hdrPixels, w, h, iccBakeEnabled, colorSpaceTag,
-                    new ToneMappingParams { Mode = ToneMapMode.Aces });
+                    new ToneMappingParams { Mode = ToneMapMode.Aces, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits) });
                 if (iccP is not null)
                     settings.IccProfile = iccP;
                 settings.HdrOutput = false;
@@ -1565,13 +1621,6 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>GDI 捕获指定屏幕坐标区域。w/h 超过 4096 会自动分块。供外部（OnCaptureNow SDR 路径）使用。</summary>
-    [Obsolete("已迁移至 WGC。保留仅供向后兼容。")]
-    public static byte[]? CaptureViaGdiStatic(int x, int y, int w, int h)
-    {
-        return CaptureViaGdi(x, y, w, h, true);
-    }
-
     // ── 截图按钮（选区模式） ──
 
     private void OnCaptureBtn(object sender, RoutedEventArgs e) => StartSelectionCapture();
@@ -1644,7 +1693,7 @@ public sealed partial class MainWindow : Window
                     LogService.Info("MainWindow", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                     var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
                         captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
-                        new ToneMappingParams { Mode = ToneMapMode.Aces });
+                        new ToneMappingParams { Mode = ToneMapMode.Aces, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits) });
                     if (iccProfile is not null)
                         settings.IccProfile = iccProfile;
                     settings.HdrOutput = false;
@@ -1781,6 +1830,7 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(ToastRecordChk)) _settings.ToastOnRecording = cb.IsChecked == true;
             else if (cb.Name == nameof(AutoStartChk)) _settings.AutoStart = cb.IsChecked == true;
             else if (cb.Name == nameof(MinimizeTrayChk)) _settings.MinimizeToTray = cb.IsChecked == true;
+            else if (cb.Name == nameof(PreviewChk)) _settings.ShowPreview = cb.IsChecked == true;
         }
         try { SaveSettingsQuiet(); } catch { }
     }
@@ -1796,9 +1846,10 @@ public sealed partial class MainWindow : Window
             if (cb.Name == nameof(BdPngCbo)) _settings.BitDepthPng = int.TryParse(tag, out var v) ? v : 8;
             else if (cb.Name == nameof(BdAvifCbo)) _settings.BitDepthAvif = int.TryParse(tag, out var v) ? v : 10;
             else if (cb.Name == nameof(BdJpegXlCbo)) _settings.BitDepthJpegXl = int.TryParse(tag, out var v) ? v : 10;
-            else if (cb.Name == nameof(BdTiffCbo)) _settings.BitDepthBmp = int.TryParse(tag, out var v) ? v : 8;
+            else if (cb.Name == nameof(BdTiffCbo)) _settings.BitDepthTiff = int.TryParse(tag, out var v) ? v : 8;
             else if (cb.Name == nameof(AvifChromaCbo)) _settings.AvifChroma = tag;
             else if (cb.Name == nameof(ChromaJpegXlCbo)) _settings.ChromaJpegXl = tag;
+            else if (cb.Name == nameof(ChromaJpegLiCbo)) _settings.ChromaJpegLi = tag;
             else if (cb.Name == nameof(ChromaWebPCbo)) _settings.ChromaWebP = tag;
             else if (cb.Name == nameof(ArchiveModeCbo)) _settings.ArchiveMode = tag;
         }
@@ -2313,84 +2364,6 @@ public sealed partial class MainWindow : Window
         AppServices.Settings.SaveQuiet();
     }
 
-    // ── sRGB 辅助（保留用于色彩管理）──
-
-    private static float[] BgraToScrgbLinear(byte[] bgra, int w, int h)
-        => TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(bgra, w, h);
-
-    // ── GDI 捕获（已过时，仅保留作为最终回退，不推荐使用）──
-
-    [Obsolete("已迁移至 WGC。保留仅供向后兼容。")]
-    private static byte[]? CaptureViaGdi(int x, int y, int w, int h, bool fixAlpha = true)
-    {
-        nint hdcScreen = 0, hdcMem = 0, hBitmap = 0, hOld = 0;
-        try
-        {
-            hdcScreen = GetDC(0);
-            if (hdcScreen == 0) return null;
-            hdcMem = CreateCompatibleDC(hdcScreen);
-            hBitmap = CreateCompatibleBitmap(hdcScreen, w, h);
-            if (hBitmap == 0) return null;
-            hOld = SelectObject(hdcMem, hBitmap);
-            if (!BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY))
-                return null;
-
-            var bytes = new byte[w * h * 4];
-            var bi = new BITMAPINFO
-            {
-                bmiHeader = new BITMAPINFOHEADER
-                {
-                    biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
-                    biWidth = w, biHeight = -h,
-                    biPlanes = 1, biBitCount = 32, biCompression = BI_RGB
-                }
-            };
-            GetDIBits(hdcMem, hBitmap, 0, (uint)h, bytes, ref bi, DIB_RGB_COLORS);
-
-            if (fixAlpha)
-            {
-                for (int i = 3; i < bytes.Length; i += 4)
-                    bytes[i] = 0xFF;
-            }
-            return bytes;
-        }
-        catch { return null; }
-        finally
-        {
-            if (hOld != 0) SelectObject(hdcMem, hOld);
-            if (hBitmap != 0) DeleteObject(hBitmap);
-            if (hdcMem != 0) DeleteDC(hdcMem);
-            if (hdcScreen != 0) ReleaseDC(0, hdcScreen);
-        }
-    }
-
-    // GDI P/Invoke（仅保留作为最终回退）
-    [LibraryImport("user32.dll")] private static partial nint GetDC(nint hWnd);
-    [LibraryImport("user32.dll")] private static partial int ReleaseDC(nint hWnd, nint hDC);
-    [LibraryImport("gdi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool BitBlt(nint hdcD, int xD, int yD, int w, int h, nint hdcS, int xS, int yS, uint rop);
-    [LibraryImport("gdi32.dll")] private static partial nint CreateCompatibleDC(nint hdc);
-    [LibraryImport("gdi32.dll")] private static partial nint CreateCompatibleBitmap(nint hdc, int w, int h);
-    [LibraryImport("gdi32.dll")] private static partial nint SelectObject(nint hdc, nint h);
-    [LibraryImport("gdi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool DeleteDC(nint hdc);
-    [LibraryImport("gdi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool DeleteObject(nint h);
-    [DllImport("gdi32.dll")] private static extern int GetDIBits(nint hdc, nint hbmp, uint start, uint cLines, byte[]? lpBits, ref BITMAPINFO lpbmi, uint usage);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFOHEADER { public uint biSize; public int biWidth, biHeight; public ushort biPlanes, biBitCount; public uint biCompression, biSizeImage; public int biXPelsPerMeter, biYPelsPerMeter; public uint biClrUsed, biClrImportant; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; }
-
-    private const uint SRCCOPY = 0x00CC0020;
-    private const uint DIB_RGB_COLORS = 0;
-    private const uint BI_RGB = 0;
-
     // ── Win32 窗口子类化（托盘消息处理）──
     [LibraryImport("user32.dll")]
     private static partial nint SetWindowLongPtrW(nint hWnd, int nIndex, nint dwNewLong);
@@ -2614,104 +2587,4 @@ public static class FontHelper
     }
 }
 
-public sealed class AppSettingsData
-{
-    // ── 输出格式 (0=PNG, 1=GainMap, 2=JPEG LI, 3=JPEG XL, 4=AVIF, 5=WebP, 6=TIFF) ──
-    public int FormatIndex { get; set; }
-
-    // ── 质量 ──
-    public double Quality { get; set; } = 80;
-
-    // ── 输出路径 ──
-    public string OutputPath { get; set; } = "";
-    public string FileNamePrefix { get; set; } = "TrueToneCap_";
-
-    // ── 色彩 (0=System, 1=sRGB, 2=DisplayP3, 3=DCI_P3, 4=AdobeRGB, 5=BT.2020) ──
-    public int ColorSpaceIndex { get; set; }
-
-    // ── HDR / ICC ──
-    public bool HdrEnabled { get; set; } = true;
-    public bool IccBakeEnabled { get; set; }
-
-    // ── 热键 ──
-    public string Hotkey { get; set; } = "Ctrl+Shift+S";
-    public string RecordHotkey { get; set; } = "Ctrl+Shift+G";
-    public string SilentHotkey { get; set; } = "Ctrl+Shift+Q";
-
-    // ── 行为 ──
-    public bool AutoStart { get; set; }
-    public bool ShowPreview { get; set; } = true;
-    public bool MinimizeToTray { get; set; } = true;
-
-    // ── AVIF ──
-    public bool AvifPngSuffix { get; set; }
-    public int AvifBackendIndex { get; set; } // 0=Auto, 1=LibAom, 2=Qsv, 3=Nvenc
-    public string AvifChroma { get; set; } = "444";
-
-    // ── 录制 ──
-    public double RecordQuality { get; set; } = 80;
-    public int AnimAvifBackendIndex { get; set; }
-
-    // ── 归档 ──
-    public bool ArchiveEnabled { get; set; }
-    public string ArchiveMode { get; set; } = "Month";
-
-    // ── 每格式位深 ──
-    public int BitDepthPng { get; set; } = 8;
-    public int BitDepthJpegLi { get; set; } = 8;
-    public int BitDepthJpegXl { get; set; } = 10;
-    public int BitDepthAvif { get; set; } = 10;
-    public int BitDepthWebP { get; set; } = 8;
-    public int BitDepthBmp { get; set; } = 8;
-    public int BitDepthGainMap { get; set; } = 8;
-
-    // ── 每格式色度采样 ──
-    public string ChromaPng { get; set; } = "444";
-    public string ChromaJpegLi { get; set; } = "420";
-    public string ChromaJpegXl { get; set; } = "444";
-    public string ChromaAvif { get; set; } = "444";
-    public string ChromaWebP { get; set; } = "420";
-    public string ChromaBmp { get; set; } = "444";
-    public string ChromaGainMap { get; set; } = "420";
-
-    // ── 翻译 ──
-    public bool UseCustomLlm { get; set; }
-    public string TranslationMode { get; set; } = "Free";
-    public string LlmEndpoint { get; set; } = "";
-    public string LlmApiKey { get; set; } = "";
-    public string LlmModel { get; set; } = "deepseek-chat";
-    public string LlmSystemPrompt { get; set; } = "";
-    public string TargetLanguage { get; set; } = "zh-CN";
-    public string OcrLanguage { get; set; } = "";
-
-    // ── 系统检测 ──
-    public bool AcmeDetected { get; set; }
-    public bool FirstRun { get; set; } = true;
-    public bool NvencAvailable { get; set; }
-    public bool QsvAvailable { get; set; }
-    public int DisplayBitDepth { get; set; } = 8;
-    public int OutputBitDepth { get; set; } = 8;
-
-    // ── 增益图 ──
-    public string GainMapMode { get; set; } = "Gray";
-
-    // ── 界面 ──
-    public string Language { get; set; } = "zh";
-    public string OcrEngineMode { get; set; } = "OnnxGpu";
-    public string ThemeMode { get; set; } = "Default";
-
-    // ── Toast ──
-    public bool ToastOnCapture { get; set; } = true;
-    public bool ToastOnSilentCapture { get; set; } = true;
-    public bool ToastOnRecording { get; set; } = true;
-    /// <summary>Toast 通知位置: BottomRight / TopRight / TopLeft / BottomLeft / WindowsNotify</summary>
-    public string ToastPosition { get; set; } = "BottomRight";
-
-    // ── 预览界面颜色 ──
-    public string OverlayColor { get; set; } = "#99001833";
-    public string BorderColor { get; set; } = "#FF4488FF";
-
-    // ── 字体选择 ──
-    /// <summary>用户选择的字体族名称（空=使用默认回退链）。</summary>
-    public string FontFamily { get; set; } = "";
-}
+// AppSettingsData 已移至 Models/AppSettingsData.cs

@@ -73,20 +73,25 @@ public static class NativeWebPEncoder
                 CreateNoWindow = true
             };
 
-            using var proc = System.Diagnostics.Process.Start(psi);
-            if (proc is null) throw new InvalidOperationException("无法启动 cwebp");
-            // 修复死锁: 必须异步读取 stdout/stderr，否则管道缓冲区满导致进程挂起
-            var stderrTask = proc.StandardError.ReadToEndAsync();
-            proc.StandardOutput.ReadToEnd();
-            if (!proc.WaitForExit(30_000))
+            var result = NativeEncoderGuard.TryEncode("WebP", () =>
             {
-                proc.Kill();
-                throw new InvalidOperationException("[WebP] cwebp 超时 (30s)");
-            }
-            stderrTask.GetAwaiter().GetResult();
+                using var proc = System.Diagnostics.Process.Start(psi);
+                if (proc is null) throw new InvalidOperationException("无法启动 cwebp");
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+                proc.StandardOutput.ReadToEnd();
+                if (!proc.WaitForExit(30_000))
+                {
+                    proc.Kill();
+                    throw new InvalidOperationException("[WebP] cwebp 超时 (30s)");
+                }
+                stderrTask.GetAwaiter().GetResult();
 
-            if (proc.ExitCode != 0 || !File.Exists(path))
-                throw new InvalidOperationException($"[WebP] cwebp 失败 (exit={proc.ExitCode})");
+                if (proc.ExitCode != 0 || !File.Exists(path))
+                    throw new InvalidOperationException($"[WebP] cwebp 失败 (exit={proc.ExitCode})");
+                return File.ReadAllBytes(path);
+            });
+            if (!result.Success)
+                throw new InvalidOperationException($"[WebP] cwebp 编码失败: {result.Error?.Message}");
         }
         finally
         {
