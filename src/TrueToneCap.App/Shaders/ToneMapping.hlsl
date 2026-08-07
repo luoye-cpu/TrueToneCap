@@ -69,14 +69,29 @@ float3 HableToneMap(float3 hdr)
 }
 
 // ACES RRT (Narkowicz 2015) + ODT - needs AP1 conversion
+// 注意: RRT 不截断到 [0,1]，高光保留给 ODT 压缩（与 CPU 一致）
+float3 ACESRrt(float3 ap1)
+{
+    const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+    return (ap1 * (a * ap1 + b)) / (ap1 * (c * ap1 + d) + e);
+}
+
+// ACES ODT: 对比度提升 + 亮度缩放（随 DisplayMaxNits 微调）
+float3 ACESOdt(float3 x, float maxNits)
+{
+    float k = 0.3f + 0.05f * clamp((maxNits - 100.0f) / 900.0f, 0.0f, 1.0f);
+    return x * (1.0f + k * (1.0f - x) * (1.0f - x));
+}
+
 float3 ACESToneMap(float3 hdr)
 {
     float3 ap1 = SrgbToAp1(hdr);
-    const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-    float3 m = (ap1 * (a * ap1 + b)) / (ap1 * (c * ap1 + d) + e);
-    m = saturate(m);
-    m = m * (1.0f + 0.3f * (1.0f - m) * (1.0f - m));
-    return Ap1ToSrgb(m);
+    float3 m = ACESRrt(ap1);
+    m = ACESOdt(m, DisplayMaxNits);
+    // 饱和度补偿（ACES 参考 ODT 色度处理, sat=0.96）
+    float lum = dot(m, float3(0.2126f, 0.7152f, 0.0722f));
+    m = lum + 0.96f * (m - lum);
+    return Ap1ToSrgb(saturate(m));
 }
 
 // Linear -> sRGB gamma (with negative protection)

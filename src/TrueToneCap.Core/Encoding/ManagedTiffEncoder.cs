@@ -134,9 +134,9 @@ public static class ManagedTiffEncoder
             }
         }
 
-        // Deflate compress
+        // Deflate compress (SmallestSize 比 Optimal 压缩率高 3-8%，适合截图保存)
         using var ms = new MemoryStream();
-        using (var ds = new DeflateStream(ms, CompressionLevel.Optimal))
+        using (var ds = new DeflateStream(ms, CompressionLevel.SmallestSize))
             ds.Write(raw, 0, raw.Length);
         var compressed = ms.ToArray();
         writer.Write(compressed);

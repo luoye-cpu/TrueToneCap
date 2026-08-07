@@ -1,21 +1,28 @@
 // TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs
-// JPEG Gain Map (Ultra HDR) — ISO 21496-1 兼容实现
+// JPEG Gain Map (Ultra HDR) — ISO 21496-1 + Ultra HDR v1 双元数据兼容实现
 //
-// 完整链路：
-//   HDR scRGB float 像素
-//     ├─ 色域转换 (scRGB→目标色域线性)
-//     ├─ Tone Map → SDR BGRA → Base JPEG (jpegli)
-//     ├─ 逐像素计算增益比 → 增益图 (Gray 或 RGB)
-//     └─ 增益图 JPEG 编码 → MPF 封装 → 输出 .jpg 文件
+// 全新管线 (2026-08-06): 以 JPEG LI 为基底 + BT.2390-4 EETF 标准映射
+// 2026-08-07 修复: 标准 hdrgm XMP + ISO 21496-1 二进制元数据 + 标准 MPF attribute
+//
+//   HDR scRGB 线性浮点 (1.0 = 80 nits)
+//     ├─ BT.2390-4 EETF 显示映射 → SDR 线性（同一 scRGB 空间）
+//     │     └─ sRGB gamma → BGRA8 → jpegli → Base JPEG
+//     ├─ 增益比 = HDR_linear / SDR_linear（基于【同一个】EETF 映射空间）
+//     │     └─ log2 编码 [0,+4] → 1/4 降采样 → jpegli → 增益图 JPEG
+//     └─ 封装: Base(APP1: hdrgm XMP + APP2: MPF) + GainMap(APP2: ISO 21496-1)
+//
+// 核心设计原则:
+//   * Base 与增益图基于同一个 BT.2390 EETF 映射，保证一致性（无偏色/过曝）
+//   * 用 BT.2390-4 EETF 标准显示映射替代通用色调映射器（Reinhard/Hable/ACES）
+//   * 全部使用 jpegli (JPEG LI) 编码，移除 ultrahdr_app 外部依赖
+//   * 双元数据: hdrgm XMP (Ultra HDR v1 解码器) + ISO 21496-1 二进制 (ISO 解码器)
 //
 // 增益图类型：
 //   Gray: log2(HDR_luminance / SDR_luminance) → 单通道灰度图
-//   RGB:  log2(HDR_channel / SDR_channel)  → 三通道彩色增益图
+//   Rgb:  log2(HDR_channel / SDR_channel)     → 三通道彩色增益图
 
 using System.IO;
-using System.Text;
 using TrueToneCap.Core.Processing;
-using TrueToneCap.Core.ColorManagement;
 
 namespace TrueToneCap.Core.Encoding;
 
@@ -59,13 +66,15 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             if (!JpegLiNative.IsAvailable)
                 throw new InvalidOperationException("JPEG Gain Map 编码需要 cjpegli.exe (Google jpegli)，请将 cjpegli.exe 放入 native/ 目录、PLAN/tools/ 目录或系统 PATH。");
             var icc = (settings.ColorSpaceTag is not (null or "System" or "sRGB")) ? settings.IccProfile : null;
-            var jpegBytes = JpegLiNative.Encode(sdrPixels, width, height, settings.Quality, settings.ChromaSubsampling, icc);
+            // settings.Quality 是 butteraugli 距离 (GetQualityRange: 0.5-3.0)，直接使用
+            float distance = Math.Clamp(settings.Quality, 0.5f, 25.0f);
+            var jpegBytes = JpegLiNative.Encode(sdrPixels, width, height, distance, settings.ChromaSubsampling, icc, forceBaseline: true);
             File.WriteAllBytes(outputPath, jpegBytes);
         }, ct);
     }
 
     // ═══════════════════════════════════════
-    //  Gain Map 编码主流程
+    //  Gain Map 编码主流程（BT.2390-4 EETF）
     // ═══════════════════════════════════════
 
     private async Task EncodeGainMapAsync(HdrFrameData frame, EncodingSettings settings,
@@ -78,56 +87,150 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             int pixelCount = w * h;
             float[] hdrPixels = frame.Pixels;
 
-            // Base JPEG 是色调映射后的 SDR 图像，不应嵌入广色域 ICC
-            byte[]? icc = null;
+            // ── 0. HDR 峰值亮度 + SDR 白点（headroom 计算输入）──
+            //     ═══ Windows scRGB 语义 (Microsoft 文档权威确认) ═══
+            //     WGC Float16 捕获: scRGB 线性, 1.0 = 80 nits (标称参考白, scene-referred)
+            //     但 SDR 内容在 HDR 桌面被 DWM 提升到 SdrWhiteLevel (通常 200 nits = 2.5 scRGB)
+            //     所以: SDR 内容捕获值 = 2.5 scRGB (200 nits), 不是 1.0!
+            //     直通阈值必须是 SDR 白点 (PaperWhiteNits/80 对应的 scRGB 值),
+            //     否则 2.5 scRGB 的 SDR 内容会被错误压缩 → Base 发灰 + 增益虚高 → 过曝。
+            float hdrPeakNits = settings.ToneMappingParams.DisplayMaxNits > 0
+                ? settings.ToneMappingParams.DisplayMaxNits
+                : 1000f;
+            float sdrWhiteNits = Math.Max(settings.ToneMappingParams.PaperWhiteNits, 80f);
+            // scRGB 中 SDR 白点的位置: PaperWhiteNits / 80 (如 200/80 = 2.5)
+            float sdrWhiteScrgb = sdrWhiteNits / 80f;
+            // headroom: HDR 峰值相对 SDR 白点 (如 1000/200 = 5.0)
+            float headroom = hdrPeakNits / sdrWhiteNits;
 
-            // ── 1. Tone Map HDR → SDR (BGRA8 for Base JPEG) ──
-            byte[] sdrBgra = ToneMapper.FloatToSRgbBytes(hdrPixels, w, h, settings.ToneMappingParams);
+            // ── 1. 分段 Reinhard 色调映射: HDR scRGB → SDR 线性 ──
+            //     输入: scRGB (1.0 = 80 nits), 先归一化到 SDR 白点相对空间
+            //       y = scRGB / sdrWhiteScrgb  (SDR 白点 = 1.0)
+            //     输出: [0, 1.0] 相对 SDR 白点 (解码器理解的 Base 亮度)
+            //     分段: y ≤ 1.0 (SDR 内容) 完全直通 → 增益 1x
+            //           y > 1.0 (真 HDR 高光) Reinhard 压缩 → 增益 >1x
+            float[] sdrLinear = ReinhardToSdr(hdrPixels, w, h, headroom, sdrWhiteScrgb);
             ct.ThrowIfCancellationRequested();
 
-            // ── 2. SDR 线性浮点值（用于增益比计算）──
-            // 注意: ApplyToneMapping 内部已做 PaperWhite 归一化 + 色调映射
-            // 输出在 sRGB 线性空间 [0,1] 范围
-            float[] sdrLinear = new float[pixelCount * 4];
-            Array.Copy(hdrPixels, sdrLinear, hdrPixels.Length);
-            ToneMapper.ApplyToneMapping(sdrLinear, w, h, settings.ToneMappingParams);
+            // ── 2. Base 像素: sdrLinear (0..1.0 相对 SDR 白点) → sRGB gamma → BGRA8 ──
+            byte[] sdrBgra = LinearToBgra8(sdrLinear, w, h);
             ct.ThrowIfCancellationRequested();
 
-            // ── 3. HDR 归一化到与 SDR 相同的 PaperWhite 空间 ──
-            // 增益比要求 HDR 和 SDR 在同一个线性空间
-            // HDR: scRGB raw (1.0 = 80 nits)
-            // SDR: tone_mapped(scRGB * 80/PaperWhite)
-            // 因此 HDR 也要乘以 80/PaperWhite 才能与 SDR 比较
-            float pw = Math.Max(settings.ToneMappingParams.PaperWhiteNits, 1.0f);
-            float pwScale = 80.0f / pw;
-            float[] hdrNorm = new float[pixelCount * 4];
-            for (int i = 0; i < pixelCount * 4; i++)
-                hdrNorm[i] = hdrPixels[i] * pwScale;
-
-            // ── 4. 编码 Base JPEG ──
-            byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, settings.Quality, icc);
+            // ── 3. 编码 Base JPEG (jpegli, Baseline) ──
+            float baseDist = Math.Clamp(settings.Quality, 0.5f, 25.0f);
+            byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, baseDist, null);
             ct.ThrowIfCancellationRequested();
 
-            // 5. 计算增益图
+            // ── 4. 增益比计算（统一到 SDR 白点相对线性空间）──
             var gainMapMode = settings.GainMapMode;
-            byte[] gainMapPixels = ComputeGainMap(hdrNorm, sdrLinear, w, h, gainMapMode);
+            // HDR scRGB (1.0=80 nits) → SDR 白点相对空间 (与 sdrLinear 一致)
+            float invSdrWhite = 1.0f / Math.Max(sdrWhiteScrgb, 1.0f);
+            float[] normHdr = new float[hdrPixels.Length];
+            for (int pi = 0; pi < pixelCount; pi++)
+            {
+                int o = pi * 4;
+                normHdr[o]     = hdrPixels[o] * invSdrWhite;
+                normHdr[o + 1] = hdrPixels[o + 1] * invSdrWhite;
+                normHdr[o + 2] = hdrPixels[o + 2] * invSdrWhite;
+                normHdr[o + 3] = hdrPixels[o + 3];
+            }
+            // 最大 log2 增益 = log2(headroom)（HDR 峰值相对 SDR 白点）
+            float maxLog2Gain = MathF.Log2(Math.Max(headroom, 1.0f));
+            byte[] gainMapPixels = ComputeGainMap(normHdr, sdrLinear, w, h, gainMapMode, maxLog2Gain);
             ct.ThrowIfCancellationRequested();
 
-            // 6. 增益图缩放 + 编码
-            int gainMapJpegQuality = 85;
+            // ── 5. 增益图降采样 + 编码 (jpegli) ──
+            //    用户已选 butteraugli 距离 → 映射回 0-100 质量：
+            //    distance 0.5→100, 3.0→50, clamp 到 [50,100] 保底
+            float gmDistance = Math.Clamp(settings.Quality, 0.5f, 3.0f);
+            int gainMapJpegQuality = (int)Math.Round(100f - (gmDistance - 0.5f) / 2.5f * 50f);
+            gainMapJpegQuality = Math.Clamp(gainMapJpegQuality, 50, 100);
             byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, gainMapMode, out int gmSW, out int gmSH);
             byte[] gainMapJpegBytes = EncodeGainMapToJpegBytesSafe(gainMapScaled, gmSW, gmSH,
                 gainMapMode, gainMapJpegQuality);
             ct.ThrowIfCancellationRequested();
 
-            // 7. MPF 封装
+            // ── 6. MPF + XMP 封装（增益范围基于实际 headroom）──
             WriteJpegGainMapFile(baseJpegBytes, gainMapJpegBytes, w, h, gmSW, gmSH,
-                gainMapMode, outputPath);
+                gainMapMode, headroom, outputPath);
 
             System.Diagnostics.Debug.WriteLine(
                 $"[GainMap] 输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({gainMapMode}), " +
-                $"Base={baseJpegBytes.Length / 1024}KB, GainMap={gainMapJpegBytes.Length / 1024}KB");
+                $"Base={baseJpegBytes.Length / 1024}KB, GainMap={gainMapJpegBytes.Length / 1024}KB, " +
+                $"headroom={headroom:F1}");
         }, ct);
+    }
+
+    /// <summary>
+    /// 分段 Reinhard 色调映射: HDR scRGB → SDR 线性 (0..1.0, 1.0=SDR 白点)。
+    /// 输入: scRGB 线性 (1.0 = 80 nits, Windows scene-referred)
+    /// 归一化: y = scRGB / sdrWhiteScrgb (SDR 白点 = 1.0)
+    /// 分段 (修复过曝的关键):
+    ///   - y ≤ 1.0 (SDR 内容, ≤ PaperWhiteNits): 完全直通 → 增益恒 1x
+    ///   - y > 1.0 (真 HDR 高光): Reinhard 压缩 (libultrahdr 公式)
+    /// 输出: [0, 1.0] 相对 SDR 白点 (解码器理解的 Base 亮度)
+    /// </summary>
+    private static float[] ReinhardToSdr(float[] hdrPixels, int w, int h, float headroom,
+        float sdrWhiteScrgb)
+    {
+        int pixelCount = w * h;
+        var sdr = new float[hdrPixels.Length];
+        float headroomSq = headroom * headroom;
+        float invSdrWhite = 1.0f / Math.Max(sdrWhiteScrgb, 1.0f);
+
+        Parallel.For(0, pixelCount, pi =>
+        {
+            int i = pi * 4;
+
+            // HDR scRGB 线性 (1.0 = 80 nits) → 归一化到 SDR 白点相对空间
+            float r = hdrPixels[i] * invSdrWhite;
+            float g = hdrPixels[i + 1] * invSdrWhite;
+            float b = hdrPixels[i + 2] * invSdrWhite;
+            float a = hdrPixels[i + 3];
+
+            float maxY = Math.Max(Math.Max(r, g), b);
+
+            if (maxY <= 1.0f)
+            {
+                // SDR 范围 (≤ SDR 白点): 完全直通, 无压缩, 增益 1x
+                sdr[i]     = Math.Clamp(r, 0f, 1f);
+                sdr[i + 1] = Math.Clamp(g, 0f, 1f);
+                sdr[i + 2] = Math.Clamp(b, 0f, 1f);
+                sdr[i + 3] = Math.Clamp(a, 0f, 1f);
+                return;
+            }
+
+            // HDR 高光 (> SDR 白点): Reinhard 压缩, 保持色相
+            // ReinhardMap(y, headroom) = (1 + y/headroom²) / (1 + y) × y
+            float maxSdr = (1.0f + maxY / headroomSq) / (1.0f + maxY) * maxY;
+
+            // 保持色相缩放 (高光压缩到 [Reinhard(1.0), 1.0] 范围)
+            float scale = maxSdr / maxY;
+            sdr[i]     = Math.Clamp(r * scale, 0f, 1f);
+            sdr[i + 1] = Math.Clamp(g * scale, 0f, 1f);
+            sdr[i + 2] = Math.Clamp(b * scale, 0f, 1f);
+            sdr[i + 3] = Math.Clamp(a, 0f, 1f);
+        });
+        return sdr;
+    }
+
+    /// <summary>BT.2390 EETF 映射后的 SDR 线性 → sRGB gamma → BGRA8。</summary>
+    private static byte[] LinearToBgra8(float[] linear, int w, int h)
+    {
+        int pixelCount = w * h;
+        var bgra = new byte[pixelCount * 4];
+        System.Threading.Tasks.Parallel.For(0, pixelCount, pi =>
+        {
+            int i = pi * 4;
+            float r = ToneMapper.LinearToSRgbScalarPub(Math.Clamp(linear[i], 0f, 1f));
+            float g = ToneMapper.LinearToSRgbScalarPub(Math.Clamp(linear[i + 1], 0f, 1f));
+            float b = ToneMapper.LinearToSRgbScalarPub(Math.Clamp(linear[i + 2], 0f, 1f));
+            bgra[i]     = (byte)(b * 255f + 0.5f);
+            bgra[i + 1] = (byte)(g * 255f + 0.5f);
+            bgra[i + 2] = (byte)(r * 255f + 0.5f);
+            bgra[i + 3] = 255;
+        });
+        return bgra;
     }
 
     // ═══════════════════════════════════════
@@ -138,7 +241,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     {
         var result = NativeEncoderGuard.TryEncode("GainMap_BaseJPEG", () =>
         {
-            return JpegLiNative.Encode(bgra, w, h, distance, "444", icc);
+            return JpegLiNative.Encode(bgra, w, h, distance, "444", icc, forceBaseline: true);
         });
         if (result.Success) return result.Value!;
         throw new InvalidOperationException($"[GainMap] Base JPEG 编码失败: {result.Error?.Message}");
@@ -175,7 +278,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
 
         var result = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
         {
-            return JpegLiNative.Encode(bgra, w, h, distance, "444", null);
+            return JpegLiNative.Encode(bgra, w, h, distance, "444", null, forceBaseline: true);
         });
         if (result.Success) return result.Value!;
         throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result.Error?.Message}");
@@ -187,12 +290,15 @@ public sealed class JpegGainMapEncoder : ImageEncoder
 
     /// <summary>
     /// 计算增益图像素。
+    /// 输入: hdrPixels = 原始 HDR scRGB 线性，sdrLinear = Reinhard 色调映射后的 SDR 线性。
+    /// 两者在同一线性空间 (1.0=80 nits)，增益比 = HDR / SDR 反映色调映射压缩的额外亮度。
+    /// Reinhard 是单调压缩，保证 SDR ≤ HDR → 增益恒 ≥ 1 → log2(gain) ∈ [0, log2(headroom)]。
     /// Gray 模式：gain = log2(max(HDR_lum / SDR_lum, 1.0))，单通道 8-bit。
     /// RGB 模式：gain_c = log2(max(HDR_c / SDR_c, 1.0))，三通道 8-bit。
-    /// 增益值映射为 8-bit：gain_byte = (log_gain + 8) / 16 * 255（clamp 到 0-255）。
+    /// 增益值映射为 8-bit：gain_byte = log_gain / maxLog2 * 255（映射 [0,maxLog2] → [0,255]，全精度）。
     /// </summary>
     private static byte[] ComputeGainMap(float[] hdrPixels, float[] sdrLinear, int w, int h,
-        GainMapMode mode)
+        GainMapMode mode, float maxLog2Gain)
     {
         int pixelCount = w * h;
         int channels = mode == GainMapMode.Gray ? 1 : 3;
@@ -213,31 +319,32 @@ public sealed class JpegGainMapEncoder : ImageEncoder
 
             if (mode == GainMapMode.Gray)
             {
-                // 亮度增益（BT.2020 权重）
-                float hLum = 0.2627f * hR + 0.6780f * hG + 0.0593f * hB;
-                float sLum = 0.2627f * sR + 0.6780f * sG + 0.0593f * sB;
+                // 亮度增益（scRGB/BT.709 权重 — HDR 和 SDR 都在 scRGB 线性空间）
+                float hLum = 0.2126f * hR + 0.7152f * hG + 0.0722f * hB;
+                float sLum = 0.2126f * sR + 0.7152f * sG + 0.0722f * sB;
                 float ratio = hLum / Math.Max(sLum, eps);
                 float logGain = MathF.Log2(Math.Max(ratio, 1.0f));
-                gain[i] = LogGainToByte(logGain);
+                gain[i] = LogGainToByte(logGain, maxLog2Gain);
             }
             else
             {
                 // 三通道独立增益
                 int off = i * 3;
-                gain[off]     = LogGainToByte(MathF.Log2(Math.Max(hR / Math.Max(sR, eps), 1.0f)));
-                gain[off + 1] = LogGainToByte(MathF.Log2(Math.Max(hG / Math.Max(sG, eps), 1.0f)));
-                gain[off + 2] = LogGainToByte(MathF.Log2(Math.Max(hB / Math.Max(sB, eps), 1.0f)));
+                gain[off]     = LogGainToByte(MathF.Log2(Math.Max(hR / Math.Max(sR, eps), 1.0f)), maxLog2Gain);
+                gain[off + 1] = LogGainToByte(MathF.Log2(Math.Max(hG / Math.Max(sG, eps), 1.0f)), maxLog2Gain);
+                gain[off + 2] = LogGainToByte(MathF.Log2(Math.Max(hB / Math.Max(sB, eps), 1.0f)), maxLog2Gain);
             }
         });
 
         return gain;
     }
 
-    /// <summary>log2(gain) → 8-bit：映射 [-4, +4] → [0, 255]。</summary>
-    private static byte LogGainToByte(float logGain)
+    /// <summary>log2(gain) → 8-bit：映射 [0, maxLog2Gain] → [0, 255]（Reinhard 保证增益 ≥ 1）。</summary>
+    private static byte LogGainToByte(float logGain, float maxLog2Gain)
     {
-        float clamped = Math.Clamp(logGain, -4f, 4f);
-        return (byte)((clamped + 4f) / 8f * 255f);
+        if (maxLog2Gain <= 0f) maxLog2Gain = 1f;
+        float clamped = Math.Clamp(logGain, 0f, maxLog2Gain);
+        return (byte)(clamped / maxLog2Gain * 255f);
     }
 
     // ═══════════════════════════════════════
@@ -289,49 +396,124 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     }
 
     // ═══════════════════════════════════════
-    //  MPF + XMP 封装
+    //  MPF + XMP + ISO 21496-1 封装
     // ═══════════════════════════════════════
 
-    /// <summary>将 Base JPEG 和 Gain Map JPEG 封装为符合 ISO 21496-1 的单文件 JPEG。</summary>
+    /// <summary>将 Base JPEG 和 Gain Map JPEG 封装为符合 ISO 21496-1 + Ultra HDR v1 的单文件 JPEG。</summary>
+    /// <remarks>
+    /// 正确结构（对齐 Google libultrahdr jpegr.cpp）:
+    ///   主图 (Base): [SOI][APP1: XMP (hdrgm+GContainer)][DQT/SOF/DHT...][APP2: MPF][SOS][扫描数据][EOI]
+    ///   增益图 (GainMap JPEG): [SOI][APP2: ISO 21496-1 (命名空间+二进制元数据)][DQT/SOF/DHT...][SOS][扫描数据][EOI]
+    ///   最终 EOI
+    /// 关键: XMP/MPF 必须插在 Base JPEG 的 SOS **之前**；ISO 元数据必须插在增益图 JPEG 的 SOI **之后**。
+    /// 双元数据: XMP (hdrgm, Ultra HDR v1 解码器) + ISO 21496-1 二进制 (APP2, ISO 解码器)。
+    /// </remarks>
     private static void WriteJpegGainMapFile(byte[] baseJpeg, byte[] gainMapJpeg,
-        int baseW, int baseH, int gmW, int gmH, GainMapMode mode, string outputPath)
+        int baseW, int baseH, int gmW, int gmH, GainMapMode mode, float headroom, string outputPath)
     {
-        byte[] xmp = BuildXmpMetadata(baseW, baseH, gmW, gmH, mode);
+        byte[] xmp = BuildXmpMetadata(baseW, baseH, gmW, gmH, mode, headroom);
+        byte[] iso = BuildIso21496Metadata(mode, headroom);
 
-        // 1. Base JPEG 去掉 EOI（因为后续要嵌入 APP1/APP2）
-        int baseLen = TrimTrailingEoi(baseJpeg);
+        // 1. 定位 Base JPEG 的 SOS (FFDA) 标记位置
+        int sosIndex = FindSosIndex(baseJpeg);
+        if (sosIndex < 0)
+        {
+            // 找不到 SOS（异常），回退旧逻辑：仅写入 Base JPEG
+            File.WriteAllBytes(outputPath, baseJpeg);
+            return;
+        }
 
-        // 2. Gain Map JPEG 保留完整 SOI 和 EOI（MPF 要求每张图是完整 JPEG）
-        //    完整的 Gain Map JPEG 包含 SOI...EOI
-        int gmLen = gainMapJpeg.Length;
+        // 2. Base JPEG 头部段 = [SOI ... SOS 之前]，不含 SOS
+        //    SOS 段 = 2 字节 marker + 2 字节长度 + 参数
+        int sosLen = 2 + ((baseJpeg[sosIndex + 2] << 8) | baseJpeg[sosIndex + 3]);
+        int baseHeaderLen = sosIndex;                       // 头部段（到 SOS 前）
+        int baseScanStart = sosIndex + sosLen;              // 扫描数据起点
+        int baseScanLen = baseJpeg.Length - baseScanStart;  // 扫描数据（含 EOI）
 
-        // 3. 构建 MPF（big-endian，包含正确的偏移量）
-        //    Gain Map 数据偏移 = Base JPEG + APP1 + APP2
-        int mpfDataLen = 58; // BuildMpf 输出的固定长度
-        int gmOffset = baseLen
-            + 2 + 2 + xmp.Length       // APP1: marker(2) + length(2) + data
-            + 2 + 2 + mpfDataLen;       // APP2: marker(2) + length(2) + data
-        byte[] mpf = BuildMpf(gmOffset);
+        // 3. 将 ISO 21496-1 元数据插入增益图 JPEG: [SOI][APP2: ISO][增益图数据(去SOI)]
+        byte[] gainMapWithIso = InsertIsoIntoSegment(gainMapJpeg, iso);
 
-        // 4. 构建完整文件
-        //    结构: Base(无EOI) + APP1(XMP) + APP2(MPF) + GainMap(完整含EOI) + 最终EOI
-        using var ms = new MemoryStream(baseLen + 100 + xmp.Length + mpf.Length + gmLen + 2);
-        ms.Write(baseJpeg, 0, baseLen);
+        // 4. 构建 MPF（big-endian）
+        //    Gain Map 偏移 = Base头部 + APP1(XMP) + APP2(MPF) + SOS段 + Base扫描数据
+        int app1Total = 2 + 2 + xmp.Length;       // marker(2) + length(2) + data
+        int mpfDataLen = 86;                      // BuildMpf 输出固定长度
+        int app2Total = 2 + 2 + mpfDataLen;       // marker(2) + length(2) + data
+        int gmOffset = baseHeaderLen + app1Total + app2Total + sosLen + baseScanLen;
+        byte[] mpf = BuildMpf(gmOffset, gainMapWithIso.Length);
+
+        // 5. 构建完整文件
+        //    结构: Base头部 + APP1(XMP) + APP2(MPF) + SOS + Base扫描(含EOI)
+        //        + GainMap(含ISO段, 完整含EOI) + 最终EOI
+        using var ms = new MemoryStream(baseJpeg.Length + app1Total + app2Total + gainMapWithIso.Length + 2);
+        // 写入 Base 头部段（SOI...SOS 之前）
+        ms.Write(baseJpeg, 0, baseHeaderLen);
+        // 插入 APP1 (XMP) + APP2 (MPF)
         WriteAppSegmentMem(ms, 0xE1, xmp);
         WriteAppSegmentMem(ms, 0xE2, mpf);
-        ms.Write(gainMapJpeg, 0, gmLen); // 完整 Gain Map JPEG（含 EOI）
-        ms.WriteByte(0xFF);              // 最终 EOI
+        // 写入 SOS 段 + Base 扫描数据（含 EOI）
+        ms.Write(baseJpeg, sosIndex, sosLen + baseScanLen);
+        // 写入完整 Gain Map JPEG（含 ISO 段 + 自己的 SOI...EOI）
+        ms.Write(gainMapWithIso, 0, gainMapWithIso.Length);
+        // 最终 EOI
+        ms.WriteByte(0xFF);
         ms.WriteByte(0xD9);
 
         File.WriteAllBytes(outputPath, ms.ToArray());
     }
 
-    private static int TrimTrailingEoi(byte[] jpeg)
+    /// <summary>ISO 21496-1 命名空间 (libultrahdr kIsoNameSpace)。</summary>
+    private const string IsoNamespace = "urn:iso:std:iso:ts:21496:-1";
+
+    /// <summary>将 ISO 21496-1 元数据作为 APP2 段插入增益图 JPEG 的 SOI 之后。</summary>
+    private static byte[] InsertIsoIntoSegment(byte[] gainMapJpeg, byte[] isoData)
     {
-        int len = jpeg.Length;
-        if (len >= 2 && jpeg[len - 2] == 0xFF && jpeg[len - 1] == 0xD9)
-            return len - 2;
-        return len;
+        // 增益图必须以 SOI 开头
+        if (gainMapJpeg.Length < 2 || gainMapJpeg[0] != 0xFF || gainMapJpeg[1] != 0xD8)
+            return gainMapJpeg;
+
+        // APP2 段 payload = 命名空间(含 null 终止符) + 二进制元数据
+        byte[] ns = System.Text.Encoding.ASCII.GetBytes(IsoNamespace);
+        int payloadLen = ns.Length + 1 + isoData.Length; // namespace + '\0' + metadata
+        using var ms = new MemoryStream(gainMapJpeg.Length + 2 + 2 + payloadLen);
+        ms.Write(gainMapJpeg, 0, 2); // SOI
+        // APP2 marker + length
+        ms.WriteByte(0xFF);
+        ms.WriteByte(0xE2);
+        int segLen = payloadLen + 2;
+        ms.WriteByte((byte)(segLen >> 8));
+        ms.WriteByte((byte)(segLen & 0xFF));
+        // 命名空间 + null 终止符
+        ms.Write(ns, 0, ns.Length);
+        ms.WriteByte(0x00);
+        // 二进制元数据
+        ms.Write(isoData, 0, isoData.Length);
+        // 剩余增益图数据（去 SOI）
+        ms.Write(gainMapJpeg, 2, gainMapJpeg.Length - 2);
+        return ms.ToArray();
+    }
+
+    /// <summary>在 JPEG 字节流中定位 SOS (FFDA) 标记的偏移。</summary>
+    private static int FindSosIndex(byte[] jpeg)
+    {
+        int i = 2; // 跳过 SOI
+        while (i < jpeg.Length - 4)
+        {
+            if (jpeg[i] == 0xFF)
+            {
+                byte m = jpeg[i + 1];
+                if (m == 0xDA) return i; // SOS
+                if (m == 0xD9) break;    // 意外 EOI，无 SOS
+                // 跳过带长度参数的标记段
+                if (m != 0x01 && !(m >= 0xD0 && m <= 0xD7))
+                {
+                    int len = (jpeg[i + 2] << 8) | jpeg[i + 3];
+                    i += 2 + len;
+                }
+                else i += 2;
+            }
+            else i++;
+        }
+        return -1;
     }
 
     private static void WriteAppSegmentMem(MemoryStream ms, byte marker, byte[] data)
@@ -344,11 +526,29 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         ms.Write(data, 0, data.Length);
     }
 
-    /// <summary>构建正确的 MPF（Multi-Picture Format）数据，大端序。</summary>
-    private static byte[] BuildMpf(int mpfOffset)
+    /// <summary>构建符合 CIPA DC-007 (MPF) 的 MPF 数据，大端序。</summary>
+    /// <remarks>
+    /// attribute 值对齐 Google libultrahdr (multipictureformat.h):
+    ///   kMPEntryAttributeFormatJpeg = 0x000000, kMPEntryAttributeTypePrimary = 0x030000
+    /// 主图 (Primary):  attribute = 0x030000 (JPEG 格式 + Primary 类型)
+    /// 增益图 (GainMap): attribute = 0x000000 (JPEG 格式，无额外类型)
+    /// </remarks>
+    /// <param name="mpfOffset">Gain Map JPEG 数据在文件中的偏移量。</param>
+    /// <param name="mpfSize">Gain Map JPEG 数据大小（字节）。</param>
+    private static byte[] BuildMpf(int mpfOffset, int mpfSize)
     {
-        // 使用手动大端写入，确保规范兼容
-        var ms = new MemoryStream(58);
+        // MPF APP2 数据布局 (相对数据起始):
+        //   offset 0:  "MPF\0" (4)
+        //   offset 4:  TIFF header "MM" + 42 + offset_to_IFD(8) (8)
+        //   offset 12: IFD entry count (2) = 3
+        //   offset 14: Entry0 MPFVersion (12)
+        //   offset 26: Entry1 NumberOfImages (12)
+        //   offset 38: Entry2 MPEntry (12)
+        //   offset 50: next IFD (4) = 0
+        //   offset 54: Image Data Entry 0 (16)
+        //   offset 70: Image Data Entry 1 (16)
+        //   offset 86: 总长度
+        var ms = new MemoryStream(86);
         var bw = new BinaryWriter(ms);
 
         // MPF identifier: "MPF\0"
@@ -359,8 +559,8 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         bw.Write((byte)0x00); bw.Write((byte)0x2A); // TIFF magic (42)
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x08); // offset to IFD = 8
 
-        // IFD: 2 entries
-        bw.Write((byte)0x00); bw.Write((byte)0x02); // entry count = 2
+        // IFD: 3 entries (MPFVersion + NumberOfImages + MPEntry)
+        bw.Write((byte)0x00); bw.Write((byte)0x03); // entry count = 3
 
         // Entry 0: MPFVersion (0xB000) = "0100"
         bw.Write((byte)0xB0); bw.Write((byte)0x00); // tag
@@ -374,48 +574,161 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x01); // count = 1
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x02); // value = 2 images
 
+        // Entry 2: MPEntry (0xB002) — 指向 Individual Image Data 列表
+        bw.Write((byte)0xB0); bw.Write((byte)0x02); // tag
+        bw.Write((byte)0x00); bw.Write((byte)0x07); // type: UNDEFINED
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x20); // count = 32 (2 entries * 16 bytes)
+        // value 指向 IFD 后的数据区 (相对 MPF 数据起始 = 54)
+        int entryOffset = 54;
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)entryOffset);
+
         // Next IFD offset = 0 (no more IFDs)
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00);
 
-        // Individual Image Data Entry for Image 0: Base JPEG (offset = 0, same file)
-        bw.Write((byte)0x02); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // attribute
-        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // offset = 0
+        // ── Individual Image Data Entries (32 bytes: 2 entries × 16 bytes) ──
 
-        // Individual Image Data Entry for Image 1: Gain Map JPEG
-        bw.Write((byte)0x02); bw.Write((byte)0x00); bw.Write((byte)0x02); bw.Write((byte)0x00); // attribute (Gain Map)
+        // Image 0: Base JPEG (Primary, attribute = 0x030000, big-endian)
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x03); bw.Write((byte)0x00); // attribute: JPEG + Primary
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // offset = 0 (same file)
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // size = 0 (entire file)
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // reserved
+
+        // Image 1: Gain Map JPEG (attribute = 0x000000: JPEG 格式，无额外类型)
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // attribute: JPEG
         // offset (big-endian)
         bw.Write((byte)(mpfOffset >> 24));
         bw.Write((byte)(mpfOffset >> 16));
         bw.Write((byte)(mpfOffset >> 8));
         bw.Write((byte)mpfOffset);
+        // size (big-endian)
+        bw.Write((byte)(mpfSize >> 24));
+        bw.Write((byte)(mpfSize >> 16));
+        bw.Write((byte)(mpfSize >> 8));
+        bw.Write((byte)mpfSize);
+        // reserved
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00);
 
         return ms.ToArray();
     }
 
-    /// <summary>构建 ISO 21496-1 兼容的 XMP 元数据。</summary>
-    private static byte[] BuildXmpMetadata(int baseW, int baseH, int gmW, int gmH, GainMapMode mode)
+    /// <summary>构建符合 Ultra HDR v1 (Adobe hdrgm) 规范的 XMP 元数据。</summary>
+    /// <remarks>
+    /// 命名空间: http://ns.adobe.com/hdr-gain-map/1.0/ (前缀 hdrgm)
+    /// 关键语义 (Android Ultra HDR 规范 v1.1):
+    ///   - hdrgm:GainMapMin/Max 存储 map_min_log2/map_max_log2 (log2 值)，不是线性增益！
+    ///     像素编码: gain_byte = log2(HDR/SDR) / maxLog2 * 255, 范围 [0, maxLog2] → [0, 255]
+    ///     (Reinhard 保证 SDR ≤ HDR, 增益恒 ≥ 1, 故 GainMapMin = log2(1) = 0)
+    ///     GainMapMax = log2(headroom) = log2(HDR峰值/SDR白点)
+    ///     解码公式: log_boost = min*(1-recovery) + max*recovery; HDR = (SDR+off)*2^log_boost - off
+    ///   - hdrgm:HDRCapacityMax = GainMapMax (log2), HDRCapacityMin = max(GainMapMin, 0)
+    ///   - BaseRenditionIsHDR = False (主图为 SDR)
+    /// </remarks>
+    public static byte[] BuildXmpMetadata(int baseW, int baseH, int gmW, int gmH, GainMapMode mode,
+        float headroom = 12.5f)
     {
-        string gmType = mode == GainMapMode.Gray
-            ? "urn:iso:std:iso:21496:-1:schema:gainmap:type:luminance"
-            : "urn:iso:std:iso:21496:-1:schema:gainmap:type:color";
+        // log2 增益映射范围（与 ComputeGainMap/LogGainToByte 一致）
+        const float gainMinLog2 = 0.0f;
+        float gainMaxLog2 = MathF.Log2(Math.Max(headroom, 1.0f)); // log2(HDR峰值/SDR白点)
+        const float offset = 0.015625f; // 1/64，规范推荐值
+        const float gamma = 1.0f;
 
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
         string xmp = "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>" +
             "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">" +
             "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">" +
-            "<rdf:Description rdf:about=\"\" xmlns:gm=\"urn:iso:std:iso:21496:-1:schema:gainmap\">" +
-            "<gm:Version>1.0</gm:Version>" +
-            "<gm:Type>" + gmType + "</gm:Type>" +
-            "<gm:Width>" + gmW + "</gm:Width>" +
-            "<gm:Height>" + gmH + "</gm:Height>" +
-            "<gm:MinGain>0.0625</gm:MinGain>" +
-            "<gm:MaxGain>16.0</gm:MaxGain>" +
-            "<gm:Gamma>1.0</gm:Gamma>" +
-            "<gm:OffsetSDR>0.015625</gm:OffsetSDR>" +
-            "<gm:OffsetHDR>0.015625</gm:OffsetHDR>" +
-            "<gm:BaseRenditionIsHDR>False</gm:BaseRenditionIsHDR>" +
+            "<rdf:Description rdf:about=\"\" xmlns:hdrgm=\"http://ns.adobe.com/hdr-gain-map/1.0/\"" +
+            " xmlns:Container=\"http://ns.google.com/photos/1.0/container/\"" +
+            " xmlns:Item=\"http://ns.google.com/photos/1.0/container/item/\"" +
+            " hdrgm:Version=\"1.0\">" +
+            "<Container:Directory>" +
+            "<rdf:Seq>" +
+            "<rdf:li rdf:parseType=\"Resource\">" +
+            "<Container:Item Item:Semantic=\"Primary\" Item:Mime=\"image/jpeg\"/>" +
+            "</rdf:li>" +
+            "<rdf:li rdf:parseType=\"Resource\">" +
+            "<Container:Item Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\"/>" +
+            "</rdf:li>" +
+            "</rdf:Seq>" +
+            "</Container:Directory>" +
+            "<hdrgm:GainMapMin>" + gainMinLog2.ToString("0.0", inv) + "</hdrgm:GainMapMin>" +
+            "<hdrgm:GainMapMax>" + gainMaxLog2.ToString("0.00", inv) + "</hdrgm:GainMapMax>" +
+            "<hdrgm:Gamma>" + gamma.ToString("0.0", inv) + "</hdrgm:Gamma>" +
+            "<hdrgm:OffsetSDR>" + offset.ToString("0.000000", inv) + "</hdrgm:OffsetSDR>" +
+            "<hdrgm:OffsetHDR>" + offset.ToString("0.000000", inv) + "</hdrgm:OffsetHDR>" +
+            "<hdrgm:HDRCapacityMin>0</hdrgm:HDRCapacityMin>" +
+            "<hdrgm:HDRCapacityMax>" + gainMaxLog2.ToString("0.00", inv) + "</hdrgm:HDRCapacityMax>" +
+            "<hdrgm:BaseRenditionIsHDR>False</hdrgm:BaseRenditionIsHDR>" +
             "</rdf:Description></rdf:RDF></x:xmpmeta>" +
             "<?xpacket end=\"w\"?>";
 
         return System.Text.Encoding.UTF8.GetBytes(xmp);
+    }
+
+    /// <summary>构建 ISO 21496-1 二进制增益图元数据 (APP2 段数据)。</summary>
+    /// <remarks>
+    /// 对齐 Google libultrahdr (gainmapmetadata.cpp) 的 ISO 21496-1 二进制封装:
+    ///   [min_version: u16 BE = 0][writer_version: u16 BE = 0][flags: u8]
+    ///   flags: bit7=multi-channel, bit6=use base color space, bit2=backward, bit3=common denominator
+    ///   common denominator 模式: [denom: u32][baseHdrHeadroomN: u32][alternateHdrHeadroomN: u32]
+    ///     [每通道: gainMapMinN: s32, gainMapMaxN: s32, gainMapGammaN: u32, baseOffsetN: s32, alternateOffsetN: s32]
+    /// 语义: gainMapMin/Max = log2 值 (Reinhard 保证增益 ≥ 1, 故 min=0);
+    ///   gainMapMax = log2(headroom); headroom = log2(capacity) 值 (base=0 → 1.0, alternate=log2(headroom))
+    /// </remarks>
+    public static byte[] BuildIso21496Metadata(GainMapMode mode, float headroom = 12.5f)
+    {
+        // 与 BuildXmpMetadata 一致的元数据值
+        const int gainMapMinLog2 = 0;    // log2(1.0) — Reinhard 保证增益 ≥ 1
+        int gainMapMaxLog2 = (int)MathF.Round(MathF.Log2(Math.Max(headroom, 1.0f))); // log2(headroom) 四舍五入
+        const int gammaN = 1;            // gamma = 1.0
+        const int offsetN = 1;           // offset = 1/64
+        const int denom = 64;
+        const int baseHeadroomN = 0;     // baseHdrHeadroom = 2^0 = 1.0 (capacity_min)
+        int alternateHeadroomN = gainMapMaxLog2; // alternateHdrHeadroom = 2^log2(headroom) = headroom
+
+        bool multiChannel = mode == GainMapMode.Rgb;
+        int channels = multiChannel ? 3 : 1;
+
+        using var ms = new MemoryStream();
+        var bw = new BinaryWriter(ms);
+
+        // min_version = 0, writer_version = 0 (u16 BE)
+        WriteBe16(bw, 0);
+        WriteBe16(bw, 0);
+
+        // flags: bit7=multi-channel, bit6=useBaseColorSpace(0), bit2=backward(0), bit3=commonDenominator(1)
+        byte flags = 0;
+        if (multiChannel) flags |= 0x80;
+        flags |= 0x08; // common denominator
+        bw.Write(flags);
+
+        // common denominator 模式
+        WriteBe32(bw, (uint)denom);                    // common denominator
+        WriteBe32(bw, (uint)baseHeadroomN);            // base HDR headroom numerator
+        WriteBe32(bw, (uint)alternateHeadroomN);       // alternate HDR headroom numerator
+
+        for (int c = 0; c < channels; c++)
+        {
+            WriteBe32(bw, unchecked((uint)gainMapMinLog2));  // gainMapMin numerator (s32)
+            WriteBe32(bw, unchecked((uint)gainMapMaxLog2));  // gainMapMax numerator (s32)
+            WriteBe32(bw, (uint)gammaN);                     // gamma numerator
+            WriteBe32(bw, unchecked((uint)offsetN));         // baseOffset (SDR) numerator (s32)
+            WriteBe32(bw, unchecked((uint)offsetN));         // alternateOffset (HDR) numerator (s32)
+        }
+
+        return ms.ToArray();
+    }
+
+    private static void WriteBe16(BinaryWriter bw, ushort value)
+    {
+        bw.Write((byte)(value >> 8));
+        bw.Write((byte)(value & 0xFF));
+    }
+
+    private static void WriteBe32(BinaryWriter bw, uint value)
+    {
+        bw.Write((byte)(value >> 24));
+        bw.Write((byte)(value >> 16));
+        bw.Write((byte)(value >> 8));
+        bw.Write((byte)(value & 0xFF));
     }
 }

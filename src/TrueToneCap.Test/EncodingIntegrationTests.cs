@@ -194,10 +194,59 @@ public static class EncodingIntegrationTests
             }
 
             var fi = new FileInfo(path);
-            // JPEG Gain Map 应包含 MPF 标记 (FFD8...FFD8 双 SOI)
+            // JPEG Gain Map 应包含双 SOI（Base + 增益图）
             var bytes = File.ReadAllBytes(path);
-            bool hasMpf = bytes.Length > 4 && bytes[0] == 0xFF && bytes[1] == 0xD8;
-            Assert(name, fi.Length > 0 && hasMpf, $"{fi.Length / 1024.0:F0}KB, {sw.ElapsedMilliseconds}ms, JPEG SOI={hasMpf}");
+            int soiCount = 0;
+            for (int i = 0; i < bytes.Length - 1; i++)
+                if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8) soiCount++;
+            bool hasGainMap = soiCount >= 2;
+
+            // 验证 XMP 段完整（含 hdrgm:Version）
+            bool hasXmpFields = false;
+            bool hasIsoMetadata = false;
+            for (int i = 0; i < Math.Min(bytes.Length - 4, 8000); i++)
+            {
+                if (bytes[i] == 0xFF && bytes[i + 1] == 0xE1)
+                {
+                    int segLen = (bytes[i + 2] << 8) | bytes[i + 3];
+                    if (segLen > 100)
+                    {
+                        var xmp = System.Text.Encoding.UTF8.GetString(bytes, i + 4, segLen - 2);
+                        hasXmpFields = xmp.Contains("hdrgm:Version") && xmp.Contains("hdrgm:GainMapMax");
+                    }
+                    break;
+                }
+            }
+            // ISO 21496-1 二进制元数据: 位于增益图 JPEG (第二个 SOI) 之后, APP2 段命名空间
+            for (int i = 0; i < bytes.Length - 40; i++)
+            {
+                if (bytes[i] == 0xFF && bytes[i + 1] == 0xE2)
+                {
+                    int segLen = (bytes[i + 2] << 8) | bytes[i + 3];
+                    if (segLen > 30)
+                    {
+                        var payload = System.Text.Encoding.ASCII.GetString(bytes, i + 4, Math.Min(segLen - 2, 40));
+                        if (payload.Contains("urn:iso:std:iso:ts:21496:-1"))
+                        {
+                            hasIsoMetadata = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 检查 Base JPEG 的 SOF 类型（优先 Baseline SOF0=0xC0，但回退路径可接受 SOF1）
+            int baseSof = 0;
+            for (int i = 2; i < Math.Min(bytes.Length - 2, 2000); i++)
+            {
+                if (bytes[i] == 0xFF && bytes[i + 1] >= 0xC0 && bytes[i + 1] <= 0xCF)
+                { baseSof = bytes[i + 1]; break; }
+            }
+            bool isBaseline = baseSof == 0xC0;
+            Console.WriteLine($"  [SOF] Base SOF=0x{baseSof:X2} ({(isBaseline ? "Baseline ✓" : "非Baseline, 可接受")})");
+            // 关键判据: 输出含增益图（双 SOI）。SOF 类型可选。
+            bool ok = fi.Length > 0 && hasGainMap && hasXmpFields && hasIsoMetadata;
+            Assert(name, ok, $"{fi.Length / 1024.0:F0}KB, 增益图={hasGainMap}, XMP={hasXmpFields}, ISO={hasIsoMetadata}, Baseline={isBaseline}");
         }
         catch (Exception ex)
         {

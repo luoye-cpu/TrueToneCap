@@ -34,6 +34,9 @@ public static class CorePipelineTests
         Test_ToneMapper_Reinhard_BlackStaysBlack();
         Test_ToneMapper_Hable_WhiteClamps();
         Test_ToneMapper_Aces_OutputInRange();
+        Test_ToneMapper_Aces_HighlightRolloff();
+        Test_ToneMapper_Aces_OdtMonotonic();
+        Test_ToneMapper_Aces_GrayLevels();
         Test_ToneMapper_FusedKernel_MatchesSeparate();
         Test_ToneMapper_SwizzleOrder();
 
@@ -41,6 +44,10 @@ public static class CorePipelineTests
         Test_SrgbIcc_ValidHeader();
         Test_SrgbIcc_MinimumSize();
         Test_SrgbIcc_Cached();
+        Test_ColorProfile_SrgbIcc_Valid();
+        Test_ColorProfile_ResolveColorSpaceTag();
+        Test_ColorProfile_MapColorSpaceTag();
+        Test_ColorProfile_GetStandardIcc_AllSpaces();
 
         // PixelOps 扩展
         Test_DownsampleToGray_Dimensions();
@@ -62,6 +69,21 @@ public static class CorePipelineTests
         Test_EncoderRegistry_AllFormatsRegistered();
         Test_EncoderRegistry_QualityRanges();
         Test_EncodingSettings_Defaults();
+
+        // IccStore
+        Test_IccStore_AllSpaces_Valid();
+        Test_IccStore_Srgb_HasAcspSignature();
+
+        // ColorSpaceConverter
+        Test_ColorSpaceConverter_MatrixRowSum();
+        Test_ColorSpaceConverter_NoNegativeValues();
+        Test_ColorSpaceConverter_GetCicpPrimaries();
+
+        // ColorProfileProvider 逻辑
+        Test_ColorProfile_SrgbIcc_Valid();
+        Test_ColorProfile_ResolveColorSpaceTag();
+        Test_ColorProfile_MapColorSpaceTag();
+        Test_ColorProfile_GetStandardIcc_AllSpaces();
 
         Console.WriteLine($"\n══════════════════════════════════════");
         Console.WriteLine($"  结果: {_passed} 通过, {_failed} 失败");
@@ -170,6 +192,50 @@ public static class CorePipelineTests
             if (pixels[i] < 0 || pixels[i] > 1 || pixels[i + 1] < 0 || pixels[i + 1] > 1 || pixels[i + 2] < 0 || pixels[i + 2] > 1)
             { ok = false; break; }
         Assert("ToneMapper.Aces: 所有输出在 [0,1]", ok);
+    }
+
+    static void Test_ToneMapper_Aces_HighlightRolloff()
+    {
+        // 验证 ACES 高光平滑滚降：适度高光输入应单调递增（有区分度），
+        // 而非硬截断到纯白。SDR 输出最终 clamp 到 [0,1]，但中间调有渐进肩部。
+        // 输入 1x/2x/4x/8x 亮度，输出应严格递增（肩部滚降，非硬切）。
+        float Prev(float v)
+        {
+            var p = new float[] { v, v, v, 1f };
+            ToneMapper.AcesToneMapCpu(p, 1, 1);
+            return p[0];
+        }
+        float o1 = Prev(1f), o2 = Prev(2f), o4 = Prev(4f), o8 = Prev(8f);
+        bool ok = o1 < o2 && o2 < o4 && o4 < o8 && o8 <= 1.0f;
+        Assert($"ToneMapper.Aces: 高光滚降单调 ({o1:F3}→{o2:F3}→{o4:F3}→{o8:F3})", ok);
+    }
+
+    static void Test_ToneMapper_Aces_OdtMonotonic()
+    {
+        // 验证 ODT 单调递增：更强的输入映射更亮（对比度增强不反转）
+        var lo = new float[] { 0.2f, 0.2f, 0.2f, 1f };
+        var hi = new float[] { 0.8f, 0.8f, 0.8f, 1f };
+        ToneMapper.AcesToneMapCpu(lo, 1, 1);
+        ToneMapper.AcesToneMapCpu(hi, 1, 1);
+        bool ok = hi[0] > lo[0];
+        Assert("ToneMapper.Aces: ODT 单调递增", ok);
+    }
+
+    static void Test_ToneMapper_Aces_GrayLevels()
+    {
+        // 验证 ACES 对典型灰阶的映射亮度合理（不严重偏暗）
+        // 输入为 scRGB 线性（1.0 = 80 nits 参考）。测试 0.18(18%灰)/0.5/1.0(参考白)
+        var p18 = new float[] { 0.18f, 0.18f, 0.18f, 1f };
+        var p50 = new float[] { 0.5f, 0.5f, 0.5f, 1f };
+        var p100 = new float[] { 1.0f, 1.0f, 1.0f, 1f };
+        ToneMapper.AcesToneMapCpu(p18, 1, 1);
+        ToneMapper.AcesToneMapCpu(p50, 1, 1);
+        ToneMapper.AcesToneMapCpu(p100, 1, 1);
+        // 参考白 (1.0) 应映射到接近 0.7-0.8（SDR 参考白），18% 灰应映射到 ~0.2-0.3
+        bool ok = p18[0] < p50[0] && p50[0] < p100[0];
+        ok &= p100[0] > 0.6f && p100[0] < 0.95f;   // 参考白合理
+        ok &= p18[0] > 0.15f && p18[0] < 0.4f;     // 18% 灰合理（不严重偏暗）
+        Assert($"ToneMapper.Aces: 灰阶亮度合理 (18%={p18[0]:F3}, 50%={p50[0]:F3}, 100%={p100[0]:F3})", ok);
     }
 
     static void Test_ToneMapper_FusedKernel_MatchesSeparate()
@@ -451,6 +517,128 @@ public static class CorePipelineTests
             && s.AvifChroma == "444"
             && s.DisplayBitDepth == 8;
         Assert("EncodingSettings: 默认值正确", ok);
+    }
+
+    // ═══════════════════════════════════════
+    //  IccStore 测试
+    // ═══════════════════════════════════════
+
+    static void Test_IccStore_AllSpaces_Valid()
+    {
+        // 验证所有标准 ICC 配置文件有效（大小 > 128 字节）
+        var spaces = new[] { "sRGB", "AdobeRGB", "DisplayP3", "BT2020" };
+        bool ok = true;
+        foreach (var s in spaces)
+        {
+            var icc = IccStore.GetByName(s);
+            if (icc is null || icc.Length < 128) { ok = false; break; }
+        }
+        Assert("IccStore: 所有标准 ICC 有效", ok);
+    }
+
+    static void Test_IccStore_Srgb_HasAcspSignature()
+    {
+        var icc = IccStore.SRGB;
+        // ICC 签名 "acsp" 在偏移 36 处
+        bool ok = icc.Length >= 40
+            && icc[36] == 'a' && icc[37] == 'c' && icc[38] == 's' && icc[39] == 'p';
+        Assert("IccStore: sRGB ICC 签名 'acsp'", ok);
+    }
+
+    // ═══════════════════════════════════════
+    //  ColorSpaceConverter 测试
+    // ═══════════════════════════════════════
+
+    static void Test_ColorSpaceConverter_MatrixRowSum()
+    {
+        // 验证色域转换矩阵行和 ≈ 1.0 (白色保持白色)
+        var matrices = new[]
+        {
+            ("sRGB→BT.2020", ColorSpaceConverter.SrgbToBt2020),
+            ("sRGB→P3", ColorSpaceConverter.SrgbToDisplayP3),
+            ("sRGB→AdobeRGB", ColorSpaceConverter.SrgbToAdobeRgb),
+        };
+        bool ok = true;
+        foreach (var (name, m) in matrices)
+        {
+            // 行和: 第 0 行 R 贡献
+            float row0 = m[0, 0] + m[0, 1] + m[0, 2];
+            float row1 = m[1, 0] + m[1, 1] + m[1, 2];
+            float row2 = m[2, 0] + m[2, 1] + m[2, 2];
+            if (Math.Abs(row0 - 1.0f) > 0.01f || Math.Abs(row1 - 1.0f) > 0.01f || Math.Abs(row2 - 1.0f) > 0.01f)
+                { ok = false; break; }
+        }
+        Assert("ColorSpaceConverter: 矩阵行和 ≈ 1.0", ok);
+    }
+
+    static void Test_ColorSpaceConverter_NoNegativeValues()
+    {
+        // 验证矩阵没有负值列（对于 [0,1]^3 输入，输出不应有负值）
+        var matrices = new[]
+        {
+            ColorSpaceConverter.SrgbToBt2020,
+            ColorSpaceConverter.SrgbToDisplayP3,
+            ColorSpaceConverter.SrgbToAdobeRgb,
+        };
+        bool ok = true;
+        foreach (var m in matrices)
+        {
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 3; c++)
+                    if (m[r, c] < -0.01f) { ok = false; break; }
+        }
+        Assert("ColorSpaceConverter: 矩阵无负值", ok);
+    }
+
+    static void Test_ColorSpaceConverter_GetCicpPrimaries()
+    {
+        // 验证 CICP 主色索引正确
+        Assert("CICP BT.2020 → 9", ColorSpaceConverter.GetCicpPrimaries("BT2020") == 9);
+        Assert("CICP sRGB → 1", ColorSpaceConverter.GetCicpPrimaries("sRGB") == 1);
+        Assert("CICP P3 → 12", ColorSpaceConverter.GetCicpPrimaries("DisplayP3") == 12);
+        Assert("CICP AdobeRGB → 1", ColorSpaceConverter.GetCicpPrimaries("AdobeRGB") == 1);
+    }
+
+    // ═══════════════════════════════════════
+    //  ColorProfileProvider 逻辑测试
+    // ═══════════════════════════════════════
+
+    static void Test_ColorProfile_SrgbIcc_Valid()
+    {
+        // sRGB ICC 应有效
+        var icc = ColorProfileProvider.GetDefaultSRgbIcc();
+        bool ok = icc is { Length: > 128 };
+        Assert("ColorProfile: sRGB ICC 有效", ok);
+    }
+
+    static void Test_ColorProfile_ResolveColorSpaceTag()
+    {
+        // 非 ACM 下 System 解析为 sRGB
+        var tag = ColorProfileProvider.ResolveColorSpaceTag("System", false, false);
+        Assert("ColorProfile: System→sRGB(非ACM)", tag == "sRGB");
+
+        // 已知色域直通
+        tag = ColorProfileProvider.ResolveColorSpaceTag("BT2020", false, false);
+        Assert("ColorProfile: BT2020→BT2020", tag == "BT2020");
+    }
+
+    static void Test_ColorProfile_MapColorSpaceTag()
+    {
+        Assert("MapColorSpace: sRGB→sRGB", ColorProfileProvider.MapColorSpaceTag("sRGB") == "sRGB");
+        Assert("MapColorSpace: BT2020→BT2020", ColorProfileProvider.MapColorSpaceTag("BT2020") == "BT2020");
+        Assert("MapColorSpace: DisplayP3→DisplayP3", ColorProfileProvider.MapColorSpaceTag("DisplayP3") == "DisplayP3");
+    }
+
+    static void Test_ColorProfile_GetStandardIcc_AllSpaces()
+    {
+        var spaces = new[] { "sRGB", "BT2020", "DisplayP3", "AdobeRGB" };
+        bool ok = true;
+        foreach (var s in spaces)
+        {
+            var icc = ColorProfileProvider.GetStandardIccProfile(s);
+            if (icc is null || icc.Length < 128) { ok = false; break; }
+        }
+        Assert("ColorProfile: 所有标准空间 ICC 有效", ok);
     }
 
     // ═══════════════════════════════════════

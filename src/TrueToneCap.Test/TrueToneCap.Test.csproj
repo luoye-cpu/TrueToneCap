@@ -9,9 +9,6 @@
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.Drawing.Common" Version="11.0.0-preview.6.26359.118" />
-  </ItemGroup>
-  <ItemGroup>
     <ProjectReference Include="..\TrueToneCap.Core\TrueToneCap.Core.csproj" />
   </ItemGroup>
 </Project>

@@ -111,7 +111,7 @@ public static class NativeAvifEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-q {q} -s 6 {chromaArg} {cicpArgs} {iccArg} \"{tmpPng}\" \"{path}\"".Trim(),
+                Arguments = $"-q {q} -s 4 {chromaArg} {cicpArgs} {iccArg} \"{tmpPng}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -180,7 +180,7 @@ public static class NativeAvifEncoder
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = $"-q {q} -s 6 {cicpArgs} \"{pngPath}\" \"{avifPath}\"".Trim(),
+            Arguments = $"-q {q} -s 4 {cicpArgs} \"{pngPath}\" \"{avifPath}\"".Trim(),
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
@@ -230,7 +230,7 @@ public static class NativeAvifEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-q {q} -s 6 --depth 10 --cicp 9/16/0 \"{tmpY4m}\" \"{path}\"".Trim(),
+                Arguments = $"-q {q} -s 4 --depth 10 --cicp 9/16/0 \"{tmpY4m}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
