@@ -239,7 +239,11 @@ public sealed partial class MainWindow : Window
                 hdrText = "⚠ 此显示器不支持 HDR";
             }
             var acmText = cap.SystemAcm ? " | ACM 已启用（系统管理显示器色彩）" : "";
-            HdrHintTxt.Text = hdrText + acmText;
+            // 显示系统 SDR 白点 (GainMap 亮度基准) — 帮助用户匹配第三方查看器
+            string sdrWhiteText = cap.DisplayPaperWhiteNits > 0
+                ? $" | SDR 白点 {cap.DisplayPaperWhiteNits} nits"
+                : "";
+            HdrHintTxt.Text = hdrText + acmText + sdrWhiteText;
 
             IccBakeSwitch.IsEnabled = cap.IccBakeAvailable;
             IccBakeSwitch.IsOn = _settings.IccBakeEnabled;
@@ -487,7 +491,7 @@ public sealed partial class MainWindow : Window
         {
             OutputFormat.PNG => "✅ 无损格式，支持 HDR (cICP Rec.2100 PQ)。截图首选。",
             OutputFormat.JPEG_LI => "✅ Google jpegli 编码，butteraugli 距离控制质量。体积小，兼容性最佳。",
-            OutputFormat.JPEG_GAINMAP => "✅ Ultra HDR (ISO 21496-1)，兼容 JPEG。SDR/HDR 自适应。",
+            OutputFormat.JPEG_GAINMAP => $"✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 {( _settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80 )} nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 {( _settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80 )}。",
             OutputFormat.JPEG_XL => "✅ 新一代格式，Modular 模式对截图极优。支持 HDR。",
             OutputFormat.AVIF => "✅ 先进格式，支持 HDR + 硬件加速编码。默认 4:4:4。",
             OutputFormat.WebP => "⚠ 仅 SDR 8-bit。适合简单分享场景。",

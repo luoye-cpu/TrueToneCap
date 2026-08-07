@@ -660,30 +660,44 @@ public static class ColorPipelineTests
 
     static void GainMap_BuildIsoMetadata_Output()
     {
-        // 验证 ISO 21496-1 二进制元数据
+        // 验证 ISO 21496-1 二进制元数据 (非公共分母模式)
         var iso = JpegGainMapEncoder.BuildIso21496Metadata(GainMapMode.Gray);
-        // 引出: u16 min_version + u16 writer_version + u8 flags + u32 denom + u32 baseHeadroom + u32 altHeadroom + 5*s32
-        int expectedLen = 2 + 2 + 1 + 4 + 4 + 4 + (5 * 4);
+        // 布局: u16 min_version + u16 writer_version + u8 flags
+        //   + baseHeadroomN/D + altHeadroomN/D (4×u32)
+        //   + 每通道 [minN, minD, maxN, maxD, gammaN, gammaD, baseOffN, baseOffD, altOffN, altOffD] (10×u32)
+        int expectedLen = 2 + 2 + 1 + (4 * 4) + (10 * 4);
         Assert($"ISO 元数据: 长度={iso.Length} (期望 {expectedLen})", iso.Length == expectedLen);
         // min_version=0, writer_version=0
         Assert("ISO 元数据: min_version=0", iso[0] == 0 && iso[1] == 0);
         Assert("ISO 元数据: writer_version=0", iso[2] == 0 && iso[3] == 0);
-        // flags: common denominator (0x08) 且非多通道 (Gray)
-        Assert("ISO 元数据: flags 含 common denominator", (iso[4] & 0x08) != 0);
+        // flags: 非公共分母 (bit3=0) 且非多通道 (Gray)
+        Assert("ISO 元数据: 非 common denominator", (iso[4] & 0x08) == 0);
         Assert("ISO 元数据: Gray 非多通道", (iso[4] & 0x80) == 0);
-        // denom = 64
-        Assert("ISO 元数据: denom=64", iso[5] == 0 && iso[6] == 0 && iso[7] == 0 && iso[8] == 64);
-        // gainMapMin = 0 (log2(1), Reinhard 保证增益≥1)
-        Assert("ISO 元数据: gainMapMin=0", iso[17] == 0 && iso[18] == 0 && iso[19] == 0 && iso[20] == 0);
-        // gainMapMax = log2(12.5) ≈ 3.64 → 3 (整数舍入)
-        int expectedMax = (int)Math.Round(MathF.Log2(12.5f));
-        Assert($"ISO 元数据: gainMapMax={expectedMax} (log2(12.5)≈3.64)", iso[21] == 0 && iso[22] == 0 && iso[23] == 0 && iso[24] == expectedMax);
-        // alternateHdrHeadroom = expectedMax (log2(capacity_max))
-        Assert($"ISO 元数据: altHeadroom={expectedMax}", iso[13] == 0 && iso[14] == 0 && iso[15] == 0 && iso[16] == expectedMax);
+        // headroom: base=0/1, alt=max/1
+        int expectedMax = (int)Math.Round(MathF.Log2(12.5f) * 100f); // 364 (log2(12.5)=3.64 × 100)
+        Assert("ISO 元数据: baseHeadroom=0/1", iso[5] == 0 && iso[6] == 0 && iso[7] == 0 && iso[8] == 0 && iso[9] == 0 && iso[10] == 0 && iso[11] == 0 && iso[12] == 1);
+        Assert($"ISO 元数据: altHeadroom={expectedMax}/100", 
+            iso[13] == (expectedMax >> 24 & 0xFF) && iso[14] == (expectedMax >> 16 & 0xFF) && 
+            iso[15] == (expectedMax >> 8 & 0xFF) && iso[16] == (expectedMax & 0xFF) &&
+            iso[17] == 0 && iso[18] == 0 && iso[19] == 0 && iso[20] == 100);
+        // 每通道字段 (从偏移 21 开始)
+        int off = 21;
+        // gainMapMin = 0/1
+        Assert("ISO 元数据: gainMapMin=0/1", iso[off] == 0 && iso[off+1] == 0 && iso[off+2] == 0 && iso[off+3] == 0 && iso[off+4] == 0 && iso[off+5] == 0 && iso[off+6] == 0 && iso[off+7] == 1);
+        // gainMapMax = expectedMax/100 (精确, 与 XMP 一致!)
+        Assert($"ISO 元数据: gainMapMax={expectedMax}/100 (精确)",
+            iso[off+8] == (expectedMax >> 24 & 0xFF) && iso[off+9] == (expectedMax >> 16 & 0xFF) && 
+            iso[off+10] == (expectedMax >> 8 & 0xFF) && iso[off+11] == (expectedMax & 0xFF) &&
+            iso[off+12] == 0 && iso[off+13] == 0 && iso[off+14] == 0 && iso[off+15] == 100);
+        // ═══ 关键: gamma = 1/1 (不能是 1/64 = 0.015625!) ═══
+        Assert("ISO 元数据: gamma=1/1 (关键!)", iso[off+16] == 0 && iso[off+17] == 0 && iso[off+18] == 0 && iso[off+19] == 1 && iso[off+20] == 0 && iso[off+21] == 0 && iso[off+22] == 0 && iso[off+23] == 1);
+        // offset = 1/64
+        Assert("ISO 元数据: baseOffset=1/64", iso[off+24] == 0 && iso[off+25] == 0 && iso[off+26] == 0 && iso[off+27] == 1 && iso[off+28] == 0 && iso[off+29] == 0 && iso[off+30] == 0 && iso[off+31] == 64);
+        Assert("ISO 元数据: altOffset=1/64", iso[off+32] == 0 && iso[off+33] == 0 && iso[off+34] == 0 && iso[off+35] == 1 && iso[off+36] == 0 && iso[off+37] == 0 && iso[off+38] == 0 && iso[off+39] == 64);
 
-        // RGB 模式: 多通道标志
+        // RGB 模式: 多通道标志 + 3 通道
         var isoRgb = JpegGainMapEncoder.BuildIso21496Metadata(GainMapMode.Rgb);
-        int expectedRgb = 2 + 2 + 1 + 4 + 4 + 4 + (3 * 5 * 4);
+        int expectedRgb = 2 + 2 + 1 + (4 * 4) + (3 * 10 * 4);
         Assert($"ISO 元数据 RGB: 长度={isoRgb.Length} (期望 {expectedRgb})", isoRgb.Length == expectedRgb);
         Assert("ISO 元数据 RGB: 多通道标志", (isoRgb[4] & 0x80) != 0);
     }
