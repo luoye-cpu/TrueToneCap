@@ -7,6 +7,7 @@ using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Encoding;
 using TrueToneCap.Core.Metadata;
 using TrueToneCap.Core.Processing;
+using TrueToneCap.App.Models;
 using Vortice.Direct3D11;
 
 namespace TrueToneCap.App.Services;
@@ -114,7 +115,7 @@ public sealed class CapturePipelineService
             OutputFormat.JPEG_XL => (s.BitDepthJpegXl, s.ChromaJpegXl),
             OutputFormat.AVIF => (s.BitDepthAvif, s.ChromaAvif),
             OutputFormat.WebP => (s.BitDepthWebP, s.ChromaWebP),
-            OutputFormat.TIFF => (s.BitDepthBmp, s.ChromaBmp),
+            OutputFormat.TIFF => (s.BitDepthTiff, s.ChromaTiff),
             OutputFormat.JPEG_GAINMAP => (s.BitDepthGainMap, s.ChromaGainMap),
             _ => (s.OutputBitDepth, s.AvifChroma),
         };
@@ -122,7 +123,7 @@ public sealed class CapturePipelineService
         var settings = new EncodingSettings
         {
             Format = format,
-            Quality = (float)s.Quality,
+            Quality = (float)GetPerFormatQuality(s, format),
             HdrOutput = hdrOutput,
             AvifBackend = avifBackend,
             AvifPngSuffix = s.AvifPngSuffix,
@@ -133,7 +134,14 @@ public sealed class CapturePipelineService
             GainMapMode = s.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
             Metadata = meta,
             PreferGpuEncode = true,
-            ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Aces },
+            // ── SDR 白点: 系统检测值优先 (DISPLAYCONFIG_SDR_WHITE_LEVEL), 用户手动设置回退 ──
+            // 关键: GainMap 的 SDR 直通阈值必须与系统实际 SdrWhiteLevel 一致,
+            // 否则 Base 亮度错误 (SDR 发暗/过曝)。系统值 > 0 时优先。
+            ToneMappingParams = new ToneMappingParams
+            {
+                Mode = ToneMapMode.Aces,
+                PaperWhiteNits = (s.SystemSdrWhiteLevel > 0 ? s.SystemSdrWhiteLevel : s.PaperWhiteNits)
+            },
         };
 
         // 解析 "System" 为实际色域（ACM 感知），确保编码器能正确判断 ICC/CICP 策略
@@ -151,9 +159,22 @@ public sealed class CapturePipelineService
         // HDR 开启 + 广色域目标 (P3/AdobeRGB/BT.2020) → 保留 HDR 直通编码
         // 用户选择广色域目标意味着要保留 HDR 动态范围
 
-        LogService.Info("Pipeline", $"编码设置: {format} HDR={settings.HdrOutput} 质量={s.Quality:F1} 位深={bitDepth} 色度={chroma} AVIF后端={avifBackend} 色域={resolvedTag}");
+        LogService.Info("Pipeline", $"编码设置: {format} HDR={settings.HdrOutput} 质量={settings.Quality:F1} 位深={bitDepth} 色度={chroma} AVIF后端={avifBackend} 色域={resolvedTag}");
         return settings;
     }
+
+    /// <summary>按格式获取每格式独立质量（避免切换格式互相覆盖）。</summary>
+    private static double GetPerFormatQuality(AppSettingsData s, OutputFormat format) => format switch
+    {
+        OutputFormat.PNG => s.QualityPng,
+        OutputFormat.JPEG_GAINMAP => s.QualityGainMap,
+        OutputFormat.JPEG_LI => s.QualityJpegLi,
+        OutputFormat.JPEG_XL => s.QualityJpegXl,
+        OutputFormat.AVIF => s.QualityAvif,
+        OutputFormat.WebP => s.QualityWebp,
+        OutputFormat.TIFF => s.QualityTiff,
+        _ => s.Quality,
+    };
 
     /// <summary>获取当前鼠标所在显示器句柄。</summary>
     private static nint? GetMonitorHandle()
@@ -209,9 +230,14 @@ public sealed class CapturePipelineService
 
     /// <summary>编码并保存 SDR 像素到文件（同步编码，在后台线程执行）。</summary>
     /// <remarks>
-    /// 注意: 输入为 byte[] BGRA8 像素，始终走 SDR 编码路径。
-    /// 即使 hdrOutput=true，byte[] 输入也不应转为 HDR PQ 路径（因为没有实际的 HDR float 数据）。
-    /// 真正的 HDR 编码请使用 EncodeHdrFrameAsync（接收 HdrFrameData float 像素）。
+    /// ═══ 重要: 此方法始终走 SDR 编码路径 ═══
+    /// 输入为 byte[] BGRA8 像素，即使 hdrOutput=true，也绝不转为 HDR PQ 路径。
+    /// 因为 byte[] 输入不包含 HDR 浮点数据，强行转为 HDR 会导致色域错误。
+    /// 
+    /// 如需 HDR 编码，请使用 EncodeHdrFrameAsync()（接收 HdrFrameData float 像素）。
+    /// 
+    /// hdrOutput 参数仅用于 BuildEncodingSettings 的色域解析逻辑
+    /// （例如 HDR 开启时 "System" 解析为 BT.2020），不改变编码路径。
     /// </remarks>
     public async Task<string> EncodeAndSaveAsync(
         byte[] bgra, int w, int h, OutputFormat format,

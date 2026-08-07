@@ -56,7 +56,8 @@
                                 <TextBlock x:Name="BasicOutputTitle" Text="基础输出" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="格式" VerticalAlignment="Center"/><ComboBox x:Name="FormatCbo" Grid.Column="1" SelectionChanged="OnFormatChanged"/></Grid>
                                 <TextBlock x:Name="FormatHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
-                                <Grid ColumnDefinitions="120,*,50,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
+                                <Grid ColumnDefinitions="120,*,54,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0" TextTrimming="None" TextWrapping="NoWrap"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
+                                <TextBlock x:Name="QualityDescTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
                                 <Grid ColumnDefinitions="120,*,50"><TextBlock Text="保存路径" VerticalAlignment="Center"/><TextBox x:Name="PathTxt" Grid.Column="1" LostFocus="OnPathLostFocus"/><Button Grid.Column="2" Content="..." Click="OnBrowsePath" Width="40" Margin="4,0,0,0"/></Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="文件名前缀" VerticalAlignment="Center"/><TextBox x:Name="PrefixTxt" Grid.Column="1" LostFocus="OnPrefixLostFocus"/></Grid>
                                 <CheckBox x:Name="ArchiveChk" Content="启用文件归档" Checked="OnArchiveChanged" Unchecked="OnArchiveChanged"/>
@@ -77,12 +78,12 @@
                                 <TextBlock x:Name="AvifOptionsTitle" Text="AVIF 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="编码后端" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="AvifBackendCbo" Grid.Column="1" SelectionChanged="OnAvifBackendChanged">
-                                        <ComboBoxItem Tag="Auto">自动检测</ComboBoxItem><ComboBoxItem Tag="LibAom">libaom (软件)</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC</ComboBoxItem>
+                                        <ComboBoxItem Tag="Auto" IsSelected="True">自动检测</ComboBoxItem><ComboBoxItem Tag="LibAom">libaom (软件)</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="AvifChromaCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="444">4:4:4 ✓ 截图推荐</ComboBoxItem><ComboBoxItem Tag="422">4:2:2</ComboBoxItem><ComboBoxItem Tag="420">4:2:0 (体积最小)</ComboBoxItem>
+                                        <ComboBoxItem Tag="444" IsSelected="True">4:4:4 ✓ 截图推荐</ComboBoxItem><ComboBoxItem Tag="422">4:2:2</ComboBoxItem><ComboBoxItem Tag="420">4:2:0 (体积最小)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <CheckBox x:Name="AvifPngSuffixChk" Content="添加 .avif.png 双后缀（兼容旧软件）" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
@@ -96,7 +97,7 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="BdAvifCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
-                                        <ComboBoxItem Tag="10">10-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="10" IsSelected="True">10-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
@@ -113,7 +114,7 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock x:Name="GainMapModeLabelTxt" Text="增益图模式" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="GainMapModeCbo" Grid.Column="1" SelectionChanged="OnGainMapModeChanged">
                                         <ComboBoxItem Tag="Rgb">RGB 增益（色彩准确，体积较大）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Gray">灰度增益（体积最优，亮度还原）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Gray" IsSelected="True">灰度增益（体积最优，亮度还原）</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="GainMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
@@ -126,13 +127,27 @@
                                 <TextBlock Text="PNG 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="BdPngCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="8" IsSelected="True">8-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="10">10-bit (PNG 3.0)</ComboBoxItem>
                                         <ComboBoxItem Tag="12">12-bit (PNG 3.0)</ComboBoxItem>
                                         <ComboBoxItem Tag="16">16-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <!-- PNG 色度采样：PNG 是 RGB 无损格式，不支持色度子采样 -->
+                            </StackPanel>
+                        </Border>
+
+                        <!-- JPEG LI 选项卡片 -->
+                        <Border x:Name="JpegLiOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="JPEG LI 选项" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="ChromaJpegLiCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="444">4:4:4（最佳质量）</ComboBoxItem>
+                                        <ComboBoxItem Tag="422">4:2:2（平衡）</ComboBoxItem>
+                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0（最小体积）</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
                             </StackPanel>
                         </Border>
 
@@ -143,13 +158,13 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="BdJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
-                                        <ComboBoxItem Tag="10">10-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="10" IsSelected="True">10-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="ChromaJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
+                                        <ComboBoxItem Tag="444" IsSelected="True">4:4:4</ComboBoxItem>
                                         <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
@@ -163,7 +178,7 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="ChromaWebPCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
-                                        <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
+                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                             </StackPanel>
@@ -174,7 +189,7 @@
                                 <TextBlock Text="TIFF 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="BdTiffCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="8" IsSelected="True">8-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="16">16-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
@@ -197,7 +212,7 @@
                                 </StackPanel>
                                 <Grid ColumnDefinitions="120,*"><TextBlock x:Name="ColorSpaceLabel" Text="目标色域" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="ColorCbo" Grid.Column="1" SelectionChanged="OnColorSpaceChanged">
-                                        <ComboBoxItem Tag="System">跟随显示器（自动）</ComboBoxItem><ComboBoxItem Tag="sRGB">sRGB</ComboBoxItem><ComboBoxItem Tag="DisplayP3">Display P3</ComboBoxItem>
+                                        <ComboBoxItem Tag="System" IsSelected="True">跟随显示器（自动）</ComboBoxItem><ComboBoxItem Tag="sRGB">sRGB</ComboBoxItem><ComboBoxItem Tag="DisplayP3">Display P3</ComboBoxItem>
                                         <ComboBoxItem Tag="DCI_P3">DCI-P3</ComboBoxItem><ComboBoxItem Tag="AdobeRGB">Adobe RGB</ComboBoxItem><ComboBoxItem Tag="BT2020">BT.2020</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
@@ -235,7 +250,7 @@
                                 <TextBlock Text="截图" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="快捷键" VerticalAlignment="Center"/><TextBox x:Name="HotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+S" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="CaptureHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnCaptureHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="无感截图快捷键" VerticalAlignment="Center"/><TextBox x:Name="SilentHotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+Q" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="SilentHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnSilentHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
-                                <CheckBox x:Name="PreviewChk" Content="截图后右下角缩略图预览"/>
+                                <CheckBox x:Name="PreviewChk" Content="截图后右下角缩略图预览" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                             </StackPanel>
                         </Border>
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
@@ -281,7 +296,7 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="最大时长" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="MaxDurationCbo" Grid.Column="1"><ComboBoxItem Tag="15">15 秒</ComboBoxItem><ComboBoxItem Tag="30" IsSelected="True">30 秒</ComboBoxItem><ComboBoxItem Tag="60">60 秒</ComboBoxItem><ComboBoxItem Tag="120">120 秒</ComboBoxItem></ComboBox>
                                 </Grid>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1" Minimum="0" Maximum="100"/></Grid>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1" Minimum="0" Maximum="100" ValueChanged="OnRecordQualityChanged"/></Grid>
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -331,7 +346,7 @@
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="目标语言" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="TargetLangCbo" Grid.Column="1">
+                                    <ComboBox x:Name="TargetLangCbo" Grid.Column="1" SelectionChanged="OnTargetLangChanged">
                                         <ComboBoxItem Tag="zh-CN" IsSelected="True">中文 (简体)</ComboBoxItem>
                                         <ComboBoxItem Tag="zh-TW">中文 (繁體)</ComboBoxItem>
                                         <ComboBoxItem Tag="en">English</ComboBoxItem>

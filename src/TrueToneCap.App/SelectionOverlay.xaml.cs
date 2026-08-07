@@ -57,8 +57,8 @@ public sealed partial class SelectionOverlay : Window
     private static partial int SetWindowLongW(nint hWnd, int nIndex, int dwNewLong);
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint hwnd);
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmExtendFrameIntoClientArea(nint hwnd, ref MARGINS margins);
+    [LibraryImport("dwmapi.dll")]
+    private static partial int DwmExtendFrameIntoClientArea(nint hwnd, ref MARGINS margins);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MARGINS { public int cxLeftWidth, cxRightWidth, cyTopHeight, cyBottomHeight; }

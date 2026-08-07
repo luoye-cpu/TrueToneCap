@@ -191,6 +191,217 @@ public static partial class DisplayEnumerator
         return displays.FirstOrDefault(d => d.IsPrimary)?.Index ?? 0;
     }
 
+    // ────── SDR 白点 (SdrWhiteLevel) 读取 ──────
+    // Windows 系统实际 SDR 白点 (nits), 通过 DISPLAYCONFIG_SDR_WHITE_LEVEL 获取
+    // scRGB 中 SDR 内容 = 该系统值 (如 200 nits = 2.5 scRGB), 1.0 scRGB = 80 nits 标称
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DISPLAYCONFIG_DEVICE_INFO_HEADER
+    {
+        public uint Type;
+        public uint Size;
+        public LUID AdapterId;
+        public uint Id;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LUID
+    {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DISPLAYCONFIG_SDR_WHITE_LEVEL
+    {
+        public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+        public uint SDRWhiteLevel; // 单位: 0.001 nits (如 200000 = 200 nits)
+    }
+
+    private const uint DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 0x0000000b;
+    private const uint DISPLAYCONFIG_PATH_ACTIVE = 1;
+    // QueryDisplayConfig flags (wingdi.h)
+    private const uint QDC_ALL_PATHS = 0x00000001;
+    private const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
+    private const uint QDC_DATABASE_CURRENT = 0x00000004;
+
+    [DllImport("user32.dll")]
+    private static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPathArrayElements, out uint numModeInfoArrayElements);
+
+    [DllImport("user32.dll")]
+    private static extern int QueryDisplayConfig(
+        uint flags, ref uint numPathArrayElements, IntPtr pathInfoArray,
+        ref uint numModeInfoArrayElements, IntPtr modeInfoArray, out uint topologyId);
+
+    [DllImport("user32.dll")]
+    private static extern int DisplayConfigGetDeviceInfo(IntPtr requestPacket);
+
+    /// <summary>
+    /// 获取系统实际 SDR 白点亮度 (nits)。
+    /// 通过 DISPLAYCONFIG_SDR_WHITE_LEVEL API 读取 (Windows 10 2004+)。
+    /// 失败时返回 0 (调用方回退到默认值)。
+    /// </summary>
+    public static int GetSdrWhiteLevel()
+    {
+        try
+        {
+            uint nPaths = 0, nModes = 0;
+            int bs = GetDisplayConfigBufferSizes(QDC_DATABASE_CURRENT, out nPaths, out nModes);
+            if (bs != 0)
+                return 0;
+
+            int pathSize = 100; // sizeof(DISPLAYCONFIG_PATH_INFO)
+            int modeSize = 64;  // sizeof(DISPLAYCONFIG_MODE_INFO)
+            var paths = Marshal.AllocHGlobal((int)(pathSize * nPaths));
+            var modes = Marshal.AllocHGlobal((int)(modeSize * nModes));
+            try
+            {
+                uint actualPaths = nPaths, actualModes = nModes;
+                int qr = QueryDisplayConfig(QDC_DATABASE_CURRENT, ref actualPaths, paths, ref actualModes, modes, out _);
+                if (qr != 0)
+                    return 0;
+
+                // 遍历路径, 对每个路径查询 SDR 白点
+                // DISPLAYCONFIG_PATH_INFO 布局 (100 字节):
+                //   [0..19]   sourceInfo (LUID 8 + id 4 + modeInfoIdx 4 + statusFlags 4)
+                //   [20..95]  targetInfo (LUID 8 + id 4 + modeInfoIdx 4 + statusFlags 4 + ...)
+                //   [96..99]  flags
+                for (uint i = 0; i < actualPaths; i++)
+                {
+                    var pathPtr = paths + (int)(i * pathSize);
+                    // targetInfo 从偏移 20 开始:
+                    //   adapterId @ 20 (LUID 8), id @ 28, modeInfoIdx @ 32, statusFlags @ 36
+                    //   targetSize @ 40, refreshRate @ 48, scanLineOrdering @ 56, ...
+                    //   注意: SDR 白点查询用 target adapterId + target id
+                    uint tgtAdapterLow = (uint)Marshal.ReadInt32(pathPtr, 20);
+                    int tgtAdapterHigh = Marshal.ReadInt32(pathPtr, 24);
+                    uint tgtId = (uint)Marshal.ReadInt32(pathPtr, 28);
+
+                    var whiteLevel = new DISPLAYCONFIG_SDR_WHITE_LEVEL
+                    {
+                        header = new DISPLAYCONFIG_DEVICE_INFO_HEADER
+                        {
+                            Type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+                            Size = (uint)Marshal.SizeOf<DISPLAYCONFIG_SDR_WHITE_LEVEL>(),
+                            AdapterId = new LUID { LowPart = tgtAdapterLow, HighPart = tgtAdapterHigh },
+                            Id = tgtId
+                        }
+                    };
+                    IntPtr req = Marshal.AllocHGlobal(Marshal.SizeOf<DISPLAYCONFIG_SDR_WHITE_LEVEL>());
+                    try
+                    {
+                        Marshal.StructureToPtr(whiteLevel, req, false);
+                        if (DisplayConfigGetDeviceInfo(req) == 0)
+                        {
+                            var result = Marshal.PtrToStructure<DISPLAYCONFIG_SDR_WHITE_LEVEL>(req);
+                            // SDRWhiteLevel 单位: 80 nits 的倍数 × 1000 (Microsoft 文档)
+                            //   nits = SDRWhiteLevel / 1000 × 80
+                            //   例: 1000 = 80 nits, 1250 = 100 nits, 2000 = 160 nits
+                            int nits = (int)Math.Round(result.SDRWhiteLevel / 1000.0 * 80.0);
+                            if (nits > 0) return nits;
+                        }
+                    }
+                    finally { Marshal.FreeHGlobal(req); }
+                }
+                return 0;
+            }
+            finally { Marshal.FreeHGlobal(paths); Marshal.FreeHGlobal(modes); }
+        }
+        catch { return 0; }
+    }
+
+    // ── DISPLAYCONFIG 结构 (参考 wingdi.h 精确定义, 使用固定 Size 强制布局) ──
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DISPLAYCONFIG_RATIONAL
+    {
+        public uint Numerator;
+        public uint Denominator;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DISPLAYCONFIG_2DREGION
+    {
+        public uint cx;
+        public uint cy;
+    }
+
+    // DISPLAYCONFIG_VIDEO_SIGNAL_INFO = 32 字节
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DISPLAYCONFIG_VIDEO_SIGNAL_INFO
+    {
+        public ulong pixelRate;
+        public DISPLAYCONFIG_RATIONAL hSyncFreq;
+        public DISPLAYCONFIG_RATIONAL vSyncFreq;
+        public DISPLAYCONFIG_2DREGION activeSize;
+        public DISPLAYCONFIG_2DREGION totalSize;
+        public uint videoStandard;
+        public uint scanLineOrdering;
+    }
+
+    // DISPLAYCONFIG_PATH_TARGET_INFO 实际布局 (76 字节):
+    // adapterId(8) + id(4) + modeInfoIdx(4) + statusFlags(4) + targetSize(8)
+    // + refreshRate(8) + scanLineOrdering(8) + outputTechnology(4) + rotation(4)
+    // + scaling(4) + targetAdapterId(8) + targetId(4) + sourceInfo(4) + flags(4)
+    [StructLayout(LayoutKind.Sequential, Size = 76)]
+    private struct DISPLAYCONFIG_PATH_TARGET_INFO
+    {
+        public LUID adapterId;
+        public uint id;
+        public uint modeInfoIdx;
+        public uint statusFlags;
+        public DISPLAYCONFIG_2DREGION targetSize;
+        public DISPLAYCONFIG_RATIONAL refreshRate;
+        public DISPLAYCONFIG_RATIONAL scanLineOrdering;
+        public uint outputTechnology;
+        public uint rotation;
+        public uint scaling;
+        public LUID targetAdapterId;
+        public uint targetId;
+        public uint sourceInfo;
+        public uint flags;
+    }
+
+    // DISPLAYCONFIG_PATH_SOURCE_INFO = 20 字节
+    [StructLayout(LayoutKind.Sequential, Size = 20)]
+    private struct DISPLAYCONFIG_PATH_SOURCE_INFO
+    {
+        public LUID adapterId;
+        public uint id;
+        public uint modeInfoIdx;
+        public uint statusFlags;
+    }
+
+    // DISPLAYCONFIG_PATH_INFO = 20 + 76 + 4 = 100
+    [StructLayout(LayoutKind.Sequential, Size = 100)]
+    private struct DISPLAYCONFIG_PATH_INFO
+    {
+        public DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo;
+        public DISPLAYCONFIG_PATH_TARGET_INFO targetInfo;
+        public uint flags;
+    }
+
+    // DISPLAYCONFIG_MODE_INFO = 64 字节: infoType(4) + id(4) + adapterId(8) + union(48)
+// 注意: 不能用 byte[] 字段 (会变成引用), 用固定连续字段
+    [StructLayout(LayoutKind.Sequential, Size = 64)]
+    private struct DISPLAYCONFIG_MODE_INFO
+    {
+        public uint infoType;
+        public uint id;
+        public LUID adapterId;
+        public uint _union0;
+        public uint _union1;
+        public uint _union2;
+        public uint _union3;
+        public uint _union4;
+        public uint _union5;
+        public uint _union6;
+        public uint _union7;
+        public uint _union8;
+        public uint _union9;
+        public uint _union10;
+        public uint _union11;
+    }
+
     private static bool IsMonitorPrimary(nint hMonitor)
     {
         var info = new MONITORINFOEX { CbSize = (uint)Marshal.SizeOf<MONITORINFOEX>() };

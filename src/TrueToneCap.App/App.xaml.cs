@@ -125,7 +125,7 @@ public partial class App : Application
             }
 
             var fullMsg = $"TrueToneCap 崩溃:\n\n{msg}\n\n{e.Exception?.StackTrace}";
-            LogService.Error("App", $"未处理异常: {msg}", e.Exception);
+            LogService.Error("App", $"未处理异常: {msg}", e.Exception ?? new Exception(msg));
             try
             {
                 var crashPath = Path.Combine(

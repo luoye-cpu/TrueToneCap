@@ -18,15 +18,7 @@
   <assembly fullname="Vortice.Mathematics">
     <type fullname="Vortice.Mathematics.*" preserve="all" />
   </assembly>
-  <assembly fullname="Magick.NET-Q16-HDRI-AnyCPU">
-    <type fullname="ImageMagick.*" preserve="all" />
-  </assembly>
-  <assembly fullname="Magick.NET.Core">
-    <type fullname="ImageMagick.*" preserve="all" />
-  </assembly>
-  <assembly fullname="JxlNet">
-    <type fullname="JxlNet.*" preserve="all" />
-  </assembly>
+  <!-- Magick.NET 和 JxlNet 已移除，不再需要 -->
   <assembly fullname="SharpGen.Runtime.COM">
     <type fullname="SharpGen.Runtime.COM.*" preserve="all" />
   </assembly>

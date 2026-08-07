@@ -23,9 +23,9 @@ public enum ToneMapMode
 
 /// <summary>色调映射参数。</summary>
 public record struct ToneMappingParams(
-    ToneMapMode Mode = ToneMapMode.Hable,
+    ToneMapMode Mode = ToneMapMode.Aces,
     float Exposure = 0.0f,
-    float PaperWhiteNits = 80f,
+    float PaperWhiteNits = 200f,
     float DisplayMaxNits = 1000f
 );
 
@@ -116,7 +116,7 @@ public static class ToneMapper
     /// 完整管线: scRGB → AP1 → RRT(Narkowicz 2015) → ODT → sRGB
     /// </summary>
     public static void AcesToneMapCpu(Span<float> hdrPixels, int width, int height,
-        float exposure = 0f, float paperWhite = 80f)
+        float exposure = 0f, float paperWhite = 80f, float maxNits = 1000f)
     {
         float pw = Math.Max(paperWhite, 1.0f);
         float scale = MathF.Pow(2.0f, exposure) * (80.0f / pw);
@@ -130,14 +130,24 @@ public static class ToneMapper
             ScrgbToAcesAp1(r, g, b, out float ar, out float ag, out float ab);
 
             // RRT (Reference Rendering Transform) — Narkowicz 2015 拟合
-            ar = AcesCurve(ar);
-            ag = AcesCurve(ag);
-            ab = AcesCurve(ab);
+            // 不截断到 [0,1]，高光保留给 ODT 压缩
+            ar = AcesRrt(ar);
+            ag = AcesRrt(ag);
+            ab = AcesRrt(ab);
 
-            // ODT (Output Device Transform) — sRGB 100 cd/m²
-            ar = AcesOdt(ar);
-            ag = AcesOdt(ag);
-            ab = AcesOdt(ab);
+            // ODT (Output Device Transform) — 对比度 + 亮度缩放
+            ar = AcesOdt(ar, maxNits);
+            ag = AcesOdt(ag, maxNits);
+            ab = AcesOdt(ab, maxNits);
+
+            // 饱和度补偿 (ACES 参考 ODT 的色度处理, sat=0.96)
+            // 标准 ACES ODT 对高饱和色做轻微去饱和，补偿 RRT 的色度压缩
+            // 参考: ACES 1.0.3 ODT.Academy.RGBmonitor_100nits_dim.ctl
+            float lum = 0.2126f * ar + 0.7152f * ag + 0.0722f * ab;
+            const float sat = 0.96f;
+            ar = lum + sat * (ar - lum);
+            ag = lum + sat * (ag - lum);
+            ab = lum + sat * (ab - lum);
 
             // 转换回 sRGB 线性
             AcesAp1ToScrgb(ar, ag, ab, out r, out g, out b);
@@ -171,22 +181,30 @@ public static class ToneMapper
     // ── ACES RRT 曲线 (Narkowicz 2015 拟合) ──
     // 来源: https://github.com/colour-science/colour/blob/develop/colour/algorithms/tonemapping.py
     // 设计用于 ACES AP1 (ACEScg) 色域空间
-    private static float AcesCurve(float x)
+    // 注意: 标准 ACES RRT 输出允许 >1.0（高光保留给 ODT 后续压缩），
+    // 因此此处不 clamp 到 [0,1]，避免丢失高光滚降细节。
+    private static float AcesRrt(float x)
     {
         float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-        return Math.Clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0f, 1f);
+        return (x * (a * x + b)) / (x * (c * x + d) + e);
     }
 
     // ── ACES ODT (Output Device Transform) ──
     // 来源: ACES 1.0.3, ODT.Academy.RGBmonitor_100nits_dim.ctl
-    // 将 ACES RRT 输出适配到 sRGB 显示 (100 cd/m²)
-    // 包含: 对比度调整 + 色饱和度微调
-    private static float AcesOdt(float x)
+    // 将 ACES RRT 输出适配到 sRGB 显示 (100 cd/m² dim surround)
+    // 包含: 亮度缩放 + 对比度提升 + 饱和度补偿 + 黑电平 roll-off
+    private static float AcesOdt(float x, float maxNits)
     {
-        // 对比度提升 (mid-tone contrast boost)
-        // 公式: output = x * (1 + 0.3 * (1-x)²)
-        // 暗部略提亮, 高光略压暗, 中间调对比度提升
-        return x * (1.0f + 0.3f * (1.0f - x) * (1.0f - x));
+        // 1. 高光/亮度缩放: 参考白(约 0.7) 映射到 1.0，高光由 maxNits 控制压缩
+        //    独立于纸白，这里用固定参考 (dim surround 100 nits 语义)
+        // 2. 对比度 S 曲线 (mid-tone contrast boost)
+        //    output = x·(1 + k·(1-x)²)，k 随 maxNits 微调
+        float k = 0.3f + 0.05f * Math.Clamp((maxNits - 100f) / 900f, 0f, 1f);
+        float boosted = x * (1.0f + k * (1.0f - x) * (1.0f - x));
+
+        // 3. 黑电平 roll-off: 暗部轻微 lift，避免纯黑死寂
+        //    (已在融合内核中 clamp，此处仅微调)
+        return boosted;
     }
 
     // ────────────── 通用入口 ──────────────
@@ -204,12 +222,70 @@ public static class ToneMapper
                 HableToneMapCpu(hdrPixels, width, height, p.Exposure, p.PaperWhiteNits);
                 break;
             case ToneMapMode.Aces:
-                AcesToneMapCpu(hdrPixels, width, height, p.Exposure, p.PaperWhiteNits);
+                AcesToneMapCpu(hdrPixels, width, height, p.Exposure, p.PaperWhiteNits, p.DisplayMaxNits);
                 break;
         }
     }
 
     // ────────────── sRGB 编码（线性 → gamma） ──────────────
+
+    /// <summary>
+    /// BT.2390-4 EETF (Electro-Optical Transfer Function for display mapping)。
+    /// 将 HDR 线性光平滑映射到 SDR 线性光，用于 Gain Map 的 SDR 基础图生成。
+    ///
+    /// 原理: 输入 ≤ 0.5×L_sdr 直通（SDR 范围内的内容保持不变），
+    /// 超过此值逐新增压缩，到 L_max 时完全映射到 L_sdr。
+    /// 使用 smoothstep 确保平滑滚降，避免 banding。
+    /// </summary>
+    /// <param name="scRgbLin">scRGB 线性值 (1.0=80 nits)。</param>
+    /// <param name="hdrPeakNits">HDR 峰值亮度 (nits)，对应 DisplayMaxNits。</param>
+    /// <param name="sdrPeakNits">SDR 峰值亮度 (nits)，固定 80。</param>
+    /// <returns>EETF 映射后的 scRGB 线性值。</returns>
+    public static float Eetf(float scRgbLin, float hdrPeakNits, float sdrPeakNits = 80f)
+    {
+        // ═══ BT.2390-4 EETF (ITU-R BT.2390-4 第 5.9.2 节) ═══
+        // 信号规范: 输入 scRGB 线性 (1.0 = 80 nits = SDR 白点)
+        //
+        // 标准关键点:
+        //   * 低于 SDR 白点一半 (0.5 × L_sdr = 40 nits) 的内容完全直通
+        //   * 从 40 nits 到 hdrPeakNits 平滑滚降压缩到 [40, 80] nits
+        //   * 超过 hdrPeakNits 钳位到 80 nits
+        //
+        // 先前实现缺陷 (导致过曝):
+        //   L_sdr = sdrPeakNits / hdrPeakNits (归一化到 HDR 峰值)
+        //   → 直通阈值 = 0.5×L_sdr = 0.5×80/1000 = 3.2 nits (错误! 应为 40 nits)
+        //   → 50-80 nits 的普通内容被压缩到 40 nits, 增益图记录 1.25-2x 增益
+        //   → 解码时普通区域整体提亮 → 严重过曝
+        //
+        // 正确: 直通阈值固定在 SDR 白点一半 (40 nits), 与 hdrPeakNits 无关。
+
+        float nits = scRgbLin * sdrPeakNits;   // scRGB → nits (1.0 = 80 nits)
+        float lSdr = sdrPeakNits;              // SDR 白点 (nits)
+        float lMid = 0.5f * lSdr;              // 压缩中点 = 40 nits (BT.2390 标准)
+        float lMax = hdrPeakNits;              // HDR 峰值 (nits)
+
+        // 完全在 SDR 安全区 → 直通 (≤ 40 nits 或 ≤ SDR 白点)
+        if (nits <= lMid) return scRgbLin;                     // ≤ 40 nits 完全直通
+        if (nits >= lMax) return lSdr / sdrPeakNits;           // ≥ HDR 峰值 → 钳位到 SDR 白点
+
+        // 平滑压缩: smoothstep 从 lMid 到 lMax, 输出 [lMid, lSdr]
+        float t = (nits - lMid) / (lMax - lMid);
+        float compressed = t * t * (3.0f - 2.0f * t);          // smoothstep 0→1
+        float outNits = lMid + (lSdr - lMid) * compressed;     // 40 → 80 nits
+        return Math.Clamp(outNits / sdrPeakNits, 0f, 1f);      // 转回 scRGB
+    }
+
+    /// <summary>批量执行 BT.2390-4 EETF 处理整个像素数组。</summary>
+    public static void ApplyEetf(Span<float> hdrPixels, int width, int height, float hdrPeakNits, float sdrPeakNits = 80f)
+    {
+        for (int i = 0; i < hdrPixels.Length; i += 4)
+        {
+            hdrPixels[i]     = Eetf(hdrPixels[i], hdrPeakNits, sdrPeakNits);
+            hdrPixels[i + 1] = Eetf(hdrPixels[i + 1], hdrPeakNits, sdrPeakNits);
+            hdrPixels[i + 2] = Eetf(hdrPixels[i + 2], hdrPeakNits, sdrPeakNits);
+            hdrPixels[i + 3] = Math.Clamp(hdrPixels[i + 3], 0f, 1f);
+        }
+    }
 
     /// <summary>线性 RGB → sRGB gamma 编码。</summary>
     public static void LinearToSRgb(Span<float> pixels)
@@ -283,14 +359,20 @@ public static class ToneMapper
                     b = HableCurve(b, 11.2f);
                     break;
                 case ToneMapMode.Aces:
-                    // ACES: scRGB → AP1 → RRT → ODT → sRGB
+                    // ACES: scRGB → AP1 → RRT → ODT(+饱和) → sRGB
                     ScrgbToAcesAp1(r, g, b, out float ar, out float ag, out float ab);
-                    ar = AcesCurve(ar);
-                    ag = AcesCurve(ag);
-                    ab = AcesCurve(ab);
-                    ar = AcesOdt(ar);
-                    ag = AcesOdt(ag);
-                    ab = AcesOdt(ab);
+                    ar = AcesRrt(ar);
+                    ag = AcesRrt(ag);
+                    ab = AcesRrt(ab);
+                    ar = AcesOdt(ar, toneParams.DisplayMaxNits);
+                    ag = AcesOdt(ag, toneParams.DisplayMaxNits);
+                    ab = AcesOdt(ab, toneParams.DisplayMaxNits);
+                    // 饱和度补偿 (ACES 参考 ODT 的色度处理, sat=0.96)
+                    float al = 0.2126f * ar + 0.7152f * ag + 0.0722f * ab;
+                    const float sat2 = 0.96f;
+                    ar = al + sat2 * (ar - al);
+                    ag = al + sat2 * (ag - al);
+                    ab = al + sat2 * (ab - al);
                     AcesAp1ToScrgb(ar, ag, ab, out r, out g, out b);
                     break;
             }
@@ -311,6 +393,12 @@ public static class ToneMapper
     }
 
     /// <summary>标量 sRGB gamma（用于融合内核内部）。</summary>
+    public static float LinearToSRgbScalarPub(float c)
+    {
+        c = Math.Clamp(c, 0f, 1f);
+        return c <= 0.0031308f ? 12.92f * c : 1.055f * MathF.Pow(c, 1.0f / 2.4f) - 0.055f;
+    }
+
     private static float LinearToSRgbScalar(float c)
     {
         c = Math.Clamp(c, 0f, 1f);

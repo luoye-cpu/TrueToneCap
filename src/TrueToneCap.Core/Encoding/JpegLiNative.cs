@@ -93,9 +93,10 @@ public static class JpegLiNative
     /// <param name="distance">butteraugli 距离 (0.5~=无损, 1.0=高质量, 3.0=低质量)。</param>
     /// <param name="chromaSubsampling">色度采样: "444" / "422" / "420"。</param>
     /// <param name="iccProfile">可选 ICC Profile。</param>
+    /// <param name="forceBaseline">强制 Baseline Sequential (SOF0)。Gain Map Base JPEG 需要此模式。</param>
     /// <returns>JPEG 字节流 (FFD8...FFD9)。</returns>
     public static byte[] Encode(byte[] bgra, int width, int height, float distance = 1.0f,
-        string chromaSubsampling = "444", byte[]? iccProfile = null)
+        string chromaSubsampling = "444", byte[]? iccProfile = null, bool forceBaseline = false)
     {
         var exePath = GetExePath();
 
@@ -108,29 +109,35 @@ public static class JpegLiNative
         {
             WriteBgraToPpm(bgra, width, height, tmpPpm);
 
-            // 直接传递浮点 distance 值（无需 Q4 整数转换）
-            // cjpegli 的 --distance 接受浮点值，如 1.0, 0.5, 3.0
-            // 传整数 4 会被解释为 d4.000（极低质量），而非 d1.000（近无损）
-            string distArg = $"{distance:F4}";
+            // cjpegli 的 --distance 接受浮点值，允许范围 [0.0, 25.0]
+            // 重要: 传整数 90 会被解释为 d90.000（超出范围导致错误）
+            // 调用方可能传 quality 值 (0-100)，必须 clamp 到合法范围
+            float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
+            string distArg = $"{clampedDist:F4}";
             string chromaArg = chromaSubsampling switch
             {
-                "420" => "--chroma_subsampling 420",
-                "422" => "--chroma_subsampling 422",
+                "420" => " --chroma_subsampling 420",
+                "422" => " --chroma_subsampling 422",
                 _ => "" // 444 默认
             };
 
-            string iccArg = "";
-            if (iccProfile is { Length: > 128 })
+            // 注意: 此版本 cjpegli 不支持 --icc_profile 参数
+            // ICC 通过后处理注入: 编码后读回 JPEG 字节流，插入 APP1 marker
+            bool hasNonSrgbIcc = iccProfile is { Length: > 128 };
+            if (hasNonSrgbIcc)
             {
                 tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
-                File.WriteAllBytes(tmpIcc, iccProfile);
-                iccArg = $"--icc_profile \"{tmpIcc}\"";
+                File.WriteAllBytes(tmpIcc, iccProfile!);
             }
 
+            // Gain Map 需要 Baseline (SOF0)，常规 JPEG 用 Progressive (SOF2) 获得更小体积
+            // --progressive_level 2: 默认 Progressive，体积小 5-10%
+            // --progressive_level 0: Baseline，Gain Map 兼容性要求
+            string progArg = forceBaseline ? " --progressive_level 0" : ""; // 默认 Progressive(2) 更省体积
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {distArg} {chromaArg} {iccArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"--distance {distArg}{progArg}{chromaArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -147,7 +154,16 @@ public static class JpegLiNative
             if (proc.ExitCode != 0 || !File.Exists(outPath))
                 throw new InvalidOperationException($"[jpegli] cjpegli 失败 (exit={proc.ExitCode}) {stderr.Trim()}");
 
-            return File.ReadAllBytes(outPath);
+            var jpegBytes = File.ReadAllBytes(outPath);
+
+            // 后处理注入 ICC: 在 SOI 后插入 APP1 segment
+            // cjpegli 不支持 --icc_profile，需要手动注入
+            if (hasNonSrgbIcc && tmpIcc is not null)
+            {
+                jpegBytes = InjectIccIntoJpeg(jpegBytes, iccProfile!);
+            }
+
+            return jpegBytes;
         }
         finally
         {
@@ -155,6 +171,34 @@ public static class JpegLiNative
             try { File.Delete(tmpPpm + ".jpg"); } catch { }
             if (tmpIcc is not null) try { File.Delete(tmpIcc); } catch { }
         }
+    }
+
+    /// <summary>在 JPEG SOI 后注入 ICC Profile 作为 APP1 段。</summary>
+    private static byte[] InjectIccIntoJpeg(byte[] jpeg, byte[] iccProfile)
+    {
+        if (jpeg.Length < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8)
+            return jpeg;
+
+        // 构建 APP1 marker + ICC 数据
+        // APP1 marker: FF E1
+        // Segment length: 2 + 2 + ICC_ID(12) + ICC data
+        string iccId = "ICC_PROFILE\0";
+        int iccIdLen = 12;
+        int segLen = 2 + iccIdLen + iccProfile.Length;
+        using var ms = new MemoryStream(jpeg.Length + segLen + 2);
+        ms.Write(jpeg, 0, 2); // SOI
+        // APP1 marker
+        ms.WriteByte(0xFF);
+        ms.WriteByte(0xE1);
+        ms.WriteByte((byte)(segLen >> 8));
+        ms.WriteByte((byte)(segLen & 0xFF));
+        // ICC identifier
+        ms.Write(System.Text.Encoding.ASCII.GetBytes(iccId));
+        // ICC data
+        ms.Write(iccProfile);
+        // Rest of JPEG
+        ms.Write(jpeg, 2, jpeg.Length - 2);
+        return ms.ToArray();
     }
 
     /// <summary>将 BGRA8 像素写入 PPM 文件（彩色 P6 格式）。</summary>

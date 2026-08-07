@@ -4,7 +4,7 @@
 
 param(
     [string]$ShaderDir = $PSScriptRoot,
-    [string]$OutputDir = "$PSScriptRoot\..\src\TrueToneCap.App\Shaders"
+    [string]$OutputDir = $PSScriptRoot
 )
 
 $ErrorActionPreference = "Stop"

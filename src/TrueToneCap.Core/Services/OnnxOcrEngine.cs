@@ -1,10 +1,11 @@
 // TrueToneCap.Core/Services/OnnxOcrEngine.cs
 // ONNX Runtime 内嵌 OCR 引擎 — PP-OCRv6 medium, FP16 推理, 纯 C# 零 Python 依赖
 //
-// 模型来源: PaddleOCR PP-OCRv6_medium → ONNX 导出 (FP16)
-//   检测: PP-OCRv6_medium_det.onnx (FP16, ~25MB, 34.5M 参数, Hmean 86.2%)
-//   识别: PP-OCRv6_medium_rec.onnx (FP16, ~73MB, 50 语言统一)
-//   字典: ppocr_keys_v2.txt (多语言统一, ~15000+ chars)
+// 模型来源: PaddleOCR PP-OCRv6_medium → ONNX 导出 (FP32) → FP16 量化
+//   检测: PP-OCRv6_medium_det.onnx (FP16, ~30MB, 34.5M 参数, Hmean 86.2%)
+//   识别: PP-OCRv6_medium_rec.onnx (FP16, ~37MB, 50 语言统一)
+//   字典: ppocrv6_dict.txt (多语言统一, ~15000+ chars)
+//   量化工具: scripts/onnx_fp16_quantize.py (onnxconverter-common float16)
 //
 // 后端: DirectML (GPU, FP16 原生) | CPU (FP16 模型 + FP32 计算)
 // 降级: DirectML 不可用 → CPU

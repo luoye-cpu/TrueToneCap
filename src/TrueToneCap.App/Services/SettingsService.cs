@@ -3,6 +3,7 @@
 // 使用 System.Text.Json 源生成器实现 AOT 兼容
 
 using System.Text.Json;
+using TrueToneCap.App.Models;
 
 namespace TrueToneCap.App.Services;
 

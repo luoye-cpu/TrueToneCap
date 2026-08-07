@@ -3,7 +3,9 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$OutputDir = "publish\TrueToneCap-v0.3.0-beta"
+    [string]$OutputDir = "publish\TrueToneCap-v0.3.0-beta",
+    [switch]$CoreAot = $false,
+    [switch]$NoReadyToRun = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,8 +13,8 @@ $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "╔══════════════════════════════════════╗"
 Write-Host "║  TrueToneCap v0.3.0 Beta 发布脚本   ║"
-Write-Host "║  依赖仓库: publish/PLAN/            ║"
-Write-Host "║  迁移计划: docs/dotnet11-migration-plan.md ║"
+Write-Host "║  ReadyToRun: $(-not $NoReadyToRun)                     ║"
+Write-Host "║  Core AOT: $CoreAot                           ║"
 Write-Host "╚══════════════════════════════════════╝"
 Write-Host ""
 
@@ -22,7 +24,7 @@ $planDir = Join-Path $RepoRoot "publish\PLAN"
 $planTools = Join-Path $planDir "tools"
 $planModels = Join-Path $planDir "models"
 
-$toolFiles = @{ "avifenc.exe" = "AVIF 编码器"; "cjpegli.exe" = "JPEG LI 编码器"; "cwebp.exe" = "WebP 编码器" }
+$toolFiles = @{ "avifenc.exe" = "AVIF 编码器"; "cjpegli.exe" = "JPEG LI 编码器"; "cwebp.exe" = "WebP 编码器"; "cjxl.exe" = "JPEG XL 编码器" }
 $modelFiles = @{ "PP-OCRv6_medium_det.onnx" = "ONNX 文字检测"; "PP-OCRv6_medium_rec.onnx" = "ONNX 文字识别"; "ppocrv6_dict.txt" = "中英文字典" }
 
 $allOk = $true
@@ -66,6 +68,26 @@ if (-not $allOk) {
 }
 Write-Host ""
 
+# ── 构建额外参数 ──
+$extraArgs = @()
+
+# ReadyToRun（默认开启，-NoReadyToRun 禁用）
+if (-not $NoReadyToRun) {
+    $extraArgs += "-p:PublishReadyToRun=true"
+    $extraArgs += "-p:PublishReadyToRunComposite=true"
+    Write-Host "   ⚡ ReadyToRun 已启用 (复合映像)"
+} else {
+    Write-Host "   🐢 ReadyToRun 已禁用 (纯 JIT)"
+}
+
+# Core AOT 分离编译（默认关闭，-CoreAot 启用）
+# 以 NativeAOT 编译 TrueToneCap.Core，App 层通过 JIT 桥接调用
+# 注意：Core 的 Vortice/ONNX Runtime 依赖需 AOT 兼容
+if ($CoreAot) {
+    $extraArgs += "-p:CorePublishAot=true"
+    Write-Host "   🔥 Core AOT 已启用 (试验性)"
+}
+
 # ── 1. Clean & Build ──
 Write-Host "[1/5] 编译 Release..."
 Push-Location $RepoRoot
@@ -78,6 +100,7 @@ dotnet publish src\TrueToneCap.App\TrueToneCap.App.csproj `
     -c $Configuration -r $Runtime `
     --self-contained true `
     -p:WindowsAppSDKSelfContained=true `
+    $extraArgs `
     -o $OutputDir
 if ($LASTEXITCODE -ne 0) { throw "编译失败 (Build failed)" }
 
@@ -86,8 +109,19 @@ Write-Host "   📦 编译完成: $([math]::Round($buildSize,1)) MB"
 
 # ── 2. 复制 PRI 资源 (编译后的 XAML 资源索引) ──
 Write-Host "[2/5] 复制 PRI 资源..."
-$BinDir = "src\TrueToneCap.App\bin\$Configuration\net10.0-windows10.0.26100.0\$Runtime"
-$priFile = Get-ChildItem $BinDir -Filter "TrueToneCap.pri" -ErrorAction SilentlyContinue
+# RID 布局：WinUI 输出在 bin\x64\Release\net11.0-windows10.0.26100.0\win-x64
+# 旧路径 bin\Release\... 在清理缓存后失效，需自适应查找
+$BinDir = $null
+$candidates = @(
+    "src\TrueToneCap.App\bin\x64\$Configuration\net11.0-windows10.0.26100.0\$Runtime",
+    "src\TrueToneCap.App\bin\$Configuration\net11.0-windows10.0.26100.0\$Runtime",
+    "src\TrueToneCap.App\bin\x64\$Configuration\net11.0-windows10.0.26100.0"
+)
+foreach ($c in $candidates) { if (Test-Path $c) { $BinDir = $c; break } }
+Write-Host "   📁 资源目录: $BinDir"
+
+$priFile = $null
+if ($BinDir) { $priFile = Get-ChildItem $BinDir -Filter "TrueToneCap.pri" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -notmatch '\\obj\\' } | Select-Object -First 1 }
 if ($priFile) {
     Copy-Item $priFile.FullName $OutputDir -Force
     Write-Host "   ✅ TrueToneCap.pri ($([math]::Round($priFile.Length/1KB,1)) KB)"
@@ -104,9 +138,10 @@ if ($priFile) {
 
 # ── 3. 复制 XBF 文件 (编译后的 XAML 二进制) ──
 Write-Host "[3/5] 复制 XBF 文件..."
-$xbfFiles = Get-ChildItem $BinDir -Filter "*.xbf" -ErrorAction SilentlyContinue
+$xbfFiles = $null
+if ($BinDir) { $xbfFiles = Get-ChildItem $BinDir -Filter "*.xbf" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -notmatch '\\obj\\' } }
 if ($xbfFiles) {
-    Copy-Item "$BinDir\*.xbf" $OutputDir -Force
+    Copy-Item $xbfFiles.FullName $OutputDir -Force
     Write-Host "   ✅ $($xbfFiles.Count) 个 XBF 文件"
     $xbfFiles | ForEach-Object { Write-Host "      ├─ $($_.Name)" }
 } else {
@@ -135,7 +170,7 @@ if (Test-Path $planTools) {
     $nativeDir = Join-Path $OutputDir "native"
     New-Item -ItemType Directory -Path $nativeDir -Force | Out-Null
     $toolCount = 0
-    foreach ($exe in @("avifenc.exe", "cjpegli.exe", "cwebp.exe")) {
+    foreach ($exe in @("avifenc.exe", "cjpegli.exe", "cwebp.exe", "cjxl.exe")) {
         $src = Join-Path $planTools $exe
         if (Test-Path $src) {
             Copy-Item $src $nativeDir -Force
@@ -146,7 +181,7 @@ if (Test-Path $planTools) {
             Write-Warning "   ⚠️ $exe 在 PLAN/tools/ 中缺失"
         }
     }
-    Write-Host "   📁 native/ — $toolCount 个原生工具"
+    Write-Host "   📁 native/ — $toolCount 个文件"
 }
 
 # 5.2 OCR 模型 → data/Models/
