@@ -669,21 +669,34 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// 对齐 Google libultrahdr (gainmapmetadata.cpp) 的 ISO 21496-1 二进制封装:
     ///   [min_version: u16 BE = 0][writer_version: u16 BE = 0][flags: u8]
     ///   flags: bit7=multi-channel, bit6=use base color space, bit2=backward, bit3=common denominator
-    ///   common denominator 模式: [denom: u32][baseHdrHeadroomN: u32][alternateHdrHeadroomN: u32]
-    ///     [每通道: gainMapMinN: s32, gainMapMaxN: s32, gainMapGammaN: u32, baseOffsetN: s32, alternateOffsetN: s32]
-    /// 语义: gainMapMin/Max = log2 值 (Reinhard 保证增益 ≥ 1, 故 min=0);
-    ///   gainMapMax = log2(headroom); headroom = log2(capacity) 值 (base=0 → 1.0, alternate=log2(headroom))
+    ///   非 common denominator 模式 (各字段独立分母):
+    ///     [baseHdrHeadroomN: u32][baseHdrHeadroomD: u32][alternateHdrHeadroomN: u32][alternateHdrHeadroomD: u32]
+    ///     [每通道: gainMapMinN: s32, gainMapMinD: u32, gainMapMaxN: s32, gainMapMaxD: u32,
+    ///              gainMapGammaN: u32, gainMapGammaD: u32, baseOffsetN: s32, baseOffsetD: u32,
+    ///              alternateOffsetN: s32, alternateOffsetD: u32]
+    /// 关键: 各字段分母必须精确 (gamma=1/1, offset=1/64, min/max=1), 
+    ///   不能共用公共分母 — 否则 gamma 会被错误解析 (如 1/64=0.015625 导致解码过亮!)
+    /// 语义: gainMapMin/Max = log2 值; headroom = log2(capacity)
     /// </remarks>
     public static byte[] BuildIso21496Metadata(GainMapMode mode, float headroom = 12.5f)
     {
         // 与 BuildXmpMetadata 一致的元数据值
+        // gainMapMin/Max = log2 值, 用精确分数表示 (与 XMP 完全一致!)
+        // 关键: 像素用 maxLog2Gain = log2(headroom) 编码 (如 3.32)
+        //   ISO 必须用相同值, 否则解码器解释像素偏大 → 过亮
+        //   用头分子/分母精确表示: log2(headroom) × 100 / 100
         const int gainMapMinLog2 = 0;    // log2(1.0) — Reinhard 保证增益 ≥ 1
-        int gainMapMaxLog2 = (int)MathF.Round(MathF.Log2(Math.Max(headroom, 1.0f))); // log2(headroom) 四舍五入
+        int gainMapMaxLog2N = (int)MathF.Round(MathF.Log2(Math.Max(headroom, 1.0f)) * 100f); // 如 332
+        const int gainMapMaxLog2D = 100; // 分母 100 → 3.32
         const int gammaN = 1;            // gamma = 1.0
+        const int gammaD = 1;            // gamma 分母 = 1 (必须! 不能用公共 64)
         const int offsetN = 1;           // offset = 1/64
-        const int denom = 64;
+        const int offsetD = 64;
+        const int gainMinD = 1;          // min 分母 = 1 (整数 0)
         const int baseHeadroomN = 0;     // baseHdrHeadroom = 2^0 = 1.0 (capacity_min)
-        int alternateHeadroomN = gainMapMaxLog2; // alternateHdrHeadroom = 2^log2(headroom) = headroom
+        const int baseHeadroomD = 1;
+        int alternateHeadroomN = gainMapMaxLog2N; // alternateHdrHeadroom = log2(headroom) 精确
+        const int alternateHeadroomD = 100;
 
         bool multiChannel = mode == GainMapMode.Rgb;
         int channels = multiChannel ? 3 : 1;
@@ -695,24 +708,30 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         WriteBe16(bw, 0);
         WriteBe16(bw, 0);
 
-        // flags: bit7=multi-channel, bit6=useBaseColorSpace(0), bit2=backward(0), bit3=commonDenominator(1)
+        // flags: bit7=multi-channel, bit6=useBaseColorSpace(0), bit2=backward(0)
+        // 注意: 不设 bit3 (common denominator) — 各字段用独立分母
         byte flags = 0;
         if (multiChannel) flags |= 0x80;
-        flags |= 0x08; // common denominator
         bw.Write(flags);
 
-        // common denominator 模式
-        WriteBe32(bw, (uint)denom);                    // common denominator
-        WriteBe32(bw, (uint)baseHeadroomN);            // base HDR headroom numerator
-        WriteBe32(bw, (uint)alternateHeadroomN);       // alternate HDR headroom numerator
+        // 非 common denominator 模式: headroom 各带分母
+        WriteBe32(bw, (uint)baseHeadroomN);
+        WriteBe32(bw, (uint)baseHeadroomD);
+        WriteBe32(bw, (uint)alternateHeadroomN);
+        WriteBe32(bw, (uint)alternateHeadroomD);
 
         for (int c = 0; c < channels; c++)
         {
             WriteBe32(bw, unchecked((uint)gainMapMinLog2));  // gainMapMin numerator (s32)
-            WriteBe32(bw, unchecked((uint)gainMapMaxLog2));  // gainMapMax numerator (s32)
+            WriteBe32(bw, (uint)gainMinD);                   // gainMapMin denominator
+            WriteBe32(bw, unchecked((uint)gainMapMaxLog2N)); // gainMapMax numerator (s32)
+            WriteBe32(bw, (uint)gainMapMaxLog2D);            // gainMapMax denominator (100)
             WriteBe32(bw, (uint)gammaN);                     // gamma numerator
-            WriteBe32(bw, unchecked((uint)offsetN));         // baseOffset (SDR) numerator (s32)
-            WriteBe32(bw, unchecked((uint)offsetN));         // alternateOffset (HDR) numerator (s32)
+            WriteBe32(bw, (uint)gammaD);                     // gamma denominator = 1
+            WriteBe32(bw, unchecked((uint)offsetN));         // baseOffset numerator (s32)
+            WriteBe32(bw, (uint)offsetD);                    // baseOffset denominator = 64
+            WriteBe32(bw, unchecked((uint)offsetN));         // alternateOffset numerator (s32)
+            WriteBe32(bw, (uint)offsetD);                    // alternateOffset denominator = 64
         }
 
         return ms.ToArray();
