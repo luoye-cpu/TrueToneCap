@@ -263,7 +263,7 @@ public static class EncodingIntegrationTests
         const string name = "ToneMapping 全模式";
         try
         {
-            var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
+            var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.SegmentedReinhard };
             bool allOk = true;
             string detail = "";
 

@@ -1,5 +1,5 @@
 // TrueToneCap.Test/ServiceTests.cs
-// 基础设施服务测试 — ShaderLoader / NativeLibraryResolver / ToolchainHelper
+// 基础设施服务测试 — ShaderLoader / NativeLibraryResolver
 
 using System.Reflection;
 using TrueToneCap.Core.Services;
@@ -27,9 +27,6 @@ public static class ServiceTests
         // NativeLibraryResolver
         Test_NativeLibraryResolver_Initializes();
         Test_NativeLibraryResolver_GetExePath_ThrowsOnMissing();
-
-        // ToolchainHelper
-        Test_ToolchainHelper_CheckAvailable_Invalid();
 
         Console.WriteLine($"\n══════════════════════════════════════");
         Console.WriteLine($"  结果: {_passed} 通过, {_failed} 失败");
@@ -99,17 +96,6 @@ public static class ServiceTests
         {
             Assert($"NativeLibraryResolver: 异常类型错误: {ex.GetType().Name}", false);
         }
-    }
-
-    // ═══════════════════════════════════════
-    //  ToolchainHelper
-    // ═══════════════════════════════════════
-
-    static void Test_ToolchainHelper_CheckAvailable_Invalid()
-    {
-        // 不存在的工具应返回 false
-        var available = ToolchainHelper.CheckAvailable("nonexistent_tool_xyz.exe", "--version");
-        Assert("ToolchainHelper: 不存在返回 false", !available);
     }
 
     // ═══════════════════════════════════════

@@ -3,7 +3,16 @@
 // 用法: dotnet run --project src/TrueToneCap.Tools/FormatBench.csproj
 
 using System.Diagnostics;
+using TrueToneCap.Core;
 using TrueToneCap.Core.Encoding;
+using TrueToneCap.Core.Processing;
+
+// ═══ OCR 准确度基准分派 (--ocr-bench <modelDir>) ═══
+if (args.Length >= 1 && args[0] == "--ocr-bench")
+{
+    OcrBench.Run(args);
+    return;
+}
 
 // ═══ 生成 4K 测试像素 (彩色渐变) ═══
 const int W = 3840, H = 2160;
@@ -18,6 +27,16 @@ for (int x = 0; x < W; x++)
     bgra[i + 3] = 255;                                    // A
 }
 Console.WriteLine($"测试像素: {W}x{H} ({bgra.Length / 1024 / 1024} MB BGRA8)");
+
+// ═══ 色调映射性能基准 (2026-08-09: 验证 sRGB gamma LUT 加速) ═══
+var hdrLin = PixelOps.BgraToScrgbLinearFast(bgra, W, H);
+var toneParams = new ToneMappingParams(ToneMapMode.SegmentedReinhard, 0, 200, 1000);
+for (int i = 0; i < 2; i++) ToneMapper.FloatToSRgbBytes(hdrLin, W, H, toneParams); // 预热
+var tsw = Stopwatch.StartNew();
+for (int i = 0; i < 5; i++) ToneMapper.FloatToSRgbBytes(hdrLin, W, H, toneParams);
+tsw.Stop();
+Console.WriteLine($"色调映射 (LUT): {tsw.ElapsedMilliseconds / 5.0:F1} ms/次 (4K)");
+Console.WriteLine($"ISA: AVX2={PixelOps.HasAvx2} AVX512={PixelOps.HasAvx512Full} AVX10v1={PixelOps.HasAvx10V1} AVX10v2={PixelOps.HasAvx10V2} FMA={PixelOps.HasFma} AVXVNNI={PixelOps.HasAvxVnni} NEON={PixelOps.HasNeon} VecWidth={PixelOps.BestVectorByteWidth}\n");
 
 // ═══ 全格式测试 ═══
 var formats = new (OutputFormat Fmt, string Name, float Quality, bool Hdr, int TimeoutS)[]

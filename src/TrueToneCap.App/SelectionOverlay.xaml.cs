@@ -148,33 +148,41 @@ public sealed partial class SelectionOverlay : Window
             _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
                 SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-            // ═══ 创建 HDR 背景窗口（在覆盖层下方，DWM 透明穿透可见）═══
-            bool hdrBgOk = false;
-            if (_hdrPixels is not null && _hdrW > 0 && _hdrH > 0)
+            // ═══ 创建 GPU 背景窗口 (在覆盖层下方, DWM 透明穿透可见) ═══
+            // 2026-08-09: 统一 HDR(float) 与 SDR(BGRA8) 走 GPU 呈现, 消除 WriteableBitmap CPU 合成
+            bool gpuBgOk = false;
+            try
             {
-                try
+                var sharedDevice = AppServices.Wgc
+                    ?.GetOrCreateDevice(TrueToneCap.Core.Capture.DisplayEnumerator.GetMonitorUnderCursor());
+                _hdrBgWnd = new HdrPreviewWindow(sharedDevice);
+                int bgW = _hdrW > 0 ? _hdrW : vw;
+                int bgH = _hdrH > 0 ? _hdrH : vh;
+                if (_hdrBgWnd.Initialize(vx, vy, bgW, bgH))
                 {
-                    var sharedDevice = AppServices.Wgc
-                        ?.GetOrCreateDevice(TrueToneCap.Core.Capture.DisplayEnumerator.GetMonitorUnderCursor());
-                    _hdrBgWnd = new HdrPreviewWindow(sharedDevice);
-                    if (_hdrBgWnd.Initialize(vx, vy, _hdrW, _hdrH))
+                    if (_hdrPixels is not null && _hdrW > 0 && _hdrH > 0)
                     {
                         _hdrBgWnd.PresentFrame(_hdrPixels, _hdrW, _hdrH);
-                        hdrBgOk = true;
-                        System.Diagnostics.Debug.WriteLine($"[Overlay] HDR 背景窗口已创建");
+                        System.Diagnostics.Debug.WriteLine($"[Overlay] GPU 背景窗口 (HDR) 已创建");
                     }
-                    else
+                    else if (desktopPixels is not null)
                     {
-                        _hdrBgWnd.Dispose();
-                        _hdrBgWnd = null;
+                        _hdrBgWnd.PresentFrameBgra(desktopPixels, vw, vh);
+                        System.Diagnostics.Debug.WriteLine($"[Overlay] GPU 背景窗口 (SDR) 已创建");
                     }
+                    gpuBgOk = true;
                 }
-                catch (Exception ex)
+                else
                 {
-                    System.Diagnostics.Debug.WriteLine($"[Overlay] HDR 背景创建失败: {ex.Message}");
-                    _hdrBgWnd?.Dispose();
+                    _hdrBgWnd.Dispose();
                     _hdrBgWnd = null;
                 }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Overlay] GPU 背景创建失败: {ex.Message}");
+                _hdrBgWnd?.Dispose();
+                _hdrBgWnd = null;
             }
 
             // 全透明窗口：margins 全部 -1 使整个客户区透明，
@@ -187,7 +195,7 @@ public sealed partial class SelectionOverlay : Window
                 _dpiScale = dpi / 96.0;
             else
                 _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
-            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2} HDR背景={hdrBgOk}");
+            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2} GPU背景={gpuBgOk}");
 
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
@@ -195,8 +203,10 @@ public sealed partial class SelectionOverlay : Window
             {
                 _bgRendered = true;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                RenderDesktopBackground(desktopPixels, vw, vh);
-                System.Diagnostics.Debug.WriteLine($"[⏱ Overlay] 背景渲染: {sw.ElapsedMilliseconds}ms");
+                // 2026-08-09: GPU 背景成功时跳过 WriteableBitmap CPU 合成
+                if (!gpuBgOk && desktopPixels is not null)
+                    RenderDesktopBackground(desktopPixels, vw, vh);
+                System.Diagnostics.Debug.WriteLine($"[⏱ Overlay] 背景渲染: {sw.ElapsedMilliseconds}ms (GPU={gpuBgOk})");
                 DetectAndRenderRegions();
             }
         };

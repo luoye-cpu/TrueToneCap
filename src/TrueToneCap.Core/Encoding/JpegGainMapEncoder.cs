@@ -1,19 +1,23 @@
 // TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs
 // JPEG Gain Map (Ultra HDR) — ISO 21496-1 + Ultra HDR v1 双元数据兼容实现
 //
-// 全新管线 (2026-08-06): 以 JPEG LI 为基底 + BT.2390-4 EETF 标准映射
+// 全新管线 (2026-08-06): 以 JPEG LI 为基底 + 分段 Reinhard 显示映射
 // 2026-08-07 修复: 标准 hdrgm XMP + ISO 21496-1 二进制元数据 + 标准 MPF attribute
+// 2026-08-08 修复: y=1.0 跳变 (smoothstep 过渡) + HDR-off 降级路径统一 + Base sRGB ICC
 //
 //   HDR scRGB 线性浮点 (1.0 = 80 nits)
-//     ├─ BT.2390-4 EETF 显示映射 → SDR 线性（同一 scRGB 空间）
-//     │     └─ sRGB gamma → BGRA8 → jpegli → Base JPEG
-//     ├─ 增益比 = HDR_linear / SDR_linear（基于【同一个】EETF 映射空间）
+//     ├─ 分段 Reinhard 显示映射 → SDR 线性（同一 scRGB 空间）
+//     │     └─ sRGB gamma → BGRA8 → jpegli → Base JPEG (+sRGB ICC)
+//     ├─ 增益比 = HDR_linear / SDR_linear（基于【同一个】映射空间）
 //     │     └─ log2 编码 [0,+4] → 1/4 降采样 → jpegli → 增益图 JPEG
 //     └─ 封装: Base(APP1: hdrgm XMP + APP2: MPF) + GainMap(APP2: ISO 21496-1)
 //
 // 核心设计原则:
-//   * Base 与增益图基于同一个 BT.2390 EETF 映射，保证一致性（无偏色/过曝）
-//   * 用 BT.2390-4 EETF 标准显示映射替代通用色调映射器（Reinhard/Hable/ACES）
+//   * Base 与增益图基于同一个分段 Reinhard 映射，保证一致性（无偏色/过曝）
+//   * 分段 Reinhard (y≤SDR白点直通, y>SDR白点 Reinhard 压缩) 取代 BT.2390-4 EETF。
+//     公式与 libultrahdr ReinhardMap 一致; 直通保护使桌面 SDR 内容完全保真 (增益恒 1x),
+//     根治 EETF 固定 40 nits 直通阈值在 SdrWhite>80 时压缩 40~SdrWhite nits 导致的过曝。
+//   * y=1.0 (SDR 白点) 处 smoothstep 过渡保证值连续且单调, 消除亮度跳变
 //   * 全部使用 jpegli (JPEG LI) 编码，移除 ultrahdr_app 外部依赖
 //   * 双元数据: hdrgm XMP (Ultra HDR v1 解码器) + ISO 21496-1 二进制 (ISO 解码器)
 //
@@ -22,6 +26,7 @@
 //   Rgb:  log2(HDR_channel / SDR_channel)     → 三通道彩色增益图
 
 using System.IO;
+using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Processing;
 
 namespace TrueToneCap.Core.Encoding;
@@ -46,14 +51,34 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     {
         if (!settings.HdrOutput)
         {
-            // SDR 模式：回退为普通 JPEG LI（通过统一编码器，带 ICC 和色域支持）
-            // 先做色域转换 + 色调映射
-            System.Diagnostics.Debug.WriteLine("[GainMap] ⚠ HDR 未开启，Gain Map 降级为普通 JPEG（需要 HDR 数据才能生成增益图）");
-            var sdr = FormatHelper.ToSdr(frame, settings);
-            await EncodeSdrAsync(sdr, frame.Width, frame.Height, settings, outputPath, ct);
+            // SDR 模式：用与 GainMap 主路径完全相同的分段 Reinhard 生成 Base JPEG（无增益图）。
+            // 修复: 原降级路径走 ACES (FormatHelper.ToSdr) 与主路径分段 Reinhard 风格不一致,
+            // 切换 HDR 开关时 SDR 查看器看到的基础图会跳变。现共用 ComputeWhitePoint/
+            // ReinhardToSdr/LinearToBgra8, 视觉完全一致。
+            System.Diagnostics.Debug.WriteLine("[GainMap] ⚠ HDR 未开启，Gain Map 降级为普通 JPEG（分段 Reinhard Base, 无增益图）");
+            await EncodeBaseOnlyAsync(frame, settings, outputPath, ct);
             return;
         }
         await EncodeGainMapAsync(frame, settings, outputPath, ct);
+    }
+
+    /// <summary>仅编码 Base JPEG（无增益图）——HDR 关闭时的降级路径。
+    /// 与主路径共用 ComputeWhitePoint/ReinhardToSdr/LinearToBgra8，保证视觉一致。</summary>
+    private async Task EncodeBaseOnlyAsync(HdrFrameData frame, EncodingSettings settings,
+        string outputPath, CancellationToken ct)
+    {
+        await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            int w = frame.Width, h = frame.Height;
+            var (_, _, sdrWhiteScrgb, headroom) = ComputeWhitePoint(settings);
+            float[] sdrLinear = ReinhardToSdr(frame.Pixels, w, h, headroom, sdrWhiteScrgb);
+            byte[] sdrBgra = LinearToBgra8(sdrLinear, w, h);
+            float distance = Math.Clamp(settings.Quality, 0.5f, 25.0f);
+            byte[] jpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, distance,
+                ColorProfileProvider.GetDefaultSRgbIcc());
+            File.WriteAllBytes(outputPath, jpegBytes);
+        }, ct);
     }
 
     public override async Task EncodeSdrAsync(byte[] sdrPixels, int width, int height,
@@ -94,14 +119,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             //     所以: SDR 内容捕获值 = 2.5 scRGB (200 nits), 不是 1.0!
             //     直通阈值必须是 SDR 白点 (PaperWhiteNits/80 对应的 scRGB 值),
             //     否则 2.5 scRGB 的 SDR 内容会被错误压缩 → Base 发灰 + 增益虚高 → 过曝。
-            float hdrPeakNits = settings.ToneMappingParams.DisplayMaxNits > 0
-                ? settings.ToneMappingParams.DisplayMaxNits
-                : 1000f;
-            float sdrWhiteNits = Math.Max(settings.ToneMappingParams.PaperWhiteNits, 80f);
-            // scRGB 中 SDR 白点的位置: PaperWhiteNits / 80 (如 200/80 = 2.5)
-            float sdrWhiteScrgb = sdrWhiteNits / 80f;
-            // headroom: HDR 峰值相对 SDR 白点 (如 1000/200 = 5.0)
-            float headroom = hdrPeakNits / sdrWhiteNits;
+            var (hdrPeakNits, sdrWhiteNits, sdrWhiteScrgb, headroom) = ComputeWhitePoint(settings);
 
             // ── 1. 分段 Reinhard 色调映射: HDR scRGB → SDR 线性 ──
             //     输入: scRGB (1.0 = 80 nits), 先归一化到 SDR 白点相对空间
@@ -116,9 +134,15 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             byte[] sdrBgra = LinearToBgra8(sdrLinear, w, h);
             ct.ThrowIfCancellationRequested();
 
-            // ── 3. 编码 Base JPEG (jpegli, Baseline) ──
+            // ── 3. 编码 Base JPEG (jpegli, Baseline) + 显式 sRGB ICC ──
+            //     Base 像素 = scRGB(BT.709 primaries) → sRGB gamma, 恒为 sRGB 内容。
+            //     显式嵌入 sRGB ICC (规范要求主图声明色彩空间; 无 ICC 时解码器默认 sRGB,
+            //     显式嵌入更规范且与像素一致)。不嵌用户目标色域 ICC — 管线未做色域转换
+            //     (2026-08-06 设计决策: Base 与增益图同处 scRGB 空间), 嵌入 P3/BT.2020
+            //     ICC 会错误标记像素。
             float baseDist = Math.Clamp(settings.Quality, 0.5f, 25.0f);
-            byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, baseDist, null);
+            byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, baseDist,
+                ColorProfileProvider.GetDefaultSRgbIcc());
             ct.ThrowIfCancellationRequested();
 
             // ── 4. 增益比计算（统一到 SDR 白点相对线性空间）──
@@ -163,11 +187,10 @@ public sealed class JpegGainMapEncoder : ImageEncoder
 
     /// <summary>
     /// 分段 Reinhard 色调映射: HDR scRGB → SDR 线性 (0..1.0, 1.0=SDR 白点)。
-    /// 输入: scRGB 线性 (1.0 = 80 nits, Windows scene-referred)
-    /// 归一化: y = scRGB / sdrWhiteScrgb (SDR 白点 = 1.0)
-    /// 分段 (修复过曝的关键):
-    ///   - y ≤ 1.0 (SDR 内容, ≤ PaperWhiteNits): 完全直通 → 增益恒 1x
-    ///   - y > 1.0 (真 HDR 高光): Reinhard 压缩 (libultrahdr 公式)
+    /// 委托共享核心 ToneMapper.SegmentedReinhardMap (2026-08-08 起 GainMap 与其他格式同款):
+    ///   - y ≤ 1.0 直通 (SDR 内容保真, 增益恒 1x)
+    ///   - 1.0~1.25 smoothstep 过渡 (修复 SDR 白点亮度跳变)
+    ///   - ≥ 1.25 Reinhard 压缩 (libultrahdr ReinhardMap 公式, R(headroom)=1.0)
     /// 输出: [0, 1.0] 相对 SDR 白点 (解码器理解的 Base 亮度)
     /// </summary>
     private static float[] ReinhardToSdr(float[] hdrPixels, int w, int h, float headroom,
@@ -175,7 +198,6 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     {
         int pixelCount = w * h;
         var sdr = new float[hdrPixels.Length];
-        float headroomSq = headroom * headroom;
         float invSdrWhite = 1.0f / Math.Max(sdrWhiteScrgb, 1.0f);
 
         Parallel.For(0, pixelCount, pi =>
@@ -189,23 +211,11 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             float a = hdrPixels[i + 3];
 
             float maxY = Math.Max(Math.Max(r, g), b);
-
-            if (maxY <= 1.0f)
-            {
-                // SDR 范围 (≤ SDR 白点): 完全直通, 无压缩, 增益 1x
-                sdr[i]     = Math.Clamp(r, 0f, 1f);
-                sdr[i + 1] = Math.Clamp(g, 0f, 1f);
-                sdr[i + 2] = Math.Clamp(b, 0f, 1f);
-                sdr[i + 3] = Math.Clamp(a, 0f, 1f);
-                return;
-            }
-
-            // HDR 高光 (> SDR 白点): Reinhard 压缩, 保持色相
-            // ReinhardMap(y, headroom) = (1 + y/headroom²) / (1 + y) × y
-            float maxSdr = (1.0f + maxY / headroomSq) / (1.0f + maxY) * maxY;
+            // 共享核心: 直通 / smoothstep 过渡 / Reinhard 压缩 (含 headroom 保护)
+            float maxSdr = ToneMapper.SegmentedReinhardMap(maxY, headroom);
 
             // 保持色相缩放 (高光压缩到 [Reinhard(1.0), 1.0] 范围)
-            float scale = maxSdr / maxY;
+            float scale = maxY > 1e-6f ? maxSdr / maxY : 0f;
             sdr[i]     = Math.Clamp(r * scale, 0f, 1f);
             sdr[i + 1] = Math.Clamp(g * scale, 0f, 1f);
             sdr[i + 2] = Math.Clamp(b * scale, 0f, 1f);
@@ -214,7 +224,25 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         return sdr;
     }
 
-    /// <summary>BT.2390 EETF 映射后的 SDR 线性 → sRGB gamma → BGRA8。</summary>
+    /// <summary>计算 GainMap 亮度参数，供主路径与降级路径共用（保证一致性）。
+    /// hdrPeakNits: DisplayMaxNits (系统检测 SystemMaxNits 优先, 用户配置回退);
+    /// sdrWhiteNits: PaperWhiteNits (系统 SdrWhiteLevel 优先, 用户配置回退);
+    /// sdrWhiteScrgb = sdrWhiteNits / 80; headroom = hdrPeakNits / sdrWhiteNits。</summary>
+    private static (float hdrPeakNits, float sdrWhiteNits, float sdrWhiteScrgb, float headroom)
+        ComputeWhitePoint(EncodingSettings settings)
+    {
+        float hdrPeakNits = settings.ToneMappingParams.DisplayMaxNits > 0
+            ? settings.ToneMappingParams.DisplayMaxNits
+            : 1000f;
+        float sdrWhiteNits = Math.Max(settings.ToneMappingParams.PaperWhiteNits, 80f);
+        // scRGB 中 SDR 白点的位置: PaperWhiteNits / 80 (如 200/80 = 2.5)
+        float sdrWhiteScrgb = sdrWhiteNits / 80f;
+        // headroom: HDR 峰值相对 SDR 白点 (如 1000/200 = 5.0)
+        float headroom = hdrPeakNits / sdrWhiteNits;
+        return (hdrPeakNits, sdrWhiteNits, sdrWhiteScrgb, headroom);
+    }
+
+    /// <summary>分段 Reinhard 映射后的 SDR 线性 → sRGB gamma → BGRA8 (查表, 替代 MathF.Pow)。</summary>
     private static byte[] LinearToBgra8(float[] linear, int w, int h)
     {
         int pixelCount = w * h;
@@ -222,12 +250,9 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         System.Threading.Tasks.Parallel.For(0, pixelCount, pi =>
         {
             int i = pi * 4;
-            float r = ToneMapper.LinearToSRgbScalarPub(Math.Clamp(linear[i], 0f, 1f));
-            float g = ToneMapper.LinearToSRgbScalarPub(Math.Clamp(linear[i + 1], 0f, 1f));
-            float b = ToneMapper.LinearToSRgbScalarPub(Math.Clamp(linear[i + 2], 0f, 1f));
-            bgra[i]     = (byte)(b * 255f + 0.5f);
-            bgra[i + 1] = (byte)(g * 255f + 0.5f);
-            bgra[i + 2] = (byte)(r * 255f + 0.5f);
+            bgra[i]     = ToneMapper.LinearToSrgbByte(linear[i]);     // B
+            bgra[i + 1] = ToneMapper.LinearToSrgbByte(linear[i + 1]); // G
+            bgra[i + 2] = ToneMapper.LinearToSrgbByte(linear[i + 2]); // R
             bgra[i + 3] = 255;
         });
         return bgra;

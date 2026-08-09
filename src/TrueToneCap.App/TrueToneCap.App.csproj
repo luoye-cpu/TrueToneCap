@@ -64,7 +64,7 @@
   </ItemGroup>
 
   <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发） -->
-  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\ToneMapping.hlsl;Shaders\MosaicEffect.hlsl;Shaders\FullscreenVS.hlsl" Outputs="Shaders\ToneMapping.hlsl.cso;Shaders\MosaicEffect.hlsl.cso;Shaders\FullscreenVS.hlsl.cso">
+  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\ToneMapping.hlsl;Shaders\FullscreenVS.hlsl" Outputs="Shaders\ToneMapping.hlsl.cso;Shaders\FullscreenVS.hlsl.cso">
     <Message Text="编译 HLSL 着色器..." Importance="high" />
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Shaders\CompileShaders.ps1&quot; -ShaderDir &quot;$(MSBuildProjectDirectory)\Shaders&quot; -OutputDir &quot;$(MSBuildProjectDirectory)\Shaders&quot;" />
   </Target>

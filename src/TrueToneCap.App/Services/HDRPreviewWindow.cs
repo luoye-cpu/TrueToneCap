@@ -22,6 +22,11 @@ public sealed partial class HdrPreviewWindow : IDisposable
     private IDXGISwapChain? _swapChain;
     private ID3D11Texture2D? _backBuffer;
 
+    // ── 池化 Staging 纹理 (2026-08-09: 避免每帧创建, 4K 省 ~16MB 分配) ──
+    private ID3D11Texture2D? _pooledStaging;
+    private int _pooledW, _pooledH;
+    private Format _pooledFmt;
+
     // ── 状态 ──
     public bool IsInitialized { get; private set; }
     public string? LastError { get; private set; }
@@ -200,47 +205,72 @@ public sealed partial class HdrPreviewWindow : IDisposable
     /// <summary>
     /// 呈现 HDR 帧到窗口。
     /// 输入的 float[] 应为 scRGB 线性 RGBA 数据（与 WGC HDR 捕获输出一致）。
+    /// 使用池化 Staging 纹理 (2026-08-09 优化)。
     /// </summary>
     /// <param name="pixels">scRGB linear float[] RGBA 像素。</param>
     /// <param name="width">图像宽度。</param>
     /// <param name="height">图像高度。</param>
     public unsafe void PresentFrame(float[] pixels, int width, int height)
+        => PresentFrameHdr(pixels, width, height);
+
+    /// <summary>
+    /// 呈现 SDR 帧到窗口 (2026-08-09: 全屏覆盖预览 GPU 化)。
+    /// 输入 BGRA8 像素 (与 WGC SDR 捕获一致)。
+    /// </summary>
+    /// <param name="bgra">BGRA8 像素数组。</param>
+    /// <param name="width">图像宽度。</param>
+    /// <param name="height">图像高度。</param>
+    public unsafe void PresentFrameBgra(byte[] bgra, int width, int height)
     {
-        if (_disposed || _swapChain is null || _context is null || _device is null)
+        if (_disposed || _swapChain is null || _context is null || _device is null || _backBuffer is null)
+            return;
+
+        try
+        {
+            // CopyResource 要求同格式: SDR 用 B8G8R8A8 交换链 (而非 Float16)
+            EnsureSwapChainSize(width, height, Format.B8G8R8A8_UNorm);
+
+            // 获取池化 BGRA8 Staging 纹理 (尺寸/格式匹配时复用)
+            var staging = GetPooledStaging(width, height, Format.B8G8R8A8_UNorm);
+            var mapped = _context.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
+            if (mapped.DataPointer == IntPtr.Zero)
+                return;
+
+            byte* dstBase = (byte*)mapped.DataPointer.ToPointer();
+            int dstPitch = (int)mapped.RowPitch;
+            fixed (byte* src = bgra)
+            {
+                for (int row = 0; row < height; row++)
+                {
+                    // BGRA8 无行对齐差异时整行拷贝; 有差异时逐行
+                    Buffer.MemoryCopy(src + row * width * 4, dstBase + row * dstPitch, width * 4, width * 4);
+                }
+            }
+            _context.Unmap(staging, 0);
+
+            // 后台缓冲是 Float16, 用 CopyResource 由 GPU 自动转换 (UNORM→Float)
+            _context.CopyResource(_backBuffer!, staging);
+            _swapChain.Present(1, PresentFlags.None);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[HdrPreview] PresentFrameBgra 异常: {ex.Message}");
+        }
+    }
+
+    /// <summary>HDR float 帧呈现 (纹理池化版本)。</summary>
+    private unsafe void PresentFrameHdr(float[] pixels, int width, int height)
+    {
+        if (_disposed || _swapChain is null || _context is null || _device is null || _backBuffer is null)
             return;
 
         try
         {
             // ── 尺寸变化时重建交换链 ──
-            if (width != _winW || height != _winH)
-            {
-                _backBuffer?.Dispose();
-                _backBuffer = null;
-                _swapChain.ResizeBuffers(2, (uint)width, (uint)height,
-                    Format.R16G16B16A16_Float, SwapChainFlags.None);
-                _winW = width;
-                _winH = height;
-                _backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+            EnsureSwapChainSize(width, height, Format.R16G16B16A16_Float);
 
-                // ResizeBuffers 后色彩空间重置为默认，需重新设置
-                using var sc3 = _swapChain.QueryInterface<IDXGISwapChain3>();
-                sc3.SetColorSpace1(ColorSpaceType.RgbFullG10NoneP709);
-            }
-
-            // ── 创建 Staging 纹理并上传像素 ──
-            using var staging = _device.CreateTexture2D(new Texture2DDescription
-            {
-                Width = (uint)width,
-                Height = (uint)height,
-                MipLevels = 1,
-                ArraySize = 1,
-                Format = Format.R16G16B16A16_Float,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Staging,
-                BindFlags = BindFlags.None,
-                CPUAccessFlags = CpuAccessFlags.Write
-            });
-
+            // ── 池化 Staging 纹理 (尺寸/格式匹配时复用) ──
+            var staging = GetPooledStaging(width, height, Format.R16G16B16A16_Float);
             var mapped = _context.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
             if (mapped.DataPointer == IntPtr.Zero)
                 return;
@@ -272,6 +302,52 @@ public sealed partial class HdrPreviewWindow : IDisposable
         {
             System.Diagnostics.Debug.WriteLine($"[HdrPreview] PresentFrame 异常: {ex.Message}");
         }
+    }
+
+    /// <summary>尺寸变化时重建交换链 (含色彩空间设置)。
+    /// HDR (Float16) 用 scRGB 线性 (RgbFullG10NoneP709); SDR (BGRA8) 默认 sRGB (G22)。</summary>
+    private void EnsureSwapChainSize(int width, int height, Format format)
+    {
+        if (width != _winW || height != _winH)
+        {
+            _backBuffer?.Dispose();
+            _backBuffer = null;
+            _swapChain?.ResizeBuffers(2, (uint)width, (uint)height, format, SwapChainFlags.None);
+            _winW = width;
+            _winH = height;
+            _backBuffer = _swapChain!.GetBuffer<ID3D11Texture2D>(0);
+
+            // ResizeBuffers 后色彩空间重置为默认，需重新设置
+            using var sc3 = _swapChain.QueryInterface<IDXGISwapChain3>();
+            if (format == Format.R16G16B16A16_Float)
+                sc3.SetColorSpace1(ColorSpaceType.RgbFullG10NoneP709); // scRGB 线性 (HDR)
+            // SDR (B8G8R8A8_UNorm) 保持默认 sRGB gamma (G22), 无需设置
+        }
+    }
+
+    /// <summary>获取池化 Staging 纹理 (尺寸/格式匹配时复用, 否则重建)。</summary>
+    private ID3D11Texture2D GetPooledStaging(int width, int height, Format format)
+    {
+        if (_pooledStaging is not null && _pooledW == width && _pooledH == height && _pooledFmt == format)
+            return _pooledStaging;
+
+        _pooledStaging?.Dispose();
+        _pooledStaging = _device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = format,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Staging,
+            BindFlags = BindFlags.None,
+            CPUAccessFlags = CpuAccessFlags.Write
+        });
+        _pooledW = width;
+        _pooledH = height;
+        _pooledFmt = format;
+        return _pooledStaging;
     }
 
     // ═══════════════════════════════════════════════════
@@ -429,6 +505,8 @@ public sealed partial class HdrPreviewWindow : IDisposable
     {
         _backBuffer?.Dispose();
         _backBuffer = null;
+        _pooledStaging?.Dispose();
+        _pooledStaging = null;
         _swapChain?.Dispose();
         _swapChain = null;
         if (_hwnd != nint.Zero)
@@ -445,6 +523,8 @@ public sealed partial class HdrPreviewWindow : IDisposable
         _disposed = true;
         _backBuffer?.Dispose();
         _backBuffer = null;
+        _pooledStaging?.Dispose();
+        _pooledStaging = null;
         _swapChain?.Dispose();
         _swapChain = null;
         // 共享设备场景下不释放 _device，由调用方管理

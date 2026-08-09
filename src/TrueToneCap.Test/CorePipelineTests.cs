@@ -1,5 +1,5 @@
 // TrueToneCap.Test/CorePipelineTests.cs
-// 核心管线单元测试 — PixelOps / ToneMapper / ColorProfileProvider / GamutMapper / Annotation / Encoders
+// 核心管线单元测试 — PixelOps / ToneMapper / ColorProfileProvider / Annotation / Encoders
 // 运行: dotnet run --project src/TrueToneCap.Test -- --unit-tests
 
 using TrueToneCap.Core;
@@ -33,12 +33,10 @@ public static class CorePipelineTests
         // ToneMapper
         Test_ToneMapper_Reinhard_BlackStaysBlack();
         Test_ToneMapper_Hable_WhiteClamps();
-        Test_ToneMapper_Aces_OutputInRange();
-        Test_ToneMapper_Aces_HighlightRolloff();
-        Test_ToneMapper_Aces_OdtMonotonic();
-        Test_ToneMapper_Aces_GrayLevels();
         Test_ToneMapper_FusedKernel_MatchesSeparate();
         Test_ToneMapper_SwizzleOrder();
+        Test_ToneMapper_SrgbLut_Accuracy();
+        Test_ToneMapper_SrgbLut_Endpoints();
 
         // ColorProfileProvider
         Test_SrgbIcc_ValidHeader();
@@ -54,11 +52,6 @@ public static class CorePipelineTests
         Test_DownsampleToGray_UniformColor();
         Test_ComputeEdgeProjections_FlatImage();
         Test_ComputeEdgeProjections_EdgeDetection();
-
-        // GamutMapper
-        Test_GamutMapper_HdrToSRgb_OutputRange();
-        Test_GamutMapper_HdrToSRgb_BlackPreserved();
-        Test_GamutMapper_MapToSRgb_NullIcc_Passthrough();
 
         // AnnotationManager
         Test_AnnotationManager_AddLayer();
@@ -183,61 +176,6 @@ public static class CorePipelineTests
         Assert("ToneMapper.Hable: 超亮值钳制到 [0,1]", ok);
     }
 
-    static void Test_ToneMapper_Aces_OutputInRange()
-    {
-        var pixels = new float[] { 0f, 0.5f, 1f, 2f, 10f, 0.1f, 1f, 1f };
-        ToneMapper.AcesToneMapCpu(pixels, 2, 1);
-        bool ok = true;
-        for (int i = 0; i < pixels.Length; i += 4)
-            if (pixels[i] < 0 || pixels[i] > 1 || pixels[i + 1] < 0 || pixels[i + 1] > 1 || pixels[i + 2] < 0 || pixels[i + 2] > 1)
-            { ok = false; break; }
-        Assert("ToneMapper.Aces: 所有输出在 [0,1]", ok);
-    }
-
-    static void Test_ToneMapper_Aces_HighlightRolloff()
-    {
-        // 验证 ACES 高光平滑滚降：适度高光输入应单调递增（有区分度），
-        // 而非硬截断到纯白。SDR 输出最终 clamp 到 [0,1]，但中间调有渐进肩部。
-        // 输入 1x/2x/4x/8x 亮度，输出应严格递增（肩部滚降，非硬切）。
-        float Prev(float v)
-        {
-            var p = new float[] { v, v, v, 1f };
-            ToneMapper.AcesToneMapCpu(p, 1, 1);
-            return p[0];
-        }
-        float o1 = Prev(1f), o2 = Prev(2f), o4 = Prev(4f), o8 = Prev(8f);
-        bool ok = o1 < o2 && o2 < o4 && o4 < o8 && o8 <= 1.0f;
-        Assert($"ToneMapper.Aces: 高光滚降单调 ({o1:F3}→{o2:F3}→{o4:F3}→{o8:F3})", ok);
-    }
-
-    static void Test_ToneMapper_Aces_OdtMonotonic()
-    {
-        // 验证 ODT 单调递增：更强的输入映射更亮（对比度增强不反转）
-        var lo = new float[] { 0.2f, 0.2f, 0.2f, 1f };
-        var hi = new float[] { 0.8f, 0.8f, 0.8f, 1f };
-        ToneMapper.AcesToneMapCpu(lo, 1, 1);
-        ToneMapper.AcesToneMapCpu(hi, 1, 1);
-        bool ok = hi[0] > lo[0];
-        Assert("ToneMapper.Aces: ODT 单调递增", ok);
-    }
-
-    static void Test_ToneMapper_Aces_GrayLevels()
-    {
-        // 验证 ACES 对典型灰阶的映射亮度合理（不严重偏暗）
-        // 输入为 scRGB 线性（1.0 = 80 nits 参考）。测试 0.18(18%灰)/0.5/1.0(参考白)
-        var p18 = new float[] { 0.18f, 0.18f, 0.18f, 1f };
-        var p50 = new float[] { 0.5f, 0.5f, 0.5f, 1f };
-        var p100 = new float[] { 1.0f, 1.0f, 1.0f, 1f };
-        ToneMapper.AcesToneMapCpu(p18, 1, 1);
-        ToneMapper.AcesToneMapCpu(p50, 1, 1);
-        ToneMapper.AcesToneMapCpu(p100, 1, 1);
-        // 参考白 (1.0) 应映射到接近 0.7-0.8（SDR 参考白），18% 灰应映射到 ~0.2-0.3
-        bool ok = p18[0] < p50[0] && p50[0] < p100[0];
-        ok &= p100[0] > 0.6f && p100[0] < 0.95f;   // 参考白合理
-        ok &= p18[0] > 0.15f && p18[0] < 0.4f;     // 18% 灰合理（不严重偏暗）
-        Assert($"ToneMapper.Aces: 灰阶亮度合理 (18%={p18[0]:F3}, 50%={p50[0]:F3}, 100%={p100[0]:F3})", ok);
-    }
-
     static void Test_ToneMapper_FusedKernel_MatchesSeparate()
     {
         // 验证融合内核 FloatToSRgbBytes 与分步处理结果一致
@@ -286,6 +224,30 @@ public static class CorePipelineTests
         // BGRA: [B, G, R, A]
         bool ok = bytes[0] < 10 && bytes[1] < 10 && bytes[2] > 100 && bytes[3] > 200;
         Assert("ToneMapper.Swizzle: 纯红 → BGRA[2] 高", ok);
+    }
+
+    static void Test_ToneMapper_SrgbLut_Accuracy()
+    {
+        // 验证 LinearToSrgbLut (4096 项) 与精确 MathF.Pow 误差 < 0.5 LSB (8-bit)
+        float maxErr = 0;
+        for (int i = 0; i <= 20000; i++)
+        {
+            float lin = i / 20000f;
+            float lut = ToneMapper.LinearToSrgbLut(lin);
+            float exact = lin <= 0.0031308f ? 12.92f * lin : 1.055f * MathF.Pow(lin, 1f / 2.4f) - 0.055f;
+            maxErr = Math.Max(maxErr, Math.Abs(lut - exact));
+        }
+        // 8-bit 量化区间 = 1/255 ≈ 0.00392; LUT 误差应远小于半 LSB
+        bool ok = maxErr < 0.001f;
+        Assert($"ToneMapper.LUT: 最大误差 {maxErr:F6} < 0.001 (8-bit LSB={1f/255f:F6})", ok);
+    }
+
+    static void Test_ToneMapper_SrgbLut_Endpoints()
+    {
+        // LUT 端点: 黑→0, 白→1
+        float black = ToneMapper.LinearToSrgbLut(0f);
+        float white = ToneMapper.LinearToSrgbLut(1f);
+        Assert($"ToneMapper.LUT: 黑={black:F4}≈0 白={white:F4}≈1", black < 0.001f && Math.Abs(white - 1f) < 0.001f);
     }
 
     // ═══════════════════════════════════════
@@ -372,49 +334,6 @@ public static class CorePipelineTests
         // vEdges 应全部 == 0 (列内无变化)
         bool ok = hEdges.All(v => v > 3f) && vEdges.All(v => v == 0f);
         Assert("ComputeEdgeProjections: 垂直边缘 → hEdges 大, vEdges 零", ok);
-    }
-
-    // ═══════════════════════════════════════
-    //  GamutMapper 测试
-    // ═══════════════════════════════════════
-
-    static void Test_GamutMapper_HdrToSRgb_OutputRange()
-    {
-        // HDR 输入 → SDR 输出所有值在 [0,255]
-        var rng = new Random(99);
-        int w = 32, h = 32;
-        var hdr = new float[w * h * 4];
-        for (int i = 0; i < hdr.Length; i += 4)
-        {
-            hdr[i] = (float)(rng.NextDouble() * 10);
-            hdr[i + 1] = (float)(rng.NextDouble() * 10);
-            hdr[i + 2] = (float)(rng.NextDouble() * 10);
-            hdr[i + 3] = 1f;
-        }
-        var p = new ToneMappingParams { Mode = ToneMapMode.Aces };
-        var sdr = GamutMapper.HdrToSRgb(hdr, w, h, p);
-        // 输出是 byte[]，天然在 [0,255]，验证长度正确
-        bool ok = sdr.Length == w * h * 4;
-        Assert($"GamutMapper.HdrToSRgb: 输出长度 {sdr.Length} == {w * h * 4}", ok);
-    }
-
-    static void Test_GamutMapper_HdrToSRgb_BlackPreserved()
-    {
-        // 纯黑 HDR → SDR 仍为黑
-        var hdr = new float[] { 0f, 0f, 0f, 1f };
-        var p = new ToneMappingParams { Mode = ToneMapMode.Hable };
-        var sdr = GamutMapper.HdrToSRgb(hdr, 1, 1, p);
-        bool ok = sdr[0] == 0 && sdr[1] == 0 && sdr[2] == 0;
-        Assert("GamutMapper.HdrToSRgb: 黑色保持黑色", ok);
-    }
-
-    static void Test_GamutMapper_MapToSRgb_NullIcc_Passthrough()
-    {
-        // 无 ICC → 直通，像素不变
-        var bgra = new byte[] { 10, 20, 30, 255, 40, 50, 60, 255 };
-        var (result, icc) = GamutMapper.MapToSRgb(bgra, 2, 1, null);
-        bool ok = ReferenceEquals(result, bgra) && icc is null;
-        Assert("GamutMapper.MapToSRgb: null ICC → 直通", ok);
     }
 
     // ═══════════════════════════════════════

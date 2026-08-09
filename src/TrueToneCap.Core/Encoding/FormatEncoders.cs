@@ -22,10 +22,7 @@ public sealed class PngEncoder : ImageEncoder
             if (s.OutputBitDepth <= 8)
             {
                 // 用户选择 8-bit → 色调映射到 SDR，走 SDR 编码路径
-                // 注意: ToSdr 输出已为 sRGB 色域，必须覆盖 ColorSpaceTag
-                var d = FormatHelper.ToSdr(f, s);
-                s.ColorSpaceTag = "sRGB";
-                s.HdrOutput = false;
+                var d = FormatHelper.ToSdrAndDegrade(f, s);
                 await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
             }
             else
@@ -49,10 +46,11 @@ public sealed class PngEncoder : ImageEncoder
         }
         else
         {
-            var d = FormatHelper.ToSdr(f, s);
+            var d = FormatHelper.ToSdrAndDegrade(f, s);
             await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
         }
     }
+
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
         // 完全尊重用户设置的 OutputBitDepth
@@ -81,11 +79,8 @@ public sealed class JpegLiEncoder : ImageEncoder
     public override string GetQualityDescription(float q) => $"距离: {q:F1} (越小越清晰)";
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {
-        // JPEG LI 不支持 HDR，始终降级到 SDR
-        // 色调映射后像素为 sRGB 色域，覆盖 ColorSpaceTag
-        var d = FormatHelper.ToSdr(f, s);
-        s.ColorSpaceTag = "sRGB";
-        s.HdrOutput = false;
+        // JPEG LI 不支持 HDR，始终降级到 SDR (ToSdrAndDegrade 统一色调映射 + sRGB 覆盖)
+        var d = FormatHelper.ToSdrAndDegrade(f, s);
         await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
     }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
@@ -128,7 +123,7 @@ public sealed class JpegXlEncoder : ImageEncoder
         }
         else
         {
-            var d = FormatHelper.ToSdr(f, s);
+            var d = FormatHelper.ToSdrAndDegrade(f, s);
             await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
         }
     }
@@ -176,7 +171,7 @@ public sealed class AvifEncoder : ImageEncoder
         }
         else
         {
-            var d = FormatHelper.ToSdr(f, s);
+            var d = FormatHelper.ToSdrAndDegrade(f, s);
             await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
         }
     }
@@ -193,11 +188,8 @@ public sealed class WebPEncoder : ImageEncoder
     public override string GetQualityDescription(float q) => q >= 100 ? "无损" : $"{(int)q}%";
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {
-        // WebP 不支持 HDR，始终降级到 SDR
-        // 色调映射后像素为 sRGB 色域，覆盖 ColorSpaceTag
-        var d = FormatHelper.ToSdr(f, s);
-        s.ColorSpaceTag = "sRGB";
-        s.HdrOutput = false;
+        // WebP 不支持 HDR，始终降级到 SDR (ToSdrAndDegrade 统一色调映射 + sRGB 覆盖)
+        var d = FormatHelper.ToSdrAndDegrade(f, s);
         await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
     }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
@@ -246,7 +238,7 @@ public sealed class TiffEncoder : ImageEncoder
         }
         else
         {
-            var d = FormatHelper.ToSdr(f, s);
+            var d = FormatHelper.ToSdrAndDegrade(f, s);
             await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
         }
     }
@@ -514,6 +506,18 @@ file static class AvifFallbackHelper
 public static class FormatHelper
 {
     public static byte[] ToSdr(HdrFrameData f, EncodingSettings s) => Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams, s.ColorSpaceTag);
+
+    /// <summary>
+    /// HDR→SDR 降级辅助 (2026-08-09): 将 HDR 帧色调映射为 SDR BGRA8 并改写 settings 为 SDR 路径。
+    /// 统一 PNG/JXL/AVIF/TIFF/JPEG_LI/WebP 编码器中的重复降级模式。
+    /// ToSdr 输出恒为 sRGB 色域，因此覆盖 ColorSpaceTag。</summary>
+    public static byte[] ToSdrAndDegrade(HdrFrameData f, EncodingSettings s)
+    {
+        var d = ToSdr(f, s);
+        s.ColorSpaceTag = "sRGB";
+        s.HdrOutput = false;
+        return d;
+    }
 
     /// <summary>根据 EncodingSettings 计算 ICC 和 CICP 元数据。</summary>
     public static (byte[]? icc, byte[]? cicp) GetColorMetadata(EncodingSettings s)

@@ -65,6 +65,19 @@ public static class PixelOps
     /// </summary>
     public static bool HasAvx10_512 => Vector512.IsHardwareAccelerated && HasAvx512Full;
 
+    // ── 扩展指令 (加速特定运算) ──
+    /// <summary>FMA (Fused Multiply-Add): 3×3 色域矩阵/混合运算加速 (Haswell+, Zen 1+)。</summary>
+    public static bool HasFma => Fma.IsSupported;
+
+    /// <summary>AVX-VNNI (256-bit 整数点积): Zen 4+/Gracemont+, 用于像素级整数运算。</summary>
+    public static bool HasAvxVnni => AvxVnni.IsSupported;
+
+    /// <summary>AVX10 v1 (统一 256-bit AVX512 特性集, 2024+ Intel/AMD)。</summary>
+    public static bool HasAvx10V1 => Avx10v1.IsSupported;
+
+    /// <summary>AVX10 v2 (扩展, 2025+ Intel)。</summary>
+    public static bool HasAvx10V2 => Avx10v2.IsSupported;
+
     // ── ARM64 ──
     /// <summary>ARM64 NEON (Snapdragon X, Apple M 系列) — 已实现。</summary>
     public static bool HasNeon => AdvSimd.IsSupported;

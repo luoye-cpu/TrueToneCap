@@ -962,27 +962,6 @@ public static class ColorSpaceConverter
         { 0.000000f, 0.041169f, 0.958831f }
     };
 
-    /// <summary>scRGB (BT.709) → ACES AP1 (ACEScg) 线性转换矩阵。</summary>
-    /// <remarks>
-    /// 来源: ACES 1.0.3 规范 (SMPTE ST 2065-1:2012)
-    /// 链: BT.709 linear → XYZ(D65) → XYZ(D60) → AP1(ACEScg)
-    /// BT.709 和 sRGB 使用相同原色，因此矩阵相同。
-    /// </remarks>
-    public static readonly float[,] SrgbToAcesAp1 = new float[3, 3]
-    {
-        { 0.613132f, 0.339538f, 0.047416f },
-        { 0.070124f, 0.916324f, 0.013452f },
-        { 0.020445f, 0.109548f, 0.870006f }
-    };
-
-    /// <summary>ACES AP1 → scRGB (BT.709) 线性转换矩阵（SrgbToAcesAp1 的逆）。</summary>
-    public static readonly float[,] AcesAp1ToSrgb = new float[3, 3]
-    {
-        { 1.704579f, -0.625505f, -0.078038f },
-        { -0.129701f,  1.139240f, -0.009570f },
-        { -0.019717f, -0.128087f,  1.147935f }
-    };
-
     /// <summary>根据色彩空间标签获取 scRGB→目标色域 3×3 矩阵。</summary>
     public static float[,]? GetMatrix(string colorSpaceTag) => colorSpaceTag switch
     {
@@ -1013,7 +992,7 @@ public static class ColorSpaceConverter
     /// 将 scRGB Float16 线性浮点像素转换到目标色域线性空间并做色调映射到 SDR BGRA8。
     /// 用于 HDR 关闭 + 广色域目标场景：
     ///   WGC Float16 包含完整广色域数据 → 色域矩阵转换 → 色调映射 → sRGB gamma → BGRA8
-    /// 注意: ACES 色调映射模式内部已包含 scRGB→AP1→ACES→sRGB 完整管线，
+    /// 注意: 统一流程为色域转换 + 分段 Reinhard 色调映射
     /// 输出始终为 sRGB 色域，无需额外色域转换。
     /// </summary>
     /// <param name="hdrPixels">scRGB 线性 RGBA 浮点像素 (WGC Float16 会话)。</param>
@@ -1025,22 +1004,14 @@ public static class ColorSpaceConverter
     public static byte[] ConvertFloat16ToSdrBgra(float[] hdrPixels, int w, int h,
         string? colorSpaceTag, Processing.ToneMappingParams toneParams)
     {
-        // ACES 模式：FloatToSRgbBytes 融合内核内部已处理 scRGB→AP1→ACES→sRGB 完整管线
-        // 输出始终为 sRGB 色域。如果目标不是 sRGB，需要做 sRGB→目标色域后处理
-        if (toneParams.Mode == Processing.ToneMapMode.Aces)
-        {
-            var srgb = Processing.ToneMapper.FloatToSRgbBytes(hdrPixels, w, h, toneParams);
-            if (colorSpaceTag is not null and not "sRGB")
-                return ApplySrgbToTargetGamut(srgb, w, h, colorSpaceTag);
-            return srgb;
-        }
-
-        // 非 ACES 模式 (Reinhard/Hable)：先做色域转换，再做色调映射
+        // 2026-08-08: 统一流程为色域转换 + 分段 Reinhard 色调映射。
+        // 统一流程: 先做色域转换 (scRGB → 目标色域线性), 再做色调映射 (分段 Reinhard)。
         // 1. 色域转换：scRGB (BT.709) → 目标色域线性
         var matrix = GetMatrix(colorSpaceTag ?? "sRGB");
         var converted = ConvertScrgbToTarget(hdrPixels, w, h, matrix);
 
         // 2. 复用 ToneMapper 融合内核：色调映射 + gamma + swizzle → BGRA8
+        //    分段 Reinhard (GainMap 同款) 为亮度缩放保持色相, 在目标色域线性空间同样正确
         // 传递 colorSpaceTag 以使用正确的动态亮度权重
         return Processing.ToneMapper.FloatToSRgbBytes(converted, w, h, toneParams, colorSpaceTag);
     }
@@ -1107,23 +1078,24 @@ public static class ColorSpaceConverter
         float m20 = matrix[2, 0], m21 = matrix[2, 1], m22 = matrix[2, 2];
 
         var result = new byte[bgra.Length];
+        var lut = PixelOps.SrgbToLinearLut;
         System.Threading.Tasks.Parallel.For(0, pixelCount, i =>
         {
             int idx = i * 4;
-            // BGRA → linear (去 sRGB gamma)
-            float bLin = SrgbToLinear(bgra[idx] / 255f);
-            float gLin = SrgbToLinear(bgra[idx + 1] / 255f);
-            float rLin = SrgbToLinear(bgra[idx + 2] / 255f);
+            // BGRA → linear (去 sRGB gamma, 查表替代 MathF.Pow)
+            float bLin = lut[bgra[idx]];
+            float gLin = lut[bgra[idx + 1]];
+            float rLin = lut[bgra[idx + 2]];
 
             // 矩阵转换 (sRGB linear → 目标色域 linear)
             float rOut = rLin * m00 + gLin * m01 + bLin * m02;
             float gOut = rLin * m10 + gLin * m11 + bLin * m12;
             float bOut = rLin * m20 + gLin * m21 + bLin * m22;
 
-            // 目标 gamma + 量化
-            result[idx]     = (byte)Math.Clamp((int)(LinearToSrgb(bOut) * 255f + 0.5f), 0, 255);
-            result[idx + 1] = (byte)Math.Clamp((int)(LinearToSrgb(gOut) * 255f + 0.5f), 0, 255);
-            result[idx + 2] = (byte)Math.Clamp((int)(LinearToSrgb(rOut) * 255f + 0.5f), 0, 255);
+            // 目标 gamma + 量化 (ToneMapper LUT, 替代 MathF.Pow)
+            result[idx]     = Processing.ToneMapper.LinearToSrgbByte(bOut);
+            result[idx + 1] = Processing.ToneMapper.LinearToSrgbByte(gOut);
+            result[idx + 2] = Processing.ToneMapper.LinearToSrgbByte(rOut);
             result[idx + 3] = bgra[idx + 3];
         });
         return result;

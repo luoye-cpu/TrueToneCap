@@ -14,7 +14,7 @@ public sealed class EncodingSettings
     public bool HdrOutput { get; set; }
     public byte[]? IccProfile { get; set; }
     public ImageMetadata? Metadata { get; set; }
-    public Processing.ToneMappingParams ToneMappingParams { get; set; } = new(ToneMapMode.Hable);
+    public Processing.ToneMappingParams ToneMappingParams { get; set; } = new(ToneMapMode.SegmentedReinhard);
     public bool PreferGpuEncode { get; set; } = true;
     /// <summary>AVIF 编码后端偏好。</summary>
     public AvifEncoderBackend AvifBackend { get; set; } = AvifEncoderBackend.Auto;
