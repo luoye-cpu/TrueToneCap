@@ -93,6 +93,11 @@ public static class NativeJxlEncoder
 
             var exePath = GetExePath();
 
+            // ═══ 2026-08-09 修复: clamp butteraugli distance 到 cjxl 合法范围 [0,25] ═══
+            // 调用方可能传 quality 值 (0-100 百分比), 但 cjxl 的 -d 只接受 [0,25],
+            // 传 90 → EncodeImageJXL() failed. 与 JpegLiNative 的 clamp 一致。
+            float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
+
             // 色彩空间参数
             string colorArg;
             if (iccProfile is { Length: > 128 })
@@ -107,19 +112,26 @@ public static class NativeJxlEncoder
                 colorArg = "-x color_space=sRGB";
             }
 
-            // 容器位深: 8-bit 源强制 8-bit; 否则按请求位深 (仅容器声明, 数据仍为 8-bit)
-            int effectiveBits = bitDepth is 10 or 12 or 16 ? bitDepth : 8;
-            string bitsArg = effectiveBits == 8 ? "" : $" -b {effectiveBits}";
+            // ═══ 2026-08-09 修复: 删除无效的 -b 参数 ═══
+            // cjxl v0.11.2 无 -b 参数 (Unknown argument: -b → exit 1), 位深由输入格式决定。
+            // PPM 输入为 8-bit → 输出 8-bit JXL。bitDepth>8 的 SDR 请求无法通过 PPM 实现,
+            // 真正 >8-bit 需用 EncodeHdr (16-bit PNG 中转)。此处忽略 bitDepth (8-bit)。
+            // ⚠ 之前传 -b {bitDepth>8} → 无感截图 JXL 失败 (Unknown argument: -b)
+            string bitsArg = "";
 
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {distance:F4} -e 9{bitsArg} {colorArg} \"{tmpPpm}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e 9{bitsArg} {colorArg} \"{tmpPpm}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+
+            // ═══ 2026-08-10 诊断: 输出实际命令行 (验证 -d 是否正确传递) ═══
+            // Release 下 Debug.WriteLine 不输出 → 写临时文件供分析
+            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JXL] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
 
             var result = NativeEncoderGuard.TryEncode("JXL", () =>
             {
@@ -168,6 +180,9 @@ public static class NativeJxlEncoder
 
             var exePath = GetExePath();
 
+            // ═══ 2026-08-09: clamp distance 到 cjxl 合法范围 [0,25] (同 Encode) ═══
+            float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
+
             // ICC 参数
             string iccArg = "";
             if (iccProfile is { Length: > 128 })
@@ -180,12 +195,16 @@ public static class NativeJxlEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {distance:F4} -e 9 {iccArg} -x color_space=Rec2100PQ --intensity_target={intensityTarget:F0} \"{tmpPng}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e 9 {iccArg} -x color_space=Rec2100PQ --intensity_target={intensityTarget:F0} \"{tmpPng}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+
+            // ═══ 2026-08-10 诊断: 输出实际命令行 (验证 -d 是否正确传递) ═══
+            // Release 下 Debug.WriteLine 不输出 → 写临时文件供分析
+            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JXL_HDR] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
 
             var result = NativeEncoderGuard.TryEncode("JXL_HDR", () =>
             {

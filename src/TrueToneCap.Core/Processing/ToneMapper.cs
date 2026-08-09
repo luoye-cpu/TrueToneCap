@@ -1,6 +1,11 @@
 // TrueToneCap.Core/Processing/ToneMapper.cs
 // CPU 色调映射算法库 — Reinhard / Hable / SegmentedReinhard (GainMap 同款)
-// 业界标准 HDR→SDR 管线:
+// 色彩语义:
+//   - 输入: scRGB 线性 (BT.709 原色 + 线性 gamma, 1.0 = 80 nits, Windows HDR 合成空间)
+//   - 输出: sRGB (BT.709 原色 + sRGB gamma) — 图片/截图标准
+//   - 注意: sRGB 与 BT.709 共享相同 primaries, 区别仅在 transfer;
+//     图片输出用 sRGB (CICP transfer code 13), 非纯 BT.709 (视频 OETF code 1)
+// 管线:
 //   1. PaperWhite 亮度归一化 (scRGB×80/PaperWhiteNits)
 //   2. 色调映射曲线 (SegmentedReinhard 亮度缩放保持色相)
 //   3. sRGB gamma 编码
@@ -82,7 +87,7 @@ public static class ToneMapper
 
     /// <summary>
     /// Reinhard 全局色调映射算子。
-    /// 在 scRGB (BT.709) 空间工作，亮度缩放保持色相。
+    /// 在 scRGB 空间 (BT.709 原色 + 线性 gamma) 工作，亮度缩放保持色相。
     /// </summary>
     public static void ReinhardToneMapCpu(Span<float> hdrPixels, int width, int height,
         float exposure = 0f, float paperWhite = 80f)
@@ -116,7 +121,7 @@ public static class ToneMapper
 
     /// <summary>
     /// Hable (Filmic/Uncharted2) 色调映射曲线。
-    /// 在 scRGB (BT.709) 空间工作，逐通道曲线。
+    /// 在 scRGB 空间 (BT.709 原色 + 线性 gamma) 工作，逐通道曲线。
     /// </summary>
     public static void HableToneMapCpu(Span<float> hdrPixels, int width, int height,
         float exposure = 0f, float paperWhite = 80f, float whitePoint = 11.2f)

@@ -25,16 +25,68 @@ public sealed class CapturePipelineService
     /// <summary>ICC 色彩管理准备（后台线程安全，不访问 UI 控件）。</summary>
     public static (byte[] pixels, byte[]? iccProfile) PreparePixelsWithIcc(
         byte[] bgra, int w, int h, bool iccBakeEnabled, string colorSpaceTag,
-        bool acmEnabled = false, nint? monitorHandle = null)
+        bool? acmEnabled = null, nint? monitorHandle = null)
     {
         if (!iccBakeEnabled)
             return (bgra, null);
 
+        // acmEnabled 默认为系统当前 ACM 状态 (从 AppServices 读取)
+        bool acm = acmEnabled ?? ReadSystemAcm();
+
         // 将 "System" 解析为实际色域（ACM 感知）
-        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acmEnabled, monitorHandle);
+        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acm, monitorHandle);
         var targetCs = ColorProfileProvider.MapColorSpaceTag(resolvedTag);
         bool isSRgbTarget = resolvedTag is "sRGB";
 
+        // ACM 下检测显示器原生色域 (SDR 捕获像素所在色域)
+        string? nativeGamutTag = null;
+        if (acm)
+        {
+            try
+            {
+                var hmon = monitorHandle ?? DisplayEnumerator.GetMonitorUnderCursor();
+                nativeGamutTag = ColorProfileProvider.GetDisplayNativeGamutTag(hmon);
+            }
+            catch { }
+            nativeGamutTag ??= (isSRgbTarget ? "sRGB" : null);
+        }
+
+        // ═══ ACM 模式 (2026-08-09 方案A): 系统已接管显示器色彩管理 ═══
+        // ACM 启用时, WGC SDR 捕获的 BGRA8 像素是 DWM 合成后的显示器色域 (ACM 已把
+        // 所有应用内容映射到显示器色域)。因此:
+        // - 目标 = 显示器原生色域 (或 sRGB): 像素已在该色域, 跳过烘焙, 嵌显示器原生
+        //   色域的标准 ICC (或 sRGB 不嵌) 即可 → 无双重转换, 色彩准确
+        // - 目标 ≠ 显示器原生色域: 像素在显示器色域但用户要输出目标色域, 必须烘焙
+        //   (从显示器色域转换到目标), 跳过烘焙会产生像素/ICC 矛盾
+        if (acm)
+        {
+            // 目标色域 = 显示器原生色域(或 sRGB) → 跳过烘焙, 嵌对应标准 ICC
+            if (isSRgbTarget || targetCs == nativeGamutTag)
+                return (bgra, isSRgbTarget ? null : ColorProfileProvider.GetStandardIccProfile(targetCs));
+
+            // ═══ 2026-08-09 修复: 目标 ≠ 显示器色域 → 用标准原生色域 ICC 作源烘焙 ═══
+            // ACM 下 GetDisplayIccProfile 可能返回 null 或已被 ACM 修改的 ICC (非原生色域),
+            // 用它作烘焙源 → 矩阵错误/烘焙失败 → 像素未转换却嵌目标 ICC → 色彩错误。
+            // 改用标准原生色域 ICC (可靠矩阵): 像素 = 显示器色域 + 标准原生 ICC 解析
+            // → BakeIccToTarget 正确转换像素到目标色域 + 嵌目标标准 ICC。
+            if (nativeGamutTag is not null)
+            {
+                var nativeIcc = ColorProfileProvider.GetStandardIccProfile(nativeGamutTag);
+                if (nativeIcc is { Length: > 128 })
+                {
+                    var (baked, targetIcc) = ColorProfileProvider.BakeIccToTarget(bgra, w, h, nativeIcc, targetCs);
+                    if (baked is not null)
+                    {
+                        if (isSRgbTarget)
+                            return (baked, null);
+                        return (baked, targetIcc);
+                    }
+                }
+            }
+            // 原生色域未知 → fallthrough 到下方传统烘焙 (可能失败, 兜底)
+        }
+
+        // ── 非 ACM 模式: 传统烘焙 (显示器 ICC → 目标色域) ──
         byte[]? displayIcc = null;
         try
         {
@@ -65,32 +117,46 @@ public sealed class CapturePipelineService
         return (bgra, null);
     }
 
+    /// <summary>读取系统当前 ACM 状态 (供 static 方法默认值)。</summary>
+    private static bool ReadSystemAcm()
+    {
+        try { return AppServices.Settings.Current.AcmeDetected; }
+        catch { return false; }
+    }
+
     /// <summary>
     /// 从 Float16 广色域像素转换为 SDR BGRA8 + 嵌入 ICC 元数据。
     /// 用于 HDR 关闭 + 广色域目标场景：
-    /// WGC Float16 包含完整广色域数据 → 色域矩阵转换 → 色调映射 → sRGB gamma → BGRA8
+    /// WGC Float16 包含完整广色域数据 → 色调映射 → sRGB gamma → BGRA8
     /// </summary>
     public static (byte[] pixels, byte[]? iccProfile) PrepareFloat16WithIcc(
         float[] hdrPixels, int w, int h,
         bool iccBakeEnabled, string colorSpaceTag,
         TrueToneCap.Core.Processing.ToneMappingParams toneParams,
-        bool acmEnabled = false, nint? monitorHandle = null)
+        bool? acmEnabled = null, nint? monitorHandle = null)
     {
+        bool acm = acmEnabled ?? ReadSystemAcm();
+
         // 将 "System" 解析为实际色域（ACM 感知）
-        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acmEnabled, monitorHandle);
-
-        // 1. 色域转换 + 色调映射到 BGRA8
-        var bgra = ColorSpaceConverter.ConvertFloat16ToSdrBgra(
-            hdrPixels, w, h, resolvedTag, toneParams);
-
-        // 2. ICC 色彩管理（嵌入元数据）
+        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acm, monitorHandle);
         bool isSRgbTarget = resolvedTag is "sRGB";
-        if (!iccBakeEnabled || isSRgbTarget)
-            return (bgra, null);
 
-        var targetCs = ColorProfileProvider.MapColorSpaceTag(resolvedTag);
-        var targetIcc = ColorProfileProvider.GetStandardIccProfile(targetCs);
-        return (bgra, targetIcc);
+        // ═══ 2026-08-10 修复(2): SDR 输出恒为 sRGB 色域 ═══
+        // 教训: 2026-08-09 误改为"转换到目标色域 (BT2020)"→ 影响 GainMap SDR 回退
+        // 和 JPEG LI 的 HDR→SDR 路径:
+        //   - 像素被矩阵转换到 BT2020, 但 gamma 编码是 sRGB 的
+        //   - 再嵌 BT2020 ICC → 查看器按 BT2020 TRC 解码 → gamma 不匹配 → 颜色错误
+        // GainMap 的正确映射 (ReinhardToSdr): scRGB 直接色调映射, 不做色域矩阵,
+        // Base 恒 sRGB + sRGB ICC (2026-08-06 设计决策: Base 与增益图同处 scRGB 空间)。
+        // SDR 8-bit 容器语义 = sRGB; BT2020 色域只应通过 HDR 直通 (PQ) 实现。
+        // 因此: 恒输出 sRGB 色域像素 (scRGB BT.709 原色 + sRGB gamma), 与 GainMap 一致。
+
+        // 1. 色调映射到 BGRA8 (scRGB → sRGB gamma, 不转换色域矩阵)
+        var bgra = ColorSpaceConverter.ConvertFloat16ToSdrBgra(
+            hdrPixels, w, h, "sRGB", toneParams);
+
+        // 2. ICC 色彩管理: SDR 输出恒为 sRGB → 不嵌 ICC (查看器默认 sRGB)
+        return (bgra, null);
     }
 
     /// <summary>构建编码设置。</summary>
@@ -302,12 +368,13 @@ public sealed class CapturePipelineService
     public async Task<string> EncodeAndSaveAsync(
         byte[] bgra, int w, int h, EncodingSettings settings,
         bool iccBakeEnabled, string colorSpaceTag,
-        CancellationToken ct = default, ID3D11Texture2D? gpuTexture = null)
+        CancellationToken ct = default, ID3D11Texture2D? gpuTexture = null,
+        string? outputDir = null)
     {
         var encoder = EncoderFactory.Create(settings.Format);
         if (gpuTexture is not null)
             settings.GpuTexture = gpuTexture;
-        var outDir = GetEffectiveOutputDir();
+        var outDir = outputDir ?? GetEffectiveOutputDir();
         var path = BuildOutputPath(settings.Format, outDir);
 
         LogService.Info("Pipeline", $"开始编码: {settings.Format} {w}x{h} → {Path.GetFileName(path)}");
@@ -369,6 +436,25 @@ public sealed class CapturePipelineService
 
             if (encoder.SupportsHdr)
             {
+                // ═══ 2026-08-09 修复: HDR 直通 ICC 策略 ═══
+                // 关键教训: 标准 ICC (GetStandardIccProfile) 是 sRGB TRC,
+                // 而 HDR 像素是 PQ 编码 → 嵌入会覆盖/冲突 → 解码器按 sRGB gamma
+                // 解码 PQ 值 → 图像错误 (JXL 实测: cjxl 的 icc_pathname 覆盖 color_space,
+                // 最终 codestream 声明 sRGB transfer 而像素是 PQ!)。
+                // - JXL: 用 `-x color_space=Rec2100PQ` color fields 声明 BT.2020+PQ (最优)
+                // - PNG/AVIF: 用 CICP (BT.2020 + PQ) 声明 (PNG 3.0/AV1 规范优先)
+                // - TIFF: 无 CICP 机制 → 必须嵌 PQ TRC ICC
+                if (settings.Format == OutputFormat.TIFF)
+                {
+                    var hdrCsTag = settings.ColorSpaceTag;
+                    settings.IccProfile = (hdrCsTag is not (null or "System" or "sRGB"))
+                        ? ColorProfileProvider.GetHdrStandardIccProfile(hdrCsTag)
+                        : null;
+                }
+                else
+                {
+                    settings.IccProfile = null;
+                }
                 LogService.Debug("Pipeline", $"HDR 直通编码: {settings.Format}");
                 EncodeSync(encoder, hdrFrame, settings, path, ct);
             }

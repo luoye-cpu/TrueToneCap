@@ -25,6 +25,11 @@ public sealed partial class SelectionOverlay : Window
     private bool _selectionComplete;
     private bool _finished; // 防止 ActionCompleted 双重触发
 
+    // ── 3 分钟无操作超时自动取消（防止覆盖层卡死无法操作）──
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _timeoutTimer;
+    private readonly System.Diagnostics.Stopwatch _idleWatch = System.Diagnostics.Stopwatch.StartNew();
+    private const int SelectionTimeoutMs = 3 * 60 * 1000;
+
     // ── 自动识别区域 ──
     private List<DetectedRegion> _detectedRegions = [];
     private int _hoveredRegionIndex = -1;
@@ -199,6 +204,11 @@ public sealed partial class SelectionOverlay : Window
 
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
+
+            // 启动 3 分钟无操作超时（窗口真正显示后开始计时）
+            if (_timeoutTimer is { IsRunning: false } && !_finished)
+                _timeoutTimer.Start();
+
             if (!_bgRendered)
             {
                 _bgRendered = true;
@@ -230,7 +240,26 @@ public sealed partial class SelectionOverlay : Window
         AnnotationCanvas.PointerPressed += OnAnnoCanvasPressed;
         AnnotationCanvas.PointerMoved += OnAnnoCanvasMoved;
         AnnotationCanvas.PointerReleased += OnAnnoCanvasReleased;
+
+        // ── 3 分钟无操作超时自动取消 ──
+        _timeoutTimer = DispatcherQueue.CreateTimer();
+        _timeoutTimer.Interval = TimeSpan.FromSeconds(5);
+        _timeoutTimer.IsRepeating = true;
+        _timeoutTimer.Tick += (_, _) =>
+        {
+            if (_idleWatch.ElapsedMilliseconds >= SelectionTimeoutMs)
+            {
+                System.Diagnostics.Debug.WriteLine("[SelectionOverlay] 3 分钟无操作，自动取消");
+                Finish(ActionResult.Cancel);
+            }
+        };
     }
+
+    /// <summary>重置 3 分钟超时计时（任何用户交互时调用）。</summary>
+    private void TouchIdle() => _idleWatch.Restart();
+
+    /// <summary>外部强制取消（应用退出时由 MainWindow 调用，触发 ActionCompleted + 关闭）。</summary>
+    public void Cancel() => Finish(ActionResult.Cancel);
 
     // ═══════════════════════════════════════
     //  键盘
@@ -238,6 +267,7 @@ public sealed partial class SelectionOverlay : Window
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        TouchIdle();
         if (_isAnnotating)
         {
             switch (e.Key)
@@ -433,6 +463,7 @@ public sealed partial class SelectionOverlay : Window
 
     private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        TouchIdle();
         if (_isAnnotating) return; // 标注模式下不处理选区鼠标
         if (IsDescendantOf(e.OriginalSource as DependencyObject, Toolbar)) return;
         if (IsDescendantOf(e.OriginalSource as DependencyObject, AnnotationToolbar)) return;
@@ -447,6 +478,7 @@ public sealed partial class SelectionOverlay : Window
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        TouchIdle();
         if (_selectionComplete || _isAnnotating) return;
         var pt = e.GetCurrentPoint(RootGrid).Position;
 
@@ -502,6 +534,7 @@ public sealed partial class SelectionOverlay : Window
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        TouchIdle();
         if (!_isDragging || _isAnnotating) return;
         _isDragging = false;
         RootGrid.ReleasePointerCapture(e.Pointer);
@@ -554,6 +587,10 @@ public sealed partial class SelectionOverlay : Window
         if (_finished) return; // 防止双重触发
         _finished = true;
 
+        // 停止超时定时器
+        _timeoutTimer?.Stop();
+        _timeoutTimer = null;
+
         // 标注模式下先退出标注
         if (_isAnnotating) ExitAnnotationMode();
 
@@ -572,6 +609,10 @@ public sealed partial class SelectionOverlay : Window
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
+        // 停止超时定时器
+        _timeoutTimer?.Stop();
+        _timeoutTimer = null;
+
         // 关闭 HDR 背景窗口
         _hdrBgWnd?.Close();
         _hdrBgWnd?.Dispose();

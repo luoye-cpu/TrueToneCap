@@ -6,8 +6,9 @@
 // 2026-08-08 修复: y=1.0 跳变 (smoothstep 过渡) + HDR-off 降级路径统一 + Base sRGB ICC
 //
 //   HDR scRGB 线性浮点 (1.0 = 80 nits)
-//     ├─ 分段 Reinhard 显示映射 → SDR 线性（同一 scRGB 空间）
-//     │     └─ sRGB gamma → BGRA8 → jpegli → Base JPEG (+sRGB ICC)
+//     ├─ 分段 Reinhard 显示映射 → SDR 线性（同一 scRGB 空间, BT.709 原色 + 线性 gamma）
+//     │     └─ sRGB gamma → BGRA8 → jpegli → Base JPEG (+sRGB ICC, CICP transfer=13)
+//     ├─ 增益比 = HDR_linear / SDR_linear（基于【同一个】映射空间）
 //     ├─ 增益比 = HDR_linear / SDR_linear（基于【同一个】映射空间）
 //     │     └─ log2 编码 [0,+4] → 1/4 降采样 → jpegli → 增益图 JPEG
 //     └─ 封装: Base(APP1: hdrgm XMP + APP2: MPF) + GainMap(APP2: ISO 21496-1)
@@ -164,14 +165,14 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             ct.ThrowIfCancellationRequested();
 
             // ── 5. 增益图降采样 + 编码 (jpegli) ──
-            //    用户已选 butteraugli 距离 → 映射回 0-100 质量：
-            //    distance 0.5→100, 3.0→50, clamp 到 [50,100] 保底
-            float gmDistance = Math.Clamp(settings.Quality, 0.5f, 3.0f);
-            int gainMapJpegQuality = (int)Math.Round(100f - (gmDistance - 0.5f) / 2.5f * 50f);
-            gainMapJpegQuality = Math.Clamp(gainMapJpegQuality, 50, 100);
+            //     ═══ 2026-08-10 修复: 直接传 butteraugli distance (JXL 修复方案) ═══
+            //     旧实现: distance → 百分制 quality → 再转回 distance (往返有精度损失,
+            //     且 clamp 上限 5.0 与 JpegLiNative 的 [0,25] 不一致)。
+            //     JXL 修复 (NativeJxlEncoder): clamp [0,25] 直接传 -d, 不做百分制转换。
+            float gmDistance = Math.Clamp(settings.Quality, 0.0f, 25.0f);
             byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, gainMapMode, out int gmSW, out int gmSH);
             byte[] gainMapJpegBytes = EncodeGainMapToJpegBytesSafe(gainMapScaled, gmSW, gmSH,
-                gainMapMode, gainMapJpegQuality);
+                gainMapMode, gmDistance);
             ct.ThrowIfCancellationRequested();
 
             // ── 6. MPF + XMP 封装（增益范围基于实际 headroom）──
@@ -242,7 +243,11 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         return (hdrPeakNits, sdrWhiteNits, sdrWhiteScrgb, headroom);
     }
 
-    /// <summary>分段 Reinhard 映射后的 SDR 线性 → sRGB gamma → BGRA8 (查表, 替代 MathF.Pow)。</summary>
+    /// <summary>分段 Reinhard 映射后的 SDR 线性 → sRGB gamma → BGRA8 (查表, 替代 MathF.Pow)。
+    /// ⚠ 2026-08-10 修复: 输入 linear 是 RGBA (ReinhardToSdr: [i]=R, [i+1]=G, [i+2]=B),
+    /// 输出是 BGRA → 必须 B←linear[i+2], R←linear[i]。
+    /// 旧实现写成 B←linear[i](R) / R←linear[i+2](B) → R/B 通道交换!
+    /// 红色变蓝、蓝色变红 = GainMap 偏色根因 (灰平衡测试无法检出, 灰色 R≈G≈B)。</summary>
     private static byte[] LinearToBgra8(float[] linear, int w, int h)
     {
         int pixelCount = w * h;
@@ -250,9 +255,9 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         System.Threading.Tasks.Parallel.For(0, pixelCount, pi =>
         {
             int i = pi * 4;
-            bgra[i]     = ToneMapper.LinearToSrgbByte(linear[i]);     // B
+            bgra[i]     = ToneMapper.LinearToSrgbByte(linear[i + 2]); // B ← linear[i+2]=B
             bgra[i + 1] = ToneMapper.LinearToSrgbByte(linear[i + 1]); // G
-            bgra[i + 2] = ToneMapper.LinearToSrgbByte(linear[i + 2]); // R
+            bgra[i + 2] = ToneMapper.LinearToSrgbByte(linear[i]);     // R ← linear[i]=R
             bgra[i + 3] = 255;
         });
         return bgra;
@@ -273,40 +278,45 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     }
 
     private static byte[] EncodeGainMapToJpegBytesSafe(byte[] pixels, int w, int h,
-        GainMapMode mode, int quality)
+        GainMapMode mode, float distance)
     {
-        // 增益图像素 → BGRA (jpegli 输入格式)
-        byte[] bgra = new byte[w * h * 4];
+        // ═══ 2026-08-10 修复: Gray 模式用真灰度 JPEG (YCbCr400 1 分量) ═══
+        // 旧实现: Gray 像素复制到 RGB 三通道 + 彩色 444 编码 → 3 分量彩色 JPEG,
+        // 但 ISO flags 声明单通道 (multi=0) → 元数据与像素格式矛盾!
+        // 解码器 (MS Photos/Android) 按 JPEG 分量数判断通道数 → 可能按 3 通道
+        // 独立增益处理 → 高光偏色。
+        // 对齐 libultrahdr: 单通道增益图 = UHDR_IMG_FMT_8bppYCbCr400 (1 分量灰度)。
         if (mode == GainMapMode.Gray)
         {
-            for (int i = 0; i < w * h; i++)
+            var result = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
             {
-                byte v = pixels[i];
-                int off = i * 4;
-                bgra[off] = v; bgra[off + 1] = v; bgra[off + 2] = v; bgra[off + 3] = 255;
-            }
+                return JpegLiNative.EncodeGray(pixels, w, h, distance, forceBaseline: true);
+            });
+            if (result.Success) return result.Value!;
+            throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result.Error?.Message}");
         }
-        else
+
+        // RGB 模式: 3 通道彩色增益图 (libultrahdr UHDR_IMG_FMT_24bppRGB888)
+        // 增益图像素 → BGRA (jpegli 输入格式)
+        byte[] bgra = new byte[w * h * 4];
+        for (int i = 0; i < w * h; i++)
         {
-            for (int i = 0; i < w * h; i++)
-            {
-                int off = i * 4;
-                bgra[off] = pixels[i * 3 + 2];     // B
-                bgra[off + 1] = pixels[i * 3 + 1]; // G
-                bgra[off + 2] = pixels[i * 3];     // R
-                bgra[off + 3] = 255;
-            }
+            int off = i * 4;
+            bgra[off] = pixels[i * 3 + 2];     // B
+            bgra[off + 1] = pixels[i * 3 + 1]; // G
+            bgra[off + 2] = pixels[i * 3];     // R
+            bgra[off + 3] = 255;
         }
 
-        // quality (1-100) → butteraugli distance: 100→0.5, 50→3.0
-        float distance = Math.Clamp(0.5f + (100 - quality) * 0.05f, 0.5f, 5.0f);
-
-        var result = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
+        // ═══ 2026-08-10 修复: 直接传 distance (JXL 修复方案) ═══
+        // 旧实现: quality(0-100) → distance 往返转换, 精度损失 + clamp 上限 5.0 错误。
+        // JpegLiNative.Encode 内部已 clamp [0,25] (与 JXL 的 -d 修复一致)。
+        var result2 = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
         {
             return JpegLiNative.Encode(bgra, w, h, distance, "444", null, forceBaseline: true);
         });
-        if (result.Success) return result.Value!;
-        throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result.Error?.Message}");
+        if (result2.Success) return result2.Value!;
+        throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result2.Error?.Message}");
     }
 
     // ═══════════════════════════════════════
@@ -436,7 +446,6 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     private static void WriteJpegGainMapFile(byte[] baseJpeg, byte[] gainMapJpeg,
         int baseW, int baseH, int gmW, int gmH, GainMapMode mode, float headroom, string outputPath)
     {
-        byte[] xmp = BuildXmpMetadata(baseW, baseH, gmW, gmH, mode, headroom);
         byte[] iso = BuildIso21496Metadata(mode, headroom);
 
         // 1. 定位 Base JPEG 的 SOS (FFDA) 标记位置
@@ -458,13 +467,44 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         // 3. 将 ISO 21496-1 元数据插入增益图 JPEG: [SOI][APP2: ISO][增益图数据(去SOI)]
         byte[] gainMapWithIso = InsertIsoIntoSegment(gainMapJpeg, iso);
 
+        // ═══ 2026-08-10 修复: XMP 增益图 item 添加 Item:Length ═══
+        // 对齐 libultrahdr generateXmpForPrimaryImage: GainMap item 写 Item:Length
+        // = 增益图 JPEG 完整大小 (SOI + ISO 段 + 数据)。部分解码器用 Item:Length
+        // 定位增益图, 缺失 → 增益图层无法解析 → "增益涂层写入不正确"
+        byte[] xmp = BuildXmpMetadata(baseW, baseH, gmW, gmH, mode, headroom, gainMapWithIso.Length);
+
+        // ═══ 2026-08-10 修复: XMP payload 必须带标准命名空间前缀 ═══
+        // libultrahdr (jpegr.cpp appendGainMap): APP1 payload =
+        //   "http://ns.adobe.com/xap/1.0/\0" + XMP XML (kXmpNameSpace + null 终止符)
+        // 旧实现写裸 XML → MS Photos 等解码器无法识别 XMP → 元数据解析失败 → 偏色/无 HDR
+        // (libultrahdr getMetadataFromXMP 也要求 payload 以 namespace 开头)
+        byte[] xmpNs = System.Text.Encoding.ASCII.GetBytes("http://ns.adobe.com/xap/1.0/\0");
+        byte[] xmpPayload = new byte[xmpNs.Length + xmp.Length];
+        System.Buffer.BlockCopy(xmpNs, 0, xmpPayload, 0, xmpNs.Length);
+        System.Buffer.BlockCopy(xmp, 0, xmpPayload, xmpNs.Length, xmp.Length);
+
         // 4. 构建 MPF（big-endian）
-        //    Gain Map 偏移 = Base头部 + APP1(XMP) + APP2(MPF) + SOS段 + Base扫描数据
-        int app1Total = 2 + 2 + xmp.Length;       // marker(2) + length(2) + data
+        //    ═══ 2026-08-10 修复: offset 语义 + primary size ═══
+        //    对齐 libultrahdr (jpegr.cpp appendGainMap + multipictureformat.cpp):
+        //    - 增益图 offset 是相对 MPF 数据段起始 (APP2 payload 中 'MPF\0' 之后,
+        //      即 TIFF 头 'MM' 处) 的偏移, 不是文件绝对偏移!
+        //      libultrahdr: secondary_image_offset = primary_image_size - pos - 8
+        //      (8 = APP2 marker(2) + length(2) + 'MPF\0'(4))
+        //    - primary image size = 主图完整大小 (含 XMP/MPF 段), 不是 0
+        // 旧实现: gmOffset 传文件绝对偏移 + primary size=0 → 部分解码器 (如
+        // libultrahdr 解析) 按错误偏移查找增益图 → 找不到/解析失败 → "增益涂层写入不正确"
+        // ⚠ app1Total 必须用 xmpPayload.Length (含 namespace) — 否则 MPF 偏移差 29 字节
+        int app1Total = 2 + 2 + xmpPayload.Length; // marker(2) + length(2) + data
         int mpfDataLen = 86;                      // BuildMpf 输出固定长度
         int app2Total = 2 + 2 + mpfDataLen;       // marker(2) + length(2) + data
-        int gmOffset = baseHeaderLen + app1Total + app2Total + sosLen + baseScanLen;
-        byte[] mpf = BuildMpf(gmOffset, gainMapWithIso.Length);
+        // 主图 (Base) 完整大小: 从文件头到 Base EOI (含 XMP/MPF 段)
+        int primarySize = baseHeaderLen + app1Total + app2Total + sosLen + baseScanLen;
+        // 增益图绝对偏移 = 主图结束位置
+        int gmAbsOffset = primarySize;
+        // 增益图偏移 (相对 MPF 数据段起始, 即 Base 头部 + APP1 之后 + 8)
+        int mpfDataStart = baseHeaderLen + app1Total + 8; // 8 = APP2 marker(2)+len(2)+'MPF\0'(4)
+        int gmOffset = gmAbsOffset - mpfDataStart;
+        byte[] mpf = BuildMpf(gmOffset, gainMapWithIso.Length, primarySize);
 
         // 5. 构建完整文件
         //    结构: Base头部 + APP1(XMP) + APP2(MPF) + SOS + Base扫描(含EOI)
@@ -472,8 +512,8 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         using var ms = new MemoryStream(baseJpeg.Length + app1Total + app2Total + gainMapWithIso.Length + 2);
         // 写入 Base 头部段（SOI...SOS 之前）
         ms.Write(baseJpeg, 0, baseHeaderLen);
-        // 插入 APP1 (XMP) + APP2 (MPF)
-        WriteAppSegmentMem(ms, 0xE1, xmp);
+        // 插入 APP1 (XMP, 含 namespace) + APP2 (MPF)
+        WriteAppSegmentMem(ms, 0xE1, xmpPayload);
         WriteAppSegmentMem(ms, 0xE2, mpf);
         // 写入 SOS 段 + Base 扫描数据（含 EOI）
         ms.Write(baseJpeg, sosIndex, sosLen + baseScanLen);
@@ -558,9 +598,10 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// 主图 (Primary):  attribute = 0x030000 (JPEG 格式 + Primary 类型)
     /// 增益图 (GainMap): attribute = 0x000000 (JPEG 格式，无额外类型)
     /// </remarks>
-    /// <param name="mpfOffset">Gain Map JPEG 数据在文件中的偏移量。</param>
+    /// <param name="mpfOffset">Gain Map JPEG 数据在 MPF 数据段中的偏移量 (相对 'MPF\0' 之后的 TIFF 头)。</param>
     /// <param name="mpfSize">Gain Map JPEG 数据大小（字节）。</param>
-    private static byte[] BuildMpf(int mpfOffset, int mpfSize)
+    /// <param name="primarySize">主图 (Base) 完整大小（含 XMP/MPF 段），对齐 libultrahdr。</param>
+    private static byte[] BuildMpf(int mpfOffset, int mpfSize, int primarySize = 0)
     {
         // MPF APP2 数据布局 (相对数据起始):
         //   offset 0:  "MPF\0" (4)
@@ -611,25 +652,36 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00);
 
         // ── Individual Image Data Entries (32 bytes: 2 entries × 16 bytes) ──
+        // ═══ 2026-08-10 修复: 字段顺序 = attribute → size → offset (CIPA DC-007) ═══
+        // 旧实现写成 attribute → offset → size → 字段错位: 解码器按规范读取
+        // 得到 size=180555/offset=14751 (实际应 size=14751/offset=180555),
+        // 按错误 offset 查找增益图 → 找不到 → "增益涂层写入不正确"!
+        // 对齐 libultrahdr multipictureformat.cpp generateMpf:
+        //   write32(attribute); write32(size); write32(offset); write16(0); write16(0);
 
         // Image 0: Base JPEG (Primary, attribute = 0x030000, big-endian)
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x03); bw.Write((byte)0x00); // attribute: JPEG + Primary
-        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // offset = 0 (same file)
-        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // size = 0 (entire file)
+        // size = 主图完整大小 (旧实现写 0, libultrahdr 写 primary_image_size)
+        bw.Write((byte)(primarySize >> 24));
+        bw.Write((byte)(primarySize >> 16));
+        bw.Write((byte)(primarySize >> 8));
+        bw.Write((byte)primarySize);
+        // offset = 0 (主图从文件头开始)
+        bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00);
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // reserved
 
         // Image 1: Gain Map JPEG (attribute = 0x000000: JPEG 格式，无额外类型)
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); // attribute: JPEG
-        // offset (big-endian)
-        bw.Write((byte)(mpfOffset >> 24));
-        bw.Write((byte)(mpfOffset >> 16));
-        bw.Write((byte)(mpfOffset >> 8));
-        bw.Write((byte)mpfOffset);
         // size (big-endian)
         bw.Write((byte)(mpfSize >> 24));
         bw.Write((byte)(mpfSize >> 16));
         bw.Write((byte)(mpfSize >> 8));
         bw.Write((byte)mpfSize);
+        // offset (big-endian)
+        bw.Write((byte)(mpfOffset >> 24));
+        bw.Write((byte)(mpfOffset >> 16));
+        bw.Write((byte)(mpfOffset >> 8));
+        bw.Write((byte)mpfOffset);
         // reserved
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00);
 
@@ -649,7 +701,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     ///   - BaseRenditionIsHDR = False (主图为 SDR)
     /// </remarks>
     public static byte[] BuildXmpMetadata(int baseW, int baseH, int gmW, int gmH, GainMapMode mode,
-        float headroom = 12.5f)
+        float headroom = 12.5f, long gainMapLength = 0)
     {
         // log2 增益映射范围（与 ComputeGainMap/LogGainToByte 一致）
         const float gainMinLog2 = 0.0f;
@@ -657,7 +709,12 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         const float offset = 0.015625f; // 1/64，规范推荐值
         const float gamma = 1.0f;
 
+        // ═══ 2026-08-10 修复: GainMap item 添加 Item:Length ═══
+        // 对齐 libultrahdr generateXmpForPrimaryImage (Item:Length = 增益图完整大小)
         var inv = System.Globalization.CultureInfo.InvariantCulture;
+        string gainMapItem = gainMapLength > 0
+            ? $"<Container:Item Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\" Item:Length=\"{gainMapLength}\"/>"
+            : "<Container:Item Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\"/>";
         string xmp = "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>" +
             "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">" +
             "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">" +
@@ -671,7 +728,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             "<Container:Item Item:Semantic=\"Primary\" Item:Mime=\"image/jpeg\"/>" +
             "</rdf:li>" +
             "<rdf:li rdf:parseType=\"Resource\">" +
-            "<Container:Item Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\"/>" +
+            gainMapItem +
             "</rdf:li>" +
             "</rdf:Seq>" +
             "</Container:Directory>" +
@@ -733,10 +790,17 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         WriteBe16(bw, 0);
         WriteBe16(bw, 0);
 
-        // flags: bit7=multi-channel, bit6=useBaseColorSpace(0), bit2=backward(0)
+        // ═══ 2026-08-10 修复: flags 添加 useBaseColorSpace (bit6=0x40) ═══
+        // 对齐 libultrahdr gainmapmetadata.cpp encodeGainmapMetadata:
+        //   flags = kIsMultiChannelMask(0x80) | kUseBaseColorSpaceMask(0x40) | backward(4) | common(8)
+        // 增益图在 base (sRGB/BT.709) 色彩空间计算 (use_base_cg=true, 与 libultrahdr
+        // 默认一致) → 必须声明 bit6, 否则解码器按 alternate (HDR) 色彩空间解释增益图
+        // → 色域转换错误 → 增益涂层效果错误!
+        // flags: bit7=multi-channel, bit6=useBaseColorSpace(1), bit2=backward(0), bit3=common denominator(0)
         // 注意: 不设 bit3 (common denominator) — 各字段用独立分母
         byte flags = 0;
         if (multiChannel) flags |= 0x80;
+        flags |= 0x40; // useBaseColorSpace: 增益图在 base 色彩空间 (libultrahdr use_base_cg=true)
         bw.Write(flags);
 
         // 非 common denominator 模式: headroom 各带分母

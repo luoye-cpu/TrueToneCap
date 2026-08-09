@@ -248,7 +248,10 @@ public static partial class ColorProfileProvider
         using var bw = new BinaryWriter(ms);
         bw.Write("desc"u8); bw.Write(0); // signature + reserved
         var ascii = System.Text.Encoding.ASCII.GetBytes(text + "\0");
-        bw.Write(ascii.Length); bw.Write(ascii);
+        // ⚠️ 2026-08-09 修复: ICC 规范大端, BinaryWriter 小端 → 手动大端
+        bw.Write((byte)(ascii.Length >> 24)); bw.Write((byte)(ascii.Length >> 16));
+        bw.Write((byte)(ascii.Length >> 8)); bw.Write((byte)ascii.Length);
+        bw.Write(ascii);
         bw.Write(0); // unicode language code
         bw.Write(0); // unicode count
         bw.Write((ushort)0); bw.Write((ushort)0); // scriptcode code, count
@@ -270,7 +273,11 @@ public static partial class ColorProfileProvider
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
         bw.Write("XYZ "u8); bw.Write(0);
-        bw.Write((int)(x * 65536)); bw.Write((int)(y * 65536)); bw.Write((int)(z * 65536));
+        // ⚠️ 2026-08-09 修复: ICC 规范大端 (s15Fixed16), BinaryWriter 小端 → 手动大端
+        foreach (int v in new[] { (int)Math.Round(x * 65536), (int)Math.Round(y * 65536), (int)Math.Round(z * 65536) })
+        {
+            bw.Write((byte)(v >> 24)); bw.Write((byte)(v >> 16)); bw.Write((byte)(v >> 8)); bw.Write((byte)v);
+        }
         return ms.ToArray();
     }
 
@@ -280,12 +287,13 @@ public static partial class ColorProfileProvider
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
         bw.Write("curv"u8); bw.Write(0);
-        bw.Write(256); // count
+        bw.Write((byte)0); bw.Write((byte)0); bw.Write((byte)1); bw.Write((byte)0); // count=256 大端
         for (int i = 0; i < 256; i++)
         {
             float v = i / 255f;
             float linear = v <= 0.04045f ? v / 12.92f : MathF.Pow((v + 0.055f) / 1.055f, 2.4f);
-            bw.Write((ushort)Math.Clamp((int)(linear * 65535 + 0.5f), 0, 65535));
+            var u16 = (ushort)Math.Clamp((int)(linear * 65535 + 0.5f), 0, 65535);
+            bw.Write((byte)(u16 >> 8)); bw.Write((byte)(u16 & 0xFF));
         }
         return ms.ToArray();
     }
@@ -660,10 +668,11 @@ public static partial class ColorProfileProvider
         int tagCount = ReadBE32(icc, 128);
         int tagTableStart = 132;
 
-        // 计算新 primaries 的 XYZ 值（D50 适应）
-        var (rX, rY, rZ) = IccProfileBuilder.XyToXyzPublic(p.Rx, p.Ry);
-        var (gX, gY, gZ) = IccProfileBuilder.XyToXyzPublic(p.Gx, p.Gy);
-        var (bX, bY, bZ) = IccProfileBuilder.XyToXyzPublic(p.Bx, p.By);
+        // 计算新 primaries 的 XYZ 值 (D50 适应 + 白点归一, ICC 标准)
+        // ⚠️ 2026-08-09 修复: 旧 XyToXyzPublic 用 Y=1 无 D50 适应 → 色域错误 (P3 红 2.125)
+        //    ICC rXYZ/gXYZ/bXYZ 需 D50 adapted + 白点归一 (白点 Y=1) 的正确 XYZ
+        var (rX, rY, rZ, gX, gY, gZ, bX, bY, bZ) =
+            PrimariesToD50Xyz(p.Rx, p.Ry, p.Gx, p.Gy, p.Bx, p.By);
 
         // 遍历 tag table，找到 rXYZ/gXYZ/bXYZ/desc 并修改
         for (int i = 0; i < tagCount; i++)
@@ -692,6 +701,271 @@ public static partial class ColorProfileProvider
         }
 
         return icc;
+    }
+
+    /// <summary>获取 HDR (PQ) 标准 ICC Profile — 目标色域 primaries + ST.2084 PQ TRC。
+    /// 用于 TIFF 等无 CICP 机制的格式：像素是 PQ 编码 (HdrToPq16)，ICC 必须声明 PQ 传输，
+    /// 否则解码器按 sRGB gamma 解码 PQ 值 → 图像错误。
+    /// 注意: 不要用于 JXL/PNG/AVIF — 它们用 color fields/CICP 声明更可靠,
+    /// 且 JXL 的 ICC 会覆盖 color fields 导致 PQ 传输丢失。</summary>
+    public static byte[]? GetHdrStandardIccProfile(string colorSpace)
+    {
+        try
+        {
+            IccPrimaries p = colorSpace switch
+            {
+                "DisplayP3" or "DCI_P3" => IccPrimaries.DisplayP3,
+                "BT2020" => IccPrimaries.BT2020,
+                "AdobeRGB" => IccPrimaries.AdobeRGB,
+                _ => IccPrimaries.SRGB,
+            };
+            string name = colorSpace switch
+            {
+                "DisplayP3" or "DCI_P3" => "Display P3 (PQ)",
+                "BT2020" => "BT.2020 (PQ)",
+                "AdobeRGB" => "Adobe RGB (PQ)",
+                _ => "sRGB (PQ)",
+            };
+            return BuildHdrPqIcc(p, name);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>完整构建 HDR PQ ICC (v2, 矩阵型): 目标色域 primaries (D50) + PQ EOTF 曲线。
+    /// 不能用 sRGB 模板打补丁: 模板 TRC 空间仅 256 点, 无法容纳 4096 点 PQ LUT。</summary>
+    private static byte[]? BuildHdrPqIcc(IccPrimaries p, string name)
+    {
+        // primaries → D50 XYZ (与 PatchSrgbPrimaries 同算法)
+        var (rX, rY, rZ, gX, gY, gZ, bX, bY, bZ) =
+            PrimariesToD50Xyz(p.Rx, p.Ry, p.Gx, p.Gy, p.Bx, p.By);
+
+        byte[] rXyz = BuildXyzTag(rX, rY, rZ);
+        byte[] gXyz = BuildXyzTag(gX, gY, gZ);
+        byte[] bXyz = BuildXyzTag(bX, bY, bZ);
+        byte[] wtpt = BuildXyzTag(0.9642f, 1.0f, 0.8249f);   // D50
+        byte[] trc = BuildPqCurveTag();                      // 4096 点 PQ EOTF
+        byte[] desc = BuildDescTag(name);
+        byte[] cprt = BuildTextTag("Public Domain");
+
+        var tags = new (uint sig, byte[] data)[]
+        {
+            (0x64657363u, desc), (0x63707274u, cprt),   // desc, cprt
+            (0x77747074u, wtpt),                        // wtpt
+            (0x7258595Au, rXyz), (0x6758595Au, gXyz), (0x6258595Au, bXyz),
+            (0x72545243u, trc), (0x67545243u, trc), (0x62545243u, trc),
+        };
+
+        int headerSize = 128, tagTableSize = 4 + tags.Length * 12;
+        int Align4(int v) => (v + 3) / 4 * 4;
+        int off = headerSize + tagTableSize;
+        var blocks = new List<(int o, byte[] d)>();
+        foreach (var t in tags) { blocks.Add((off, t.data)); off += Align4(t.data.Length); }
+        int total = off;
+
+        using var ms = new MemoryStream(total);
+        using var bw = new BinaryWriter(ms);
+        // ICC 规范为大端序, BinaryWriter 是小端 → 手动大端写入
+        static void W32(BinaryWriter w, uint v) { w.Write((byte)(v >> 24)); w.Write((byte)(v >> 16)); w.Write((byte)(v >> 8)); w.Write((byte)v); }
+        static void W16(BinaryWriter w, ushort v) { w.Write((byte)(v >> 8)); w.Write((byte)v); }
+        W32(bw, (uint)total);                  // profile size
+        W32(bw, 0);                            // preferred CMM
+        bw.Write(new byte[] { 0x02, 0x10, 0x00, 0x00 }); // version 2.1.0
+        bw.Write("mntr"u8);                    // device class: monitor
+        bw.Write("RGB "u8);                    // color space
+        bw.Write("XYZ "u8);                    // PCS
+        W16(bw, 2026); W16(bw, 8); W16(bw, 9);
+        W16(bw, 0); W16(bw, 0); W16(bw, 0);
+        bw.Write("acsp"u8);                    // signature
+        W32(bw, 0); W32(bw, 0); W32(bw, 0); W32(bw, 0);
+        bw.Write(new byte[8]); W32(bw, 0);
+        W32(bw, 0x0000F6D6); W32(bw, 0x00010000); W32(bw, 0x0000D32D); // D50 illuminant
+        W32(bw, 0);
+        bw.Write(new byte[16]); bw.Write(new byte[28]);
+
+        W32(bw, (uint)tags.Length);
+        for (int i = 0; i < tags.Length; i++)
+        {
+            W32(bw, tags[i].sig); W32(bw, (uint)blocks[i].o); W32(bw, (uint)tags[i].data.Length);
+        }
+        foreach (var b in blocks)
+        {
+            bw.Write(b.d);
+            int pad = Align4(b.d.Length) - b.d.Length;
+            if (pad > 0) bw.Write(new byte[pad]);
+        }
+        bw.Flush();
+        return ms.ToArray();
+    }
+
+    /// <summary>构建 ST.2084 PQ EOTF 曲线标签 (curv, 4096 点, 归一化到 10000 nits = 1.0)。
+    /// 值: V ∈ [0,1] → PQ EOTF → L ∈ [0,1] (10000 nits 归一)。</summary>
+    private static byte[] BuildPqCurveTag()
+    {
+        const int points = 4096;
+        var data = new byte[12 + points * 2];
+        // 'curv' type signature
+        data[0] = (byte)'c'; data[1] = (byte)'u'; data[2] = (byte)'r'; data[3] = (byte)'v';
+        // reserved 4 bytes (0)
+        // count (4096)
+        WriteBE32(data, 8, (uint)points);
+        // PQ EOTF (ST.2084): L = ((max(V^(1/m) - c1, 0)) / (c2 - c3*V^(1/m)))^(1/n)
+        const double m = 78.84375, n = 0.1593017578125;
+        const double c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+        for (int i = 0; i < points; i++)
+        {
+            double v = i / (double)(points - 1);
+            double vm = Math.Pow(v, 1.0 / m);
+            double num = Math.Max(vm - c1, 0.0);
+            double den = c2 - c3 * vm;
+            double l = den > 0 ? Math.Pow(num / den, 1.0 / n) : 0.0;
+            l = Math.Clamp(l, 0.0, 1.0);
+            ushort u16 = (ushort)Math.Round(l * 65535.0);
+            data[12 + i * 2] = (byte)(u16 >> 8);
+            data[12 + i * 2 + 1] = (byte)(u16 & 0xFF);
+        }
+        return data;
+    }
+
+    /// <summary>
+    /// 计算 ICC primaries 的 D50-adapted XYZ 值 (白点归一到 Y=1)。
+    /// ICC rXYZ/gXYZ/bXYZ tag 记录的是 D50 PCS 下的实际 XYZ (白点 Y=1)。
+    /// 算法: 1) xy (Y=1) → 线性 XYZ; 2) 构建 RGB→XYZ D65 矩阵并白点缩放;
+    ///       3) Bradford D65→D50 chromatic adaptation。
+    /// </summary>
+    public static (float RX, float RY, float RZ, float GX, float GY, float GZ, float BX, float BY, float BZ)
+        PrimariesToD50Xyz(float rx, float ry, float gx, float gy, float bx, float by)
+    {
+        // xy → XYZ (Y=1)
+        static (float X, float Y, float Z) Xy(double x, double y)
+        {
+            if (y == 0) return (0, 0, 0);
+            double Y = 1.0;
+            double X = x * Y / y;
+            double Z = (1.0 - x - y) * Y / y;
+            return ((float)X, (float)Y, (float)Z);
+        }
+        var d65 = Xy(0.3127, 0.3290); // D65 白点
+        var d50 = Xy(0.3457, 0.3585); // D50 白点
+
+        // 3×3 矩阵列 = 各 primary XYZ (Y=1)
+        Span<double> colR = stackalloc double[] { Xy(rx, ry).Item1, Xy(rx, ry).Item2, Xy(rx, ry).Item3 };
+        Span<double> colG = stackalloc double[] { Xy(gx, gy).Item1, Xy(gx, gy).Item2, Xy(gx, gy).Item3 };
+        Span<double> colB = stackalloc double[] { Xy(bx, by).Item1, Xy(bx, by).Item2, Xy(bx, by).Item3 };
+
+        // 解 s 使 s_R·colR + s_G·colG + s_B·colB = D65 (白点归一)
+        // 即求 C·s = w65, C = [colR colG colB]
+        double[,] C = new double[3, 3]
+        {
+            { colR[0], colG[0], colB[0] },
+            { colR[1], colG[1], colB[1] },
+            { colR[2], colG[2], colB[2] }
+        };
+        double[] s = Solve3x3(C, new double[] { d65.X, d65.Y, d65.Z });
+        for (int i = 0; i < 3; i++) { colR[i] *= s[0]; colG[i] *= s[1]; colB[i] *= s[2]; }
+
+        // Bradford D65→D50 adaptation (就地修改列)
+        BradfordAdapt(colR, colG, colB, d65, d50);
+
+        return ((float)colR[0], (float)colR[1], (float)colR[2],
+                (float)colG[0], (float)colG[1], (float)colG[2],
+                (float)colB[0], (float)colB[1], (float)colB[2]);
+    }
+
+    /// <summary>Bradford chromatic adaptation (D65→D50) 应用于 RGB→XYZ 矩阵列。</summary>
+    private static void BradfordAdapt(
+        Span<double> colR, Span<double> colG, Span<double> colB,
+        (float X, float Y, float Z) srcWhite, (float X, float Y, float Z) dstWhite)
+    {
+        // Bradford cone response matrix
+        ReadOnlySpan<double> MA = new double[]
+        {
+            0.8951, 0.2664, -0.1614,
+            -0.7502, 1.7135, 0.0367,
+            0.0389, -0.0685, 1.0296
+        };
+        // source/dest white in cone space
+        double[] srcCone = new double[3], dstCone = new double[3];
+        for (int i = 0; i < 3; i++)
+        {
+            srcCone[i] = MA[i * 3 + 0] * srcWhite.X + MA[i * 3 + 1] * srcWhite.Y + MA[i * 3 + 2] * srcWhite.Z;
+            dstCone[i] = MA[i * 3 + 0] * dstWhite.X + MA[i * 3 + 1] * dstWhite.Y + MA[i * 3 + 2] * dstWhite.Z;
+        }
+        // adaptation matrix M = inv(MA) · diag(dstCone/srcCone) · MA
+        double[,] AD = new double[3, 3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                AD[i, j] = MA[i * 3 + j] * (dstCone[i] / srcCone[i]);
+        // M = MA⁻¹ · AD  (MA is not orthogonal, need inverse)
+        double[,] MAinv = Invert3x3(MA);
+        double[,] M = new double[3, 3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+            {
+                double sum = 0;
+                for (int k = 0; k < 3; k++) sum += MAinv[i, k] * AD[k, j];
+                M[i, j] = sum;
+            }
+
+        Apply3x3(M, colR, colG, colB);
+    }
+
+    private static void Apply3x3(double[,] M, Span<double> colR, Span<double> colG, Span<double> colB)
+    {
+        Apply3x3ToColumn(M, colR);
+        Apply3x3ToColumn(M, colG);
+        Apply3x3ToColumn(M, colB);
+    }
+
+    private static void Apply3x3ToColumn(double[,] M, Span<double> col)
+    {
+        var orig = new[] { col[0], col[1], col[2] };
+        for (int i = 0; i < 3; i++)
+        {
+            double sum = 0;
+            for (int k = 0; k < 3; k++) sum += M[i, k] * orig[k];
+            col[i] = sum;
+        }
+    }
+
+    private static double[] Solve3x3(double[,] A, double[] b)
+    {
+        // 高斯消元求解 3×3 线性方程组 Ax=b
+        double[,] m = (double[,])A.Clone();
+        double[] v = (double[])b.Clone();
+        double[,] aug = new double[3, 4];
+        for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) aug[i, j] = m[i, j]; aug[i, 3] = v[i]; }
+        for (int col = 0; col < 3; col++)
+        {
+            int piv = col;
+            for (int r = col + 1; r < 3; r++) if (Math.Abs(aug[r, col]) > Math.Abs(aug[piv, col])) piv = r;
+            for (int c = 0; c < 4; c++) (aug[col, c], aug[piv, c]) = (aug[piv, c], aug[col, c]);
+            double d = aug[col, col];
+            if (Math.Abs(d) < 1e-12) continue;
+            for (int c = 0; c < 4; c++) aug[col, c] /= d;
+            for (int r = 0; r < 3; r++)
+            {
+                if (r == col) continue;
+                double f = aug[r, col];
+                for (int c = 0; c < 4; c++) aug[r, c] -= f * aug[col, c];
+            }
+        }
+        return new[] { aug[0, 3], aug[1, 3], aug[2, 3] };
+    }
+
+    private static double[,] Invert3x3(ReadOnlySpan<double> m)
+    {
+        double a = m[0], b = m[1], c = m[2];
+        double d = m[3], e = m[4], f = m[5];
+        double g = m[6], h = m[7], i = m[8];
+        double det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        double[,] inv = new double[3, 3];
+        inv[0, 0] = (e * i - f * h) / det; inv[0, 1] = (c * h - b * i) / det; inv[0, 2] = (b * f - c * e) / det;
+        inv[1, 0] = (f * g - d * i) / det; inv[1, 1] = (a * i - c * g) / det; inv[1, 2] = (c * d - a * f) / det;
+        inv[2, 0] = (d * h - e * g) / det; inv[2, 1] = (b * g - a * h) / det; inv[2, 2] = (a * e - b * d) / det;
+        return inv;
     }
 
     private static void WriteXyzData(byte[] icc, int offset, float x, float y, float z)
@@ -938,7 +1212,8 @@ public static class ColorSpaceConverter
     //  预计算 BT.709_to_XYZ × XYZ_to_Target
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>scRGB (BT.709) → BT.2020 线性转换矩阵。</summary>
+    /// <summary>scRGB (BT.709 原色 + 线性 gamma) → BT.2020 线性转换矩阵。
+    /// 注意: 矩阵只依赖 primaries (sRGB/scRGB/BT.709 原色相同), 与 gamma 无关。</summary>
     public static readonly float[,] SrgbToBt2020 = new float[3, 3]
     {
         { 0.627403f, 0.329283f, 0.043313f },
@@ -946,7 +1221,7 @@ public static class ColorSpaceConverter
         { 0.016392f, 0.088013f, 0.895595f }
     };
 
-    /// <summary>scRGB (BT.709) → Display P3 线性转换矩阵。</summary>
+    /// <summary>scRGB (BT.709 原色 + 线性 gamma) → Display P3 线性转换矩阵。</summary>
     public static readonly float[,] SrgbToDisplayP3 = new float[3, 3]
     {
         { 0.822462f, 0.177194f, 0.000344f },
@@ -954,7 +1229,7 @@ public static class ColorSpaceConverter
         { 0.017083f, 0.072411f, 0.910506f }
     };
 
-    /// <summary>scRGB (BT.709) → Adobe RGB 线性转换矩阵。</summary>
+    /// <summary>scRGB (BT.709 原色 + 线性 gamma) → Adobe RGB 线性转换矩阵。</summary>
     public static readonly float[,] SrgbToAdobeRgb = new float[3, 3]
     {
         { 0.715160f, 0.284849f, 0.000009f },
@@ -971,7 +1246,8 @@ public static class ColorSpaceConverter
         _ => null // sRGB / System: 无需转换
     };
 
-    /// <summary>获取 CICP 原色索引 (ITU-T H.273)。</summary>
+    /// <summary>获取 CICP 原色索引 (ITU-T H.273 Table 2)。
+    /// sRGB/BT.709 共享相同 primaries → code 1; DisplayP3=12; BT2020=9; AdobeRGB=1。</summary>
     public static byte GetCicpPrimaries(string colorSpaceTag) => colorSpaceTag switch
     {
         "DisplayP3" or "DCI_P3" => 12,
@@ -980,7 +1256,9 @@ public static class ColorSpaceConverter
         _ => 1
     };
 
-    /// <summary>获取 CICP 传输函数索引。</summary>
+    /// <summary>获取 CICP 传输函数索引 (ITU-T H.273 Table 3)。
+    /// HDR=true → 16 (ST.2084 PQ); SDR → 13 (sRGB transfer)/1 (BT.709 视频 OETF)。
+    /// 图片输出用 sRGB (code 13), 非 BT.709 视频 (code 1)。</summary>
     public static byte GetCicpTransfer(string colorSpaceTag, bool hdrOutput) => (colorSpaceTag, hdrOutput) switch
     {
         (_, true) => 16,  // ST.2084 PQ (ITU-T H.273 Table 3)
@@ -1006,7 +1284,7 @@ public static class ColorSpaceConverter
     {
         // 2026-08-08: 统一流程为色域转换 + 分段 Reinhard 色调映射。
         // 统一流程: 先做色域转换 (scRGB → 目标色域线性), 再做色调映射 (分段 Reinhard)。
-        // 1. 色域转换：scRGB (BT.709) → 目标色域线性
+        // 1. 色域转换：scRGB (BT.709 原色 + 线性 gamma) → 目标色域线性
         var matrix = GetMatrix(colorSpaceTag ?? "sRGB");
         var converted = ConvertScrgbToTarget(hdrPixels, w, h, matrix);
 
@@ -1110,7 +1388,8 @@ public static class ColorSpaceConverter
 /// <summary>ICC 色域原色 (CIE xy)。</summary>
 public readonly record struct IccPrimaries(float Rx, float Ry, float Gx, float Gy, float Bx, float By)
 {
-    /// <summary>sRGB / BT.709 原色。</summary>
+    /// <summary>sRGB / BT.709 原色 (sRGB 与 BT.709 共享相同 primaries, 仅 transfer 不同)。
+    /// 图片输出用 sRGB (BT.709 原色 + sRGB gamma); scRGB (Windows HDR 合成) 用 BT.709 原色 + 线性 gamma。</summary>
     public static readonly IccPrimaries SRGB = new(0.6400f, 0.3300f, 0.3000f, 0.6000f, 0.1500f, 0.0600f);
     /// <summary>Adobe RGB (1998) 原色。</summary>
     public static readonly IccPrimaries AdobeRGB = new(0.6400f, 0.3300f, 0.2100f, 0.7100f, 0.1500f, 0.0600f);

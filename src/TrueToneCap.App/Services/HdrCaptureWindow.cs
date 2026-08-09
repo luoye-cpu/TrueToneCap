@@ -44,7 +44,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     // 自动超时关闭
     private System.Threading.Timer? _autoTimer;
-    private const int AutoTimeoutMs = 300_000; // 5 分钟无操作自动关闭
+    private const int AutoTimeoutMs = 180_000; // 3 分钟无操作自动关闭
     private System.Diagnostics.Stopwatch _idleWatch = System.Diagnostics.Stopwatch.StartNew();
 
     public event Action<HdrCaptureAction, int, int, int, int>? ActionCompleted;
@@ -657,6 +657,14 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private void TouchIdle() { _idleWatch.Restart(); }
 
     public void Close() { _autoTimer?.Dispose(); _autoTimer = null; if (_hwnd != 0) { s_windows.TryRemove(_hwnd, out _); DestroyWindow(_hwnd); _hwnd = 0; } IsInitialized = false; }
+
+    /// <summary>外部强制取消（应用退出时由 MainWindow 调用，触发 ActionCompleted + 关闭窗口）。</summary>
+    public void RequestCancel()
+    {
+        if (_hwnd == 0 || _disposed) return; // 已关闭/已销毁，防止重复触发
+        ActionCompleted?.Invoke(HdrCaptureAction.Cancel, 0, 0, 0, 0);
+        Close();
+    }
 
     private void Cleanup()
     {

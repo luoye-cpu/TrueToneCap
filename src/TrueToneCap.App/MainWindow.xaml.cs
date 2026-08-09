@@ -31,6 +31,8 @@ public sealed partial class MainWindow : Window
     private volatile int _isCapturing; // 0=idle, 1=busy (防重入)
     private CancellationTokenSource? _captureCts; // 截图/编码取消令牌
     private bool _isExiting;           // 托盘退出标志（跳过最小化）
+    private SelectionOverlay? _activeSelectionOverlay;   // 当前活动选区覆盖层（应用退出时强制关闭）
+    private Services.HdrCaptureWindow? _activeHdrWindow; // 当前活动 HDR 覆盖窗口（应用退出时强制关闭）
     private TextBox? _recordingTarget; // 正在录制的快捷键输入框
     private string _hdrSystemHint = ""; // 系统 HDR 状态基础提示 (DetectAndApplySystemCapabilitiesAsync 写入)
     private bool _hdrHardwareSupported; // 硬件是否支持 HDR (能力检测写入, 供格式联动禁用开关)
@@ -619,6 +621,41 @@ public sealed partial class MainWindow : Window
         // ── 格式专属选项卡片 ──
         bool isAvif = format == OutputFormat.AVIF;
         bool isGainMap = format == OutputFormat.JPEG_GAINMAP;
+
+        // ═══ GainMap 色域/HD R 锁定 (2026-08-09) ═══
+        // GainMap 管线恒在 scRGB/sRGB 空间 (Base 恒 sRGB, 增益图是相对编码),
+        // 目标色域选择 (P3/BT.2020) 对 GainMap 无效 → 锁定为 BT.2020。
+        // GainMap 是 Ultra HDR → 锁定 HDR 开启 (不可关)。
+        if (isGainMap)
+        {
+            // 锁定 HDR 开启
+            HdrSwitch.IsEnabled = false;
+            HdrSwitch.IsOn = true;
+            _settings.HdrEnabled = true;
+            // 锁定目标色域为 BT.2020 (ColorCbo index 5)
+            if (ColorCbo is not null)
+            {
+                ColorCbo.IsEnabled = false;
+                if (ColorCbo.SelectedIndex != 5)
+                {
+                    ColorCbo.SelectedIndex = 5;
+                    _settings.ColorSpaceIndex = 5;
+                }
+            }
+            // 更新提示: 色域锁定说明
+            if (HdrHintTxt is not null)
+            {
+                string colorLockHint = "\n🔒 Gain Map 为 Ultra HDR：目标色域恒为 BT.2020 (Base 为 sRGB 兼容层)，HDR 输出已锁定开启。";
+                HdrHintTxt.Text = _hdrSystemHint + colorLockHint;
+            }
+        }
+        else
+        {
+            // 非 GainMap 格式: 恢复 HDR 开关和色域选择可用性
+            HdrSwitch.IsEnabled = _hdrHardwareSupported && cap.SupportsHdr;
+            if (ColorCbo is not null) ColorCbo.IsEnabled = true;
+        }
+
         AvifOptionsCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
         GainMapOptionsCard.Visibility = isGainMap ? Visibility.Visible : Visibility.Collapsed;
         PngOptionsCard.Visibility = format == OutputFormat.PNG ? Visibility.Visible : Visibility.Collapsed;
@@ -1076,9 +1113,14 @@ public sealed partial class MainWindow : Window
                 var settings = BuildEncodingSettings(format, actualHdr, meta);
                 settings.IccProfile ??= captureResult.IccProfile;
 
-                if (hdrOutput)
+                // ═══ 2026-08-10 修复: GainMap 格式只要有 HDR 帧就走主路径 ═══
+                // 用户 HDR 开关关闭 + GainMap 格式时, 旧逻辑走 PrepareFloat16WithIcc →
+                // EncodeSdrAsync → 只输出普通 JPEG (无增益图/无 XMP/MPF/ISO 元数据)!
+                // GainMap 的本质 = Base(SDR) + 增益图(HDR), 需要原始 HDR 帧计算增益比,
+                // 与 HDR 开关无关 (开关只控制 HDR 直通编码)。
+                if (hdrOutput || format == OutputFormat.JPEG_GAINMAP)
                 {
-                    // HDR 直通编码
+                    // HDR 直通编码 (GainMap 主路径: Base + 增益图)
                     LogService.Info("SilentCapture", $"HDR 直通编码: {format} {fw}x{fh}");
                     path = await AppServices.Pipeline.EncodeHdrFrameAsync(
                         new HdrFrameData
@@ -1202,27 +1244,28 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            var tmpPath = Path.Combine(Path.GetTempPath(), $"ttc_clip_{Guid.NewGuid():N}.png");
-
-            // ── ICC 烘焙 + 编码全部移到后台线程 ──
+            // ═══ 2026-08-09: 剪贴板复制复用完整保存管线 (与正式保存完全一致的色彩/ICC/ACM 处理) ═══
+            // 之前独立实现 ResolveColorSpaceTag(colorSpaceTag, false) 未传 ACM → System 解析错误,
+            // 且只编码 PNG 简化路径 → 与最终输出不一致。
+            // 现改为: 复用 EncodeAndSaveAsync (BuildEncodingSettings 传 ACM + PreparePixelsWithIcc 传 ACM),
+            // 仅输出到临时目录, 然后复制该完整文件。剪贴板得到与最终输出完全一致的成品。
+            var (format, _) = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
+            var hdrOutput = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
             var iccBakeEnabled = IccBakeSwitch.IsOn;
             var colorSpaceTag = GetSelectedColorSpaceTag();
-            // 解析 "System" 为实际色域，确保编码器正确嵌入 ICC/CICP
-            string resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false);
-            var settings = BuildEncodingSettings(OutputFormat.PNG, false, null);
 
-            await Task.Run(() =>
-            {
-                var (pixels, iccProfile) = CapturePipelineService.PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
-                if (iccProfile is not null)
-                    settings.IccProfile = iccProfile;
-                // 使用已解析的色域标签，确保 ICC/CICP 策略正确
-                settings.ColorSpaceTag = resolvedTag;
-                var encoder = EncoderFactory.Create(OutputFormat.PNG);
-                encoder.EncodeSdrAsync(pixels, w, h, settings, tmpPath).GetAwaiter().GetResult();
-            });
+            // 用与正式保存相同的设置构建 (含 System→实际色域的 ACM 感知解析)
+            var settings = BuildEncodingSettings(format, hdrOutput, null);
 
-            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(tmpPath);
+            // 输出到临时目录 (不写入用户正式输出目录)
+            var tmpDir = Path.Combine(Path.GetTempPath(), "TrueToneCap_Clip");
+            Directory.CreateDirectory(tmpDir);
+
+            var path = await AppServices.Pipeline.EncodeAndSaveAsync(
+                bgra, w, h, settings, iccBakeEnabled, colorSpaceTag,
+                default, null, tmpDir);
+
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
             var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
             dp.SetStorageItems(new[] { file });
             Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
@@ -1315,7 +1358,10 @@ public sealed partial class MainWindow : Window
 
             LogService.Info("MainWindow", $"HDR 编码: {format} {w}x{h} HDR={hdrOutput} ICC烘焙={iccBakeEnabled} 色域={colorSpaceTag}");
 
-            if (hdrOutput)
+            // ═══ 2026-08-10 修复: GainMap 格式只要有 HDR 帧就走主路径 ═══
+            // (与 SilentCapture 一致: GainMap 需要原始 HDR 帧生成增益图,
+            //  与 HDR 开关无关; 旧逻辑走 SDR 降级 → 无增益图)
+            if (hdrOutput || format == OutputFormat.JPEG_GAINMAP)
             {
                 // HDR 直通编码（同无感截图路径）
                 var path = await AppServices.Pipeline.EncodeHdrFrameAsync(
@@ -1456,6 +1502,7 @@ public sealed partial class MainWindow : Window
                 var sharedDevice = AppServices.Wgc?.GetOrCreateDevice(
                     DisplayEnumerator.GetMonitorUnderCursor());
                 using var hdrWnd = new Services.HdrCaptureWindow(sharedDevice);
+                _activeHdrWindow = hdrWnd; // 注册：应用退出时强制关闭
                 bool initOk = hdrWnd.Initialize(vx, vy, vw, vh);
 
                 if (initOk)
@@ -1469,10 +1516,12 @@ public sealed partial class MainWindow : Window
                     hdrWnd.ActionCompleted += (action, ax, ay, aw, ah) =>
                         tcs.TrySetResult((action, ax, ay, aw, ah));
                     var (action, rx, ry, rw, rh) = await tcs.Task;
+                    _activeHdrWindow = null; // 窗口已完成动作并关闭
 
                     if (action == HdrCaptureAction.Cancel)
                     {
-                        DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
+                        if (!_isExiting)
+                            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
                         return;
                     }
 
@@ -1533,6 +1582,7 @@ public sealed partial class MainWindow : Window
                 return;
             }
             var overlay = new SelectionOverlay(desktopPixels, vx, vy, vw, vh);
+            _activeSelectionOverlay = overlay; // 注册：应用退出时强制关闭
             overlay.Activate();
             overlayShown = true; // 标记覆盖层已激活，由 ActionCompleted 负责释放锁
             var overlayReady = new TaskCompletionSource<bool>();
@@ -1545,7 +1595,8 @@ public sealed partial class MainWindow : Window
                 {
                     if (action == SelectionOverlay.ActionResult.Cancel)
                     {
-                        DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
+                        if (!_isExiting)
+                            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
                         return;
                     }
 
@@ -1594,6 +1645,7 @@ public sealed partial class MainWindow : Window
                 }
                 finally
                 {
+                    _activeSelectionOverlay = null; // 覆盖层已关闭，取消注册
                     // 确保锁释放：覆盖层完成时无论成功/失败都释放防重入锁
                     Interlocked.Exchange(ref _isCapturing, 0);
                 }
@@ -1798,7 +1850,9 @@ public sealed partial class MainWindow : Window
                 var settings = BuildEncodingSettings(format, actualHdr, meta);
                 settings.IccProfile ??= captureResult.IccProfile;
 
-                if (hdrOutput)
+                // ═══ 2026-08-10 修复: GainMap 格式只要有 HDR 帧就走主路径 ═══
+                // (与 SilentCapture 一致: GainMap 需要原始 HDR 帧生成增益图)
+                if (hdrOutput || format == OutputFormat.JPEG_GAINMAP)
                 {
                     // HDR 直通编码
                     LogService.Info("MainWindow", $"HDR 直通编码: {format}");
@@ -1869,6 +1923,8 @@ public sealed partial class MainWindow : Window
         var settings = AppServices.Pipeline.BuildEncodingSettings(format, hdrOutput, meta, tag, _settings.AcmeDetected);
         // 覆盖 UI 特有的设置
         settings.Quality = (float)QualitySld.Value;
+        // ═══ 2026-08-10 诊断: 记录覆盖后的实际质量值 (验证滑块值是否正确) ═══
+        LogService.Info("MainWindow", $"BuildEncodingSettings: 质量覆盖 QualitySld.Value={QualitySld.Value:F2} → settings.Quality={settings.Quality:F2} (滑块范围 {QualitySld.Minimum:F1}-{QualitySld.Maximum:F1})");
         settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;
         settings.AvifBackend = AvifBackendCbo.SelectedIndex switch
         { 1 => AvifEncoderBackend.LibAom, 2 => AvifEncoderBackend.Qsv, 3 => AvifEncoderBackend.Nvenc, _ => AvifEncoderBackend.Auto };
@@ -2476,6 +2532,12 @@ public sealed partial class MainWindow : Window
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        // ── 应用退出：强制关闭可能仍打开的全屏选区覆盖层（避免残留遮挡屏幕/挂起）──
+        try { _activeSelectionOverlay?.Cancel(); } catch { }
+        try { _activeHdrWindow?.RequestCancel(); } catch { }
+        _activeSelectionOverlay = null;
+        _activeHdrWindow = null;
+
         // 自动保存设置
         try { SaveSettings(); } catch { }
 

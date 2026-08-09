@@ -145,17 +145,23 @@ public static class NativeAvifEncoder
         if (isHdr)
         {
             byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(colorSpaceTag ?? "BT2020");
-            return $"--cicp {primaries}/16/0 --depth 10";
+            // ═══ 2026-08-10 修复: matrix 0 (identity) → 9 (BT.2020 NCL) ═══
+            // matrix=0 (identity) 兼容性差: Windows 照片/部分解码器不支持 AV1
+            // identity 矩阵 → fallback 错误矩阵 → YUV 解码偏色 (绿偏黄/红偏紫)。
+            // AVIF HDR 标准推荐 BT.2020 NCL (matrix=9): 编码与声明一致 → 任意
+            // 支持 BT.2020 的解码器正确还原。
+            return $"--cicp {primaries}/16/9 --depth 10";
         }
 
         // SDR: 根据 colorSpaceTag 选择原色
+        // 2026-08-10: matrix 0 → 1 (BT.709), 同上 identity 兼容性问题
         byte prim = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(colorSpaceTag ?? "sRGB");
-        return $"--cicp {prim}/13/0";
+        return $"--cicp {prim}/13/1";
     }
 
     /// <summary>直接从 PNG 文件编码为 AVIF，支持 CICP 参数。</summary>
     public static void EncodeFile(string pngPath, string avifPath, int crf, byte[]? cicp = null,
-        string? colorSpaceTag = null)
+        string? colorSpaceTag = null, float peakNits = 0)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
@@ -164,10 +170,15 @@ public static class NativeAvifEncoder
         int q = CrfToQuality(crf);
 
         // 从 cicp 字节数组构建参数，默认 sRGB
-        string cicpArgs = "--cicp 1/13/0";
+        string cicpArgs = "--cicp 1/13/1";
         if (cicp is { Length: 4 })
         {
-            cicpArgs = $"--cicp {cicp[0]}/{cicp[1]}/{cicp[2]}";
+            byte m = cicp[2];
+            // ═══ 2026-08-10 修复: HDR (PQ) 用 BT.2020 NCL matrix=9 ═══
+            // matrix=0 (identity) 兼容性差 → Windows 照片等解码器偏色 (同 BuildCicpArgs)
+            if (cicp[1] == 16) m = 9;  // PQ 内容: BT.2020 NCL
+            else if (m == 0) m = 1;    // SDR: BT.709
+            cicpArgs = $"--cicp {cicp[0]}/{cicp[1]}/{m}";
             if (cicp[1] == 16) // ST.2084 PQ → 10-bit
                 cicpArgs += " --depth 10";
         }
@@ -177,10 +188,22 @@ public static class NativeAvifEncoder
             cicpArgs = BuildCicpArgs(cicp?[1] == 16, colorSpaceTag);
         }
 
+        // ═══ 2026-08-10 修复: HDR 写 clli (内容亮度级别) ═══
+        // avifenc --clli MaxCLL,MaxPALL。恒 10000 让 tone-map 查看器把 SDR 桌面
+        // 内容显示极暗 → 传内容实际峰值。
+        string clliArg = "";
+        if (peakNits > 0)
+        {
+            int maxCll = (int)Math.Clamp(peakNits, 203f, 10000f);
+            // MaxPALL: 平均亮度上限, 用峰值的一半作为近似 (仅元数据提示)
+            int maxPall = Math.Max(1, maxCll / 2);
+            clliArg = $" --clli {maxCll},{maxPall}";
+        }
+
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = $"-q {q} -s 4 {cicpArgs} \"{pngPath}\" \"{avifPath}\"".Trim(),
+            Arguments = $"-q {q} -s 4 {cicpArgs}{clliArg} \"{pngPath}\" \"{avifPath}\"".Trim(),
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
@@ -230,7 +253,8 @@ public static class NativeAvifEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-q {q} -s 4 --depth 10 --cicp 9/16/0 \"{tmpY4m}\" \"{path}\"".Trim(),
+                // ═══ 2026-08-10 修复: matrix 9 (BT.2020 NCL) 替代 identity (兼容性) ═══
+                Arguments = $"-q {q} -s 4 --depth 10 --cicp 9/16/9 \"{tmpY4m}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -259,7 +283,7 @@ public static class NativeAvifEncoder
     /// <summary>scRGB linear RGB → BT.2020 PQ 10-bit YCbCr (BT.2020 矩阵)。</summary>
     private static int FloatToPq10(float r, float g, float b, out int cb, out int cr)
     {
-        // scRGB linear (BT.709 原色) → BT.2020 RGB 色域转换
+        // scRGB linear (BT.709 原色 + 线性 gamma) → BT.2020 RGB 色域转换
         // 矩阵: ITU-R BT.709 linear → ITU-R BT.2020 linear (D65→D65)
         float r2020 = 0.627404f * r + 0.329283f * g + 0.043313f * b;
         float g2020 = 0.069097f * r + 0.919541f * g + 0.011362f * b;

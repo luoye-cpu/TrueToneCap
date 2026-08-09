@@ -50,6 +50,20 @@ publish/*
 !publish/PLAN/
 !publish/PLAN/**
 
+# ── Publish 内的测试数据 (raw 像素数据, 体积大且无上传价值) ──
+# 注意: 必须放在 !publish/PLAN/** 白名单规则之后才能生效
+publish/PLAN/tools/*.raw
+
+# ── 手动测试/调试脚本 (统一管理, 不上传 GitHub) ──
+tests/manual/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
 # ── .NET 11 Migration Backup ──
 .net10-backup/
 
@@ -89,3 +103,13 @@ TestResults/
 
 # ── TrueToneCap specific ──
 TrueToneCap.settings.json
+
+# ── 签名密钥 (防泄露) ──
+*.pfx
+*.snk
+*.spc
+*.cer
+
+# ── 测试输出图片/临时产物 ──
+*.test.png
+*.test.jpg

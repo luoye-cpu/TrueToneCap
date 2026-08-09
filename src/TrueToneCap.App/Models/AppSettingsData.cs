@@ -13,7 +13,8 @@ public sealed class AppSettingsData
     public int SettingsVersion { get; set; } = 1;
 
     // ── 输出格式 (0=PNG, 1=GainMap, 2=JPEG LI, 3=JPEG XL, 4=AVIF, 5=WebP, 6=TIFF) ──
-    public int FormatIndex { get; set; }
+    // 默认 JPEG LI (索引 2): 体积小 + 兼容性最佳 + 编码快 (jpegli), 适合默认截图
+    public int FormatIndex { get; set; } = 2;
 
     // ── 质量 ──
     // 兼容字段：当前格式的质量（保留用于旧配置文件/其他读取点）。
