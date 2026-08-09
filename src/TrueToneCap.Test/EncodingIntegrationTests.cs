@@ -202,19 +202,25 @@ public static class EncodingIntegrationTests
             bool hasGainMap = soiCount >= 2;
 
             // 验证 XMP 段完整（含 hdrgm:Version）
+            // 注意: Base 可能先有 ICC_PROFILE APP1, 必须遍历所有 APP1 段直到找到 hdrgm XMP
             bool hasXmpFields = false;
             bool hasIsoMetadata = false;
-            for (int i = 0; i < Math.Min(bytes.Length - 4, 8000); i++)
+            for (int i = 0; i < Math.Min(bytes.Length - 4, 20000); i++)
             {
                 if (bytes[i] == 0xFF && bytes[i + 1] == 0xE1)
                 {
                     int segLen = (bytes[i + 2] << 8) | bytes[i + 3];
-                    if (segLen > 100)
+                    if (segLen > 100 && i + 4 + segLen - 2 <= bytes.Length)
                     {
                         var xmp = System.Text.Encoding.UTF8.GetString(bytes, i + 4, segLen - 2);
-                        hasXmpFields = xmp.Contains("hdrgm:Version") && xmp.Contains("hdrgm:GainMapMax");
+                        if (xmp.Contains("hdrgm:Version") && xmp.Contains("hdrgm:GainMapMax"))
+                        {
+                            hasXmpFields = true;
+                            break;
+                        }
                     }
-                    break;
+                    // 跳过该段继续 (不 break, 可能前有 ICC_PROFILE)
+                    i += 2 + segLen;
                 }
             }
             // ISO 21496-1 二进制元数据: 位于增益图 JPEG (第二个 SOI) 之后, APP2 段命名空间

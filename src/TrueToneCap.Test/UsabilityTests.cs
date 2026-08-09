@@ -135,10 +135,13 @@ public static class UsabilityTests
         GainMap_QualitySettings();
         GainMap_MetadataRoundtrip();
         GainMap_HdrOff_DegradedBase();
+        GainMap_ColorFidelity();
 
         // ─── 13. FormatHelper 辅助测试 ───
         Console.WriteLine("\n── 13. FormatHelper ──");
         FormatHelper_HdrToPq16_Valid();
+        FormatHelper_ComputePeakNits_Valid();
+        HdrIntensityTarget_DisplayPeakPreferred();
         FormatHelper_Rgba16ToBgra16_Valid();
         FormatHelper_GetColorMetadata_AllTags();
         FormatHelper_ToSdr_AllModes();
@@ -406,8 +409,8 @@ public static class UsabilityTests
         {
             var cs = ColorProfileProvider.MapColorSpaceTag(space);
             var icc = ColorProfileProvider.GetStandardIccProfile(cs);
-            bool valid = icc.Length > 128 && icc[36] == (byte)'a' && icc[37] == (byte)'c' && icc[38] == (byte)'s' && icc[39] == (byte)'p';
-            Assert($"ColorProfile: {space} ICC有效 ({icc.Length}B)", valid);
+            bool valid = icc is { Length: > 128 } && icc[36] == (byte)'a' && icc[37] == (byte)'c' && icc[38] == (byte)'s' && icc[39] == (byte)'p';
+            Assert($"ColorProfile: {space} ICC有效 ({icc?.Length ?? 0}B)", valid);
         }
     }
 
@@ -582,9 +585,14 @@ public static class UsabilityTests
             try
             {
                 var encoder = EncoderFactory.Create(fmt);
+                // ═══ 2026-08-09: 用每格式默认质量, 不用统一 90 ═══
+                // 各格式质量语义不同: JXL/JPEG_LI 是 butteraugli distance (0.1-4.0),
+                // 90 是百分比 (WebP/AVIF). 统一 90 传给 JXL 会生成 -d 90 → cjxl 失败
+                // (EncodeImageJXL failed). 用 GetQualityRange().Default 保证格式正确。
+                var (min, max, def, _) = encoder.GetQualityRange();
                 var settings = new EncodingSettings
                 {
-                    Format = fmt, Quality = 90f, HdrOutput = false,
+                    Format = fmt, Quality = def, HdrOutput = false,
                     ChromaSubsampling = "444", OutputBitDepth = 8, DisplayBitDepth = 8,
                 };
                 string ext = fmt switch
@@ -629,9 +637,11 @@ public static class UsabilityTests
             try
             {
                 var encoder = EncoderFactory.Create(OutputFormat.JPEG_LI);
+                // JPEG_LI 是 butteraugli distance (0.5-3.0), 用默认 1.0 (90 非法)
+                var (_, _, def, _) = encoder.GetQualityRange();
                 var settings = new EncodingSettings
                 {
-                    Format = OutputFormat.JPEG_LI, Quality = 90f, HdrOutput = false,
+                    Format = OutputFormat.JPEG_LI, Quality = def, HdrOutput = false,
                     ChromaSubsampling = chroma, OutputBitDepth = 8, DisplayBitDepth = 8,
                 };
                 string path = Path.Combine(OutDir, $"jpeg_chroma_{chroma}_{w}x{h}.jpg");
@@ -707,9 +717,11 @@ public static class UsabilityTests
             try
             {
                 var encoder = EncoderFactory.Create(fmt);
+                // 用每格式默认质量 (JXL/JPEG_LI 是 butteraugli distance, 90 非法)
+                var (_, _, def, _) = encoder.GetQualityRange();
                 var settings = new EncodingSettings
                 {
-                    Format = fmt, Quality = 90f, HdrOutput = false,
+                    Format = fmt, Quality = def, HdrOutput = false,
                     ChromaSubsampling = "444", OutputBitDepth = 8,
                     ColorSpaceTag = "DisplayP3",
                     IccProfile = srgbIcc,
@@ -816,9 +828,11 @@ public static class UsabilityTests
                     Assert($"HDR {fmt}: 跳过(不支持)", true);
                     continue;
                 }
+                // 用每格式默认质量 (JXL 是 butteraugli distance, 90 非法 → cjxl 失败)
+                var (_, _, hdrDefault, _) = encoder.GetQualityRange();
                 var settings = new EncodingSettings
                 {
-                    Format = fmt, Quality = 90f, HdrOutput = true,
+                    Format = fmt, Quality = hdrDefault, HdrOutput = true,
                     ChromaSubsampling = "444", OutputBitDepth = 10, DisplayBitDepth = 10,
                 };
                 string ext = fmt switch
@@ -1264,6 +1278,72 @@ public static class UsabilityTests
         return (byte)(clamped / maxLog2 * 255f);
     }
 
+    /// <summary>
+    /// 色彩保真测试 (2026-08-10): 构造已知纯色 HDR 帧 → 编码 GainMap → 验证 Base 色相保持。
+    /// 纯红/绿/蓝在 Base 中不应串色 (偏色根因排查)。输出文件供 Python 分析。
+    /// </summary>
+    static void GainMap_ColorFidelity()
+    {
+        try
+        {
+            // 6 个色块: 白(3,3,3) 红(3,0,0) 绿(0,3,0) 蓝(0,0,3) 灰(1.5,1.5,1.5) 深灰(0.6,0.6,0.6)
+            // scRGB 线性, 1.0=80nits; 3.0 = 240 nits 高光 (需色调映射压缩)
+            int w = 6, h = 64;
+            var px = new float[w * h * 4];
+            float[][] colors = [
+                [3f, 3f, 3f], [3f, 0f, 0f], [0f, 3f, 0f], [0f, 0f, 3f],
+                [1.5f, 1.5f, 1.5f], [0.6f, 0.6f, 0.6f]
+            ];
+            for (int x = 0; x < w; x++)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    int i = (y * w + x) * 4;
+                    px[i] = colors[x][0]; px[i + 1] = colors[x][1]; px[i + 2] = colors[x][2]; px[i + 3] = 1f;
+                }
+            }
+            var frame = new HdrFrameData { Pixels = px, Width = w, Height = h };
+            var encoder = new JpegGainMapEncoder();
+            var settings = new EncodingSettings
+            {
+                Format = OutputFormat.JPEG_GAINMAP, Quality = 0.5f, HdrOutput = true,
+                GainMapMode = GainMapMode.Gray,
+                ToneMappingParams = new ToneMappingParams
+                {
+                    Mode = ToneMapMode.SegmentedReinhard, PaperWhiteNits = 100, DisplayMaxNits = 418
+                },
+            };
+            string path = Path.Combine(OutDir, "gainmap_colorfidelity.jpg");
+            if (File.Exists(path)) File.Delete(path);
+            encoder.EncodeAsync(frame, settings, path).GetAwaiter().GetResult();
+            var fi = new FileInfo(path);
+            Assert($"GainMap 色彩保真: {fi.Length / 1024:N0}KB", fi.Exists && fi.Length > 0);
+            // 双 SOI = Base + 增益图
+            var bytes = File.ReadAllBytes(path);
+            int soiCount = 0;
+            for (int i = 0; i < bytes.Length - 1; i++)
+                if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8) soiCount++;
+            Assert($"GainMap 色彩保真: 双图 (SOI={soiCount})", soiCount == 2);
+
+            // ═══ 2026-08-10 回归: 提取 Base 段供 Python 验证 R/B 通道 (红蓝不得串色) ═══
+            for (int i = 2; i < bytes.Length - 1; i++)
+            {
+                if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8)
+                {
+                    var baseBytes = new byte[i];
+                    Array.Copy(bytes, 0, baseBytes, 0, i);
+                    File.WriteAllBytes(Path.Combine(OutDir, "gainmap_colorfidelity_base.jpg"), baseBytes);
+                    Assert("GainMap 色彩保真: Base 段提取成功", baseBytes.Length > 500);
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Assert("GainMap 色彩保真: 编码成功", false, ex.ToString());
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  13. FormatHelper
     // ═══════════════════════════════════════════════════════════════
@@ -1279,6 +1359,62 @@ public static class UsabilityTests
         Assert("HdrToPq16: 长度=12 (3px*4ch)", p16.Length == 12);
         Assert("HdrToPq16: 黑色=0", p16[0] == 0 && p16[1] == 0 && p16[2] == 0);
         Assert("HdrToPq16: 白色>0", p16[4] > 0 && p16[5] > 0 && p16[6] > 0);
+    }
+
+    static void FormatHelper_ComputePeakNits_Valid()
+    {
+        // ═══ 2026-08-10: JXL intensity_target / AVIF clli 用内容实际峰值 ═══
+        // scRGB 1.0 = 80 nits → PQ 码值
+        // 场景1: 纯 SDR 桌面 (200 nits = scRGB 2.5) → peak≈203-260 (clamp 203)
+        ushort[] sdr = new ushort[8];
+        float[] sdrPx = [2.5f, 2.5f, 2.5f, 1f, 0f, 0f, 0f, 1f];
+        var pqSdr = FormatHelper.HdrToPq16(new HdrFrameData { Pixels = sdrPx, Width = 2, Height = 1 }, null, 16);
+        float peakSdr = FormatHelper.ComputePeakNits(pqSdr);
+        Assert($"ComputePeakNits: SDR 桌面 peak={peakSdr:F0} nits (期望 ~200)", peakSdr >= 203f && peakSdr <= 400f);
+
+        // 场景2: 高光 800 nits (scRGB 10) → peak≈800
+        ushort[] hdr = new ushort[8];
+        float[] hdrPx = [2.5f, 2.5f, 2.5f, 1f, 10f, 10f, 10f, 1f];
+        var pqHdr = FormatHelper.HdrToPq16(new HdrFrameData { Pixels = hdrPx, Width = 2, Height = 1 }, null, 16);
+        float peakHdr = FormatHelper.ComputePeakNits(pqHdr);
+        Assert($"ComputePeakNits: 高光 peak={peakHdr:F0} nits (期望 ~800)", peakHdr >= 700f && peakHdr <= 900f);
+
+        // 场景3: 全黑 → clamp 203
+        float[] blackPx = [0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f];
+        var pqBlack = FormatHelper.HdrToPq16(new HdrFrameData { Pixels = blackPx, Width = 2, Height = 1 }, null, 16);
+        float peakBlack = FormatHelper.ComputePeakNits(pqBlack);
+        Assert($"ComputePeakNits: 全黑 peak={peakBlack:F0} (clamp 203)", peakBlack == 203f);
+    }
+
+    static void HdrIntensityTarget_DisplayPeakPreferred()
+    {
+        // ═══ 2026-08-10 修复(2): intensity_target 语义 = 内容主控峰值 = 源显示器峰值 ═══
+        // 截图截的是显示器显示的内容 → 主控目标 = 显示器 (MaxLuminance)。
+        // PQ 是绝对亮度编码: intensity_target = 显示器峰值时,
+        // 显示器能力 ≥ 内容亮度 → 绝对亮度直显 (SDR 白点自动正确)。
+        // 错误: 恒 10000 → SDR 内容(100nits) 极暗; 内容峰值(418) → 部分查看器
+        //   re-normalize 内容峰值→显示器峰值 → SDR 白点被抬亮发灰。
+        // 规则: intensityTarget = max(显示器峰值, 内容峰值) (内容峰值兜底防 clip)。
+        float displayPeak = 418f;   // 用户显示器实测 MaxLuminance
+        float sdrWhite = 100f;      // 用户显示器实测 SdrWhiteLevel
+
+        // 场景1: SDR 桌面 (内容峰值 100 nits) + 显示器 418
+        var pqSdr = FormatHelper.HdrToPq16(new HdrFrameData
+        { Pixels = [sdrWhite / 80f, sdrWhite / 80f, sdrWhite / 80f, 1f, 0f, 0f, 0f, 1f], Width = 2, Height = 1 }, null, 16);
+        float contentPeak = FormatHelper.ComputePeakNits(pqSdr);
+        float target = Math.Max(displayPeak, contentPeak);
+        Assert($"intensity_target: SDR 桌面 → {target:F0} nits = 显示器峰值 {displayPeak}", MathF.Abs(target - displayPeak) < 1f);
+
+        // 场景2: 内容有超高光 3000 nits (异常) → 取内容峰值防 clip
+        var pqHdr = FormatHelper.HdrToPq16(new HdrFrameData
+        { Pixels = [37.5f, 37.5f, 37.5f, 1f, 1f, 1f, 1f, 1f], Width = 2, Height = 1 }, null, 16); // 37.5 = 3000 nits
+        float contentPeakHdr = FormatHelper.ComputePeakNits(pqHdr);
+        float targetHdr = Math.Max(displayPeak, contentPeakHdr);
+        Assert($"intensity_target: 3000nits 高光 → {targetHdr:F0} (≥内容峰值, 防 clip)", targetHdr >= contentPeakHdr - 1f && targetHdr > displayPeak);
+
+        // 场景3: 兜底 — DisplayMaxNits ≤ 0 → 1000
+        float fallback = displayPeak > 0 ? displayPeak : 1000f;
+        Assert($"intensity_target: 兜底 = {(fallback > 0 ? displayPeak : 1000f)}", fallback > 0);
     }
 
     static void FormatHelper_Rgba16ToBgra16_Valid()
@@ -1302,6 +1438,9 @@ public static class UsabilityTests
             var (icc, cicp) = FormatHelper.GetColorMetadata(settings);
             if (tag is "System" or "sRGB")
                 Assert($"GetColorMetadata({tag}): icc=null, cicp=[1,13,0,1]", icc is null && cicp is { Length: 4 } && cicp[0] == 1 && cicp[1] == 13);
+            else if (tag == "AdobeRGB")
+                // AdobeRGB 无标准 CICP primaries code (H.273), 写 cICP=1 会覆盖 iCCP → 不写 cICP
+                Assert($"GetColorMetadata({tag}): icc=null, cicp=null (无标准 CICP code)", icc is null && cicp is null);
             else
                 Assert($"GetColorMetadata({tag}): icc=null, cicp有效", icc is null && cicp is { Length: 4 });
         }

@@ -49,6 +49,7 @@ public static class ColorPipelineTests
         IccProfile_AllStandardSpaces();
         IccProfile_MatrixAccuracy();
         IccProfile_BakeToTarget();
+        IccProfile_HdrPqProfile();
 
         // ─── 5. 编码文件色彩标记验证 ───
         Console.WriteLine("\n── 5. 编码文件色彩标记 ──");
@@ -269,6 +270,49 @@ public static class ColorPipelineTests
         }
     }
 
+    static void IccProfile_HdrPqProfile()
+    {
+        // ═══ 2026-08-09: HDR PQ ICC (TIFF 用) — 必须声明 PQ TRC, 否则 PQ 像素按 sRGB 解码 ═══
+        var pqIcc = ColorProfileProvider.GetHdrStandardIccProfile("BT2020");
+        Assert("HDR PQ ICC: 非空", pqIcc is { Length: > 128 });
+        if (pqIcc is null) return;
+
+        int tagCount = pqIcc[128] << 24 | pqIcc[129] << 16 | pqIcc[130] << 8 | pqIcc[131];
+        Assert("HDR PQ ICC: 9 tags", tagCount == 9);
+
+        // 验证 rXYZ = BT.2020 D50 primaries (0.6735, 0.2791, -0.0019)
+        bool xyzOk = false, pqTrcOk = false;
+        for (int i = 0; i < tagCount; i++)
+        {
+            int e = 132 + i * 12;
+            if (e + 12 > pqIcc.Length) break;
+            uint sig = (uint)(pqIcc[e] << 24 | pqIcc[e + 1] << 16 | pqIcc[e + 2] << 8 | pqIcc[e + 3]);
+            int off = pqIcc[e + 4] << 24 | pqIcc[e + 5] << 16 | pqIcc[e + 6] << 8 | pqIcc[e + 7];
+            if (sig == 0x7258595Au && off + 20 <= pqIcc.Length) // rXYZ
+            {
+                static float S15(byte[] b, int o) => (b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]) / 65536f;
+                float rX = S15(pqIcc, off + 8);
+                float rY = S15(pqIcc, off + 12);
+                xyzOk = MathF.Abs(rX - 0.6735f) < 0.005f && MathF.Abs(rY - 0.2791f) < 0.005f;
+            }
+            else if ((sig == 0x72545243u || sig == 0x67545243u || sig == 0x62545243u) && off + 12 <= pqIcc.Length) // TRC
+            {
+                // curv: [4B 'curv'][4B reserved][4B count][values]
+                int cnt = pqIcc[off + 8] << 24 | pqIcc[off + 9] << 16 | pqIcc[off + 10] << 8 | pqIcc[off + 11];
+                pqTrcOk = cnt == 4096;
+                if (pqTrcOk && off + 12 + 4096 * 2 <= pqIcc.Length)
+                {
+                    // 中点值: PQ EOTF V=0.5 → L≈0.0092 (归一化 10000 nits)
+                    int mid = off + 12 + (cnt / 2) * 2;
+                    int v = pqIcc[mid] << 8 | pqIcc[mid + 1];
+                    pqTrcOk = MathF.Abs(v / 65535f - 0.0092f) < 0.002f;
+                }
+            }
+        }
+        Assert("HDR PQ ICC: rXYZ = BT.2020 D50 primaries", xyzOk);
+        Assert("HDR PQ ICC: TRC = PQ 4096 点曲线 (中点 L≈0.0092)", pqTrcOk);
+    }
+
     // ═══════════════════════════════════════════════
     //  5. 编码文件色彩标记验证
     // ═══════════════════════════════════════════════
@@ -346,9 +390,10 @@ public static class ColorPipelineTests
         try
         {
             var encoder = EncoderFactory.Create(OutputFormat.JPEG_GAINMAP);
+            // GainMap 质量 = butteraugli distance (0.5-3.0), 用 1.0 (90 是百分比语义, 非法)
             var settings = new EncodingSettings
             {
-                Format = OutputFormat.JPEG_GAINMAP, Quality = 90f, HdrOutput = true,
+                Format = OutputFormat.JPEG_GAINMAP, Quality = 1.0f, HdrOutput = true,
                 GainMapMode = GainMapMode.Rgb,
                 OutputBitDepth = 8, DisplayBitDepth = 10,
             };
@@ -477,7 +522,7 @@ public static class ColorPipelineTests
     static void ColorMatrix_ScrgbToP3_Accuracy()
     {
         // 验证 SrgbToDisplayP3 矩阵: P3 原色在 scRGB 中 → 矩阵 → 应回 P3 原色
-        // P3 红在 scRGB (BT.709 原色) 中的精确坐标:
+        // P3 红在 scRGB (BT.709 原色 + 线性 gamma) 中的精确坐标:
         // 由 SrgbToDisplayP3 的逆矩阵算出: [1.0, 0, 0]^T × inv(SrgbToDisplayP3)
         // 简化验证: 检查矩阵的行和 ≈ 1.0
         float[] rowSums = {
@@ -599,6 +644,12 @@ public static class ColorPipelineTests
         Assert("BuildXmpMetadata: GainMapMin 为 log2 值 (0)", minIsLog2);
         Assert($"BuildXmpMetadata: GainMapMax 为 log2 值 ({MathF.Log2(12.5f):F2})", maxIsLog2);
         Assert("BuildXmpMetadata: 包含 xpacket end", hasXpacketEnd);
+        // ═══ 2026-08-10 修复: GainMap item 含 Item:Length (libultrahdr 对齐) ═══
+        var xmpWithLen = JpegGainMapEncoder.BuildXmpMetadata(1920, 1080, 481, 271, GainMapMode.Gray, 12.5f, 12345);
+        string xmpWithLenStr = System.Text.Encoding.UTF8.GetString(xmpWithLen);
+        Assert("BuildXmpMetadata: GainMap Item 含 Item:Length", xmpWithLenStr.Contains("Item:Length=\"12345\""));
+        var xmpNoLen = JpegGainMapEncoder.BuildXmpMetadata(1920, 1080, 481, 271, GainMapMode.Gray);
+        Assert("BuildXmpMetadata: 无长度时不写 Item:Length", !System.Text.Encoding.UTF8.GetString(xmpNoLen).Contains("Item:Length"));
     }
 
     static void GainMap_BuildIsoMetadata_Output()
@@ -616,6 +667,10 @@ public static class ColorPipelineTests
         // flags: 非公共分母 (bit3=0) 且非多通道 (Gray)
         Assert("ISO 元数据: 非 common denominator", (iso[4] & 0x08) == 0);
         Assert("ISO 元数据: Gray 非多通道", (iso[4] & 0x80) == 0);
+        // ═══ 2026-08-10 修复: useBaseColorSpace (bit6=0x40) 必须设置 ═══
+        // 增益图在 base (sRGB/BT.709) 色彩空间计算, 对齐 libultrahdr use_base_cg=true;
+        // 缺失 → 解码器按 alternate (HDR) 色域解释 → 增益涂层错误
+        Assert("ISO 元数据: useBaseColorSpace (0x40)", (iso[4] & 0x40) != 0);
         // headroom: base=0/1, alt=max/1
         int expectedMax = (int)Math.Round(MathF.Log2(12.5f) * 100f); // 364 (log2(12.5)=3.64 × 100)
         Assert("ISO 元数据: baseHeadroom=0/1", iso[5] == 0 && iso[6] == 0 && iso[7] == 0 && iso[8] == 0 && iso[9] == 0 && iso[10] == 0 && iso[11] == 0 && iso[12] == 1);

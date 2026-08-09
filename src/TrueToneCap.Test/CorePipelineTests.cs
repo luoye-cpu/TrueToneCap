@@ -46,6 +46,7 @@ public static class CorePipelineTests
         Test_ColorProfile_ResolveColorSpaceTag();
         Test_ColorProfile_MapColorSpaceTag();
         Test_ColorProfile_GetStandardIcc_AllSpaces();
+        Test_ColorProfile_D50Primaries_Accuracy();
 
         // PixelOps 扩展
         Test_DownsampleToGray_Dimensions();
@@ -71,12 +72,6 @@ public static class CorePipelineTests
         Test_ColorSpaceConverter_MatrixRowSum();
         Test_ColorSpaceConverter_NoNegativeValues();
         Test_ColorSpaceConverter_GetCicpPrimaries();
-
-        // ColorProfileProvider 逻辑
-        Test_ColorProfile_SrgbIcc_Valid();
-        Test_ColorProfile_ResolveColorSpaceTag();
-        Test_ColorProfile_MapColorSpaceTag();
-        Test_ColorProfile_GetStandardIcc_AllSpaces();
 
         Console.WriteLine($"\n══════════════════════════════════════");
         Console.WriteLine($"  结果: {_passed} 通过, {_failed} 失败");
@@ -559,6 +554,55 @@ public static class CorePipelineTests
         }
         Assert("ColorProfile: 所有标准空间 ICC 有效", ok);
     }
+
+    static void Test_ColorProfile_D50Primaries_Accuracy()
+    {
+        // 验证 PatchSrgbPrimaries 生成的广色域 ICC primaries 为 D50-adapted 标准值
+        // (2026-08-09 修复: 旧 XyToXyzPublic Y=1 无 D50 适应 → P3 红 2.125 错误)
+        // 正确 D50-adapted XYZ (s15Fixed16):
+        //   DisplayP3 rXYZ ≈ (0.5151, 0.2412, -0.0011)
+        //   BT2020    rXYZ ≈ (0.6735, 0.2791, -0.0019)
+        //   AdobeRGB  rXYZ ≈ (0.6098, 0.3111, 0.0195)
+        var expected = new (string Cs, float Rx, float Ry, float Rz)[]
+        {
+            ("DisplayP3", 0.5152f, 0.2412f, -0.0011f),
+            ("BT2020",    0.6735f, 0.2791f, -0.0019f),
+            ("AdobeRGB",  0.6098f, 0.3111f, 0.0195f),
+        };
+        bool ok = true;
+        foreach (var (cs, eRx, eRy, eRz) in expected)
+        {
+            var icc = ColorProfileProvider.GetStandardIccProfile(cs);
+            if (icc is null) { ok = false; Assert($"{cs}: ICC 为 null", false); continue; }
+            var (rX, rY, rZ) = ExtractRgbXyz(icc);
+            bool match = Math.Abs(rX - eRx) < 0.001f && Math.Abs(rY - eRy) < 0.001f && Math.Abs(rZ - eRz) < 0.001f;
+            if (!match) ok = false;
+            Assert($"{cs} rXYZ D50: ({rX:F4},{rY:F4},{rZ:F4}) 匹配标准值 ({eRx:F4},{eRy:F4},{eRz:F4})", match);
+        }
+        Assert("ColorProfile: 广色域 ICC primaries 均为 D50-adapted 标准值", ok);
+    }
+
+    static (float X, float Y, float Z) ExtractRgbXyz(byte[] icc)
+    {
+        int tagCount = icc[128] << 24 | icc[129] << 16 | icc[130] << 8 | icc[131];
+        for (int i = 0; i < tagCount; i++)
+        {
+            int e = 132 + i * 12;
+            uint sig = (uint)(icc[e] << 24 | icc[e + 1] << 16 | icc[e + 2] << 8 | icc[e + 3]);
+            if (sig == 0x7258595Au) // rXYZ
+            {
+                int off = icc[e + 4] << 24 | icc[e + 5] << 16 | icc[e + 6] << 8 | icc[e + 7];
+                float X = ReadS15F16(icc, off + 8);
+                float Y = ReadS15F16(icc, off + 12);
+                float Z = ReadS15F16(icc, off + 16);
+                return (X, Y, Z);
+            }
+        }
+        return (0, 0, 0);
+    }
+
+    static float ReadS15F16(byte[] d, int off)
+        => ((d[off] << 24) | (d[off + 1] << 16) | (d[off + 2] << 8) | d[off + 3]) / 65536f;
 
     // ═══════════════════════════════════════
     //  辅助
