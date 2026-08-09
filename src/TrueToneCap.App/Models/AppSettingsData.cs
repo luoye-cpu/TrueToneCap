@@ -107,6 +107,11 @@ public sealed class AppSettingsData
     [JsonIgnore]
     public int SystemSdrWhiteLevel { get; set; }
 
+    /// <summary>系统检测的 HDR 显示器峰值亮度 (nits)，从 DXGI MaxLuminance 读取。
+    /// 0 表示未检测到，使用用户 DisplayMaxNits。</summary>
+    [JsonIgnore]
+    public int SystemMaxNits { get; set; }
+
     // ── 首次运行标记 ──
     // ⚠ 必须持久化（不能 JsonIgnore）：用于"仅首次运行"时应用系统检测默认值。
     // 若忽略该字段，则每次启动 FirstRun 都为 true，

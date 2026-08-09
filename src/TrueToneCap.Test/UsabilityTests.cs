@@ -61,12 +61,9 @@ public static class UsabilityTests
         ColorProfile_GetStandardIcc_Consistent();
         ColorProfile_DisplayIcc_NullSafe();
 
-        // ─── 4. GamutMapper 测试 ───
-        Console.WriteLine("\n── 4. GamutMapper ──");
-        GamutMapper_HdrToSRgb_AllModes();
-        GamutMapper_MapToSRgb_WithIcc();
-        GamutMapper_MapToSRgb_BoundaryPixels();
-        GamutMapper_BakeToTarget_AllSpaces();
+        // ─── 4. 色彩烘焙测试 ───
+        Console.WriteLine("\n── 4. 色彩烘焙 ──");
+        ColorBakeToTarget_AllSpaces();
 
         // ─── 5. AnnotationManager 测试 ───
         Console.WriteLine("\n── 5. AnnotationManager ──");
@@ -137,6 +134,7 @@ public static class UsabilityTests
         GainMap_RgbMode();
         GainMap_QualitySettings();
         GainMap_MetadataRoundtrip();
+        GainMap_HdrOff_DegradedBase();
 
         // ─── 13. FormatHelper 辅助测试 ───
         Console.WriteLine("\n── 13. FormatHelper ──");
@@ -306,7 +304,7 @@ public static class UsabilityTests
     static void ToneMapper_AllModes_Quality()
     {
         // 验证所有模式输出图像质量: 非全黑、非全白、有梯度差异
-        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
+        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.SegmentedReinhard };
         var hdr = new float[64 * 4];
         for (int i = 0; i < hdr.Length; i += 4)
         {
@@ -330,8 +328,8 @@ public static class UsabilityTests
                 minVal = Math.Min(minVal, lum);
                 maxVal = Math.Max(maxVal, lum);
             }
-            // ACES 压缩度最大，对高亮度输入可能输出全白，只验证不崩溃
-            hasRange = mode == ToneMapMode.Aces ? true : maxVal - minVal > 20;
+            // 所有模式输出应落在 [0,255], 且有亮度区分度
+            hasRange = maxVal - minVal > 20;
 
             bool allInRange = bytes.All(b => b >= 0);
             Assert($"ToneMapper.{mode}: 动态范围={minVal}-{maxVal}, 所有字节在[0,255]={allInRange}", hasRange && allInRange);
@@ -387,7 +385,7 @@ public static class UsabilityTests
     static void ToneMapper_AllModes_Deterministic()
     {
         var hdr = new float[] { 0.1f, 0.2f, 0.3f, 1f, 0.4f, 0.5f, 0.6f, 1f };
-        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
+        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.SegmentedReinhard };
         foreach (var mode in modes)
         {
             var p = new ToneMappingParams { Mode = mode };
@@ -443,50 +441,10 @@ public static class UsabilityTests
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  4. GamutMapper
+    //  4. 色彩烘焙 (ColorProfileProvider.BakeIccToTarget)
     // ═══════════════════════════════════════════════════════════════
 
-    static void GamutMapper_HdrToSRgb_AllModes()
-    {
-        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
-        var hdr = new float[] { 0.5f, 0.3f, 0.8f, 1f, 1.5f, 2.0f, 0.5f, 1f };
-        foreach (var mode in modes)
-        {
-            var p = new ToneMappingParams { Mode = mode };
-            var bytes = GamutMapper.HdrToSRgb(hdr, 2, 1, p);
-            bool ok = bytes.Length == 8 && bytes.All(b => b >= 0);
-            Assert($"GamutMapper.HdrToSRgb: {mode} 输出有效", ok);
-        }
-    }
-
-    static void GamutMapper_MapToSRgb_WithIcc()
-    {
-        var bgra = new byte[16 * 16 * 4];
-        for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 128; bgra[i + 1] = 64; bgra[i + 2] = 192; bgra[i + 3] = 255; }
-        // 使用 sRGB ICC 做映射
-        var srgbIcc = ColorProfileProvider.GetDefaultSRgbIcc();
-        var (pixels, targetIcc) = GamutMapper.MapToSRgb(bgra, 16, 16, srgbIcc);
-        bool ok = pixels.Length == bgra.Length && (targetIcc is null || targetIcc.Length > 0);
-        Assert("GamutMapper.MapToSRgb: 有 ICC 输入不崩溃", ok);
-    }
-
-    static void GamutMapper_MapToSRgb_BoundaryPixels()
-    {
-        // 边界像素值: 0, 255, 随机
-        var bgra = new byte[4 * 4 * 4];
-        for (int i = 0; i < bgra.Length; i += 4)
-        {
-            bgra[i] = (byte)(i / 4 * 16);     // B
-            bgra[i + 1] = (byte)(255 - i / 4 * 16); // G
-            bgra[i + 2] = (byte)(i * 7 % 256); // R
-            bgra[i + 3] = 255;
-        }
-        var (pixels, _) = GamutMapper.MapToSRgb(bgra, 4, 4, null);
-        bool ok = pixels.Length == bgra.Length && pixels.All(b => b >= 0 && b <= 255);
-        Assert("GamutMapper.MapToSRgb: 边界像素值输出在[0,255]", ok);
-    }
-
-    static void GamutMapper_BakeToTarget_AllSpaces()
+    static void ColorBakeToTarget_AllSpaces()
     {
         var bgra = new byte[64 * 64 * 4];
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 128; bgra[i + 1] = 128; bgra[i + 2] = 128; bgra[i + 3] = 255; }
@@ -1094,8 +1052,10 @@ public static class UsabilityTests
             encoder.EncodeAsync(hdr, settings, path).GetAwaiter().GetResult();
             var fi = new FileInfo(path);
             Assert($"GainMap Gray: {fi.Length / 1024:N0}KB", fi.Exists && fi.Length > 0);
-            // 验证 XMP 元数据完整性
+            // 验证 XMP 元数据完整性 (跳过 Base 的 ICC_PROFILE APP1 段, 找真正的 hdrgm XMP)
             var fileBytes = File.ReadAllBytes(path);
+            bool xmpOk = false;
+            int xmpLen = 0;
             for (int i = 0; i < fileBytes.Length - 4; i++)
             {
                 if (fileBytes[i] == 0xFF && fileBytes[i + 1] == 0xE1)
@@ -1103,15 +1063,15 @@ public static class UsabilityTests
                     int segLen = (fileBytes[i + 2] << 8) | fileBytes[i + 3];
                     int payload = segLen - 2;
                     var xmp = System.Text.Encoding.UTF8.GetString(fileBytes, i + 4, payload);
-                    Assert($"GainMap Gray XMP: {payload}B, 包含hdrgm:Version", xmp.Contains("hdrgm:Version"));
-                    break;
+                    if (xmp.Contains("hdrgm:Version")) { xmpOk = true; xmpLen = payload; break; }
+                    // 非 XMP 的 APP1 (如 Base 的 ICC_PROFILE 段) 继续搜索
                 }
             }
+            Assert($"GainMap Gray XMP: {xmpLen}B, 包含hdrgm:Version", xmpOk);
         }
         catch (Exception ex)
         {
-            _warnings++;
-            Console.WriteLine($"  ⚠ GainMap Gray: {ex.GetType().Name} (可接受)");
+            Assert("GainMap Gray: 编码成功", false, ex.ToString());
         }
     }
 
@@ -1137,8 +1097,7 @@ public static class UsabilityTests
         }
         catch (Exception ex)
         {
-            _warnings++;
-            Console.WriteLine($"  ⚠ GainMap RGB: {ex.GetType().Name} (可接受)");
+            Assert("GainMap RGB: 编码成功", false, ex.ToString());
         }
     }
 
@@ -1182,14 +1141,14 @@ public static class UsabilityTests
             {
                 Format = OutputFormat.JPEG_GAINMAP, Quality = 3.0f, HdrOutput = true,
                 GainMapMode = GainMapMode.Gray,
-                ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.Aces, DisplayMaxNits = 1000 },
+                ToneMappingParams = new ToneMappingParams { Mode = ToneMapMode.SegmentedReinhard, DisplayMaxNits = 1000 },
             };
             string path = Path.Combine(OutDir, "gainmap_roundtrip.jpg");
             if (File.Exists(path)) File.Delete(path);
             encoder.EncodeAsync(frame, settings, path).GetAwaiter().GetResult();
 
             var bytes = File.ReadAllBytes(path);
-            // 提取 XMP 中的 GainMapMin/Max
+            // 提取 XMP 中的 GainMapMin/Max (跳过 Base 的 ICC_PROFILE APP1 段, 找真正的 hdrgm XMP)
             string xmpStr = "";
             for (int i = 0; i < Math.Min(bytes.Length - 4, 8000); i++)
             {
@@ -1198,8 +1157,9 @@ public static class UsabilityTests
                     int segLen = (bytes[i + 2] << 8) | bytes[i + 3];
                     if (segLen > 100)
                     {
-                        xmpStr = System.Text.Encoding.UTF8.GetString(bytes, i + 4, segLen - 2);
-                        break;
+                        string seg = System.Text.Encoding.UTF8.GetString(bytes, i + 4, segLen - 2);
+                        if (seg.Contains("hdrgm:GainMapMin")) { xmpStr = seg; break; }
+                        // 非 XMP 的 APP1 (如 Base 的 ICC_PROFILE 段) 继续搜索
                     }
                 }
             }
@@ -1240,8 +1200,59 @@ public static class UsabilityTests
         }
         catch (Exception ex)
         {
-            _warnings++;
-            Console.WriteLine($"  ⚠ GainMap 往返: {ex.GetType().Name}: {ex.Message} (可接受)");
+            Assert("GainMap 往返: 编码成功", false, ex.ToString());
+        }
+    }
+
+    /// <summary>
+    /// 回归测试 (2026-08-08): HDR 关闭时 GainMap 降级路径必须与主路径一致 ——
+    /// 输出分段 Reinhard 生成的纯 Base JPEG (无增益图), 且 Base 显式嵌入 sRGB ICC。
+    /// 修复前: 降级走 ACES (FormatHelper.ToSdr) 导致 HDR 开关切换时 SDR 观感跳变;
+    ///          Base 恒不嵌 ICC (兼容性降级)。
+    /// </summary>
+    static void GainMap_HdrOff_DegradedBase()
+    {
+        try
+        {
+            var bgra = new byte[64 * 64 * 4];
+            for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 200; bgra[i + 1] = 160; bgra[i + 2] = 120; bgra[i + 3] = 255; }
+            var hdr = CreateHdrFrame(bgra, 64, 64);
+
+            var encoder = new JpegGainMapEncoder();
+            var settings = new EncodingSettings
+            {
+                Format = OutputFormat.JPEG_GAINMAP, Quality = 1.0f, HdrOutput = false,
+                GainMapMode = GainMapMode.Gray,
+                // 显式列出所有字段 (record struct 陷阱: 对象初始化器未列出字段=0)
+                ToneMappingParams = new ToneMappingParams
+                {
+                    Mode = ToneMapMode.SegmentedReinhard, PaperWhiteNits = 200, DisplayMaxNits = 1000
+                },
+            };
+            string path = Path.Combine(OutDir, "gainmap_hdroff.jpg");
+            if (File.Exists(path)) File.Delete(path);
+            encoder.EncodeAsync(hdr, settings, path).GetAwaiter().GetResult();
+
+            var bytes = File.ReadAllBytes(path);
+            Assert("GainMap HDR-off: 合法 JPEG (SOI/EOI)",
+                bytes.Length > 4 && bytes[0] == 0xFF && bytes[1] == 0xD8
+                && bytes[^2] == 0xFF && bytes[^1] == 0xD9);
+
+            // 只应有一个 SOI (纯 Base, 无增益图)
+            int soiCount = 0;
+            for (int i = 0; i < bytes.Length - 1; i++)
+                if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8) soiCount++;
+            Assert($"GainMap HDR-off: 单图 (SOI={soiCount})", soiCount == 1,
+                "HDR-off 降级应为纯 Base JPEG, 无增益图");
+
+            // Base JPEG 应含 ICC_PROFILE APP1 段 (Base 显式 sRGB ICC)
+            bool hasIcc = System.Text.Encoding.ASCII.GetString(bytes).Contains("ICC_PROFILE");
+            Assert("GainMap HDR-off: Base 含 sRGB ICC", hasIcc,
+                "Base JPEG 应显式嵌入 sRGB ICC");
+        }
+        catch (Exception ex)
+        {
+            Assert("GainMap HDR-off: 编码成功", false, ex.ToString());
         }
     }
 
@@ -1303,7 +1314,7 @@ public static class UsabilityTests
             Pixels = new float[] { 0.5f, 0.3f, 0.8f, 1f, 1.5f, 2.0f, 0.5f, 1f },
             Width = 2, Height = 1
         };
-        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
+        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.SegmentedReinhard };
         foreach (var mode in modes)
         {
             var settings = new EncodingSettings { ToneMappingParams = new ToneMappingParams { Mode = mode } };

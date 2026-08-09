@@ -26,9 +26,6 @@
                 <controls:NavigationViewItem x:Name="NavOutput" Tag="Output" Content="输出设置">
                     <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE8B7;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
-                <controls:NavigationViewItem x:Name="NavColor" Tag="Color" Content="色彩管理">
-                    <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE790;"/></controls:NavigationViewItem.Icon>
-                </controls:NavigationViewItem>
                 <controls:NavigationViewItem x:Name="NavCapture" Tag="Capture" Content="截图设置">
                     <controls:NavigationViewItem.Icon><FontIcon Glyph="&#xE722;"/></controls:NavigationViewItem.Icon>
                 </controls:NavigationViewItem>
@@ -48,7 +45,7 @@
 
                     <!-- ── 输出设置 ── -->
                     <StackPanel x:Name="PageOutput" Spacing="16">
-                        <TextBlock x:Name="PageOutputTitle" Text="输出设置" FontSize="20" FontWeight="Bold"/>
+                        <TextBlock x:Name="PageOutputTitle" Text="输出与色彩" FontSize="20" FontWeight="Bold"/>
 
                         <!-- 基础输出 -->
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
@@ -69,6 +66,49 @@
                                         <ComboBoxItem Tag="Day">按日 (2026-07-04)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 色彩与 HDR (原色彩管理页, 2026-08-08 合并) -->
+                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="色彩与 HDR" FontSize="14" FontWeight="SemiBold"/>
+                                <StackPanel Spacing="4">
+                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="HDR 输出" VerticalAlignment="Center"/><ToggleSwitch x:Name="HdrSwitch" Grid.Column="1" Toggled="OnHdrToggled"/></Grid>
+                                    <TextBlock x:Name="HdrHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <StackPanel Spacing="4">
+                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="ICC 烘焙" VerticalAlignment="Center"/><ToggleSwitch x:Name="IccBakeSwitch" Grid.Column="1" Toggled="OnIccBakeToggled"/></Grid>
+                                    <TextBlock x:Name="IccHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="ColorSpaceLabel" Text="目标色域" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="ColorCbo" Grid.Column="1" SelectionChanged="OnColorSpaceChanged">
+                                        <ComboBoxItem Tag="System" IsSelected="True">跟随显示器（自动）</ComboBoxItem><ComboBoxItem Tag="sRGB">sRGB</ComboBoxItem><ComboBoxItem Tag="DisplayP3">Display P3</ComboBoxItem>
+                                        <ComboBoxItem Tag="DCI_P3">DCI-P3</ComboBoxItem><ComboBoxItem Tag="AdobeRGB">Adobe RGB</ComboBoxItem><ComboBoxItem Tag="BT2020">BT.2020</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock x:Name="IccStrategyHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
+                                    Text="sRGB 目标不嵌入 ICC（通用默认）；非 sRGB 色域自动嵌入标准 ICC。"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 色域映射 -->
+                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock x:Name="GamutMapTitle" Text="色域映射" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="SourceGamutLabel" Text="显示器色域" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="SourceGamutTxt" Grid.Column="1" VerticalAlignment="Center"
+                                        Text="检测中..." FontWeight="SemiBold"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                </Grid>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="MappingArrow" Text="→ 映射到" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                    <TextBlock x:Name="TargetGamutTxt" Grid.Column="1" VerticalAlignment="Center"
+                                        Text="sRGB" FontWeight="SemiBold"/>
+                                </Grid>
+                                <TextBlock x:Name="GamutMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
+                                    Text="分段 Reinhard — 广色域自动感知缩限到目标色域，确保色彩准确。"/>
                             </StackPanel>
                         </Border>
 
@@ -197,51 +237,6 @@
                         </Border>
                     </StackPanel>
 
-                    <!-- ── 色彩设置 ── -->
-                    <StackPanel x:Name="PageColor" Spacing="16" Visibility="Collapsed">
-                        <TextBlock x:Name="PageColorTitle" Text="色彩设置" FontSize="20" FontWeight="Bold"/>
-                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="12">
-                                <StackPanel Spacing="4">
-                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="HDR 输出" VerticalAlignment="Center"/><ToggleSwitch x:Name="HdrSwitch" Grid.Column="1" Toggled="OnHdrToggled"/></Grid>
-                                    <TextBlock x:Name="HdrHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
-                                </StackPanel>
-                                <StackPanel Spacing="4">
-                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="ICC 烘焙" VerticalAlignment="Center"/><ToggleSwitch x:Name="IccBakeSwitch" Grid.Column="1" Toggled="OnIccBakeToggled"/></Grid>
-                                    <TextBlock x:Name="IccHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
-                                </StackPanel>
-                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="ColorSpaceLabel" Text="目标色域" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="ColorCbo" Grid.Column="1" SelectionChanged="OnColorSpaceChanged">
-                                        <ComboBoxItem Tag="System" IsSelected="True">跟随显示器（自动）</ComboBoxItem><ComboBoxItem Tag="sRGB">sRGB</ComboBoxItem><ComboBoxItem Tag="DisplayP3">Display P3</ComboBoxItem>
-                                        <ComboBoxItem Tag="DCI_P3">DCI-P3</ComboBoxItem><ComboBoxItem Tag="AdobeRGB">Adobe RGB</ComboBoxItem><ComboBoxItem Tag="BT2020">BT.2020</ComboBoxItem>
-                                    </ComboBox>
-                                </Grid>
-                                <TextBlock x:Name="IccStrategyHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
-                                    Text="sRGB 目标不嵌入 ICC（通用默认）；非 sRGB 色域自动嵌入标准 ICC。"/>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- 色域映射 -->
-                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="12">
-                                <TextBlock x:Name="GamutMapTitle" Text="色域映射" FontSize="14" FontWeight="SemiBold"/>
-                                <Grid ColumnDefinitions="120,*">
-                                    <TextBlock x:Name="SourceGamutLabel" Text="显示器色域" VerticalAlignment="Center"/>
-                                    <TextBlock x:Name="SourceGamutTxt" Grid.Column="1" VerticalAlignment="Center"
-                                        Text="检测中..." FontWeight="SemiBold"
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                </Grid>
-                                <Grid ColumnDefinitions="120,*">
-                                    <TextBlock x:Name="MappingArrow" Text="→ 映射到" VerticalAlignment="Center" FontWeight="SemiBold"/>
-                                    <TextBlock x:Name="TargetGamutTxt" Grid.Column="1" VerticalAlignment="Center"
-                                        Text="sRGB" FontWeight="SemiBold"/>
-                                </Grid>
-                                <TextBlock x:Name="GamutMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
-                                    Text="ACES 影视标准 — 广色域自动感知缩限到 sRGB，确保色彩准确。"/>
-                            </StackPanel>
-                        </Border>
-                    </StackPanel>
-
                     <!-- ── 截图与录制 ── -->
                     <StackPanel x:Name="PageCapture" Spacing="16" Visibility="Collapsed">
                         <TextBlock x:Name="PageCaptureTitle" Text="截图与录制" FontSize="20" FontWeight="Bold"/>
@@ -321,10 +316,12 @@
                                         <ComboBoxItem Tag="WindowsOcr">Windows OCR (系统)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <Grid ColumnDefinitions="100,*"><TextBlock Text="识别语言" VerticalAlignment="Center"/>
+                                <Grid x:Name="OcrLangPanel" ColumnDefinitions="100,*"><TextBlock Text="识别语言" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="OcrLangCbo" Grid.Column="1" SelectionChanged="OnOcrLangChanged">
                                     </ComboBox>
                                 </Grid>
+                                <!-- 2026-08-09: ONNX 引擎为 50 语言统一字典, 语言选择无效 → 显示说明 -->
+                                <TextBlock x:Name="OcrLangHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="100,0,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
                                 <TextBlock x:Name="OcrEngineStatus" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="100,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>

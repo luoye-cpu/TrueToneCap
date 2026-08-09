@@ -43,7 +43,7 @@ public sealed class CapturePipelineService
         }
         catch { }
 
-        // 有显示器 ICC → ACES Perceptual 烘焙到目标色域
+        // 有显示器 ICC → 烘焙到目标色域 (广色域 SDR)
         if (displayIcc is not null && displayIcc.Length > 500)
         {
             var (baked, targetIcc) = ColorProfileProvider.BakeIccToTarget(bgra, w, h, displayIcc, targetCs);
@@ -137,10 +137,17 @@ public sealed class CapturePipelineService
             // ── SDR 白点: 系统检测值优先 (DISPLAYCONFIG_SDR_WHITE_LEVEL), 用户手动设置回退 ──
             // 关键: GainMap 的 SDR 直通阈值必须与系统实际 SdrWhiteLevel 一致,
             // 否则 Base 亮度错误 (SDR 发暗/过曝)。系统值 > 0 时优先。
+            // ── HDR 峰值: 系统检测值优先 (DXGI MaxLuminance), 用户设置回退 ──
+            // 关键: GainMap headroom (XMP/ISO GainMapMax) 依赖此值,
+            // 错误值会导致解码端 weight_factor 偏差 → HDR 还原过亮/过暗。
+            // ── 色调映射模式: 分段 Reinhard (GainMap 同款) ──
+            // 2026-08-08: 所有格式 HDR→SDR 统一使用 GainMap 的分段 Reinhard 曲线
+            // (y≤SDR白点直通 + smoothstep 过渡 + 高光 Reinhard 压缩), 保证各格式输出一致。
             ToneMappingParams = new ToneMappingParams
             {
-                Mode = ToneMapMode.Aces,
-                PaperWhiteNits = (s.SystemSdrWhiteLevel > 0 ? s.SystemSdrWhiteLevel : s.PaperWhiteNits)
+                Mode = ToneMapMode.SegmentedReinhard,
+                PaperWhiteNits = (s.SystemSdrWhiteLevel > 0 ? s.SystemSdrWhiteLevel : s.PaperWhiteNits),
+                DisplayMaxNits = (s.SystemMaxNits > 0 ? s.SystemMaxNits : s.DisplayMaxNits)
             },
         };
 

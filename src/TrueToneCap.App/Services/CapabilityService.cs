@@ -28,6 +28,10 @@ public sealed record CapabilityResult
     /// 用于色调映射的 PaperWhite 归一化。值越高，HDR 高光保留越好，但 SDR 内容越暗。</summary>
     public int DisplayPaperWhiteNits { get; init; } = 200;
 
+    /// <summary>当前 HDR 显示器峰值亮度 (nits)，来自 DXGI IDXGIOutput6.MaxLuminance。
+    /// 用于 GainMap headroom。SDR 显示器回退 1000。</summary>
+    public int DisplayMaxNits { get; init; } = 1000;
+
     /// <summary>ACM 或自定义 ICC 时 ICC 烘焙可用（用户可能需要输出到显示器色域以外的目标）。</summary>
     public bool IccBakeAvailable => SupportsHdr || SystemAcm || CustomIcc;
 }
@@ -72,7 +76,12 @@ public sealed class CapabilityService
             DisplayBitDepth = bitDepth,
             // 读取系统实际 SDR 白点 (nits), 失败回退默认 200
             // 用于 GainMap/色调映射的 PaperWhite 归一化, 必须与系统一致
-            DisplayPaperWhiteNits = DisplayEnumerator.GetSdrWhiteLevel() is var pw && pw > 0 ? pw : 200
+            DisplayPaperWhiteNits = DisplayEnumerator.GetSdrWhiteLevel() is var pw && pw > 0 ? pw : 200,
+            // 读取当前 HDR 显示器峰值亮度 (DXGI MaxLuminance, nits)
+            // 用于 GainMap headroom (XMP/ISO GainMapMax), 失败回退 1000
+            DisplayMaxNits = (int)(displays.FirstOrDefault(d => d.IsHdr)?.MaxLuminance
+                ?? displays.FirstOrDefault(d => d.SupportsHdr)?.MaxLuminance
+                ?? 1000f)
         };
     }
 

@@ -258,18 +258,6 @@ public static class OcrService
         float minArea = Math.Min(areaA, areaB);
         return minArea > 0 ? overlap / minArea : 0f;
     }
-
-    /// <summary>获取可用的 OCR 语言列表</summary>
-    public static List<string> GetAvailableLanguages()
-    {
-        try
-        {
-            return OcrEngine.AvailableRecognizerLanguages
-                .Select(l => l.LanguageTag)
-                .ToList();
-        }
-        catch { return ["zh-Hans", "en-US"]; }
-    }
 }
 
 public class OcrResult

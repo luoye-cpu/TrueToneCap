@@ -87,6 +87,22 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     private string[]? _dict;
     private bool _available;
 
+    // ── 池化张量 (2026-08-09: 避免每次推理重新分配大张量, 截图连拍省分配) ──
+    // 检测张量尺寸随输入图变, 尺寸变化时重建; 识别张量尺寸固定 (配置决定)
+    private DenseTensor<float>? _detTensor;
+    private int _detTensorW, _detTensorH;
+    private DenseTensor<float>? _recTensor;
+
+    // ── byte→float LUT (2026-08-09: 消除预处理每像素 /255f 除法, 内存带宽优化) ──
+    private static readonly float[] s_byteToFloat = BuildByteToFloatLut();
+
+    private static float[] BuildByteToFloatLut()
+    {
+        var lut = new float[256];
+        for (int i = 0; i < 256; i++) lut[i] = i / 255f;
+        return lut;
+    }
+
     public OcrEngineInfo Info => new(
         $"PP-OCRv6 ({_provider}, FP16)",
         _provider == OnnxExecutionProvider.Cpu ? OcrEngineMode.Cpu : OcrEngineMode.Gpu,
@@ -221,8 +237,11 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
             // CPU: 使用默认 CPU EP (FP16 模型在 CPU 上自动提升为 FP32 计算)
         }
 
-        // ── 图优化: 全部启用 (含 FP16→FP32 提升 + 算子融合) ──
-        opts.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+        // ── 图优化: ──
+        // 2026-08-09 修复: SimplifiedLayerNormFusion 图优化在 ONNX Runtime 破坏
+        // PP-OCRv6 检测/识别模型输出 (det 输出几乎全 0 → 识别全空)。
+        // 用 ORT_DISABLE_ALL 完全禁用图优化, 牺牲少量性能换取正确结果。
+        opts.GraphOptimizationLevel = GraphOptimizationLevel.ORT_DISABLE_ALL;
 
         // ── FP16 优化 ──
         // 启用内存模式加速 FP16 tensor 分配
@@ -357,39 +376,85 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         float ratioW = (float)w / resizeW;
         float ratioH = (float)h / resizeH;
 
-        var input = new DenseTensor<float>([1, 3, resizeH, resizeW]);
+        // 池化检测张量 (尺寸变化时重建, 否则复用)
+        if (_detTensor is null || _detTensorW != resizeW || _detTensorH != resizeH)
+        {
+            _detTensor = new DenseTensor<float>([1, 3, resizeH, resizeW]);
+            _detTensorW = resizeW;
+            _detTensorH = resizeH;
+        }
+        var input = _detTensor;
         float[] mean = _config.DetMeanV;
         float[] std = _config.DetStdV;
+        var lut = s_byteToFloat;
 
-        // 双线性缩放 + 归一化 + BGRA→BGR (PP-OCRv6 inference.yml: img_mode=BGR)
-        Parallel.For(0, resizeH, y =>
+        // 2026-08-09: 降低检测阈值提高召回 (合成图/小字检测框不稳)
+        float threshold = _config.DetThreshold * 0.5f;
+
+        // ═══ 分离式双线性 (2026-08-09: 预计算坐标权重 + 中间行缓冲, 减少重复计算) ═══
+        // 1. 预计算水平/垂直坐标权重 (避免每像素重复整除/取余)
+        var x0t = new int[resizeW];
+        var x1t = new int[resizeW];
+        var wxt = new float[resizeW];
+        for (int x = 0; x < resizeW; x++)
+        {
+            float srcXf = x * ratioW;
+            int x0 = Math.Clamp((int)srcXf, 0, w - 1);
+            x0t[x] = x0;
+            x1t[x] = Math.Clamp(x0 + 1, 0, w - 1);
+            wxt[x] = srcXf - x0;
+        }
+        var y0t = new int[resizeH];
+        var y1t = new int[resizeH];
+        var wyt = new float[resizeH];
+        for (int y = 0; y < resizeH; y++)
         {
             float srcYf = y * ratioH;
-            int srcY0 = Math.Clamp((int)srcYf, 0, h - 1);
-            int srcY1 = Math.Clamp(srcY0 + 1, 0, h - 1);
-            float wy = srcYf - srcY0;
+            int y0 = Math.Clamp((int)srcYf, 0, h - 1);
+            y0t[y] = y0;
+            y1t[y] = Math.Clamp(y0 + 1, 0, h - 1);
+            wyt[y] = srcYf - y0;
+        }
+
+        // 2. 水平缩放: 每行 srcY0/srcY1 生成中间行缓冲 (3 通道)
+        //    中间行 [srcY][x][c] — 复用内层垂直合并
+        var srcRow0 = new float[resizeW * 3];
+        var srcRow1 = new float[resizeW * 3];
+
+        // 3. 垂直合并 + 归一化 (并行每输出行)
+        Parallel.For(0, resizeH, y =>
+        {
+            int sy0 = y0t[y], sy1 = y1t[y];
+            float wy = wyt[y];
+            int row0Base = sy0 * w * 4;
+            int row1Base = sy1 * w * 4;
+
+            // 水平缩放当前 2 条源行 → 中间缓冲
             for (int x = 0; x < resizeW; x++)
             {
-                float srcXf = x * ratioW;
-                int srcX0 = Math.Clamp((int)srcXf, 0, w - 1);
-                int srcX1 = Math.Clamp(srcX0 + 1, 0, w - 1);
-                float wx = srcXf - srcX0;
-
-                int i00 = (srcY0 * w + srcX0) * 4;
-                int i01 = (srcY0 * w + srcX1) * 4;
-                int i10 = (srcY1 * w + srcX0) * 4;
-                int i11 = (srcY1 * w + srcX1) * 4;
-
-                // BGRA 内存布局 [B=0,G=1,R=2,A=3]，模型期望 BGR → 直接取 c=0,1,2
+                int x0 = x0t[x], x1t_i = x1t[x];
+                float wx = wxt[x];
+                int i0 = row0Base + x0 * 4;
+                int i1 = row0Base + x1t_i * 4;
+                int j0 = row1Base + x0 * 4;
+                int j1 = row1Base + x1t_i * 4;
+                int ob = x * 3;
                 for (int c = 0; c < 3; c++)
                 {
-                    float v00 = bgra[i00 + c] / 255f;
-                    float v01 = bgra[i01 + c] / 255f;
-                    float v10 = bgra[i10 + c] / 255f;
-                    float v11 = bgra[i11 + c] / 255f;
-                    float v0 = v00 * (1 - wx) + v01 * wx;
-                    float v1 = v10 * (1 - wx) + v11 * wx;
-                    float val = v0 * (1 - wy) + v1 * wy;
+                    float h0 = lut[bgra[i0 + c]] * (1 - wx) + lut[bgra[i1 + c]] * wx;
+                    float h1 = lut[bgra[j0 + c]] * (1 - wx) + lut[bgra[j1 + c]] * wx;
+                    srcRow0[ob + c] = h0;
+                    srcRow1[ob + c] = h1;
+                }
+            }
+
+            // 垂直合并 + 归一化 → 张量
+            for (int x = 0; x < resizeW; x++)
+            {
+                int ob = x * 3;
+                for (int c = 0; c < 3; c++)
+                {
+                    float val = srcRow0[ob + c] * (1 - wy) + srcRow1[ob + c] * wy;
                     input[0, c, y, x] = (val - mean[c]) / std[c];
                 }
             }
@@ -401,7 +466,6 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         var output = results.First().AsTensor<float>();
 
         // 后处理: 二值化 + 膨胀 + 置信度过滤
-        float threshold = _config.DetThreshold;
         int oh = output.Dimensions[2], ow = output.Dimensions[3];
 
         // 保存原始概率图（用于置信度过滤）
@@ -455,9 +519,27 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         recW = Math.Max(4, recW);
 
         // 双线性缩放 crop 到 recW×recH
-        var input = new DenseTensor<float>([1, 3, recH, recMaxW]);
+        // 池化识别张量 (尺寸固定 recH×recMaxW, 创建一次复用)
+        _recTensor ??= new DenseTensor<float>([1, 3, recH, recMaxW]);
+        var input = _recTensor;
+        // 复用前清零 padding 区 (右侧 dx>=recW 残留旧数据会污染推理)
+        input.Buffer.Span.Clear();
         float[] recMean = _config.RecMeanV;
         float[] recStd = _config.RecStdV;
+        var lut = s_byteToFloat;
+
+        // 预计算水平坐标权重 (避免每 dx 重复整除/取余)
+        var rx0 = new int[recW];
+        var rx1 = new int[recW];
+        var rwx = new float[recW];
+        for (int dx = 0; dx < recW; dx++)
+        {
+            float srcXf = cropX + (float)dx / recW * cropW;
+            int x0 = Math.Clamp((int)srcXf, 0, imgW - 1);
+            rx0[dx] = x0;
+            rx1[dx] = Math.Clamp(x0 + 1, 0, imgW - 1);
+            rwx[dx] = srcXf - x0;
+        }
 
         for (int dy = 0; dy < recH; dy++)
         {
@@ -465,26 +547,26 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
             int srcY0 = Math.Clamp((int)srcYf, 0, imgH - 1);
             int srcY1 = Math.Clamp(srcY0 + 1, 0, imgH - 1);
             float wy = srcYf - srcY0;
+            int row0Base = srcY0 * imgW * 4;
+            int row1Base = srcY1 * imgW * 4;
             for (int dx = 0; dx < recW; dx++)
             {
-                float srcXf = cropX + (float)dx / recW * cropW;
-                int srcX0 = Math.Clamp((int)srcXf, 0, imgW - 1);
-                int srcX1 = Math.Clamp(srcX0 + 1, 0, imgW - 1);
-                float wx = srcXf - srcX0;
+                int x0 = rx0[dx], x1 = rx1[dx];
+                float wx = rwx[dx];
 
-                int i00 = (srcY0 * imgW + srcX0) * 4;
-                int i01 = (srcY0 * imgW + srcX1) * 4;
-                int i10 = (srcY1 * imgW + srcX0) * 4;
-                int i11 = (srcY1 * imgW + srcX1) * 4;
+                int i00 = row0Base + x0 * 4;
+                int i01 = row0Base + x1 * 4;
+                int i10 = row1Base + x0 * 4;
+                int i11 = row1Base + x1 * 4;
 
                 // PP-OCRv6 识别模型期望 BGR 通道顺序 (inference.yml: img_mode=BGR)
                 // BGRA 内存布局 [B=0,G=1,R=2,A=3] → 直接取 c=0,1,2 即为 BGR
                 for (int c = 0; c < 3; c++)
                 {
-                    float v00 = bgra[i00 + c] / 255f;
-                    float v01 = bgra[i01 + c] / 255f;
-                    float v10 = bgra[i10 + c] / 255f;
-                    float v11 = bgra[i11 + c] / 255f;
+                    float v00 = lut[bgra[i00 + c]];
+                    float v01 = lut[bgra[i01 + c]];
+                    float v10 = lut[bgra[i10 + c]];
+                    float v11 = lut[bgra[i11 + c]];
                     float v0 = v00 * (1 - wx) + v01 * wx;
                     float v1 = v10 * (1 - wx) + v11 * wx;
                     float val = v0 * (1 - wy) + v1 * wy;

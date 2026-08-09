@@ -32,10 +32,57 @@ public sealed partial class MainWindow : Window
     private CancellationTokenSource? _captureCts; // 截图/编码取消令牌
     private bool _isExiting;           // 托盘退出标志（跳过最小化）
     private TextBox? _recordingTarget; // 正在录制的快捷键输入框
+    private string _hdrSystemHint = ""; // 系统 HDR 状态基础提示 (DetectAndApplySystemCapabilitiesAsync 写入)
+    private bool _hdrHardwareSupported; // 硬件是否支持 HDR (能力检测写入, 供格式联动禁用开关)
+
+    /// <summary>格式能力描述 (2026-08-08 重构: 统一能力表替代硬编码 switch)。</summary>
+    private sealed record FormatCapability(
+        OutputFormat Format,
+        bool SupportsHdr,       // 编码器原生 HDR 支持 (JPEG LI/WebP 不支持)
+        bool SupportsWideGamut, // 能否输出广色域 CICP/ICC (GainMap Base 恒 sRGB)
+        bool IccEmbeddable,     // 能否嵌入 ICC 元数据
+        int[] BitDepths,        // 支持的位深 (null/8 表示固定)
+        string[] Chroma,        // 支持的色度采样 (空 = 固定 4:4:4)
+        string Hint);           // 格式提示文本
+
+    private static readonly Dictionary<OutputFormat, FormatCapability> s_formatCaps = new()
+    {
+        [OutputFormat.PNG] = new(OutputFormat.PNG,
+            SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
+            BitDepths: [8, 10, 12, 16], Chroma: [],
+            Hint: "✅ 无损格式，支持 HDR (cICP Rec.2100 PQ) + 广色域 ICC。截图首选。"),
+        [OutputFormat.JPEG_GAINMAP] = new(OutputFormat.JPEG_GAINMAP,
+            SupportsHdr: true, SupportsWideGamut: false, IccEmbeddable: true,
+            BitDepths: [8], Chroma: [],
+            Hint: "✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。Base 恒为 sRGB。"),
+        [OutputFormat.JPEG_LI] = new(OutputFormat.JPEG_LI,
+            SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
+            BitDepths: [8], Chroma: ["444", "422", "420"],
+            Hint: "✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit 不支持 HDR，但支持广色域 (P3/Adobe RGB) ICC 嵌入。"),
+        [OutputFormat.JPEG_XL] = new(OutputFormat.JPEG_XL,
+            SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
+            BitDepths: [8, 10, 12], Chroma: ["444", "420"],
+            Hint: "✅ 新一代格式，Modular 模式对截图极优。支持 HDR (Rec.2100 PQ) + 广色域。"),
+        [OutputFormat.AVIF] = new(OutputFormat.AVIF,
+            SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
+            BitDepths: [8, 10, 12], Chroma: ["444", "422", "420"],
+            Hint: "✅ 先进格式，支持 HDR + 硬件加速编码。默认 4:4:4。"),
+        [OutputFormat.WebP] = new(OutputFormat.WebP,
+            SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
+            BitDepths: [8], Chroma: ["444", "420"],
+            Hint: "⚠ 仅 8-bit，不支持 HDR (但支持广色域 ICC 嵌入)。适合简单分享场景。"),
+        [OutputFormat.TIFF] = new(OutputFormat.TIFF,
+            SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
+            BitDepths: [8, 16], Chroma: [],
+            Hint: "✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"),
+    };
+
+    private static FormatCapability GetFormatCap(OutputFormat fmt)
+        => s_formatCaps.TryGetValue(fmt, out var c) ? c : new FormatCapability(fmt, false, false, true, [8], [], "");
+
 
     // ── 通过 AppServices 访问共享服务（不再本地持有）──
     private WgcCaptureService? _wgcService => AppServices.Wgc;
-    private GpuToneMapper? _gpuToneMapper => AppServices.GpuToneMapper;
 
     public MainWindow(bool isAutostart = false)
     {
@@ -195,6 +242,38 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 更新 GainMap 卡片的亮度基准提示: 当前系统 SDR 白点 + 行业标准 203 nits +
+    /// 对应 Windows 'SDR 内容亮度' 滑块建议值。
+    /// 滑块映射 (本机实测 13 点采样, 完美线性): nits = 80 + 4 × 滑块 (0-100 → 80-480 nits,
+    /// 每格 4 nits)。经 5→100, 39→236 两次独立采样交叉验证一致。
+    /// 203 nits (libultrahdr kSdrWhiteNits, Android/影视生态) → 滑块 31。
+    /// 注: 此线性映射为 Windows 11 HDR 滑块常见行为 (80~480 nits), 若个别驱动非线性
+    /// 请以应用实时显示的系统 SDR 白点为准微调。
+    /// </summary>
+    private void UpdateGainMapHint(int sdrWhiteNits)
+    {
+        if (GainMapHintTxt is null) return;
+        const float kIndustryStdNits = 203f; // libultrahdr kSdrWhiteNits
+        // 本机实测线性映射: nits = 80 + 4 × 滑块 → 滑块 = (nits - 80) / 4
+        int currentSlider = sdrWhiteNits > 80
+            ? (int)Math.Round((sdrWhiteNits - 80) / 4.0)
+            : 0;
+        int targetSlider = (int)Math.Round((kIndustryStdNits - 80) / 4.0); // = 31
+
+        string text = sdrWhiteNits > 0
+            ? $"当前系统 SDR 白点: {sdrWhiteNits} nits"
+            : "当前系统 SDR 白点: 未检测到 (使用设置值)";
+        text += $" | 行业标准: {kIndustryStdNits:0} nits (Android/影视, libultrahdr)";
+        text += $"\nWindows 'SDR 内容亮度' 滑块: 当前约 {currentSlider} | 目标 {kIndustryStdNits:0} nits ≈ 滑块 {targetSlider}";
+        text += " (实测线性: nits=80+4×滑块, 0-100→80-480)";
+        if (sdrWhiteNits > 0 && Math.Abs(sdrWhiteNits - kIndustryStdNits) > 20)
+        {
+            text += $"\n💡 与行业标准偏差较大: 建议将滑块调到 {targetSlider} (≈{kIndustryStdNits:0} nits), 调完重启应用生效";
+        }
+        GainMapHintTxt.Text = text;
+    }
+
     /// <summary>一次性检测所有系统能力（HDR/ACM/ICC/色彩空间），更新 UI 和设置。</summary>
     private async Task DetectAndApplySystemCapabilitiesAsync()
     {
@@ -204,6 +283,7 @@ public sealed partial class MainWindow : Window
         _settings.QsvAvailable = cap.QsvAvailable;
         _settings.DisplayBitDepth = cap.DisplayBitDepth;
         _settings.SystemSdrWhiteLevel = cap.DisplayPaperWhiteNits;
+        _settings.SystemMaxNits = cap.DisplayMaxNits;
 
         // ACM 不再强制禁用 ICC 烘焙：用户可选择输出到任意色域，
         // ACM 仅保证显示器正确显示，不影响截图输出色彩空间。
@@ -223,8 +303,8 @@ public sealed partial class MainWindow : Window
         // 更新 UI
         DispatcherQueue.TryEnqueue(() =>
         {
-            // 无论 HDR 当前是否开启，只要硬件支持就允许用户切换
-            HdrSwitch.IsEnabled = cap.SupportsHdr;
+            _hdrHardwareSupported = cap.SupportsHdr;
+            // 无论 HDR 当前是否开启，只要硬件支持就允许用户切换 (格式联动在 UpdateQualityPanel)
             HdrSwitch.IsOn = _settings.HdrEnabled;
 
             string hdrText;
@@ -243,7 +323,15 @@ public sealed partial class MainWindow : Window
             string sdrWhiteText = cap.DisplayPaperWhiteNits > 0
                 ? $" | SDR 白点 {cap.DisplayPaperWhiteNits} nits"
                 : "";
-            HdrHintTxt.Text = hdrText + acmText + sdrWhiteText;
+            // 显示 HDR 峰值亮度 (GainMap headroom 依据, DXGI MaxLuminance)
+            string maxNitsText = cap.DisplayMaxNits > 0 && cap.SupportsHdr
+                ? $" | 峰值 {cap.DisplayMaxNits} nits"
+                : "";
+            HdrHintTxt.Text = hdrText + acmText + sdrWhiteText + maxNitsText;
+            _hdrSystemHint = hdrText + acmText + sdrWhiteText + maxNitsText; // 供格式 HDR 联动拼接
+
+            // GainMap 亮度基准提示 (SDR 白点 + 行业标准 203 + Windows 滑块建议)
+            UpdateGainMapHint(cap.DisplayPaperWhiteNits);
 
             IccBakeSwitch.IsEnabled = cap.IccBakeAvailable;
             IccBakeSwitch.IsOn = _settings.IccBakeEnabled;
@@ -255,6 +343,9 @@ public sealed partial class MainWindow : Window
                 IccHintTxt.Text = "未检测到校色 ICC；sRGB 目标不嵌入，非 sRGB 嵌入标准 ICC";
 
             UpdateAvifBackendLabels();
+
+            // 按当前格式刷新 HDR 开关状态 + 联动提示 (格式不支持 HDR 时禁用)
+            UpdateQualityPanel();
         });
     }
 
@@ -348,6 +439,9 @@ public sealed partial class MainWindow : Window
             MultiOcrService.SelectedEngineType = engineType;
         }
         PopulateOcrLanguages();
+        // 2026-08-09: 启动时按引擎类型更新语言 UI (ONNX 统一字典隐藏语言选择)
+        if (Enum.TryParse<OcrEngineType>(_settings.OcrEngineMode, out var initEngineType))
+            UpdateOcrLanguageVisibility(initEngineType);
         // Gain Map 模式
         if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
     }
@@ -482,22 +576,45 @@ public sealed partial class MainWindow : Window
         QualitySld.Maximum = max;
         QualitySld.SmallChange = 0.1;
         QualitySld.LargeChange = 0.5;
-        bool precise = format is OutputFormat.JPEG_LI or OutputFormat.JPEG_XL;
+        // GainMap 也是 butteraugli 距离 (0.5-3.0, 与 JPEG LI 同类型) → 支持小数步进 + 手动输入
+        bool precise = format is OutputFormat.JPEG_LI or OutputFormat.JPEG_XL or OutputFormat.JPEG_GAINMAP;
         QualitySld.StepFrequency = precise ? 0.1 : 1.0;
         QualitySld.IsEnabled = format != OutputFormat.PNG;
 
-        // ── 格式专属提示 ──
-        FormatHintTxt.Text = format switch
+        // ── 格式专属提示 (2026-08-08: 能力表驱动) ──
+        var cap = GetFormatCap(format);
+        FormatHintTxt.Text = format == OutputFormat.JPEG_GAINMAP
+            ? $"✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 {(_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80)} nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 {(_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80)}。"
+            : cap.Hint;
+
+        // ── HDR 能力联动 (2026-08-08: 格式能力表驱动) ──
+        // 系统 HDR 状态提示 + 格式不支持 HDR 时的降级警告 + GainMap 色域说明
+        if (HdrHintTxt is not null)
         {
-            OutputFormat.PNG => "✅ 无损格式，支持 HDR (cICP Rec.2100 PQ)。截图首选。",
-            OutputFormat.JPEG_LI => "✅ Google jpegli 编码，butteraugli 距离控制质量。体积小，兼容性最佳。",
-            OutputFormat.JPEG_GAINMAP => $"✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 {( _settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80 )} nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 {( _settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80 )}。",
-            OutputFormat.JPEG_XL => "✅ 新一代格式，Modular 模式对截图极优。支持 HDR。",
-            OutputFormat.AVIF => "✅ 先进格式，支持 HDR + 硬件加速编码。默认 4:4:4。",
-            OutputFormat.WebP => "⚠ 仅 SDR 8-bit。适合简单分享场景。",
-            OutputFormat.TIFF => "✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。",
-            _ => ""
-        };
+            // 格式不支持 HDR → 禁用 HDR 开关 (所有编码路径均用 IsOn&&IsEnabled 判断 → 自动 SDR 降级)
+            // 硬件不支持 → 同样禁用
+            HdrSwitch.IsEnabled = _hdrHardwareSupported && cap.SupportsHdr;
+            string fmtHdrWarn;
+            if (!cap.SupportsHdr)
+            {
+                // 8-bit 不支持 HDR (PQ 传输), 但支持广色域 SDR (ICC 嵌入)
+                fmtHdrWarn = _hdrHardwareSupported
+                    ? "\n🔒 当前格式为 8-bit，不支持 HDR 输出 — HDR 开关已禁用。"
+                      + (cap.SupportsWideGamut
+                          ? " 支持广色域 (P3/Adobe RGB) ICC 嵌入：ICC 烘焙开关开启 + 目标色域选 P3/Adobe RGB 时输出广色域 SDR。"
+                          : "")
+                      + " 如需 HDR 请选 PNG/JPEG XL/AVIF/TIFF/Gain Map。"
+                    : "\n🔒 此显示器不支持 HDR — HDR 开关已禁用。";
+            }
+            else
+            {
+                fmtHdrWarn = "";
+            }
+            string wideWarn = (cap.SupportsHdr && !cap.SupportsWideGamut && HdrSwitch.IsOn)
+                ? "\nℹ Gain Map 的 Base 恒为 sRGB (增益图为相对编码)，目标色域设置不影响其像素色域。"
+                : "";
+            HdrHintTxt.Text = _hdrSystemHint + fmtHdrWarn + wideWarn;
+        }
 
         // ── 格式专属选项卡片 ──
         bool isAvif = format == OutputFormat.AVIF;
@@ -631,6 +748,8 @@ public sealed partial class MainWindow : Window
         if (GetSelectedColorSpaceTag() == "System")
             DetectAndShowSourceGamut();
         UpdateGamutMappingUI();
+        // HDR 开关影响格式 HDR 联动提示 (GainMap 色域说明) — 刷新当前格式面板
+        UpdateQualityPanel();
         AppServices.Settings.SaveQuiet();
     }
 
@@ -665,6 +784,8 @@ public sealed partial class MainWindow : Window
                 : $"烘焙目标: {ColorProfileProvider.GetColorSpaceDisplayName(tag)}（将嵌入标准 ICC）";
         }
         UpdateGamutMappingUI();
+        // 色域变化影响 GainMap 色域说明提示
+        UpdateQualityPanel();
         _settings.ColorSpaceIndex = ColorCbo.SelectedIndex;
         AppServices.Settings.SaveQuiet();
     }
@@ -801,18 +922,18 @@ public sealed partial class MainWindow : Window
             if (canUseFloat16)
             {
                 MappingArrow.Text = "→ Float16 广色域捕获 → 色域映射";
-                GamutMapHintTxt.Text = $"WGC Float16 捕获完整广色域 → 3×3 矩阵转换到 {targetName} → 色调映射 (Hable) → SDR 输出。";
+                GamutMapHintTxt.Text = $"WGC Float16 捕获完整广色域 → 3×3 矩阵转换到 {targetName} → 色调映射 (分段 Reinhard) → SDR 输出。";
             }
             else
             {
-                MappingArrow.Text = "→ ACES 缩限到";
+                MappingArrow.Text = "→ 分段 Reinhard 缩限到";
                 GamutMapHintTxt.Text = $"SDR 捕获 → ICC 烘焙 → {targetName}。";
             }
         }
         else
         {
             bool needsMapping = targetIsWide || (targetTag == "System" && (sourceIsHdr || sourceIsHdrCapable));
-            MappingArrow.Text = needsMapping ? "→ ACES 缩限到" : "→ 直通（同色域）";
+            MappingArrow.Text = needsMapping ? "→ 分段 Reinhard 缩限到" : "→ 直通（同色域）";
             GamutMapHintTxt.Text = needsMapping
                 ? $"SDR 捕获 → ICC 烘焙 → {targetName}。"
                 : "当前显示器色域与目标一致，无需转换。";
@@ -975,7 +1096,7 @@ public sealed partial class MainWindow : Window
                     LogService.Info("SilentCapture", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                     var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
                         captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
-                        new ToneMappingParams { Mode = ToneMapMode.Aces, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits) });
+                        new ToneMappingParams { Mode = ToneMapMode.SegmentedReinhard, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits), DisplayMaxNits = (_settings.SystemMaxNits > 0 ? _settings.SystemMaxNits : _settings.DisplayMaxNits) });
                     if (iccProfile is not null)
                         settings.IccProfile = iccProfile;
                     settings.HdrOutput = false;
@@ -1221,7 +1342,7 @@ public sealed partial class MainWindow : Window
                 LogService.Info("MainWindow", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                 var (sdrPixels, iccP) = CapturePipelineService.PrepareFloat16WithIcc(
                     hdrPixels, w, h, iccBakeEnabled, colorSpaceTag,
-                    new ToneMappingParams { Mode = ToneMapMode.Aces, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits) });
+                    new ToneMappingParams { Mode = ToneMapMode.SegmentedReinhard, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits), DisplayMaxNits = (_settings.SystemMaxNits > 0 ? _settings.SystemMaxNits : _settings.DisplayMaxNits) });
                 if (iccP is not null)
                     settings.IccProfile = iccP;
                 settings.HdrOutput = false;
@@ -1697,7 +1818,7 @@ public sealed partial class MainWindow : Window
                     LogService.Info("MainWindow", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
                     var (sdrPixels, iccProfile) = CapturePipelineService.PrepareFloat16WithIcc(
                         captureResult.HdrPixels, fw, fh, iccBakeEnabled, colorSpaceTag,
-                        new ToneMappingParams { Mode = ToneMapMode.Aces, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits) });
+                        new ToneMappingParams { Mode = ToneMapMode.SegmentedReinhard, PaperWhiteNits = (_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : _settings.PaperWhiteNits), DisplayMaxNits = (_settings.SystemMaxNits > 0 ? _settings.SystemMaxNits : _settings.DisplayMaxNits) });
                     if (iccProfile is not null)
                         settings.IccProfile = iccProfile;
                     settings.HdrOutput = false;
@@ -1772,8 +1893,25 @@ public sealed partial class MainWindow : Window
 
         // 切换引擎 → 刷新语言列表并重置为默认语言
         PopulateOcrLanguages();
+        UpdateOcrLanguageVisibility(engineType);
         UpdateOcrEngineStatus();
         try { SaveSettingsQuiet(); } catch { }
+    }
+
+    /// <summary>
+    /// 2026-08-09: 按引擎类型更新语言 UI。
+    /// ONNX (PP-OCRv6) 为 50 语言统一字典 (ppocrv6_dict.txt), 语言选择不影响识别
+    /// → 隐藏语言下拉框 + 显示统一模型说明; 仅 Windows OCR 真正按语言工作 → 显示选择。
+    /// </summary>
+    private void UpdateOcrLanguageVisibility(OcrEngineType engineType)
+    {
+        if (OcrLangPanel is null || OcrLangHintTxt is null) return;
+        bool isWindowsOcr = engineType == OcrEngineType.WindowsOcr;
+        OcrLangPanel.Visibility = isWindowsOcr ? Visibility.Visible : Visibility.Collapsed;
+        OcrLangHintTxt.Visibility = isWindowsOcr ? Visibility.Collapsed : Visibility.Visible;
+        OcrLangHintTxt.Text = isWindowsOcr
+            ? ""
+            : "ℹ PP-OCRv6 为 50 语言统一字典 (ppocrv6_dict.txt) — 自动识别所有语言，无需选择。";
     }
 
     private void OnCategoryChanged(Microsoft.UI.Xaml.Controls.NavigationView sender, Microsoft.UI.Xaml.Controls.NavigationViewSelectionChangedEventArgs args)
@@ -1782,7 +1920,6 @@ public sealed partial class MainWindow : Window
         var tag = (args.SelectedItem as Microsoft.UI.Xaml.Controls.NavigationViewItem)?.Tag as string ?? "Output";
 
         PageOutput.Visibility = tag == "Output" ? Visibility.Visible : Visibility.Collapsed;
-        PageColor.Visibility = tag == "Color" ? Visibility.Visible : Visibility.Collapsed;
         PageCapture.Visibility = tag == "Capture" ? Visibility.Visible : Visibility.Collapsed;
         PageAI.Visibility = tag == "AI" ? Visibility.Visible : Visibility.Collapsed;
         PageSystem.Visibility = tag == "System" ? Visibility.Visible : Visibility.Collapsed;
@@ -1955,13 +2092,12 @@ public sealed partial class MainWindow : Window
         BrandTagline.Text = LocaleManager.CurrentLanguage == AppLanguage.English ? "HDR Screenshot Tool" : "HDR 截图工具";
 
         NavOutput.Content = LocaleManager.NavOutput;
-        NavColor.Content = LocaleManager.NavColor;
         NavCapture.Content = LocaleManager.NavCapture;
         NavAI.Content = LocaleManager.NavAI;
         NavSystem.Content = LocaleManager.NavSystem;
         NavLog.Content = LocaleManager.NavLog;
 
-        PageOutputTitle.Text = LocaleManager.PageOutput;
+        PageOutputTitle.Text = LocaleManager.CurrentLanguage == AppLanguage.English ? "Output & Color" : "输出与色彩";
         BasicOutputTitle.Text = LocaleManager.BasicOutput;
         AvifOptionsTitle.Text = LocaleManager.AvifOptions;
         GainMapOptionsTitle.Text = LocaleManager.GainMapOptions;
@@ -1969,7 +2105,6 @@ public sealed partial class MainWindow : Window
         GainMapModeLabelTxt.Text = LocaleManager.GainMapModeLabel;
         AvifPngSuffixChk.Content = LocaleManager.AvifPngSuffix;
 
-        PageColorTitle.Text = LocaleManager.PageColor;
         ColorSpaceLabel.Text = LocaleManager.ColorSpace;
         GamutMapTitle.Text = LocaleManager.GamutMapTitle;
         SourceGamutLabel.Text = LocaleManager.SourceGamut;

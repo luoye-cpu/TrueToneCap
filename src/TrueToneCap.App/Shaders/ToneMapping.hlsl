@@ -1,5 +1,6 @@
 // shaders/ToneMapping.hlsl
-// HDR -> SDR tone mapping shader (Reinhard / Hable / ACES)
+// HDR -> SDR tone mapping shader (Reinhard / Hable / SegmentedReinhard)
+// ACES 已移除 (2026-08-08): 生产恒用分段 Reinhard, 无激活路径。可行性见 docs/architecture-design.md
 // Compile: dxc -T ps_6_0 -E main ToneMapping.hlsl -Fo ToneMapping.cso
 
 Texture2D<float4> InputTexture : register(t0);
@@ -23,26 +24,6 @@ struct PSOutput
 {
     float4 color : SV_TARGET;
 };
-
-// scRGB (BT.709) -> ACES AP1 (ACEScg) 3x3 matrix
-float3 SrgbToAp1(float3 c)
-{
-    float3 r;
-    r.x = 0.613132f * c.x + 0.339538f * c.y + 0.047416f * c.z;
-    r.y = 0.070124f * c.x + 0.916324f * c.y + 0.013452f * c.z;
-    r.z = 0.020445f * c.x + 0.109548f * c.y + 0.870006f * c.z;
-    return r;
-}
-
-// ACES AP1 -> sRGB (BT.709) inverse matrix
-float3 Ap1ToSrgb(float3 c)
-{
-    float3 r;
-    r.x = 1.704579f * c.x - 0.625505f * c.y - 0.078038f * c.z;
-    r.y = -0.129701f * c.x + 1.139240f * c.y - 0.009570f * c.z;
-    r.z = -0.019717f * c.x - 0.128087f * c.y + 1.147935f * c.z;
-    return r;
-}
 
 // Reinhard tone mapping (scRGB space, hue-preserving luminance scaling)
 float3 ReinhardToneMap(float3 hdr)
@@ -68,30 +49,32 @@ float3 HableToneMap(float3 hdr)
     return curr * whiteScale;
 }
 
-// ACES RRT (Narkowicz 2015) + ODT - needs AP1 conversion
-// 注意: RRT 不截断到 [0,1]，高光保留给 ODT 压缩（与 CPU 一致）
-float3 ACESRrt(float3 ap1)
+// 分段 Reinhard (GainMap 同款, 2026-08-08 统一):
+// y≤1 直通 (SDR 白点内保真) → smoothstep 过渡 (消除跳变) → Reinhard 压缩 (高光)
+float SegmentedReinhardMap(float y, float headroom)
 {
-    const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-    return (ap1 * (a * ap1 + b)) / (ap1 * (c * ap1 + d) + e);
+    if (y <= 1.0f) return saturate(y);
+    float h2 = headroom * headroom;
+    float rY = (1.0f + y / h2) / (1.0f + y) * y;   // ReinhardMap(y, headroom)
+    const float eps = 0.25f;
+    if (y < 1.0f + eps)
+    {
+        float t = (y - 1.0f) / eps;
+        float s = t * t * (3.0f - 2.0f * t);        // smoothstep
+        return (1.0f - s) + s * rY;                  // 混合直通与 Reinhard
+    }
+    return rY;
 }
 
-// ACES ODT: 对比度提升 + 亮度缩放（随 DisplayMaxNits 微调）
-float3 ACESOdt(float3 x, float maxNits)
+// 分段 Reinhard 色调映射 (亮度缩放保持色相, 与 CPU 融合内核一致)
+float3 SegmentedReinhardToneMap(float3 hdr)
 {
-    float k = 0.3f + 0.05f * clamp((maxNits - 100.0f) / 900.0f, 0.0f, 1.0f);
-    return x * (1.0f + k * (1.0f - x) * (1.0f - x));
-}
-
-float3 ACESToneMap(float3 hdr)
-{
-    float3 ap1 = SrgbToAp1(hdr);
-    float3 m = ACESRrt(ap1);
-    m = ACESOdt(m, DisplayMaxNits);
-    // 饱和度补偿（ACES 参考 ODT 色度处理, sat=0.96）
-    float lum = dot(m, float3(0.2126f, 0.7152f, 0.0722f));
-    m = lum + 0.96f * (m - lum);
-    return Ap1ToSrgb(saturate(m));
+    float pw = max(PaperWhiteNits, 80.0f);
+    float headroom = max(DisplayMaxNits, 1.0f) / pw;
+    float maxY = max(hdr.r, max(hdr.g, hdr.b));
+    float maxSdr = SegmentedReinhardMap(maxY, headroom);
+    float scale = (maxY > 1e-6f) ? (maxSdr / maxY) : 0.0f;
+    return saturate(hdr * scale);
 }
 
 // Linear -> sRGB gamma (with negative protection)
@@ -114,7 +97,7 @@ PSOutput main(PSInput input)
     if (ToneMapMode == 0)
         mapped = ReinhardToneMap(lin);
     else if (ToneMapMode == 2)
-        mapped = ACESToneMap(lin);
+        mapped = SegmentedReinhardToneMap(lin);   // 分段 Reinhard (GainMap 同款)
     else
         mapped = HableToneMap(lin);
 

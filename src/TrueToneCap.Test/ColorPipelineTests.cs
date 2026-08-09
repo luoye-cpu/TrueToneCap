@@ -66,16 +66,13 @@ public static class ColorPipelineTests
 
         // ─── 7. 色域映射 ───
         Console.WriteLine("\n── 7. 色域映射 ──");
-        GamutMap_WideGamut_NoCrash();
         GamutMap_SrgbToP3_Identity();
-        GamutMap_HdrToSdr_OutputRange();
 
         // ─── 8. 色域转换矩阵精度验证 ───
         Console.WriteLine("\n── 8. 色域转换矩阵精度 ──");
         ColorMatrix_ScrgbToP3_Accuracy();
         ColorMatrix_ScrgbToBt2020_Accuracy();
         ColorMatrix_ScrgbToAdobeRgb_Accuracy();
-        ColorMatrix_SrgbToAcesAp1_Roundtrip();
         ColorMatrix_ApplySrgbToTargetGamut();
 
         // ─── 9. Gain Map XMP 验证 ───
@@ -399,7 +396,7 @@ public static class ColorPipelineTests
     static void ToneMap_AllModes_Monotonic()
     {
         // 所有色调映射模式应保持单调性（亮度更高的输入 → 亮度更高的输出）
-        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
+        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.SegmentedReinhard };
         foreach (var mode in modes)
         {
             var hdr = new float[64 * 4];
@@ -427,7 +424,7 @@ public static class ColorPipelineTests
     {
         // 纯黑输入 → 纯黑输出
         var hdr = new float[] { 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f };
-        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
+        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.SegmentedReinhard };
         foreach (var mode in modes)
         {
             var p = new ToneMappingParams { Mode = mode };
@@ -448,17 +445,6 @@ public static class ColorPipelineTests
     // ═══════════════════════════════════════════════
     //  7. 色域映射
     // ═══════════════════════════════════════════════
-
-    static void GamutMap_WideGamut_NoCrash()
-    {
-        var bgra = new byte[16 * 16 * 4];
-        for (int i = 0; i < bgra.Length; i += 4)
-        {
-            bgra[i] = 255; bgra[i + 1] = 0; bgra[i + 2] = 0; bgra[i + 3] = 255; // 纯蓝
-        }
-        var (pixels, _) = GamutMapper.MapToSRgb(bgra, 16, 16, null);
-        Assert("GamutMap: 无 ICC 直通", pixels.Length == bgra.Length);
-    }
 
     static void GamutMap_SrgbToP3_Identity()
     {
@@ -481,20 +467,6 @@ public static class ColorPipelineTests
         else
         {
             Assert("sRGB→sRGB 烘焙: 返回空(可接受)", true);
-        }
-    }
-
-    static void GamutMap_HdrToSdr_OutputRange()
-    {
-        // HDR→SDR 输出应在 [0,255] 范围内
-        var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.Aces };
-        var hdr = new float[] { 0.5f, 0.3f, 0.8f, 1f, 1.5f, 2.0f, 0.5f, 1f };
-        foreach (var mode in modes)
-        {
-            var p = new ToneMappingParams { Mode = mode };
-            var bytes = GamutMapper.HdrToSRgb(hdr, 2, 1, p);
-            bool inRange = bytes.All(b => b >= 0 && b <= 255);
-            Assert($"GamutMap.HdrToSRgb: {mode} 输出在 [0,255]", inRange);
         }
     }
 
@@ -576,35 +548,6 @@ public static class ColorPipelineTests
         for (int i = 0; i < 3; i++)
             if (MathF.Abs(rowSums[i] - 1.0f) > 0.001f) allRowSumClose = false;
         Assert("SrgbToAdobeRGB: 所有行和 ≈ 1.0", allRowSumClose);
-    }
-
-    static void ColorMatrix_SrgbToAcesAp1_Roundtrip()
-    {
-        // 验证 SrgbToAcesAp1 和 AcesAp1ToSrgb 互为逆矩阵
-        // 测试几个关键值
-        var testColors = new (float r, float g, float b)[]
-        {
-            (1.0f, 0.0f, 0.0f),  // 红
-            (0.0f, 1.0f, 0.0f),  // 绿
-            (0.0f, 0.0f, 1.0f),  // 蓝
-            (0.5f, 0.5f, 0.5f),  // 灰
-            (1.0f, 1.0f, 1.0f),  // 白
-        };
-        bool allClose = true;
-        foreach (var (r, g, b) in testColors)
-        {
-            // 正向: sRGB → AP1
-            float ar = r * ColorSpaceConverter.SrgbToAcesAp1[0,0] + g * ColorSpaceConverter.SrgbToAcesAp1[0,1] + b * ColorSpaceConverter.SrgbToAcesAp1[0,2];
-            float ag = r * ColorSpaceConverter.SrgbToAcesAp1[1,0] + g * ColorSpaceConverter.SrgbToAcesAp1[1,1] + b * ColorSpaceConverter.SrgbToAcesAp1[1,2];
-            float ab = r * ColorSpaceConverter.SrgbToAcesAp1[2,0] + g * ColorSpaceConverter.SrgbToAcesAp1[2,1] + b * ColorSpaceConverter.SrgbToAcesAp1[2,2];
-            // 逆向: AP1 → sRGB
-            float rr = ar * ColorSpaceConverter.AcesAp1ToSrgb[0,0] + ag * ColorSpaceConverter.AcesAp1ToSrgb[0,1] + ab * ColorSpaceConverter.AcesAp1ToSrgb[0,2];
-            float gg = ar * ColorSpaceConverter.AcesAp1ToSrgb[1,0] + ag * ColorSpaceConverter.AcesAp1ToSrgb[1,1] + ab * ColorSpaceConverter.AcesAp1ToSrgb[1,2];
-            float bb = ar * ColorSpaceConverter.AcesAp1ToSrgb[2,0] + ag * ColorSpaceConverter.AcesAp1ToSrgb[2,1] + ab * ColorSpaceConverter.AcesAp1ToSrgb[2,2];
-            if (MathF.Abs(rr - r) > 0.01f || MathF.Abs(gg - g) > 0.01f || MathF.Abs(bb - b) > 0.01f)
-                allClose = false;
-        }
-        Assert("ACES AP1: 正向+逆向往返精度 < 0.01", allClose);
     }
 
     static void ColorMatrix_ApplySrgbToTargetGamut()

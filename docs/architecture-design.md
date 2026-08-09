@@ -793,3 +793,44 @@ dotnet run --project src/TrueToneCap.Test -- --unit-tests
 | 有界 Channel 录制 | 防止 4K@60fps 录制 OOM（上限 ~1GB） |
 | AppServices 服务定位器 | WinUI 3 无内置 DI，轻量静态单例足够 |
 | LogService 统一日志 | 替代散落的 Debug/Trace/Console.WriteLine |
+
+---
+
+## 12. ACES 色调映射 — 可行性说明 (2026-08-08 移除)
+
+### 背景
+ACES 色调映射曾作为 HDR→SDR 的参考级曲线（`ToneMapMode.Aces`），包含：
+- **AP1 广色域工作空间**（scRGB → 3×3 → ACEScg 处理 → 逆矩阵回 sRGB）
+- **参考级 ODT**（`ODT.Academy.RGBmonitor_100nits_dim.ctl`，对比度 S 曲线 + 饱和度补偿）
+- **RRT**（Narkowicz 2015 拟合，肩部滚降不截断高光）
+
+### 移除原因 (2026-08-08)
+1. **生产零激活**：UI 无色调映射模式选择器，所有路径恒用 `SegmentedReinhard`（GainMap 同款）。
+2. **一致性架构确立**：2026-08-08 统一所有格式 HDR→SDR 为 `SegmentedReinhardMap` 单一核心，
+   GainMap Base 与其他格式降级数学等价。ACES 是另一条曲线，开放会破坏一致性。
+3. **GainMap 约束**：增益比 `HDR/SDR` 必须在同一映射空间，ACES 的相对压缩不满足增益≥1 约束，
+   GainMap 无法用 ACES。
+4. **维护成本**：AP1 矩阵 + RRT/ODT 需 CPU（C#）+ GPU（HLSL）双份同步，且无激活调用方。
+
+### 已清理内容
+- `ToneMapper.cs`：`Aces` 枚举值、`ScrgbToAcesAp1`/`AcesAp1ToScrgb` 矩阵、
+  `AcesToneMapCpu`/`AcesRrt`/`AcesOdt`、`ApplyToneMapping` 与融合内核的 ACES case。
+- `ToneMapping.hlsl`：`SrgbToAp1`/`Ap1ToSrgb`、`ACESRrt`/`ACESOdt`/`ACESToneMap`、main 的 mode 2 分支。
+- `ColorProfileProvider.cs`：`SrgbToAcesAp1`/`AcesAp1ToSrgb` 矩阵。
+- 测试：4 个 ACES 用例、`ColorMatrix_SrgbToAcesAp1_Roundtrip`、所有模式数组的 `Aces` 项。
+- `GamutMapper.cs`/`MainWindow`/`CapabilityService` 中 ACES 注释。
+
+### 复活路径 (未来"色调映射风格"选项)
+若需为用户提供"影视感"曲线，可零成本复活 ACES：
+1. **恢复枚举值**：`ToneMapMode.Aces = 2`（HLSL 已有 mode 2 槽位映射到 SegmentedReinhard，需改回）。
+2. **恢复函数**：`AcesToneMapCpu`/`AcesRrt`/`AcesOdt` + AP1 矩阵（本文档保留算法出处）。
+3. **同步 GPU**：HLSL 恢复 `ACESToneMap` + main 分支。
+4. **约束**：GainMap 仍强制 `SegmentedReinhard`（相对编码约束）；仅其他格式可选 ACES 风格。
+5. **UI**：新增"色调映射风格"下拉（直通/标准/影视）。
+
+### 算法参考（原文摘录存档）
+- **AP1 矩阵**（ACES 1.0.3, SMPTE ST 2065-1:2012）：
+  `scRGB→AP1`: `[0.613132 0.339538 0.047416; 0.070124 0.916324 0.013452; 0.020445 0.109548 0.870006]`
+  `AP1→scRGB`（逆）: `[1.704579 -0.625505 -0.078038; -0.129701 1.139240 -0.009570; -0.019717 -0.128087 1.147935]`
+- **RRT**（Narkowicz 2015）：`y = x(ax+b) / (x(cx+d)+e)`，`a=2.51 b=0.03 c=2.43 d=0.59 e=0.14`
+- **ODT**：`boosted = x·(1 + k·(1-x)²)`，`k = 0.3 + 0.05·clamp((maxNits-100)/900, 0, 1)`；饱和度补偿 `sat=0.96`

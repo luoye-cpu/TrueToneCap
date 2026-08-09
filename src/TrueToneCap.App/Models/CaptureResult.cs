@@ -39,28 +39,15 @@ public sealed class CaptureResult : IDisposable
     public long CaptureTimeMs { get; set; }
 
     /// <summary>获取可用于显示/编码的 BGRA8 像素。HDR 帧会自动执行色调映射。</summary>
-    /// <param name="toneParams">色调映射参数，默认 ACES（与主管线一致）。</param>
+    /// <param name="toneParams">色调映射参数，默认分段 Reinhard (与主管线一致)。
+    /// 注意: 必须用构造函数 (保留默认 PaperWhite=200/MaxNits=1000), 对象初始化器会置 0。</param>
     public byte[]? GetDisplayPixels(TrueToneCap.Core.Processing.ToneMappingParams? toneParams = null)
     {
         if (SdrPixels is not null) return SdrPixels;
         if (HdrPixels is not null)
             return TrueToneCap.Core.Processing.ToneMapper.FloatToSRgbBytes(HdrPixels, Width, Height,
-                toneParams ?? new TrueToneCap.Core.Processing.ToneMappingParams { Mode = TrueToneCap.Core.Processing.ToneMapMode.Aces });
+                toneParams ?? new TrueToneCap.Core.Processing.ToneMappingParams(TrueToneCap.Core.Processing.ToneMapMode.SegmentedReinhard));
         return null;
-    }
-
-    /// <summary>获取可用于显示/编码的 BGRA8 像素（异步 GPU 路径）。</summary>
-    public async Task<byte[]?> GetDisplayPixelsAsync(TrueToneCap.Core.Processing.GpuToneMapper? gpuMapper = null,
-        TrueToneCap.Core.Processing.ToneMappingParams? toneParams = null,
-        string? colorSpaceTag = null)
-    {
-        if (SdrPixels is not null) return SdrPixels;
-        var tp = toneParams ?? new TrueToneCap.Core.Processing.ToneMappingParams { Mode = TrueToneCap.Core.Processing.ToneMapMode.Aces };
-        if (HdrPixels is not null && gpuMapper is not null)
-        {
-            return await gpuMapper.ToneMapToSdrAsync(HdrPixels, Width, Height, tp, colorSpaceTag);
-        }
-        return GetDisplayPixels(tp);
     }
 
     public void Dispose()
