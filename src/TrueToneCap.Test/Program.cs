@@ -31,6 +31,12 @@ if (args.Contains("--service-tests"))
     return TrueToneCap.Test.ServiceTests.RunAll();
 }
 
+// ── OCR 服务测试入口 ──
+if (args.Contains("--ocr-tests"))
+{
+    return TrueToneCap.Test.OcrServiceTests.RunAll();
+}
+
 // ── 全部测试入口 ──
 if (args.Contains("--all"))
 {
@@ -42,6 +48,8 @@ if (args.Contains("--all"))
     totalExit += TrueToneCap.Test.EncodingIntegrationTests.RunAll();
     Console.WriteLine();
     totalExit += TrueToneCap.Test.ServiceTests.RunAll();
+    Console.WriteLine();
+    totalExit += TrueToneCap.Test.OcrServiceTests.RunAll();
     Console.WriteLine();
     totalExit += TrueToneCap.Test.UsabilityTests.RunAll();
     Console.WriteLine("\n══════════════════════════════════════");
@@ -60,5 +68,6 @@ Console.WriteLine("  --color-tests      色彩管线精度测试");
 Console.WriteLine("  --encoding-tests   编码管线集成测试");
 Console.WriteLine("  --usability-tests  综合可用性测试");
 Console.WriteLine("  --service-tests    基础设施服务测试 (ShaderLoader, NativeLibraryResolver)");
+Console.WriteLine("  --ocr-tests        OCR 服务测试 (BitmapPreprocessor, LlmProviders)");
 Console.WriteLine("  --all              全部测试\n");
 return 0;
