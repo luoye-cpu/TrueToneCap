@@ -14,6 +14,27 @@ if (args.Length >= 1 && args[0] == "--ocr-bench")
     return;
 }
 
+// ═══ 标准 ICC 空间实测验证 (--icc-check) ═══
+if (args.Length >= 1 && args[0] == "--icc-check")
+{
+    IccCheck.Run(args);
+    return;
+}
+
+// ═══ PNG cICP + iCCP 双重声明验证 (--png-check) ═══
+if (args.Length >= 1 && args[0] == "--png-check")
+{
+    PngCheck.Run(args);
+    return;
+}
+
+// ═══ 格式映射全链路验证 (--fmt-check) ═══
+if (args.Length >= 1 && args[0] == "--fmt-check")
+{
+    FmtCheck.Run(args);
+    return;
+}
+
 // ═══ 生成 4K 测试像素 (彩色渐变) ═══
 const int W = 3840, H = 2160;
 var bgra = new byte[W * H * 4];
@@ -39,6 +60,8 @@ Console.WriteLine($"色调映射 (LUT): {tsw.ElapsedMilliseconds / 5.0:F1} ms/�
 Console.WriteLine($"ISA: AVX2={PixelOps.HasAvx2} AVX512={PixelOps.HasAvx512Full} AVX10v1={PixelOps.HasAvx10V1} AVX10v2={PixelOps.HasAvx10V2} FMA={PixelOps.HasFma} AVXVNNI={PixelOps.HasAvxVnni} NEON={PixelOps.HasNeon} VecWidth={PixelOps.BestVectorByteWidth}\n");
 
 // ═══ 全格式测试 ═══
+// 注意: 各格式质量语义不同 (JXL/JPEG_LI/GainMap=butteraugli distance 0.x-4.0,
+// WebP=百分比, AVIF=CRF, PNG=固定)。必须用各格式合法范围的值, 否则 cjxl/cjpegli 失败。
 var formats = new (OutputFormat Fmt, string Name, float Quality, bool Hdr, int TimeoutS)[]
 {
     (OutputFormat.PNG,          "PNG (无损)",          100, false, 10),
@@ -46,7 +69,7 @@ var formats = new (OutputFormat Fmt, string Name, float Quality, bool Hdr, int T
     (OutputFormat.WebP,          "WebP",                90f, false, 10),
     (OutputFormat.AVIF,          "AVIF",                30f, false, 60),
     (OutputFormat.JPEG_XL,       "JPEG XL",             2.0f, false, 60),
-    (OutputFormat.JPEG_GAINMAP,  "JPEG GainMap (HDR)",  90f, true,  60),
+    (OutputFormat.JPEG_GAINMAP,  "JPEG GainMap (HDR)",  1.0f, true,  60),
 };
 
 string outDir = Path.Combine(Path.GetTempPath(), "TrueToneCap_Bench");

@@ -38,7 +38,10 @@ public sealed class PngEncoder : ImageEncoder
                     var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
                     byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
                     byte[] cicp = [primaries, 16, 0, 1]; // PQ transfer=16
-                    byte[]? icc = s.IccProfile; // 同时嵌入 ICC（如有）
+                    // ═══ 2026-08-09 修复: HDR 不嵌 ICC ═══
+                    // PNG 3.0 规范: cICP 优先于 iCCP。嵌入的 iCCP (标准 ICC, sRGB TRC)
+                    // 与 PQ 像素矛盾 → 按 iCCP 解码的查看器图像错误。CICP 声明足够。
+                    byte[]? icc = null;
                     // IHDR 始终为 16-bit，sBIT 标记实际位深 (PNG 3.0 Table 12: color type 6 仅允许 8/16)
                     ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, iccProfile: icc, bitDepth: hdrBitDepth);
                 }, ct);
@@ -117,8 +120,26 @@ public sealed class JpegXlEncoder : ImageEncoder
                 var csTag = s.ColorSpaceTag ?? "sRGB";
                 // JXL HDR 固定 16-bit 全精度
                 var pq16 = FormatHelper.HdrToPq16(f, csTag, 16);
-                var icc = s.IccProfile;
-                NativeJxlEncoder.EncodeHdr(pq16, f.Width, f.Height, path, s.Quality, icc, 10000f);
+                // ═══ 2026-08-10 修复(2): intensity_target = 显示器 HDR 峰值 ═══
+                // 截图内容的主控目标 = 源显示器 (截的就是显示器显示的)。
+                // PQ 是绝对亮度编码 (码值→绝对 nits), intensity_target 语义 =
+                // "内容亮度上限" = 显示器峰值。查看器据此做 tone-map:
+                // - 显示器能力 ≥ intensity_target → 绝对亮度直显 (SDR 白点 200nits 正确)
+                // - 显示器能力 <  → 按比例压缩
+                // 错误历史:
+                //   恒 10000 → 查看器把 200nits SDR 内容在 10000nits 容器 tone-map → 极暗
+                //   内容实际峰值(822) → 部分查看器 re-normalize 内容峰值→显示器峰值
+                //     → SDR 白点被抬亮 → 发灰 (用户指出的问题)
+                // 正确: 显示器峰值 (DisplayMaxNits 系统检测优先) + 内容峰值兜底防 clip
+                float intensityTarget = s.ToneMappingParams.DisplayMaxNits;
+                if (intensityTarget <= 0f) intensityTarget = 1000f; // 兜底: HDR 显示器常见峰值
+                float contentPeak = FormatHelper.ComputePeakNits(pq16);
+                if (intensityTarget < contentPeak) intensityTarget = contentPeak;
+                // ═══ 2026-08-09 修复: JXL HDR 不嵌 ICC ═══
+                // `-x color_space=Rec2100PQ` 已声明 BT.2020 + PQ + intensity_target。
+                // 嵌入 ICC (标准 ICC, sRGB TRC) 会覆盖 color fields → PQ 传输丢失 →
+                // 解码器按 sRGB gamma 解码 PQ 值 → 图像错误。
+                NativeJxlEncoder.EncodeHdr(pq16, f.Width, f.Height, path, s.Quality, null, intensityTarget);
             }, ct);
         }
         else
@@ -159,12 +180,19 @@ public sealed class AvifEncoder : ImageEncoder
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
                 byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(csTag);
                 byte[] cicpHdr = [primaries, 16, 0, 1]; // PQ transfer
-                byte[]? iccHdr = s.IccProfile;
+                // ═══ 2026-08-09 修复: HDR 不嵌 ICC (同 PNG, CICP 优先声明) ═══
+                byte[]? iccHdr = null;
                 var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_avif_hdr_{Guid.NewGuid():N}.png");
                 try
                 {
                     ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, tmpPng, cicp: cicpHdr, iccProfile: iccHdr);
-                    NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr, csTag);
+                    // ═══ 2026-08-10 修复: AVIF HDR clli = 显示器 HDR 峰值 (同 JXL) ═══
+                    // MaxCLL 语义 = 内容亮度上限 = 显示器峰值。恒 10000 → SDR 内容极暗。
+                    float peakNits = s.ToneMappingParams.DisplayMaxNits;
+                    if (peakNits <= 0f) peakNits = 1000f;
+                    float contentPeakAvif = FormatHelper.ComputePeakNits(p16);
+                    if (peakNits < contentPeakAvif) peakNits = contentPeakAvif;
+                    NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr, csTag, peakNits);
                 }
                 finally { try { File.Delete(tmpPng); } catch { } }
             }, ct);
@@ -233,7 +261,11 @@ public sealed class TiffEncoder : ImageEncoder
                 // TIFF HDR 固定 16-bit 全精度
                 var pq16 = FormatHelper.HdrToPq16(f, csTag, 16);
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(pq16, f.Width, f.Height);
-                ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, s.IccProfile);
+                // ═══ 2026-08-09 修复: TIFF HDR 嵌 PQ ICC ═══
+                // TIFF 无 CICP 机制, 必须嵌 ICC。但标准 ICC 是 sRGB TRC, 与 PQ 像素矛盾。
+                // 用 PQ TRC ICC (GetHdrStandardIccProfile), 否则解码器按 sRGB gamma 解码 PQ 值。
+                byte[]? iccHdr = ColorManagement.ColorProfileProvider.GetHdrStandardIccProfile(csTag);
+                ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, iccHdr);
             }, ct);
         }
         else
@@ -525,6 +557,13 @@ public static class FormatHelper
         bool isSRgb = s.ColorSpaceTag is null or "System" or "sRGB";
         byte[]? icc = (!isSRgb && s.IccProfile is { Length: > 400 }) ? s.IccProfile : null;
 
+        // ═══ AdobeRGB 无标准 CICP primaries code (ITU-T H.273 Table 2) ═══
+        // GetCicpPrimaries("AdobeRGB") 返回 1 (BT.709/sRGB), 但 cICP 优先于 iCCP,
+        // 写错误的 cICP primaries=1 会覆盖 AdobeRGB iCCP → 色彩丢失。
+        // 修复: AdobeRGB 不写 cICP, 仅靠 iCCP 声明 (否则 cICP 误标 sRGB)。
+        if (s.ColorSpaceTag == "AdobeRGB")
+            return (icc, null);
+
         // 始终写入 cICP chunk（PNG 3.0 RFC 9327 推荐两者都写）
         // cICP 优先于 iCCP，但两者都写可确保向现代和老旧解码器的兼容性
         byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(s.ColorSpaceTag ?? "sRGB");
@@ -648,6 +687,35 @@ public static class FormatHelper
     private const float PQ_c1 = 3424f / 4096f;
     private const float PQ_c2 = 2413f / 128f;
     private const float PQ_c3 = 2392f / 128f;
+
+    /// <summary>从 PQ16 数组计算内容实际峰值亮度 (nits)。
+    /// ═══ 2026-08-10: 用于 JXL `--intensity_target` ═══
+    /// 截图内容通常是 SDR 桌面 (峰值 200-800 nits), 恒传 10000 会让 tone-map
+    /// 查看器把 SDR 内容显示得极暗。传实际峰值 → 查看器正确映射。
+    /// clamp 到 [203, 10000] 保证合法 (libjxl 要求 ≥ 255, 保守用 203)。
+    /// 含 Alpha 通道 (65535) 不计入峰值。</summary>
+    public static float ComputePeakNits(ushort[] pq16)
+    {
+        int maxCode = 0;
+        // 步进采样加速: 4K 图像 3300 万码值, 全扫约 10ms
+        for (int i = 0; i < pq16.Length; i += 4)
+        {
+            int c = pq16[i];
+            if (c > maxCode) maxCode = c;
+            c = pq16[i + 1];
+            if (c > maxCode) maxCode = c;
+            c = pq16[i + 2];
+            if (c > maxCode) maxCode = c;
+        }
+        if (maxCode <= 0) return 203f;
+        // PQ EOTF: 码值 → nits
+        double vv = maxCode / 65535.0;
+        double vm = Math.Pow(vv, 1.0 / PQ_m2);
+        double num = Math.Max(vm - PQ_c1, 0.0);
+        double den = PQ_c2 - PQ_c3 * vm;
+        float nits = (float)(Math.Pow(num / den, 1.0 / PQ_m1) * 10000.0);
+        return Math.Clamp(nits, 203f, 10000f);
+    }
 
     /// <summary>scRGB 线性光 → PQ (ST.2084) 感知量化编码。</summary>
     internal static float LinearToPQ(float scRgbLinear)

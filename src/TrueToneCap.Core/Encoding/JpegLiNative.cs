@@ -144,6 +144,10 @@ public static class JpegLiNative
                 CreateNoWindow = true
             };
 
+            // ═══ 2026-08-10 诊断: 输出实际命令行 (验证 --distance 是否正确传递) ═══
+            // Release 下 Debug.WriteLine 不输出 → 写临时文件供分析
+            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JPEGLI] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
+
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");
             var stderr = proc.StandardError.ReadToEnd();
@@ -216,6 +220,64 @@ public static class JpegLiNative
             fs.WriteByte(bgra[si + 2]); // R
             fs.WriteByte(bgra[si + 1]); // G
             fs.WriteByte(bgra[si]);     // B
+        }
+    }
+
+    /// <summary>灰度 BGRA8 像素编码为 1 分量灰度 JPEG (YCbCr400)。
+    /// ═══ 2026-08-10 新增: GainMap 单通道增益图必须用真灰度 JPEG ═══
+    /// 对齐 libultrahdr (jpegr.cpp): 单通道增益图 = UHDR_IMG_FMT_8bppYCbCr400,
+    /// 解码器 (MS Photos/Android) 按 JPEG 分量数判断增益图通道数:
+    ///   - 1 分量灰度 → 单通道增益, 应用到所有通道 (规范要求!)
+    ///   - 3 分量 RGB → 每通道独立增益 (即使像素相等也可能被当作多通道处理 → 偏色)
+    /// 输入: 单通道灰度像素 (每像素 1 byte), 写 PPM P5 → cjpegli 输出 YCbCr400。</summary>
+    public static byte[] EncodeGray(byte[] gray, int width, int height,
+        float distance = 1.0f, bool forceBaseline = false)
+    {
+        var exePath = GetExePath();
+        var tmpPpm = Path.Combine(Path.GetTempPath(), $"ttc_jpegli_gray_{Guid.NewGuid():N}.pgm");
+
+        try
+        {
+            // PPM P5 灰度格式: "P5\n{w} {h}\n255\n" + 每像素 1 字节
+            using (var fs = new FileStream(tmpPpm, FileMode.Create, FileAccess.Write))
+            {
+                using var writer = new System.IO.StreamWriter(fs, System.Text.Encoding.ASCII, leaveOpen: true);
+                writer.Write($"P5\n{width} {height}\n255\n");
+                writer.Flush();
+                fs.Write(gray, 0, gray.Length);
+            }
+
+            float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
+            string progArg = forceBaseline ? " --progressive_level 0" : "";
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = $"--distance {clampedDist:F4}{progArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+
+            // ═══ 2026-08-10 诊断: 输出实际命令行 ═══
+            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JPEGLI_GRAY] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");
+            var stderr = proc.StandardError.ReadToEnd();
+            var stdout = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(30_000);
+
+            string outPath = tmpPpm + ".jpg";
+            if (proc.ExitCode != 0 || !File.Exists(outPath))
+                throw new InvalidOperationException($"[jpegli] 灰度编码失败 (exit={proc.ExitCode}) {stderr.Trim()}");
+
+            return File.ReadAllBytes(outPath);
+        }
+        finally
+        {
+            try { File.Delete(tmpPpm); } catch { }
+            try { File.Delete(tmpPpm + ".jpg"); } catch { }
         }
     }
 }

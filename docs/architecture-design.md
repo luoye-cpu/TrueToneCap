@@ -457,7 +457,7 @@ scRGB float[] → LinearToPQ (ST.2084) → ushort[] PQ16 → RGBA16→BGRA16 →
 |---|------|---------|------|
 | 1 | `EncodeAndSaveAsync` | 选区确认 | 委托 CapturePipelineService，完整 ICC + 编码 |
 | 2 | `SilentCaptureAllAsync` | 静默热键 | 全桌面，右下角 Toast |
-| 3 | `EncodeAndCopyAsync` | 选区复制 | 仅 PNG 到剪贴板 |
+| 3 | `EncodeAndCopyAsync` | 选区复制 | 复用完整保存管线 (BuildEncodingSettings + PreparePixelsWithIcc + 编码), 输出到临时目录, 与正式保存完全一致 |
 | 4 | `StartSelectionCapture` | 选区热键/按钮 | WGC → 覆盖层 → 4 种动作 |
 | 5 | `OnCaptureNow` | 全屏按钮 | 单显示器，HDR/SDR 双路径 |
 | 6 | `CaptureAndOcrFromPixelsAsync` | OCR/翻译 | 调用 OCR 管线 |
@@ -469,6 +469,7 @@ scRGB float[] → LinearToPQ (ST.2084) → ushort[] PQ16 → RGBA16→BGRA16 →
 | 代码重复 (4条路径) | ✅ **已修复** | 统一委托 `CapturePipelineService.EncodeAndSaveAsync` 重载 |
 | 无 CancellationToken | ✅ **已修复** | 所有重载接受 CancellationToken |
 | HDR 路径不一致 | ✅ **已修复** | 统一通过 CapturePipelineService 走 HDR/SDR 双路径 |
+| 剪贴板复制色彩不一致 | ✅ **已修复** (2026-08-09) | `EncodeAndCopyAsync` 不再独立简化实现 (曾漏传 ACM → System 解析错误 + 固定 PNG), 改为复用 `EncodeAndSaveAsync` 输出到临时目录, 复制完整成品 |
 | BuildEncodingSettings 去重 | ✅ **已修复** | MainWindow 委托给 CapturePipelineService |
 
 ---
@@ -711,7 +712,20 @@ Auto → MFT (系统硬件) > NVENC (NVIDIA) > QSV (Intel) > libaom (CPU)
   └─ 广色域目标（P3/AdobeRGB/BT.2020）：嵌入标准 ICC
 ```
 
-ACM（Auto Color Management）开启时自动禁用 ICC 烘焙。
+标准 ICC primaries 为 **D50 适应 + 白点归一** 的 XYZ（`PrimariesToD50Xyz`：
+xy→XYZ → 白点缩放 → Bradford D65→D50），TRC 保留 sRGB EOTF（目标 primaries +
+sRGB gamma，与像素编码自洽）。
+
+### 6.3 ACM 集成（2026-08-09 方案A）
+
+ACM（Auto Color Management）启用时，系统已接管显示器色彩管理：
+
+- **Float16 路径**（WGC scRGB）：`FloatToSRgbBytes` 不转换色域矩阵，输出恒为
+  sRGB 色域（BT.709 primaries + sRGB gamma）→ **恒嵌 sRGB**（不嵌广色域 ICC，
+  否则像素/ICC 矛盾）。应用输出 sRGB 内容，由 ACM 系统映射到显示器广色域。
+- **SDR byte[] 路径**（WGC 显示器色域像素）：
+  - 目标 = 显示器原生色域 / sRGB → 跳过烘焙，嵌标准 ICC（或 sRGB 不嵌）
+  - 目标 ≠ 显示器色域 → 仍做烘焙（显示器 ICC → 目标色域），避免像素/ICC 矛盾
 
 ---
 
