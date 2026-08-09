@@ -55,4 +55,4 @@ Publish.ps1
 
 | 软件版本 | PLAN 组件版本 | 备注 |
 |---------|-------------|------|
-| v0.3.0-beta | PP-OCRv6_medium, avifenc 1.x, cjpegli 1.x, cwebp 1.5 | — |
+| v0.3.1-beta | PP-OCRv6_medium, avifenc 1.x, cjpegli 1.x, cwebp 1.5 | — |

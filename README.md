@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.0-beta** · Windows 11 24H2+ · WinUI 3 · .NET 10 · WGC
+> **v0.3.1-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
 
 TrueToneCap 是一把为像素而生的手术刀。
 
@@ -21,7 +21,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 ## Quick Start / 快速开始
 
-1. Download `TrueToneCap-v0.3.0-beta-win-x64.zip`, extract / 下载解压
+1. Download `TrueToneCap-v0.3.1-beta-win-x64.zip`, extract / 下载解压
 2. Run `TrueToneCap.exe` / 双击运行
 3. Press `Ctrl+Shift+S` to capture / 按快捷键截图
 
@@ -69,6 +69,14 @@ dotnet run --project src\TrueToneCap.App -c Release
 ---
 
 ## Changelog / 更新日志
+
+### v0.3.1-beta — 2026-08-10
+
+- 🎨 Color: Gain Map R/B 通道交换修复 — 灰度测试不可见，纯色测试验证 / Gain Map R/B channel swap fix
+- 🖼️ Encoding: AVIF CICP matrix 修复 (BT.2020 NCL, matrix=9)，Windows 解码器兼容 / AVIF CICP matrix fix
+- 🎨 Color: HDR 编码不再嵌入 ICC 覆盖 JXL color fields，intensity_target 遵循显示器峰值 / ICC override fix
+- 🖥️ Overlay: 选区覆盖层 3 分钟超时自动取消 + 应用退出强制关闭覆盖层 / selection overlay timeout
+- 🗑️ Repo: 清理调试脚本/测试数据，git 历史瘦身，测试文件统一管理不上传 / repo cleanup
 
 ### v0.3.0-beta — 2026-08-01
 
