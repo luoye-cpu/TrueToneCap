@@ -388,8 +388,10 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         float[] std = _config.DetStdV;
         var lut = s_byteToFloat;
 
-        // 2026-08-09: 降低检测阈值提高召回 (合成图/小字检测框不稳)
-        float threshold = _config.DetThreshold * 0.5f;
+        // 二值化阈值 = DetThreshold (rapidocr 标准 0.3)
+        // ⚠ 2026-08-10 修复: 之前减半为 0.15, 背景噪声(0.15~0.3)全被二值化为前景,
+        //   与文字连通成巨大区域后平均置信度被拉低, boxThresh 过滤把所有框删光 → "未检测到文字"
+        float threshold = _config.DetThreshold;
 
         // ═══ 分离式双线性 (2026-08-09: 预计算坐标权重 + 中间行缓冲, 减少重复计算) ═══
         // 1. 预计算水平/垂直坐标权重 (避免每像素重复整除/取余)
@@ -418,12 +420,15 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
         // 2. 水平缩放: 每行 srcY0/srcY1 生成中间行缓冲 (3 通道)
         //    中间行 [srcY][x][c] — 复用内层垂直合并
-        var srcRow0 = new float[resizeW * 3];
-        var srcRow1 = new float[resizeW * 3];
+        // ⚠ 2026-08-10 修复: 缓冲必须声明在 Parallel.For 内部(每任务独立)!
+        //   之前声明在外部, 多线程同时写同一缓冲区 → 数据竞争 → det 输入错乱
+        //   → 检测框位置错误/识别垃圾 (rec 单独测试正常, 端到端失败)
 
         // 3. 垂直合并 + 归一化 (并行每输出行)
         Parallel.For(0, resizeH, y =>
         {
+            var srcRow0 = new float[resizeW * 3];
+            var srcRow1 = new float[resizeW * 3];
             int sy0 = y0t[y], sy1 = y1t[y];
             float wy = wyt[y];
             int row0Base = sy0 * w * 4;
@@ -617,7 +622,8 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     private static List<Box> ExtractBoxes(byte[] bitmap, int w, int h,
         float scaleX, float scaleY, float[]? probMap = null)
     {
-        const float boxThresh = 0.5f;     // 置信度阈值（匹配 rapidocr box_thresh）
+        const float boxThresh = 0.7f;    // 高激活像素占比阈值 (强文字区域像素应 ≥70% 概率)
+        const float highRatio = 0.10f;   // 连通域内 >boxThresh 像素占比须 >10% (抗背景噪声拉低均值)
 
         var boxes = new List<Box>();
         var visited = new bool[w * h];
@@ -631,7 +637,7 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
                 // BFS 找连通域
                 int minX = x, maxX = x, minY = y, maxY = y;
-                float probSum = 0; int probCount = 0;
+                int highCount = 0; int totalCount = 0;
                 var queue = new Queue<(int, int)>();
                 queue.Enqueue((x, y));
                 visited[idx] = true;
@@ -642,11 +648,11 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                     minX = Math.Min(minX, cx); maxX = Math.Max(maxX, cx);
                     minY = Math.Min(minY, cy); maxY = Math.Max(maxY, cy);
 
-                    // 累加概率（用于置信度过滤）
+                    // 统计高激活像素 (用于置信度过滤, 抗背景噪声)
                     if (probMap is not null)
                     {
-                        probSum += probMap[cy * w + cx];
-                        probCount++;
+                        totalCount++;
+                        if (probMap[cy * w + cx] > boxThresh) highCount++;
                     }
 
                     foreach (var (nx, ny) in new[] { (cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1) })
@@ -663,11 +669,11 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                     }
                 }
 
-                // ═══ 置信度过滤（匹配 rapidocr box_thresh）═══
-                if (probMap is not null && probCount > 0)
+                // ═══ 置信度过滤: 高激活像素占比 (替代平均分, 避免背景噪声拉低均值) ═══
+                if (probMap is not null && totalCount > 0)
                 {
-                    float avgScore = probSum / probCount;
-                    if (avgScore < boxThresh) continue;
+                    float ratio = (float)highCount / totalCount;
+                    if (ratio < highRatio) continue;
                 }
 
                 int boxW = maxX - minX, boxH = maxY - minY;

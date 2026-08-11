@@ -232,7 +232,10 @@ public static class PixelOps
 
     /// <summary>
     /// 从原始字节指针逐行转换 Half→Float。
-    /// .NET 10 Half 类型是 JIT-intrinsic，自动使用 F16C VCVTPH2PS (x86) 或 NEON (ARM64)。
+    /// 2026-08-11: 三层 ISA — AVX2 (vpmovsxwd ymm, 8 half/轮) → SSE4.1 (4 half/轮) → 标量。
+    /// .NET 11 无 AVX-512 vpmovsxwd zmm API → 512-bit 对 F16C 无收益, 不实现。
+    /// 简化: half subnormal (值 &lt; 6e-5) 置 0 — 视觉不可见，换取全 SIMD 无分支。
+    /// AVX10.1/10.2 设备均包含 AVX2 → 自动走 Tier 1。
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe void ConvertHalfToFloatRow(
@@ -240,9 +243,63 @@ public static class PixelOps
     {
         ushort* sp = (ushort*)srcRow;
 
+        // Tier 1: AVX2+ — 8 half → 8 float / 轮 (vpmovsxwd ymm)
+        if (Avx2.IsSupported && count >= 16)
+        {
+            int i = 0;
+            int last = count - 8;
+            for (; i <= last; i += 8)
+            {
+                var h16 = Vector128.Load(sp + i).AsInt16(); // 8 half
+                var b = Avx2.ConvertToVector256Int32(h16); // vpmovsxwd 符号扩展 → 8 int
+                var s = Avx2.And(Avx2.ShiftLeftLogical(b, 16), Vector256.Create<int>(int.MinValue)); // 符号 → bit31
+                var e = Avx2.And(Avx2.ShiftRightLogical(b, 10), Vector256.Create<int>(0x1F)); // 指数
+                var m = Avx2.And(b, Vector256.Create<int>(0x3FF)); // 尾数
+                var eAdj = Avx2.Add(e, Vector256.Create<int>(112)); // -15+127
+                var f = Avx2.Or(s, Avx2.Or(Avx2.ShiftLeftLogical(eAdj, 23), Avx2.ShiftLeftLogical(m, 13)));
+                // e == 0 (subnormal/零) → 0
+                var isZero = Avx2.CompareEqual(e, Vector256<int>.Zero);
+                f = Avx2.BlendVariable(f, Vector256<int>.Zero, isZero);
+                // e == 31 (inf/nan) → 0x7F800000 | 符号
+                var isInf = Avx2.CompareEqual(e, Vector256.Create<int>(31));
+                f = Avx2.BlendVariable(f, Avx2.Or(s, Vector256.Create<int>(0x7F800000)), isInf);
+                Avx2.Store((int*)(dstRow + i), f); // vmovdqu ymm
+            }
+            // 尾部标量
+            for (; i < count; i++)
+                dstRow[i] = (float)BitConverter.Int16BitsToHalf((short)sp[i]);
+            return;
+        }
+
+        // Tier 2: SSE4.1 — 4 half → 4 float / 轮
+        if (Sse41.IsSupported && count >= 8)
+        {
+            int i = 0;
+            int last = count - 4;
+            for (; i <= last; i += 4)
+            {
+                var h16 = Vector128.Load(sp + i).AsInt16(); // 8 half (用前 4)
+                var b = Sse41.ConvertToVector128Int32(h16); // 前 4 short 符号扩展 → 4 int
+                var s = Sse2.And(Sse2.ShiftLeftLogical(b, 16), Vector128.Create<int>(int.MinValue)); // 符号 → bit31
+                var e = Sse2.And(Sse2.ShiftRightLogical(b, 10), Vector128.Create<int>(0x1F)); // 指数
+                var m = Sse2.And(b, Vector128.Create<int>(0x3FF)); // 尾数
+                var eAdj = Sse2.Add(e, Vector128.Create<int>(112)); // -15+127
+                var f = Sse2.Or(s, Sse2.Or(Sse2.ShiftLeftLogical(eAdj, 23), Sse2.ShiftLeftLogical(m, 13)));
+                // e == 0 (subnormal/零) → 0
+                var isZero = Sse2.CompareEqual(e, Vector128<int>.Zero);
+                f = Sse41.BlendVariable(f, Vector128<int>.Zero, isZero);
+                // e == 31 (inf/nan) → 0x7F800000 | 符号
+                var isInf = Sse2.CompareEqual(e, Vector128.Create<int>(31));
+                f = Sse41.BlendVariable(f, Sse2.Or(s, Vector128.Create<int>(0x7F800000)), isInf);
+                f.AsSingle().Store(dstRow + i);
+            }
+            // 尾部标量
+            for (; i < count; i++)
+                dstRow[i] = (float)BitConverter.Int16BitsToHalf((short)sp[i]);
+            return;
+        }
+
         // 通用路径: .NET 10 Half 类型 (JIT-intrinsic → F16C/NEON 自动)
-        // 此处保持简单标量循环，交给 JIT 自动向量化
-        // JIT 会将其编译为 VCVTPH2PS 循环 (x86) 或 NEON 等效指令 (ARM64)
         for (int i = 0; i < count; i++)
         {
             dstRow[i] = (float)BitConverter.Int16BitsToHalf((short)sp[i]);
@@ -262,14 +319,119 @@ public static class PixelOps
 
     /// <summary>
     /// 从 float* 批量转换为 Half (ushort*)。
-    /// .NET 10: (ushort)BitConverter.HalfToInt16Bits((Half)v) → JIT 自动使用 VCVTPS2PH (x86) / NEON (ARM64)。
+    /// 2026-08-11: 三层 ISA — AVX2 (8 float/轮, 256-bit 位运算 + vpshufb 打包) → SSE4.1 (4 float/轮) → 标量。
+    /// .NET 11 无 AVX-512 vpmovdw (int→ushort 窄化) API → 512-bit 打包瓶颈, 不实现。
+    /// 简化: subnormal 结果 (|float| &lt; 2^-14 ≈ 6e-5) 置 0 — 视觉不可见，换取全 SIMD 无分支。
     /// 用于 GPU 纹理上传 (Float32 → Float16)。
+    /// AVX10.1/10.2 设备均包含 AVX2 → 自动走 Tier 1。
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe void ConvertFloatToHalfRow(
         float* srcRow, ushort* dstRow, int count)
     {
-        // JIT 自动向量化路径: .NET 10 将 (Half)float 转换编译为 VCVTPS2PH (F16C)
+        // Tier 1: AVX2+ — 8 float → 8 half / 轮
+        if (Avx2.IsSupported && count >= 16)
+        {
+            var signMask = Vector256.Create<int>(0x8000);
+            var expBias = Vector256.Create<int>(-112); // -127+15
+            var expField = Vector256.Create<int>(0xFF);
+            var mantMask = Vector256.Create<int>(0x007FFFFF);
+            var infBits = Vector256.Create<int>(0x7C00); // inf (有限溢出也饱和到 inf, 与 C# (Half) 转换一致)
+            // vpshufb ymm 索引是每 128 位通道内偏移 (0-15): 每通道 8 索引 + 8 无输出(0xFF)
+            // 输出: 低8字节=[a0..a3], 高8字节=[a4..a7] → Permute4x64 重组为连续 16 字节
+            var packMask = Vector256.Create((byte)0, 1, 4, 5, 8, 9, 12, 13, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0, 1, 4, 5, 8, 9, 12, 13, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+
+            int i = 0;
+            int last = count - 8;
+            for (; i <= last; i += 8)
+            {
+                var bits = Avx2.LoadVector256(srcRow + i).AsInt32();
+                var s = Avx2.And(Avx2.ShiftRightLogical(bits, 16), signMask); // 符号 → bit15
+                var e = Avx2.Add(Avx2.And(Avx2.ShiftRightLogical(bits, 23), expField), expBias); // 调整后指数
+                var m = Avx2.And(bits, mantMask);
+                // round-to-nearest-even (与 C# (Half) 转换一致): 检查被丢弃的 13 位
+                var lsb = Avx2.And(Avx2.ShiftRightLogical(m, 13), Vector256.Create<int>(1)); // 结果最低位
+                var round = Avx2.And(m, Vector256.Create<int>(0x1FFF));
+                var carryMask = Avx2.Or(
+                    Avx2.CompareGreaterThan(round, Vector256.Create<int>(0x1000)),  // > 半 → 进位
+                    Avx2.And(Avx2.CompareEqual(round, Vector256.Create<int>(0x1000)), lsb)); // = 半且 LSB=1 → 进位
+                var mS = Avx2.Add(Avx2.ShiftRightLogical(m, 13), Avx2.And(carryMask, Vector256.Create<int>(1)));
+                // 进位溢出 (mS == 1024) → 指数 +1, 尾数归零
+                var over = Avx2.CompareEqual(mS, Vector256.Create<int>(0x400));
+                var eR = Avx2.Add(e, Avx2.And(over, Vector256.Create<int>(1)));
+                mS = Avx2.AndNot(over, mS);
+                // 正常路径: s | (eR<<10) | mS
+                var h = Avx2.Or(s, Avx2.Or(Avx2.ShiftLeftLogical(eR, 10), mS));
+                // e <= 0 (subnormal/零) → 仅符号位 (SSE 无 int LessEqual, 用 ~(e>0))
+                var gtZero = Avx2.CompareGreaterThan(e, Vector256<int>.Zero);
+                var isSub = Avx2.AndNot(gtZero, Vector256<int>.AllBitsSet);
+                h = Avx2.BlendVariable(h, s, isSub);
+                // e >= 31 (inf/nan) → s | 0x7C00 (有限溢出也饱和到 inf, 与 C# 一致)
+                var isInf = Avx2.CompareGreaterThan(e, Vector256.Create<int>(30));
+                h = Avx2.BlendVariable(h, Avx2.Or(s, infBits), isInf);
+                // 打包: [a0..a3] 低8字节 + [a4..a7] 高8字节 → Permute4x64 把 qword2 移到 pos1 → 低128位连续
+                var packed = Avx2.Shuffle(h.AsUInt16().AsByte(), packMask);
+                var perm = Avx2.Permute4x64(packed.AsInt64(), 0b00_00_10_00); // [q0,q2,0,0]
+                Sse2.Store((byte*)(dstRow + i), perm.GetLower().AsByte());
+            }
+            // 尾部标量
+            for (; i < count; i++)
+                dstRow[i] = (ushort)BitConverter.HalfToInt16Bits((Half)srcRow[i]);
+            return;
+        }
+
+        // Tier 2: SSE4.1 — 4 float → 4 half / 轮 (128-bit 位运算)
+        if (Sse41.IsSupported && count >= 8)
+        {
+            var signMask = Vector128.Create<int>(0x8000);
+            var expBias = Vector128.Create<int>(-112); // -127+15
+            var expField = Vector128.Create<int>(0xFF);
+            var mantMask = Vector128.Create<int>(0x007FFFFF);
+            var infBits = Vector128.Create<int>(0x7C00); // inf (有限溢出也饱和到 inf, 与 C# (Half) 转换一致)
+
+            int i = 0;
+            int last = count - 4;
+            for (; i <= last; i += 4)
+            {
+                var bits = Vector128.Load(srcRow + i).AsInt32();
+                var s = Sse2.And(Sse2.ShiftRightLogical(bits, 16), signMask); // 符号 → bit15
+                var e = Sse2.Add(Sse2.And(Sse2.ShiftRightLogical(bits, 23), expField), expBias); // 调整后指数
+                var m = Sse2.And(bits, mantMask);
+                // round-to-nearest-even (与 C# (Half) 转换一致): 检查被丢弃的 13 位
+                var lsb = Sse2.And(Sse2.ShiftRightLogical(m, 13), Vector128.Create<int>(1)); // 结果最低位
+                var round = Sse2.And(m, Vector128.Create<int>(0x1FFF));
+                var carryMask = Sse2.Or(
+                    Sse2.CompareGreaterThan(round, Vector128.Create<int>(0x1000)),  // > 半 → 进位
+                    Sse2.And(Sse2.CompareEqual(round, Vector128.Create<int>(0x1000)), lsb)); // = 半且 LSB=1 → 进位
+                var mS = Sse2.Add(Sse2.ShiftRightLogical(m, 13), Sse2.And(carryMask, Vector128.Create<int>(1)));
+                // 进位溢出 (mS == 1024) → 指数 +1, 尾数归零
+                var over = Sse2.CompareEqual(mS, Vector128.Create<int>(0x400));
+                var eR = Sse2.Add(e, Sse2.And(over, Vector128.Create<int>(1)));
+                mS = Sse2.AndNot(over, mS);
+                // 正常路径: s | (eR<<10) | mS
+                var h = Sse2.Or(s, Sse2.Or(Sse2.ShiftLeftLogical(eR, 10), mS));
+                // e <= 0 (subnormal/零) → 仅符号位 (SSE 无 int LessEqual, 用 ~(e>0))
+                var gtZero = Sse2.CompareGreaterThan(e, Vector128<int>.Zero);
+                var isSub = Sse2.AndNot(gtZero, Vector128<int>.AllBitsSet);
+                h = Sse41.BlendVariable(h, s, isSub);
+                // e >= 31 (inf/nan) → s | 0x7C00 (有限溢出也饱和到 inf, 与 C# 一致)
+                var isInf = Sse2.CompareGreaterThan(e, Vector128.Create<int>(30));
+                h = Sse41.BlendVariable(h, Sse2.Or(s, infBits), isInf);
+                // 打包: 4 int 的低 16 位 [a,0,b,0,c,0,d,0] (ushort 视角) → 连续 [a,b,c,d]
+                // pshufb 字节重排: 取字节 0,1,4,5,8,9,12,13
+                var packed = Ssse3.Shuffle(h.AsUInt16().AsByte(),
+                    Vector128.Create((byte)0, 1, 4, 5, 8, 9, 12, 13,
+                        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF));
+                packed.GetLower().Store((byte*)(dstRow + i)); // 前 8 字节 = 4 half
+            }
+            // 尾部标量
+            for (; i < count; i++)
+                dstRow[i] = (ushort)BitConverter.HalfToInt16Bits((Half)srcRow[i]);
+            return;
+        }
+
+        // 通用路径: .NET 10 Half 类型 (JIT-intrinsic → F16C/NEON 自动)
         for (int i = 0; i < count; i++)
         {
             dstRow[i] = (ushort)BitConverter.HalfToInt16Bits((Half)srcRow[i]);

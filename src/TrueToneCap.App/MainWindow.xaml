@@ -254,7 +254,7 @@
                                 <Grid ColumnDefinitions="120,*">
                                     <TextBlock Text="覆盖遮罩颜色" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="OverlayColorCbo" Grid.Column="1" SelectionChanged="OnOverlayColorChanged">
-                                        <ComboBoxItem Tag="#99001833">深蓝半透明（默认）</ComboBoxItem>
+                                        <ComboBoxItem Tag="#80000000">灰色半透明（默认）</ComboBoxItem>
                                         <ComboBoxItem Tag="#99000000">纯黑半透明</ComboBoxItem>
                                         <ComboBoxItem Tag="#991A1A2E">深紫半透明</ComboBoxItem>
                                         <ComboBoxItem Tag="#990D1B2A">深海蓝</ComboBoxItem>
@@ -520,7 +520,12 @@
                                         <ComboBoxItem Tag="OCR">🔤 OCR</ComboBoxItem>
                                         <ComboBoxItem Tag="Network">🌐 网络</ComboBoxItem>
                                     </ComboBox>
-                                    <TextBox x:Name="LogSearchTxt" PlaceholderText="搜索日志..." Width="180" TextChanged="OnLogSearchChanged"/>
+                                    <TextBox x:Name="LogSearchTxt" PlaceholderText="搜索日志..." Width="160" TextChanged="OnLogSearchChanged"/>
+                                    <!-- 2026-08-11: 显示顺序 + 自动滚动开关 -->
+                                    <ToggleSwitch x:Name="LogNewestFirstSwitch" Header="最新在前" IsOn="True"
+                                        OffContent="" OnContent="" MinWidth="90" Toggled="OnLogOrderChanged"/>
+                                    <ToggleSwitch x:Name="LogAutoScrollSwitch" Header="自动滚动" IsOn="True"
+                                        OffContent="" OnContent="" MinWidth="90" Toggled="OnLogAutoScrollChanged"/>
                                 </StackPanel>
                                 <!-- 日志列表 -->
                                 <ListView x:Name="LogListView" SelectionMode="Single"
@@ -537,7 +542,7 @@
                                     </ListView.ItemContainerStyle>
                                     <ListView.ItemTemplate>
                                         <DataTemplate>
-                                            <Grid Padding="6,3" ColumnDefinitions="Auto,Auto,Auto,Auto,*">
+                                            <Grid Padding="6,3" ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,*">
                                                 <TextBlock Text="{Binding Icon}" FontSize="12" VerticalAlignment="Top" Margin="0,0,4,0"/>
                                                 <TextBlock Grid.Column="1" Text="{Binding TimeDisplay}"
                                                     FontSize="11" Foreground="#888888" VerticalAlignment="Top" Margin="0,1,6,0" FontFamily="Consolas"/>
@@ -545,7 +550,9 @@
                                                     VerticalAlignment="Top" Margin="0,1,4,0"/>
                                                 <TextBlock Grid.Column="3" Text="{Binding Tag}" FontSize="11"
                                                     Foreground="#66BBFF" FontWeight="SemiBold" VerticalAlignment="Top" Margin="0,1,8,0"/>
-                                                <TextBlock Grid.Column="4" Text="{Binding Message}" FontSize="12"
+                                                <TextBlock Grid.Column="4" Text="{Binding CallerDisplay}" FontSize="10"
+                                                    Foreground="#55AA77" VerticalAlignment="Top" Margin="0,2,8,0" FontFamily="Consolas"/>
+                                                <TextBlock Grid.Column="5" Text="{Binding Message}" FontSize="12"
                                                     TextWrapping="Wrap" VerticalAlignment="Top" IsTextSelectionEnabled="True"/>
                                             </Grid>
                                         </DataTemplate>

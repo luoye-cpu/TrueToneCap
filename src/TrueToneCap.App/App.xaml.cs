@@ -211,7 +211,9 @@ public partial class App : Application
     {
         // 提升进程优先级以减少截图延迟
         try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High; LogService.Info("App", "进程优先级已提升为 High"); } catch { }
-        LogService.Info("App", $"TrueToneCap 启动 v0.2.0, OS={Environment.OSVersion}, 进程提升优先级=High");
+        // 从程序集读取版本（避免每次发布忘记更新硬编码字符串）
+        string ver = typeof(App).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        LogService.Info("App", $"TrueToneCap 启动 v{ver}, OS={Environment.OSVersion}, 进程提升优先级=High");
         LogService.Info("App", $"命令行: {string.Join(" ", Environment.GetCommandLineArgs())}");
         // ── 初始化应用服务（Settings / Capability / Pipeline / WGC / GPU）──
         LogService.Info("App", "初始化应用服务 (DI 容器)...");

@@ -25,7 +25,11 @@ public sealed partial class HdrPreviewWindow : IDisposable
     // ── 池化 Staging 纹理 (2026-08-09: 避免每帧创建, 4K 省 ~16MB 分配) ──
     private ID3D11Texture2D? _pooledStaging;
     private int _pooledW, _pooledH;
-    private Format _pooledFmt;
+
+    // ── D3D 上下文锁（共享设备场景下与 WGC 回读互斥；null 时不加锁保持旧行为）──
+    private readonly object? _gpuLock;
+    // 是否内部创建的独占设备（共享设备时绝不释放 device/context，否则 WGC 会话会挂起）
+    private readonly bool _ownsDevice;
 
     // ── 状态 ──
     public bool IsInitialized { get; private set; }
@@ -80,7 +84,7 @@ public sealed partial class HdrPreviewWindow : IDisposable
 
     private const uint WS_POPUP = 0x80000000;
     private const uint WS_VISIBLE = 0x10000000;
-    private const uint WS_EX_TOPMOST = 0x00000008;
+    // 注意: 不含 WS_EX_TOPMOST — 本窗口始终作为选区覆盖层的下层背景 (见 Initialize 注释)
     private const uint WS_EX_TOOLWINDOW = 0x00000080;
     private const uint WS_EX_NOACTIVATE = 0x08000000;
     private const uint WS_EX_NOREDIRECTIONBITMAP = 0x00200000;
@@ -97,15 +101,19 @@ public sealed partial class HdrPreviewWindow : IDisposable
     /// </summary>
     /// <param name="sharedDevice">可选的共享 D3D11 设备（来自 WgcCaptureService）。
     /// 为 null 时内部自动创建。</param>
-    public HdrPreviewWindow(ID3D11Device? sharedDevice = null)
+    /// <param name="gpuLock">可选的 D3D 上下文锁（共享设备场景下防止与 WGC 回读并发）。</param>
+    public HdrPreviewWindow(ID3D11Device? sharedDevice = null, object? gpuLock = null)
     {
+        _gpuLock = gpuLock;
         if (sharedDevice is not null)
         {
+            _ownsDevice = false; // 共享设备：Dispose 时绝不释放 device/context
             _device = sharedDevice;
             _context = _device.ImmediateContext;
         }
         else
         {
+            _ownsDevice = true; // 内部创建：Dispose 时释放全部
             _device = D3D11.D3D11CreateDevice(
                 Vortice.Direct3D.DriverType.Hardware,
                 DeviceCreationFlags.BgraSupport);
@@ -140,8 +148,10 @@ public sealed partial class HdrPreviewWindow : IDisposable
             }
 
             // ── 创建窗口 ──
+            // 2026-08-10: 去掉 WS_EX_TOPMOST — 背景窗口必须位于选区覆盖层(TOPMOST)下方,
+            // 否则后创建的 TOPMOST 窗口会盖在覆盖层之上并吃掉鼠标事件, 导致无法框选
             _hwnd = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
                 ClassName, "HDR Preview",
                 WS_POPUP | WS_VISIBLE,
                 x, y, width, height,
@@ -203,100 +213,36 @@ public sealed partial class HdrPreviewWindow : IDisposable
     // ═══════════════════════════════════════════════════
 
     /// <summary>
-    /// 呈现 HDR 帧到窗口。
+    /// 呈现帧到窗口（2026-08-11: 统一为 Float16 scRGB 呈现）。
     /// 输入的 float[] 应为 scRGB 线性 RGBA 数据（与 WGC HDR 捕获输出一致）。
+    /// SDR 数据由调用方先转 scRGB 线性（PixelOps.BgraToScrgbLinearFast），
+    /// 走同一条 DWM 色域感知管线 —— 广色域正确性不再依赖 ACM。
     /// 使用池化 Staging 纹理 (2026-08-09 优化)。
     /// </summary>
     /// <param name="pixels">scRGB linear float[] RGBA 像素。</param>
     /// <param name="width">图像宽度。</param>
     /// <param name="height">图像高度。</param>
     public unsafe void PresentFrame(float[] pixels, int width, int height)
-        => PresentFrameHdr(pixels, width, height);
-
-    /// <summary>
-    /// 呈现 SDR 帧到窗口 (2026-08-09: 全屏覆盖预览 GPU 化)。
-    /// 输入 BGRA8 像素 (与 WGC SDR 捕获一致)。
-    /// </summary>
-    /// <param name="bgra">BGRA8 像素数组。</param>
-    /// <param name="width">图像宽度。</param>
-    /// <param name="height">图像高度。</param>
-    public unsafe void PresentFrameBgra(byte[] bgra, int width, int height)
     {
         if (_disposed || _swapChain is null || _context is null || _device is null || _backBuffer is null)
             return;
 
         try
         {
-            // CopyResource 要求同格式: SDR 用 B8G8R8A8 交换链 (而非 Float16)
-            EnsureSwapChainSize(width, height, Format.B8G8R8A8_UNorm);
-
-            // 获取池化 BGRA8 Staging 纹理 (尺寸/格式匹配时复用)
-            var staging = GetPooledStaging(width, height, Format.B8G8R8A8_UNorm);
-            var mapped = _context.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
-            if (mapped.DataPointer == IntPtr.Zero)
-                return;
-
-            byte* dstBase = (byte*)mapped.DataPointer.ToPointer();
-            int dstPitch = (int)mapped.RowPitch;
-            fixed (byte* src = bgra)
+            // GPU 操作与 WGC 回读互斥（共享设备场景）
+            // ⚠️ 用 Monitor.TryEnter 超时保护：后台线程卡在 GPU 操作时，调用方（UI 线程）
+            // 等待最多 500ms 即放弃，绝不无限阻塞导致界面卡死
+            if (_gpuLock is not null)
             {
-                for (int row = 0; row < height; row++)
+                if (!Monitor.TryEnter(_gpuLock, 500))
                 {
-                    // BGRA8 无行对齐差异时整行拷贝; 有差异时逐行
-                    Buffer.MemoryCopy(src + row * width * 4, dstBase + row * dstPitch, width * 4, width * 4);
+                    System.Diagnostics.Debug.WriteLine("[HdrPreview] GPU 锁超时 (500ms)，跳过本帧呈现");
+                    return;
                 }
+                try { PresentFrameCore(pixels, width, height); }
+                finally { Monitor.Exit(_gpuLock); }
             }
-            _context.Unmap(staging, 0);
-
-            // 后台缓冲是 Float16, 用 CopyResource 由 GPU 自动转换 (UNORM→Float)
-            _context.CopyResource(_backBuffer!, staging);
-            _swapChain.Present(1, PresentFlags.None);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[HdrPreview] PresentFrameBgra 异常: {ex.Message}");
-        }
-    }
-
-    /// <summary>HDR float 帧呈现 (纹理池化版本)。</summary>
-    private unsafe void PresentFrameHdr(float[] pixels, int width, int height)
-    {
-        if (_disposed || _swapChain is null || _context is null || _device is null || _backBuffer is null)
-            return;
-
-        try
-        {
-            // ── 尺寸变化时重建交换链 ──
-            EnsureSwapChainSize(width, height, Format.R16G16B16A16_Float);
-
-            // ── 池化 Staging 纹理 (尺寸/格式匹配时复用) ──
-            var staging = GetPooledStaging(width, height, Format.R16G16B16A16_Float);
-            var mapped = _context.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
-            if (mapped.DataPointer == IntPtr.Zero)
-                return;
-
-            // 使用 PixelOps SIMD 加速的 float→half 批量转换
-            byte* dstBase = (byte*)mapped.DataPointer.ToPointer();
-            int dstRowPitch = (int)mapped.RowPitch;
-            int halfsPerRow = width * 4;
-
-            fixed (float* src = pixels)
-            {
-                for (int row = 0; row < height; row++)
-                {
-                    byte* dstRow = dstBase + row * dstRowPitch;
-                    float* srcRow = src + row * width * 4;
-                    // .NET 10 JIT 自动将 Half 转换编译为 F16C VCVTPS2PH (x86)
-                    TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(
-                        srcRow, (ushort*)dstRow, halfsPerRow);
-                }
-            }
-
-            _context.Unmap(staging, 0);
-
-            // ── 复制到后台缓冲区并呈现 ──
-            _context.CopyResource(_backBuffer!, staging);
-            _swapChain.Present(1, PresentFlags.None);
+            else PresentFrameCore(pixels, width, height);
         }
         catch (Exception ex)
         {
@@ -304,31 +250,70 @@ public sealed partial class HdrPreviewWindow : IDisposable
         }
     }
 
-    /// <summary>尺寸变化时重建交换链 (含色彩空间设置)。
-    /// HDR (Float16) 用 scRGB 线性 (RgbFullG10NoneP709); SDR (BGRA8) 默认 sRGB (G22)。</summary>
-    private void EnsureSwapChainSize(int width, int height, Format format)
+    private unsafe void PresentFrameCore(float[] pixels, int width, int height)
+    {
+        if (_disposed || _swapChain is null || _context is null || _device is null || _backBuffer is null)
+            return;
+
+        // ── 尺寸变化时重建交换链 ──
+        EnsureSwapChainSize(width, height);
+
+        // ── 池化 Staging 纹理 (尺寸/格式匹配时复用) ──
+        var staging = GetPooledStaging(width, height);
+        var mapped = _context.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
+        if (mapped.DataPointer == IntPtr.Zero)
+            return;
+
+        // 使用 PixelOps SIMD 加速的 float→half 批量转换
+        // 2026-08-11: 按行并行（行间无依赖）+ F16C SIMD (8 元素/轮)，4K 3300 万转换 ~30ms → ~4ms
+        byte* dstBase = (byte*)mapped.DataPointer.ToPointer();
+        int dstRowPitch = (int)mapped.RowPitch;
+        int halfsPerRow = width * 4;
+
+        long baseAddr = (long)dstBase; // long 基址避免在 lambda 中捕获 fixed/指针变量 (CS1764)
+        fixed (float* src = pixels)
+        {
+            long srcBase = (long)src;
+            Parallel.For(0, height, row =>
+            {
+                byte* dstRow = (byte*)(baseAddr + row * dstRowPitch);
+                float* srcRow = (float*)(srcBase + (long)row * width * 4 * sizeof(float));
+                // .NET 10 JIT 自动将 Half 转换编译为 F16C VCVTPS2PH (x86)
+                TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(
+                    srcRow, (ushort*)dstRow, halfsPerRow);
+            });
+        }
+
+        _context.Unmap(staging, 0);
+
+        // ── 复制到后台缓冲区并呈现（Present(0) 去 vsync，静态帧无撕裂）──
+        _context.CopyResource(_backBuffer!, staging);
+        _swapChain.Present(0, PresentFlags.None);
+    }
+
+    /// <summary>尺寸变化时重建交换链 (固定 Float16 scRGB 线性, 2026-08-11 统一)。
+    /// ResizeBuffers 后色彩空间重置为默认，需重新设置 RgbFullG10NoneP709。</summary>
+    private void EnsureSwapChainSize(int width, int height)
     {
         if (width != _winW || height != _winH)
         {
             _backBuffer?.Dispose();
             _backBuffer = null;
-            _swapChain?.ResizeBuffers(2, (uint)width, (uint)height, format, SwapChainFlags.None);
+            _swapChain?.ResizeBuffers(2, (uint)width, (uint)height, Format.R16G16B16A16_Float, SwapChainFlags.None);
             _winW = width;
             _winH = height;
             _backBuffer = _swapChain!.GetBuffer<ID3D11Texture2D>(0);
 
-            // ResizeBuffers 后色彩空间重置为默认，需重新设置
+            // 色彩空间重置为默认，重新设置 scRGB 线性
             using var sc3 = _swapChain.QueryInterface<IDXGISwapChain3>();
-            if (format == Format.R16G16B16A16_Float)
-                sc3.SetColorSpace1(ColorSpaceType.RgbFullG10NoneP709); // scRGB 线性 (HDR)
-            // SDR (B8G8R8A8_UNorm) 保持默认 sRGB gamma (G22), 无需设置
+            sc3.SetColorSpace1(ColorSpaceType.RgbFullG10NoneP709);
         }
     }
 
-    /// <summary>获取池化 Staging 纹理 (尺寸/格式匹配时复用, 否则重建)。</summary>
-    private ID3D11Texture2D GetPooledStaging(int width, int height, Format format)
+    /// <summary>获取池化 Staging 纹理 (Float16, 尺寸匹配时复用, 否则重建)。</summary>
+    private ID3D11Texture2D GetPooledStaging(int width, int height)
     {
-        if (_pooledStaging is not null && _pooledW == width && _pooledH == height && _pooledFmt == format)
+        if (_pooledStaging is not null && _pooledW == width && _pooledH == height)
             return _pooledStaging;
 
         _pooledStaging?.Dispose();
@@ -338,7 +323,7 @@ public sealed partial class HdrPreviewWindow : IDisposable
             Height = (uint)height,
             MipLevels = 1,
             ArraySize = 1,
-            Format = format,
+            Format = Format.R16G16B16A16_Float,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Staging,
             BindFlags = BindFlags.None,
@@ -346,7 +331,6 @@ public sealed partial class HdrPreviewWindow : IDisposable
         });
         _pooledW = width;
         _pooledH = height;
-        _pooledFmt = format;
         return _pooledStaging;
     }
 
@@ -527,8 +511,13 @@ public sealed partial class HdrPreviewWindow : IDisposable
         _pooledStaging = null;
         _swapChain?.Dispose();
         _swapChain = null;
-        // 共享设备场景下不释放 _device，由调用方管理
-        _context?.Dispose();
+        // ⚠️ 只有内部创建的独占设备才释放 device/context；共享设备场景释放会导致
+        // WGC 会话使用已释放的 ImmediateContext → GPU 操作挂起 → 后续截图卡死
+        if (_ownsDevice)
+        {
+            _context?.Dispose();
+            _device.Dispose();
+        }
         if (_hwnd != nint.Zero)
         {
             DestroyWindow(_hwnd);

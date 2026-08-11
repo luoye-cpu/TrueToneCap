@@ -14,6 +14,48 @@ if (args.Length >= 1 && args[0] == "--ocr-bench")
     return;
 }
 
+// ═══ OCR 模型诊断 (--ocr-diag <modelDir>) ═══
+if (args.Length >= 1 && args[0] == "--ocr-diag")
+{
+    OcrModelDiag.Run(args);
+    return;
+}
+
+// ═══ OCR 预处理变体对比 (--ocr-pre <modelDir>) ═══
+if (args.Length >= 1 && args[0] == "--ocr-pre")
+{
+    OcrPreprocessDiag.Run(args);
+    return;
+}
+
+// ═══ 引擎级 OCR 诊断 (--ocr-eng <modelDir>) ═══
+if (args.Length >= 1 && args[0] == "--ocr-eng")
+{
+    OcrEngineDiag.Run(args);
+    return;
+}
+
+// ═══ rec 模型单独诊断 (--ocr-rec <modelDir>) ═══
+if (args.Length >= 1 && args[0] == "--ocr-rec")
+{
+    OcrRecDiag.Run(args);
+    return;
+}
+
+// ═══ 检测框级诊断 (--ocr-box <modelDir>) ═══
+if (args.Length >= 1 && args[0] == "--ocr-box")
+{
+    OcrBoxDiag.Run(args);
+    return;
+}
+
+// ═══ 引擎内部框诊断 (--ocr-ebox <modelDir>) ═══
+if (args.Length >= 1 && args[0] == "--ocr-ebox")
+{
+    OcrEngineBoxDiag.Run(args);
+    return;
+}
+
 // ═══ 标准 ICC 空间实测验证 (--icc-check) ═══
 if (args.Length >= 1 && args[0] == "--icc-check")
 {

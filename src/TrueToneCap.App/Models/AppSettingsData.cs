@@ -136,7 +136,8 @@ public sealed class AppSettingsData
     public string ToastPosition { get; set; } = "BottomRight";
 
     // ── 预览界面颜色 ──
-    public string OverlayColor { get; set; } = "#99001833";
+    // 2026-08-11: 遮罩默认改灰色 (半透明黑=灰), 需求: 未框选区域灰色, 选区正常亮度
+    public string OverlayColor { get; set; } = "#80000000";
     public string BorderColor { get; set; } = "#FF4488FF";
 
     // ── 字体选择 ──

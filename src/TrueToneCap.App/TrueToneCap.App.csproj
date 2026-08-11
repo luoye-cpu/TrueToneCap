@@ -19,9 +19,9 @@
     <ApplicationTitle>TrueToneCap</ApplicationTitle>
     <ApplicationId>com.trueonecap.app</ApplicationId>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.3.1-beta</Version>
-    <AssemblyVersion>0.3.1.0</AssemblyVersion>
-    <FileVersion>0.3.1.0</FileVersion>
+    <Version>0.3.2-beta</Version>
+    <AssemblyVersion>0.3.2.0</AssemblyVersion>
+    <FileVersion>0.3.2.0</FileVersion>
     <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
     <NoWarn>$(NoWarn);MSB3884</NoWarn>
   </PropertyGroup>
@@ -55,16 +55,17 @@
 
   <!-- 数据文件 + OCR 模型 → 输出到 data/ -->
   <ItemGroup>
-    <Content Include="Shaders\*.hlsl" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
-    <Content Include="Shaders\*.cso" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
-    <Content Include="Shaders\*.ps1" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Shaders\" />
-    <Content Include="Models\*.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Models\" />
+    <!-- 显式 Link 而非 LinkBase：WinUI 构建目标下 LinkBase 对 Content 未生效，导致 bin 输出到 Shaders/ 而非 data/Shaders -->
+    <Content Include="Shaders\*.hlsl" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Shaders\%(Filename)%(Extension)" />
+    <Content Include="Shaders\*.cso" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Shaders\%(Filename)%(Extension)" />
+    <Content Include="Shaders\*.ps1" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Shaders\%(Filename)%(Extension)" />
+    <Content Include="Models\*.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Models\%(Filename)%(Extension)" />
     <!-- PP-OCRv6 ONNX 模型 (FP16, 内置分发) -->
     <Content Include="Models\*.onnx" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Models\" />
   </ItemGroup>
 
   <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发） -->
-  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\ToneMapping.hlsl;Shaders\FullscreenVS.hlsl" Outputs="Shaders\ToneMapping.hlsl.cso;Shaders\FullscreenVS.hlsl.cso">
+  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\ToneMapping.hlsl;Shaders\FullscreenVS.hlsl;Shaders\OverlayComposite.hlsl" Outputs="Shaders\ToneMapping.hlsl.cso;Shaders\FullscreenVS.hlsl.cso;Shaders\OverlayComposite.hlsl.cso">
     <Message Text="编译 HLSL 着色器..." Importance="high" />
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Shaders\CompileShaders.ps1&quot; -ShaderDir &quot;$(MSBuildProjectDirectory)\Shaders&quot; -OutputDir &quot;$(MSBuildProjectDirectory)\Shaders&quot;" />
   </Target>

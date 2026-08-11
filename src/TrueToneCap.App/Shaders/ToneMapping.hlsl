@@ -20,11 +20,6 @@ struct PSInput
     float2 uv  : TEXCOORD0;
 };
 
-struct PSOutput
-{
-    float4 color : SV_TARGET;
-};
-
 // Reinhard tone mapping (scRGB space, hue-preserving luminance scaling)
 float3 ReinhardToneMap(float3 hdr)
 {
@@ -83,10 +78,11 @@ float3 LinearToSRGB(float3 c)
     float3 clamped = max(c, 0.0f);
     float3 low = 12.92f * clamped;
     float3 high = 1.055f * pow(clamped, 1.0f / 2.4f) - 0.055f;
-    return select(clamped <= 0.0031308f, low, high);
+    // fxc 兼容: select → 三元运算符 (SM5.0)
+    return (clamped <= 0.0031308f) ? low : high;
 }
 
-PSOutput main(PSInput input)
+float4 main(PSInput input) : SV_TARGET
 {
     float4 hdrColor = InputTexture.Sample(LinearSampler, input.uv);
     float pw = max(PaperWhiteNits, 1.0f);
@@ -103,5 +99,5 @@ PSOutput main(PSInput input)
 
     float3 srgb = LinearToSRGB(saturate(mapped));
     float a = saturate(hdrColor.a);
-    return PSOutput(float4(srgb, a));
+    return float4(srgb, a); // fxc 兼容: 直接返回 float4 (不支持 struct 构造)
 }

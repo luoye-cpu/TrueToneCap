@@ -25,10 +25,15 @@ public sealed partial class SelectionOverlay : Window
     private bool _selectionComplete;
     private bool _finished; // 防止 ActionCompleted 双重触发
 
-    // ── 3 分钟无操作超时自动取消（防止覆盖层卡死无法操作）──
+    // ── 1 分钟无操作超时自动取消（防止覆盖层卡死无法操作）──
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _timeoutTimer;
     private readonly System.Diagnostics.Stopwatch _idleWatch = System.Diagnostics.Stopwatch.StartNew();
-    private const int SelectionTimeoutMs = 3 * 60 * 1000;
+    private const int SelectionTimeoutMs = 60 * 1000; // 1 分钟无操作 → 自动取消
+
+    // ── 硬看门狗：3 分钟无论什么情况强制退出（UI 线程卡死时兜底）──
+    private System.Threading.Timer? _hardWatchdog;
+    private const int HardExitMs = 3 * 60 * 1000; // 3 分钟硬上限
+    private volatile bool _closed; // 窗口是否已关闭（看门狗线程检查，不依赖 UI 线程）
 
     // ── 自动识别区域 ──
     private List<DetectedRegion> _detectedRegions = [];
@@ -40,6 +45,10 @@ public sealed partial class SelectionOverlay : Window
     private string _currentAnnoTool = "Rect";
     private System.Numerics.Vector2 _annoDragStart;
     private bool _isAnnoDrawing;
+    // 画笔轨迹累积（拖动期间逐点追加，完成后一次性提交为 FreehandLayer）
+    private readonly List<System.Numerics.Vector2> _penPoints = [];
+    // 文字插入位置（选区图像坐标）
+    private System.Numerics.Vector2 _textInsertPos;
 
     public RectInt32 SelectedRect { get; private set; }
 
@@ -155,27 +164,52 @@ public sealed partial class SelectionOverlay : Window
 
             // ═══ 创建 GPU 背景窗口 (在覆盖层下方, DWM 透明穿透可见) ═══
             // 2026-08-09: 统一 HDR(float) 与 SDR(BGRA8) 走 GPU 呈现, 消除 WriteableBitmap CPU 合成
+            // 2026-08-10 保护: ① 改用 GetSharedDevice() 只取缓存设备 — 绝不用 GetOrCreateDevice(光标显示器),
+            //    否则多屏/光标移动时旧设备被 Dispose, WGC 会话挂起 → UI 等 GPU 锁 → 整个应用卡死
+            //    ② 呈现移出 UI 线程 (Task.Run + 3s 超时) — UI 线程绝不等待无限时的 GPU 操作
+            //    ③ 失败回退 CPU 渲染 (RenderDesktopBackground), 覆盖层功能永不因 GPU 问题不可用
             bool gpuBgOk = false;
             try
             {
-                var sharedDevice = AppServices.Wgc
-                    ?.GetOrCreateDevice(TrueToneCap.Core.Capture.DisplayEnumerator.GetMonitorUnderCursor());
-                _hdrBgWnd = new HdrPreviewWindow(sharedDevice);
+                var sharedDevice = AppServices.Wgc?.GetSharedDevice();
+                _hdrBgWnd = new HdrPreviewWindow(sharedDevice, AppServices.Wgc?.D3dContextLock);
                 int bgW = _hdrW > 0 ? _hdrW : vw;
                 int bgH = _hdrH > 0 ? _hdrH : vh;
                 if (_hdrBgWnd.Initialize(vx, vy, bgW, bgH))
                 {
-                    if (_hdrPixels is not null && _hdrW > 0 && _hdrH > 0)
+                    // 呈现放后台线程，UI 线程最多等 3s（正常 <100ms）；锁内部还有 500ms TryEnter 保护
+                    var pixels = _hdrPixels;
+                    int pw = _hdrW, ph = _hdrH;
+                    var bgWnd = _hdrBgWnd;
+                    bool presentOk = false;
+                    try
                     {
-                        _hdrBgWnd.PresentFrame(_hdrPixels, _hdrW, _hdrH);
-                        System.Diagnostics.Debug.WriteLine($"[Overlay] GPU 背景窗口 (HDR) 已创建");
+                        presentOk = Task.Run(() =>
+                        {
+                            if (pixels is not null && pw > 0 && ph > 0)
+                            {
+                                bgWnd.PresentFrame(pixels, pw, ph);
+                                LogService.Info("Overlay", $"GPU 背景窗口 (HDR) 已创建 {pw}x{ph}", LogCategory.Capture);
+                            }
+                            else if (desktopPixels is not null)
+                            {
+                                // 2026-08-11: SDR 数据转 scRGB 线性后走统一 Float16 呈现 —
+                                // DWM 色域感知管线处理，广色域正确性不依赖 ACM
+                                var scrgb = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(desktopPixels, vw, vh);
+                                bgWnd.PresentFrame(scrgb, vw, vh);
+                                LogService.Info("Overlay", $"GPU 背景窗口 (SDR→scRGB) 已创建 {vw}x{vh}", LogCategory.Capture);
+                            }
+                            return true;
+                        }).Wait(3000);
                     }
-                    else if (desktopPixels is not null)
+                    catch (Exception ex)
                     {
-                        _hdrBgWnd.PresentFrameBgra(desktopPixels, vw, vh);
-                        System.Diagnostics.Debug.WriteLine($"[Overlay] GPU 背景窗口 (SDR) 已创建");
+                        LogService.Error("Overlay", $"GPU 呈现异常: {ex.Message}", LogCategory.Capture);
                     }
-                    gpuBgOk = true;
+                    if (!presentOk)
+                        LogService.Warn("Overlay", "GPU 呈现超时 (3s)，回退 CPU 渲染", LogCategory.Capture);
+
+                    gpuBgOk = presentOk;
                 }
                 else
                 {
@@ -185,10 +219,14 @@ public sealed partial class SelectionOverlay : Window
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[Overlay] GPU 背景创建失败: {ex.Message}");
+                LogService.Error("Overlay", $"GPU 背景创建失败: {ex.Message}", LogCategory.Capture);
                 _hdrBgWnd?.Dispose();
                 _hdrBgWnd = null;
             }
+
+            // 防御: 背景窗口创建后再置顶覆盖层, 确保覆盖层始终在背景窗口之上接收鼠标事件
+            _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
+                SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
             // 全透明窗口：margins 全部 -1 使整个客户区透明，
             // 让下层 HDR 独立窗口的 scRGB 内容可见
@@ -201,8 +239,8 @@ public sealed partial class SelectionOverlay : Window
             else
                 _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
             System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2} GPU背景={gpuBgOk}");
+            LogService.Info("Overlay", $"覆盖层就绪 DPI={dpi} Scale={_dpiScale:F2} GPU背景={gpuBgOk} 虚拟桌面={vw}x{vh}@({vx},{vy})", LogCategory.UI);
 
-            DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
 
             // 启动 3 分钟无操作超时（窗口真正显示后开始计时）
@@ -217,6 +255,7 @@ public sealed partial class SelectionOverlay : Window
                 if (!gpuBgOk && desktopPixels is not null)
                     RenderDesktopBackground(desktopPixels, vw, vh);
                 System.Diagnostics.Debug.WriteLine($"[⏱ Overlay] 背景渲染: {sw.ElapsedMilliseconds}ms (GPU={gpuBgOk})");
+                LogService.Info("Overlay", $"背景渲染 {sw.ElapsedMilliseconds}ms (GPU={gpuBgOk})", LogCategory.Capture);
                 DetectAndRenderRegions();
             }
         };
@@ -241,7 +280,7 @@ public sealed partial class SelectionOverlay : Window
         AnnotationCanvas.PointerMoved += OnAnnoCanvasMoved;
         AnnotationCanvas.PointerReleased += OnAnnoCanvasReleased;
 
-        // ── 3 分钟无操作超时自动取消 ──
+        // ── 1 分钟无操作超时自动取消 ──
         _timeoutTimer = DispatcherQueue.CreateTimer();
         _timeoutTimer.Interval = TimeSpan.FromSeconds(5);
         _timeoutTimer.IsRepeating = true;
@@ -249,13 +288,39 @@ public sealed partial class SelectionOverlay : Window
         {
             if (_idleWatch.ElapsedMilliseconds >= SelectionTimeoutMs)
             {
-                System.Diagnostics.Debug.WriteLine("[SelectionOverlay] 3 分钟无操作，自动取消");
+                LogService.Info("Overlay", "1 分钟无操作，自动取消", LogCategory.Capture);
                 Finish(ActionResult.Cancel);
             }
         };
+
+        // ── 硬看门狗：3 分钟后无论什么情况强制退出（线程池线程，UI 卡死也能触发）──
+        _hardWatchdog = new System.Threading.Timer(HardWatchdogTick, null, HardExitMs, Timeout.Infinite);
     }
 
-    /// <summary>重置 3 分钟超时计时（任何用户交互时调用）。</summary>
+    /// <summary>硬看门狗回调（线程池线程执行，不依赖 UI 消息泵）。</summary>
+    private void HardWatchdogTick(object? state)
+    {
+        if (_closed || _finished) return; // 窗口已正常关闭
+        System.Diagnostics.Debug.WriteLine("[SelectionOverlay] 硬看门狗触发: 3 分钟强制退出");
+
+        // 先尝试优雅关闭（UI 线程活着时正常走 Finish(Cancel)）
+        try
+        {
+            DispatcherQueue.TryEnqueue(() => Finish(ActionResult.Cancel));
+        }
+        catch { }
+
+        // 给 UI 线程 5 秒处理时间；仍未关闭说明 UI 卡死 → 强制退出进程
+        Thread.Sleep(5000);
+        if (!_closed && !_finished)
+        {
+            System.Diagnostics.Debug.WriteLine("[SelectionOverlay] UI 无响应，强制退出进程");
+            try { LogService.Error("SelectionOverlay", "硬看门狗: UI 无响应，强制退出"); } catch { }
+            Environment.Exit(0);
+        }
+    }
+
+    /// <summary>重置超时计时（任何用户交互时调用）。</summary>
     private void TouchIdle() => _idleWatch.Restart();
 
     /// <summary>外部强制取消（应用退出时由 MainWindow 调用，触发 ActionCompleted + 关闭）。</summary>
@@ -582,21 +647,45 @@ public sealed partial class SelectionOverlay : Window
         HintText.Visibility = Visibility.Visible;
     }
 
-    private void Finish(ActionResult result)
+    private async void Finish(ActionResult result)
     {
         if (_finished) return; // 防止双重触发
         _finished = true;
+        _closed = true; // 通知硬看门狗已响应（防止误杀）
 
-        // 停止超时定时器
+        // 停止超时定时器 + 硬看门狗
         _timeoutTimer?.Stop();
         _timeoutTimer = null;
+        _hardWatchdog?.Dispose();
+        _hardWatchdog = null;
+        _regionRefreshTimer?.Dispose();
+        _regionRefreshTimer = null;
 
         // 标注模式下先退出标注
         if (_isAnnotating) ExitAnnotationMode();
 
-        // 在关闭前将标注合成到像素
+        // 在关闭前将标注合成到像素（后台线程执行，避免大图马赛克/文字合成阻塞 UI）
         if (result is ActionResult.Confirm or ActionResult.Copy)
-            AnnotatedRegionPixels = GetAnnotatedRegionPixels();
+        {
+            if (_annotationManager.Layers.Count > 0)
+            {
+                // 超时保护：合成卡死（如 Win2D 共享设备异常）时 10s 后跳过合成，
+                // 保证 ActionCompleted 必然触发、防重入锁必然释放（用户感知=不卡死）
+                var composeTask = Task.Run(GetAnnotatedRegionPixels);
+                var done = await Task.WhenAny(composeTask, Task.Delay(10000));
+                if (done == composeTask)
+                {
+                    AnnotatedRegionPixels = await composeTask;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("[SelectionOverlay] 标注合成超时 (10s)，跳过合成直接关闭");
+                    AnnotatedRegionPixels = ExtractRegionPixels(SelectedRect); // 无标注像素兜底
+                }
+            }
+            else
+                AnnotatedRegionPixels = ExtractRegionPixels(SelectedRect);
+        }
 
         // 关闭 HDR 背景窗口
         _hdrBgWnd?.Close();
@@ -604,23 +693,32 @@ public sealed partial class SelectionOverlay : Window
         _hdrBgWnd = null;
 
         ActionCompleted?.Invoke(result, SelectedRect);
-        this.Close();
+        try { this.Close(); } catch { /* 窗口可能已被系统关闭 */ }
     }
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
-        // 停止超时定时器
+        _closed = true; // 通知硬看门狗已关闭（防止误杀）
+
+        // 停止超时定时器 + 硬看门狗
         _timeoutTimer?.Stop();
         _timeoutTimer = null;
+        _hardWatchdog?.Dispose();
+        _hardWatchdog = null;
+        _regionRefreshTimer?.Dispose();
+        _regionRefreshTimer = null;
 
         // 关闭 HDR 背景窗口
         _hdrBgWnd?.Close();
         _hdrBgWnd?.Dispose();
         _hdrBgWnd = null;
 
-        // 仅当 Finish 未被调用时（如系统强制关闭窗口）才触发 Cancel
-        if (!_finished && !_selectionComplete)
+        // 窗口被系统关闭（Alt+F4 等）时兜底触发 Cancel，保证 MainWindow 防重入锁必然释放
+        if (!_finished)
+        {
+            _finished = true;
             ActionCompleted?.Invoke(ActionResult.Cancel, default);
+        }
     }
 
     // ═══════════════════════════════════════
@@ -720,8 +818,19 @@ public sealed partial class SelectionOverlay : Window
         if (!_isAnnotating) return;
         var pt = e.GetCurrentPoint(AnnotationCanvas).Position;
         var canvasPt = new System.Numerics.Vector2((float)pt.X, (float)pt.Y);
+
+        // 文字工具：点击位置弹输入框，不进入拖拽
+        if (_currentAnnoTool == "Text")
+        {
+            _textInsertPos = CanvasToRegionImage(canvasPt);
+            ShowTextInput(canvasPt);
+            return;
+        }
+
         _annoDragStart = CanvasToRegionImage(canvasPt);
         _isAnnoDrawing = true;
+        _penPoints.Clear();
+        _penPoints.Add(_annoDragStart);
         AnnotationCanvas.CapturePointer(e.Pointer);
     }
 
@@ -729,7 +838,17 @@ public sealed partial class SelectionOverlay : Window
     {
         if (!_isAnnoDrawing) return;
         var pt = e.GetCurrentPoint(AnnotationCanvas).Position;
-        DrawAnnoPreview(ImageToCanvas(_annoDragStart), new System.Numerics.Vector2((float)pt.X, (float)pt.Y));
+        var canvasPt = new System.Numerics.Vector2((float)pt.X, (float)pt.Y);
+        if (_currentAnnoTool == "Pen")
+        {
+            // 画笔：累积轨迹点，绘制实时折线预览
+            var imagePt = CanvasToRegionImage(canvasPt);
+            var last = _penPoints[^1];
+            if ((imagePt - last).Length() > 0.5f) _penPoints.Add(imagePt);
+            DrawPenPreview();
+            return;
+        }
+        DrawAnnoPreview(ImageToCanvas(_annoDragStart), canvasPt);
     }
 
     private void OnAnnoCanvasReleased(object sender, PointerRoutedEventArgs e)
@@ -739,6 +858,19 @@ public sealed partial class SelectionOverlay : Window
         AnnotationCanvas.ReleasePointerCaptures();
         var pt = e.GetCurrentPoint(AnnotationCanvas).Position;
         var endCanvas = new System.Numerics.Vector2((float)pt.X, (float)pt.Y);
+
+        if (_currentAnnoTool == "Pen")
+        {
+            if (_penPoints.Count >= 2)
+            {
+                _penPoints.Add(CanvasToRegionImage(endCanvas));
+                _annotationManager.AddLayer(new FreehandLayer { Points = [.. _penPoints] });
+                RenderAllAnnoLayers();
+            }
+            else AnnotationCanvas.Children.Clear();
+            _penPoints.Clear();
+            return;
+        }
         CommitAnnoShape(_annoDragStart, CanvasToRegionImage(endCanvas));
     }
 
@@ -750,19 +882,120 @@ public sealed partial class SelectionOverlay : Window
         float w = Math.Abs(end.X - start.X), h = Math.Abs(end.Y - start.Y);
         if (w < 2 && h < 2) return;
 
-        Shape? shape = _currentAnnoTool switch
+        UIElement? element = _currentAnnoTool switch
         {
             "Rect" => new Rectangle { Width = w, Height = h, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
             "Ellipse" => new Ellipse { Width = w, Height = h, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
-            "Arrow" => new Line { X1 = start.X, Y1 = start.Y, X2 = end.X, Y2 = end.Y, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
+            "Arrow" => CreateArrowElement(start, end),
             _ => new Rectangle { Width = w, Height = h, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 }
         };
 
-        if (shape != null)
+        if (element is Shape shape)
         {
-            Canvas.SetLeft(shape, x); Canvas.SetTop(shape, y);
-            AnnotationCanvas.Children.Add(shape);
+            Canvas.SetLeft(shape, x);
+            Canvas.SetTop(shape, y);
         }
+        if (element != null)
+            AnnotationCanvas.Children.Add(element);
+    }
+
+    /// <summary>画笔实时预览：按轨迹点绘制折线。</summary>
+    private void DrawPenPreview()
+    {
+        AnnotationCanvas.Children.Clear();
+        if (_penPoints.Count < 2) return;
+        var poly = new Microsoft.UI.Xaml.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red),
+            StrokeThickness = 2,
+            StrokeLineJoin = PenLineJoin.Round
+        };
+        foreach (var p in _penPoints)
+        {
+            var cp = ImageToCanvas(p);
+            poly.Points.Add(new Windows.Foundation.Point(cp.X, cp.Y));
+        }
+        AnnotationCanvas.Children.Add(poly);
+    }
+
+    /// <summary>箭头元素：主线 + 箭头头部（画布绝对坐标）。</summary>
+    private static UIElement CreateArrowElement(System.Numerics.Vector2 start, System.Numerics.Vector2 end)
+    {
+        var stroke = new SolidColorBrush(Microsoft.UI.Colors.Red);
+        var geom = new Microsoft.UI.Xaml.Media.PathGeometry();
+        var fig = new Microsoft.UI.Xaml.Media.PathFigure { StartPoint = new Windows.Foundation.Point(start.X, start.Y) };
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = new Windows.Foundation.Point(end.X, end.Y) });
+
+        // 箭头头部两条短线（与主线 ±30°）
+        float dx = end.X - start.X, dy = end.Y - start.Y;
+        float len = MathF.Sqrt(dx * dx + dy * dy);
+        const float ang = MathF.PI / 6f;
+        float ca = MathF.Cos(ang), sa = MathF.Sin(ang);
+        float ux = len > 1e-3f ? dx / len : 1f, uy = len > 1e-3f ? dy / len : 0f;
+        float head = 12f;
+        var h1 = new Windows.Foundation.Point(end.X - head * (ux * ca - uy * sa), end.Y - head * (ux * sa + uy * ca));
+        var h2 = new Windows.Foundation.Point(end.X - head * (ux * ca + uy * sa), end.Y - head * (-ux * sa + uy * ca));
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = h1 });
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = new Windows.Foundation.Point(end.X, end.Y) });
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = h2 });
+        geom.Figures.Add(fig);
+
+        return new Microsoft.UI.Xaml.Shapes.Path
+        {
+            Data = geom,
+            Stroke = stroke,
+            StrokeThickness = 2,
+            StrokeLineJoin = PenLineJoin.Round,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+        };
+    }
+
+    // ────────────── 文字输入 ──────────────
+
+    private void ShowTextInput(System.Numerics.Vector2 canvasPt)
+    {
+        TextInputPanel.Margin = new Thickness(
+            Math.Clamp(canvasPt.X + 8, 0, Math.Max(0, AnnotationCanvas.Width - 300)),
+            Math.Clamp(canvasPt.Y + 8, 0, Math.Max(0, AnnotationCanvas.Height - 60)), 0, 0);
+        TextInputPanel.Visibility = Visibility.Visible;
+        AnnoTextInput.Text = "";
+        AnnoTextInput.Focus(FocusState.Programmatic);
+    }
+
+    private void HideTextInput()
+    {
+        TextInputPanel.Visibility = Visibility.Collapsed;
+        RootGrid.Focus(FocusState.Programmatic);
+    }
+
+    private void OnTextInputKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            e.Handled = true;
+            OnTextInputOk(null!, null!);
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            e.Handled = true;
+            HideTextInput();
+        }
+    }
+
+    private void OnTextInputOk(object sender, RoutedEventArgs e)
+    {
+        string text = AnnoTextInput.Text.Trim();
+        if (text.Length > 0)
+        {
+            _annotationManager.AddLayer(new TextLayer
+            {
+                X = _textInsertPos.X, Y = _textInsertPos.Y,
+                Text = text, FontSize = 16
+            });
+            RenderAllAnnoLayers();
+        }
+        HideTextInput();
     }
 
     private void CommitAnnoShape(System.Numerics.Vector2 start, System.Numerics.Vector2 end)
@@ -791,25 +1024,68 @@ public sealed partial class SelectionOverlay : Window
         AnnotationCanvas.Children.Clear();
         foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible))
         {
-            Shape? shape = layer switch
+            UIElement? element = layer switch
             {
                 RectangleLayer r => new Rectangle { Width = r.Width, Height = r.Height, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2, Fill = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(30, 255, 0, 0)) },
                 EllipseLayer el => new Ellipse { Width = el.RadiusX * 2, Height = el.RadiusY * 2, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
+                ArrowLayer al => CreateArrowElement(
+                    ImageToCanvas(new System.Numerics.Vector2(al.StartX, al.StartY)),
+                    ImageToCanvas(new System.Numerics.Vector2(al.EndX, al.EndY))),
+                FreehandLayer fl => CreatePolylineElement(
+                    fl.Points.Select(p => ImageToCanvas(p))),
+                TextLayer tl => CreateTextElement(tl, ImageToCanvas(new System.Numerics.Vector2(tl.X, tl.Y))),
                 MosaicLayer m => new Rectangle { Width = m.Width, Height = m.Height, Fill = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(200, 100, 100, 100)) },
                 _ => null
             };
 
-            if (shape != null)
+            if (element is null) continue;
+
+            // Polyline/Path(箭头)/TextBlock 自带绝对坐标，其余按边界定位
+            if (element is not Microsoft.UI.Xaml.Shapes.Polyline
+                && element is not Microsoft.UI.Xaml.Shapes.Path
+                && element is not TextBlock)
             {
                 var bounds = layer.GetBounds();
                 var canvasPos = ImageToCanvas(new System.Numerics.Vector2(bounds.Left, bounds.Top));
                 var canvasSz = ImageToCanvas(new System.Numerics.Vector2(bounds.Right, bounds.Bottom))
                     - new System.Numerics.Vector2(canvasPos.X, canvasPos.Y);
-                shape.Width = Math.Abs(canvasSz.X); shape.Height = Math.Abs(canvasSz.Y);
-                Canvas.SetLeft(shape, canvasPos.X); Canvas.SetTop(shape, canvasPos.Y);
-                AnnotationCanvas.Children.Add(shape);
+                if (element is FrameworkElement fe)
+                {
+                    fe.Width = Math.Abs(canvasSz.X);
+                    fe.Height = Math.Abs(canvasSz.Y);
+                }
+                Canvas.SetLeft(element, canvasPos.X);
+                Canvas.SetTop(element, canvasPos.Y);
             }
+            AnnotationCanvas.Children.Add(element);
         }
+    }
+
+    /// <summary>折线元素（画笔轨迹，Polyline 坐标为画布绝对坐标）。</summary>
+    private static Microsoft.UI.Xaml.Shapes.Polyline CreatePolylineElement(IEnumerable<System.Numerics.Vector2> canvasPts)
+    {
+        var poly = new Microsoft.UI.Xaml.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red),
+            StrokeThickness = 2,
+            StrokeLineJoin = PenLineJoin.Round
+        };
+        foreach (var p in canvasPts) poly.Points.Add(new Windows.Foundation.Point(p.X, p.Y));
+        return poly;
+    }
+
+    /// <summary>文字元素（TextBlock，画布绝对定位）。</summary>
+    private static TextBlock CreateTextElement(TextLayer tl, System.Numerics.Vector2 canvasPos)
+    {
+        var tb = new TextBlock
+        {
+            Text = tl.Text,
+            FontSize = tl.FontSize,
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red),
+        };
+        Canvas.SetLeft(tb, canvasPos.X);
+        Canvas.SetTop(tb, canvasPos.Y);
+        return tb;
     }
 
     // ── 标注撤销/重做 ──
@@ -834,58 +1110,7 @@ public sealed partial class SelectionOverlay : Window
         Buffer.BlockCopy(region, 0, result, 0, region.Length);
 
         foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible))
-        {
-            var bounds = layer.GetBounds();
-            int lx = Math.Max(0, (int)bounds.Left), ly = Math.Max(0, (int)bounds.Top);
-            int rx = Math.Min(imgW - 1, (int)bounds.Right), ry = Math.Min(imgH - 1, (int)bounds.Bottom);
-            if (lx >= imgW || ly >= imgH || rx < 0 || ry < 0) continue;
-
-            byte lr = 255, lg = 0, lb = 0;
-            // 从图层样式中提取颜色（若图层有 Style 属性）
-            if (layer is RectangleLayer rl) { lr = (byte)(rl.Style.StrokeColor.R * 255); lg = (byte)(rl.Style.StrokeColor.G * 255); lb = (byte)(rl.Style.StrokeColor.B * 255); }
-            else if (layer is EllipseLayer el) { lr = (byte)(el.Style.StrokeColor.R * 255); lg = (byte)(el.Style.StrokeColor.G * 255); lb = (byte)(el.Style.StrokeColor.B * 255); }
-            else if (layer is ArrowLayer al) { lr = (byte)(al.Style.StrokeColor.R * 255); lg = (byte)(al.Style.StrokeColor.G * 255); lb = (byte)(al.Style.StrokeColor.B * 255); }
-            else if (layer is FreehandLayer fl) { lr = (byte)(fl.Style.StrokeColor.R * 255); lg = (byte)(fl.Style.StrokeColor.G * 255); lb = (byte)(fl.Style.StrokeColor.B * 255); }
-            int t = 2;
-
-            switch (layer)
-            {
-                case MosaicLayer:
-                    for (int y = ly; y <= ry; y += 6)
-                    for (int x = lx; x <= rx; x += 6)
-                    {
-                        int r2 = 0, g2 = 0, b2 = 0, cnt = 0;
-                        for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
-                        for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
-                        { int idx = ((y + dy) * imgW + (x + dx)) * 4; b2 += result[idx]; g2 += result[idx + 1]; r2 += result[idx + 2]; cnt++; }
-                        byte av = (byte)((r2 + g2 + b2) / (cnt * 3));
-                        for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
-                        for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
-                        { int idx = ((y + dy) * imgW + (x + dx)) * 4; result[idx] = result[idx + 1] = result[idx + 2] = av; }
-                    }
-                    break;
-
-                case RectangleLayer:
-                case EllipseLayer:
-                case ArrowLayer:
-                case FreehandLayer:
-                case TextLayer:
-                    // 边框渲染：四边条纹（上/下/左/右）
-                    for (int y = ly; y <= Math.Min(ly + t, ry); y++)
-                    for (int x = lx; x <= rx; x++)
-                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
-                    for (int y = Math.Max(ly, ry - t); y <= ry; y++)
-                    for (int x = lx; x <= rx; x++)
-                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
-                    for (int x = lx; x <= Math.Min(lx + t, rx); x++)
-                    for (int y = ly; y <= ry; y++)
-                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
-                    for (int x = Math.Max(lx, rx - t); x <= rx; x++)
-                    for (int y = ly; y <= ry; y++)
-                    { int idx = (y * imgW + x) * 4; result[idx] = lb; result[idx + 1] = lg; result[idx + 2] = lr; }
-                    break;
-            }
-        }
+            AnnotationRasterizer.RenderLayer(result, imgW, imgH, layer);
         return result;
     }
 
@@ -907,16 +1132,19 @@ public sealed partial class SelectionOverlay : Window
     private Border? _activeHighlight;
     private Border? _windowTooltip;
     private TextBlock? _tooltipText;
+    private System.Threading.Timer? _regionRefreshTimer;
 
-    /// <summary>后台检测窗口区域（排除覆盖层自身）。</summary>
+    /// <summary>后台检测窗口区域（排除覆盖层自身）+ 每 3 秒定时刷新（QQ截图式实时感知窗口变化）。</summary>
     private async void DetectAndRenderRegions()
     {
         try
         {
             var selfHwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            // 排除覆盖层自身 + 下层 HDR 背景窗口（避免把背景窗口识别为"窗口"）
+            var exclude = new HashSet<nint> { selfHwnd };
+            if (_hdrBgWnd?.Hwnd is nint bgHwnd && bgHwnd != 0) exclude.Add(bgHwnd);
             _detectedRegions = await Task.Run(() =>
-                RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh,
-                    new HashSet<nint> { selfHwnd }));
+                RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh, exclude));
 
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -930,6 +1158,25 @@ public sealed partial class SelectionOverlay : Window
         {
             System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] 区域检测失败: {ex.Message}");
         }
+
+        // 定时刷新（每 3 秒, 未选中时; 响应新开/关闭/移动窗口）
+        _regionRefreshTimer?.Dispose();
+        _regionRefreshTimer = new System.Threading.Timer(_ =>
+        {
+            try
+            {
+                var selfHwnd2 = WinRT.Interop.WindowNative.GetWindowHandle(this);
+                var exclude2 = new HashSet<nint> { selfHwnd2 };
+                if (_hdrBgWnd?.Hwnd is nint bgHwnd2 && bgHwnd2 != 0) exclude2.Add(bgHwnd2);
+                var regions = RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh, exclude2);
+                if (!_selectionComplete && !_isDragging)
+                {
+                    _detectedRegions = regions;
+                    if (_hoveredRegionIndex >= regions.Count) _hoveredRegionIndex = -1;
+                }
+            }
+            catch { }
+        }, null, 3000, 3000);
     }
 
     /// <summary>QQ截图式：仅高亮当前悬停的窗口（最小面积优先），显示标题提示。</summary>
