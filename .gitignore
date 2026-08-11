@@ -82,6 +82,14 @@ Desktop.ini
 crash.log
 *_crash.log
 
+# ── 日志目录 (运行时产生, 禁止上传) ──
+log/
+**/log/
+!publish/PACKAGE.md
+
+# ── TTC 日志查看器 (独立可选工具, 发布产物不入库) ──
+publish/TTC日志查看器/
+
 # ── Temp / Accidental files ──
 0
 *_error.log
@@ -100,6 +108,9 @@ crash.log
 TestResults/
 *.tmp
 *.temp
+
+# ── 冒烟测试截图 (运行时产生, 禁止上传) ──
+scripts/*.png
 
 # ── TrueToneCap specific ──
 TrueToneCap.settings.json

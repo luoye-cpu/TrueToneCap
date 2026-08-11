@@ -49,6 +49,20 @@
                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 <Canvas x:Name="AnnotationCanvas" Background="Transparent"
                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+                <!-- 文字标注输入浮层 -->
+                <Border x:Name="TextInputPanel" Visibility="Collapsed" CornerRadius="6"
+                        Background="{ThemeResource CardBackgroundFillColorDefault}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                        Padding="8" HorizontalAlignment="Left" VerticalAlignment="Top"
+                        IsHitTestVisible="True">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBox x:Name="AnnoTextInput" Width="220" FontSize="16"
+                                 PlaceholderText="输入标注文字" KeyDown="OnTextInputKeyDown"/>
+                        <Button x:Name="TextInputOk" Content="✓" Width="40" Height="32"
+                                Click="OnTextInputOk" ToolTipService.ToolTip="确认文字 (Enter)"/>
+                    </StackPanel>
+                </Border>
             </Grid>
         </Border>
 

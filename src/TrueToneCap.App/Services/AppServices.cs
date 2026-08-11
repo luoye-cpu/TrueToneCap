@@ -81,6 +81,13 @@ public static class AppServices
             LogService.Error("AppServices", "WGC/GPU 初始化失败（将以 CPU 回退模式运行）", ex);
         }
 
+        // ── Phase 1 (2026-08-11): 启动后台预热预览 UI 缓存（Win2D 设备 + 工具栏文字位图）──
+        try
+        {
+            _ = Task.Run(HdrCaptureWindow.PreloadUiCache);
+        }
+        catch { }
+
         _serviceProvider = services.BuildServiceProvider(new ServiceProviderOptions
         {
             ValidateScopes = false,

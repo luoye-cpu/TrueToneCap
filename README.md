@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.1-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
+> **v0.3.2-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
 
 TrueToneCap 是一把为像素而生的手术刀。
 
@@ -21,7 +21,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 ## Quick Start / 快速开始
 
-1. Download `TrueToneCap-v0.3.1-beta-win-x64.zip`, extract / 下载解压
+1. Download `TrueToneCap-v0.3.2-beta-win-x64.zip`, extract / 下载解压
 2. Run `TrueToneCap.exe` / 双击运行
 3. Press `Ctrl+Shift+S` to capture / 按快捷键截图
 
@@ -70,9 +70,15 @@ dotnet run --project src\TrueToneCap.App -c Release
 
 ## Changelog / 更新日志
 
-### v0.3.1-beta — 2026-08-10
+### v0.3.2-beta — 2026-08-10
 
-- 🎨 Color: Gain Map R/B 通道交换修复 — 灰度测试不可见，纯色测试验证 / Gain Map R/B channel swap fix
+- ✏️ Annotate: 预览/输出一致性修复 — Arrow/Pen/Text 预览可见，输出不再画成矩形框 / annotation preview-output consistency
+- 🖥️ Overlay: HDR 路径"标注"按钮接通独立标注窗口（原为死按钮丢失截图）/ HDR annotate wired up
+- 🛡️ Stability: Alt+F4/系统关闭兜底触发 Cancel，防重入锁不再泄漏 / close fallback fixes
+- ✏️ Annotate: 画笔轨迹累积 + 文字输入浮层（原画笔只画直线、文字固定"标注"）/ pen stroke + text input
+- ⚡ Performance: 合成移出 UI 线程 + 马赛克并行 / compose off UI thread
+- ⚡ Performance: staging 纹理池化、拷贝+遮罩合并遍历、渲染线程 16ms 门控、Present 去 vsync、多屏拼接并行 / preview pipeline optimizations
+- 🖼️ Encoding: Gain Map R/B 通道交换修复 — 灰度测试不可见，纯色测试验证 / Gain Map R/B channel swap fix
 - 🖼️ Encoding: AVIF CICP matrix 修复 (BT.2020 NCL, matrix=9)，Windows 解码器兼容 / AVIF CICP matrix fix
 - 🎨 Color: HDR 编码不再嵌入 ICC 覆盖 JXL color fields，intensity_target 遵循显示器峰值 / ICC override fix
 - 🖥️ Overlay: 选区覆盖层 3 分钟超时自动取消 + 应用退出强制关闭覆盖层 / selection overlay timeout

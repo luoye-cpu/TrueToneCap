@@ -4,26 +4,27 @@
     Title="SelectionOverlay"
     Closed="OnClosed">
 
-    <Grid x:Name="RootGrid" IsTabStop="True">
+    <!-- 关键: RootGrid 必须有无色背景才能接收指针事件 (WinUI 命中测试要求) -->
+    <Grid x:Name="RootGrid" IsTabStop="True" Background="Transparent">
         <!-- HDR SwapChain 背景（HDR 显示器上直接呈现 scRGB 线性帧） -->
         <SwapChainPanel x:Name="HdrPanel" IsHitTestVisible="False" Visibility="Collapsed"/>
         <!-- SDR 桌面截图背景（回退路径） -->
         <Image x:Name="DesktopImage" Stretch="Fill" IsHitTestVisible="False"/>
 
-        <!-- 半透明覆盖层：等待用户单击或框选 -->
-        <Border x:Name="DimOverlay" Background="#660080FF" IsHitTestVisible="False"/>
+        <!-- 半透明覆盖层：等待用户单击或框选 (灰色遮罩, 2026-08-11) -->
+        <Border x:Name="DimOverlay" Background="#80000000" IsHitTestVisible="False"/>
 
         <!-- ═══════ 自动识别区域提示层 ═══════ -->
         <Canvas x:Name="RegionHintCanvas" Background="Transparent"
                 HorizontalAlignment="Left" VerticalAlignment="Top"
                 Visibility="Visible" IsHitTestVisible="False"/>
 
-        <!-- 选区外遮罩 -->
+        <!-- 选区外遮罩 (灰色, 2026-08-11) -->
         <Grid x:Name="MaskGrid" IsHitTestVisible="False">
-            <Border x:Name="MaskTop" Background="#660080FF" IsHitTestVisible="False" VerticalAlignment="Top"/>
-            <Border x:Name="MaskBottom" Background="#660080FF" IsHitTestVisible="False" VerticalAlignment="Bottom"/>
-            <Border x:Name="MaskLeft" Background="#660080FF" IsHitTestVisible="False" HorizontalAlignment="Left"/>
-            <Border x:Name="MaskRight" Background="#660080FF" IsHitTestVisible="False" HorizontalAlignment="Right"/>
+            <Border x:Name="MaskTop" Background="#80000000" IsHitTestVisible="False" VerticalAlignment="Top"/>
+            <Border x:Name="MaskBottom" Background="#80000000" IsHitTestVisible="False" VerticalAlignment="Bottom"/>
+            <Border x:Name="MaskLeft" Background="#80000000" IsHitTestVisible="False" HorizontalAlignment="Left"/>
+            <Border x:Name="MaskRight" Background="#80000000" IsHitTestVisible="False" HorizontalAlignment="Right"/>
         </Grid>
 
         <!-- 选区四边蓝色细线（取代边框） -->
@@ -156,6 +157,20 @@
                         <TextBlock Text="完成" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
+            </StackPanel>
+        </Border>
+
+        <!-- 文字标注输入浮层 -->
+        <Border x:Name="TextInputPanel" Visibility="Collapsed" CornerRadius="6"
+                Background="{ThemeResource CardBackgroundFillColorDefault}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                Padding="8" HorizontalAlignment="Left" VerticalAlignment="Top"
+                IsHitTestVisible="True">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBox x:Name="AnnoTextInput" Width="220" FontSize="16"
+                         PlaceholderText="输入标注文字" KeyDown="OnTextInputKeyDown"/>
+                <Button x:Name="TextInputOk" Content="✓" Width="40" Height="32"
+                        Click="OnTextInputOk" ToolTipService.ToolTip="确认文字 (Enter)"/>
             </StackPanel>
         </Border>
     </Grid>

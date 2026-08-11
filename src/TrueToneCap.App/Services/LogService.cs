@@ -39,7 +39,12 @@ public sealed class LogEntry
     public string Message { get; init; } = "";
     public string? Detail { get; init; }
 
-    public string FormattedLine => $"{Timestamp:HH:mm:ss.fff} [{Level,-7}] [{CategoryDisplay}/{Tag}] {Message}";
+    // ── 2026-08-11: 调用者信息 (文件:行号) — 大幅提升日志定位能力 ──
+    public string CallerFile { get; init; } = "";
+    public int CallerLine { get; init; }
+    public string CallerDisplay => CallerFile.Length == 0 ? "" : $" {CallerFile}:{CallerLine}";
+
+    public string FormattedLine => $"{Timestamp:HH:mm:ss.fff} [{Level,-7}] [{CategoryDisplay}/{Tag}] {Message}{CallerDisplay}";
     public string TimeDisplay => Timestamp.ToString("HH:mm:ss.fff");
     public string CategoryDisplay => Category switch
     {
@@ -94,6 +99,9 @@ public static class LogService
     private static readonly TimeSpan s_cleanupInterval = TimeSpan.FromHours(1);
     private static DateTime s_lastCleanup = DateTime.MinValue;
 
+    // ── 2026-08-11: Debug 级别是否写入文件 (默认 false 防刷屏; 排障时可开) ──
+    public static bool FileDebugEnabled { get; set; }
+
     // ── UI 环形缓冲区 ──
     private const int MaxUiEntries = 2000;
     private static readonly ConcurrentQueue<LogEntry> s_uiEntries = new();
@@ -141,7 +149,7 @@ public static class LogService
         });
     }
 
-    /// <summary>按日期轮转日志文件。</summary>
+    /// <summary>按日期轮转日志文件。同一天超过大小上限时创建分片 app_日期_N.log。</summary>
     private static void RotateLogFile()
     {
         var today = DateTime.Now.ToString("yyyy-MM-dd");
@@ -151,6 +159,13 @@ public static class LogService
             {
                 var fi = new FileInfo(s_currentLogPath);
                 if (fi.Exists && fi.Length < s_maxFileSize) return;
+                // 超 4MB → 分片轮转 (不覆盖)
+                if (fi.Exists)
+                {
+                    s_currentLogPath = NextSlicePath(today);
+                    File.AppendAllText(s_currentLogPath, $"=== TrueToneCap 日志分片 [{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ===\n");
+                    return;
+                }
             }
             catch { }
         }
@@ -163,17 +178,47 @@ public static class LogService
         catch { }
     }
 
-    // ── 公开日志方法（带分类） ──
+    /// <summary>生成下一个分片路径 app_日期_N.log。</summary>
+    private static string NextSlicePath(string today)
+    {
+        for (int i = 1; ; i++)
+        {
+            var p = Path.Combine(s_logDir!, $"app_{today}_{i}.log");
+            if (!File.Exists(p)) return p;
+        }
+    }
 
-    public static void Debug(string tag, string msg, LogCategory cat = LogCategory.System) => Write(LogLevel.Debug, cat, tag, msg);
-    public static void Info(string tag, string msg, LogCategory cat = LogCategory.System) => Write(LogLevel.Info, cat, tag, msg);
-    public static void Warn(string tag, string msg, LogCategory cat = LogCategory.System) => Write(LogLevel.Warning, cat, tag, msg);
-    public static void Error(string tag, string msg, LogCategory cat = LogCategory.System) => Write(LogLevel.Error, cat, tag, msg);
-    public static void Error(string tag, string msg, Exception ex, LogCategory cat = LogCategory.System) => Write(LogLevel.Error, cat, tag, $"{msg}: {ex.Message}", ex.ToString());
+    // ── 公开日志方法（带分类 + 调用者信息） ──
+
+    public static void Debug(string tag, string msg, LogCategory cat = LogCategory.System,
+        [System.Runtime.CompilerServices.CallerFilePath] string? file = null,
+        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+        => Write(LogLevel.Debug, cat, tag, msg, null, file, line);
+
+    public static void Info(string tag, string msg, LogCategory cat = LogCategory.System,
+        [System.Runtime.CompilerServices.CallerFilePath] string? file = null,
+        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+        => Write(LogLevel.Info, cat, tag, msg, null, file, line);
+
+    public static void Warn(string tag, string msg, LogCategory cat = LogCategory.System,
+        [System.Runtime.CompilerServices.CallerFilePath] string? file = null,
+        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+        => Write(LogLevel.Warning, cat, tag, msg, null, file, line);
+
+    public static void Error(string tag, string msg, LogCategory cat = LogCategory.System,
+        [System.Runtime.CompilerServices.CallerFilePath] string? file = null,
+        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+        => Write(LogLevel.Error, cat, tag, msg, null, file, line);
+
+    public static void Error(string tag, string msg, Exception ex, LogCategory cat = LogCategory.System,
+        [System.Runtime.CompilerServices.CallerFilePath] string? file = null,
+        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+        => Write(LogLevel.Error, cat, tag, $"{msg}: {ex.Message}", ex.ToString(), file, line);
 
     // ── 核心写入 ──
 
-    private static void Write(LogLevel level, LogCategory category, string tag, string msg, string? detail = null)
+    private static void Write(LogLevel level, LogCategory category, string tag, string msg, string? detail,
+        string? callerFile, int callerLine)
     {
         var entry = new LogEntry
         {
@@ -183,10 +228,14 @@ public static class LogService
             Tag = tag,
             Message = msg,
             Detail = detail,
+            CallerFile = Path.GetFileName(callerFile ?? ""),
+            CallerLine = callerLine,
         };
 
         // 控制台输出
         System.Diagnostics.Debug.WriteLine(entry.FormattedLine);
+        if (detail is not null)
+            System.Diagnostics.Debug.WriteLine(detail);
 
         // UI 环形缓冲区
         s_uiEntries.Enqueue(entry);
@@ -196,8 +245,8 @@ public static class LogService
         // 触发 UI 事件
         try { OnLogEntry?.Invoke(entry); } catch { }
 
-        // 文件日志（仅 Info+ 级别写入文件，避免 Debug 刷屏）
-        if (level < LogLevel.Info) return;
+        // 文件日志（Info+ 始终写入; Debug 仅当 FileDebugEnabled）
+        if (level < LogLevel.Info && !FileDebugEnabled) return;
 
         lock (s_lock)
         {
@@ -205,7 +254,11 @@ public static class LogService
             {
                 RotateLogFile();
                 if (s_currentLogPath is not null)
+                {
                     File.AppendAllText(s_currentLogPath, entry.FormattedLine + "\n");
+                    if (detail is not null)
+                        File.AppendAllText(s_currentLogPath, "    └─ " + detail.Replace("\n", "\n       ") + "\n");
+                }
             }
             catch { }
         }

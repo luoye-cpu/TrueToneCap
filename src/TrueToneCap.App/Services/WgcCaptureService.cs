@@ -49,6 +49,7 @@ public sealed partial class WgcCaptureService : IDisposable
 
     // ── 内部诊断日志（使用统一 LogService）──
     private static void Log(string msg) => LogService.Debug("WgcCapture", msg, LogCategory.Capture);
+    private static void LogInfo(string msg) => LogService.Info("WgcCapture", msg, LogCategory.Capture); // 关键事件落盘
 
     private ID3D11Device? _d3dDevice;
     private nint _deviceMonitor;
@@ -57,6 +58,16 @@ public sealed partial class WgcCaptureService : IDisposable
     // ═══ D3D11 线程安全：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
     // 实例级锁：每个 WgcCaptureService 实例的 D3D11 设备各自加锁，多显示器场景不互相阻塞
     private readonly object _d3dContextLock = new();
+
+    /// <summary>D3D11 设备上下文锁（供共享同一设备的组件如 HdrPreviewWindow 使用，防止与 WGC 回读并发）。</summary>
+    public object D3dContextLock => _d3dContextLock;
+
+    /// <summary>
+    /// 获取现有 D3D11 设备（只读，不创建、不销毁）。
+    /// ⚠️ 禁止用 GetOrCreateDevice(光标显示器) 给预览窗口取设备 —— 光标显示器与截图显示器
+    /// 不一致时它会 Dispose 正在被 WGC 会话使用的设备，导致 GPU 操作挂起、UI 线程等锁卡死。
+    /// </summary>
+    public ID3D11Device? GetSharedDevice() => _d3dDevice;
 
     // ═══ P0: 懒启动会话池 + 延迟自动停止 ═══
     // P3 修复: 使用 (HMONITOR, IsHdr) 元组 key，避免位或标记碰撞
@@ -161,11 +172,13 @@ public sealed partial class WgcCaptureService : IDisposable
 
                 sw.Stop();
                 Log($"[Pool] {_hmonitor:X}: 会话启动 {sw.ElapsedMilliseconds}ms ({_width}x{_height}) {(IsHdr ? "HDR" : "SDR")}");
+                LogInfo($"会话启动: {_width}x{_height} {(IsHdr ? "HDR" : "SDR")} {sw.ElapsedMilliseconds}ms");
                 return true;
             }
             catch (Exception ex)
             {
                 Log($"[Pool] {_hmonitor:X}: 启动失败: {ex.Message}");
+                LogInfo($"会话启动失败: {ex.Message}");
                 return false;
             }
         }
@@ -229,6 +242,7 @@ public sealed partial class WgcCaptureService : IDisposable
                     _hasFrame = true;
                     _firstFrameEvent.Set();
                     Log($"[Pool] {_hmonitor:X}: 首帧就绪 {w}x{h}");
+                    LogInfo($"首帧就绪: {w}x{h} {(IsHdr ? "HDR" : "SDR")}");
                 }
             }
             catch (Exception ex)
@@ -330,57 +344,66 @@ public sealed partial class WgcCaptureService : IDisposable
 
         // ── Staging 纹理复用 + 像素缓冲区复用的像素读取 ──
 
-        private byte[] ReadBytePixelsPooled(ID3D11Texture2D texture, int w, int h)
+        private byte[]? ReadBytePixelsPooled(ID3D11Texture2D texture, int w, int h)
         {
-            // P2: 复用像素缓冲区（避免 60fps 下每帧分配 33MB）
-            // 修复竞态：使用独立写入缓冲区，不与消费者共享的 _latestSdr 冲突
             int len = w * h * 4;
             if (_writeBufferSdr is null || _writeBufferSdr.Length != len)
                 _writeBufferSdr = new byte[len];
             var pixels = _writeBufferSdr;
 
             // ═══ D3D11 线程安全：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
-            // 同一 D3D11 设备的所有操作共享 _gpuLock，防止 WGC 回调与截图线程冲突
-            lock (_gpuLock)
+            // TryEnter 超时保护：设备异常/被外部 Dispose 时 GPU 操作挂起，绝不无限等待
+            // （否则 WGC 回调线程卡死 → 后续截图拿不到帧 → 用户感知=卡死）
+            if (!Monitor.TryEnter(_gpuLock, 500))
             {
-            var ctx = _d3dDevice.ImmediateContext;
-
-            // P2: 复用 staging 纹理
-            if (_stagingTex is null || _stagingW != w || _stagingH != h)
-            {
-                _stagingTex?.Dispose();
-                _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
-                {
-                    Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
-                    Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
-                    SampleDescription = new(1, 0),
-                    Usage = ResourceUsage.Staging,
-                    BindFlags = BindFlags.None,
-                    CPUAccessFlags = CpuAccessFlags.Read
-                });
-                _stagingW = w; _stagingH = h;
+                Log($"[Pool] {_hmonitor:X}: GPU 锁超时 (500ms)，跳过本帧 SDR 读取");
+                LogInfo($"GPU 锁超时 (500ms)，跳过 SDR 帧");
+                return null;
             }
-
-            ctx.CopyResource(_stagingTex, texture);
-            var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-
-            unsafe
+            try
             {
-                byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
-                int srcRowPitch = (int)mapped.RowPitch;
-                int dstStride = w * 4;
+                var ctx = _d3dDevice.ImmediateContext;
 
-                fixed (byte* dst = pixels)
+                // P2: 复用 staging 纹理
+                if (_stagingTex is null || _stagingW != w || _stagingH != h)
                 {
-                    for (int row = 0; row < h; row++)
+                    _stagingTex?.Dispose();
+                    _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                     {
-                        byte* srcRow = srcBase + row * srcRowPitch;
-                        byte* dstRow = dst + row * dstStride;
-                        Buffer.MemoryCopy(srcRow, dstRow, dstStride, dstStride);
+                        Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                        SampleDescription = new(1, 0),
+                        Usage = ResourceUsage.Staging,
+                        BindFlags = BindFlags.None,
+                        CPUAccessFlags = CpuAccessFlags.Read
+                    });
+                    _stagingW = w; _stagingH = h;
+                }
+
+                ctx.CopyResource(_stagingTex, texture);
+                var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+
+                unsafe
+                {
+                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                    int srcRowPitch = (int)mapped.RowPitch;
+                    int dstStride = w * 4;
+
+                    fixed (byte* dst = pixels)
+                    {
+                        for (int row = 0; row < h; row++)
+                        {
+                            byte* srcRow = srcBase + row * srcRowPitch;
+                            byte* dstRow = dst + row * dstStride;
+                            Buffer.MemoryCopy(srcRow, dstRow, dstStride, dstStride);
+                        }
                     }
                 }
+                ctx.Unmap(_stagingTex, 0);
             }
-            ctx.Unmap(_stagingTex, 0);
+            finally
+            {
+                Monitor.Exit(_gpuLock);
             }
 
             // Alpha 修复（WGC 输出 alpha 可能为 0）— 纯 CPU 操作，无需锁
@@ -388,7 +411,7 @@ public sealed partial class WgcCaptureService : IDisposable
             return pixels;
         }
 
-        private float[] ReadFloatPixelsPooled(ID3D11Texture2D texture, int w, int h)
+        private float[]? ReadFloatPixelsPooled(ID3D11Texture2D texture, int w, int h)
         {
             int pixelCount = w * h * 4;
 
@@ -399,45 +422,56 @@ public sealed partial class WgcCaptureService : IDisposable
             var pixels = _writeBufferHdr;
 
             // ═══ D3D11 线程安全：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
-            lock (_gpuLock)
+            // TryEnter 超时保护（同 ReadBytePixelsPooled）
+            if (!Monitor.TryEnter(_gpuLock, 500))
             {
-            var ctx = _d3dDevice.ImmediateContext;
-
-            if (_stagingTex is null || _stagingW != w || _stagingH != h)
-            {
-                _stagingTex?.Dispose();
-                _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
-                {
-                    Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
-                    Format = Vortice.DXGI.Format.R16G16B16A16_Float,
-                    SampleDescription = new(1, 0),
-                    Usage = ResourceUsage.Staging,
-                    BindFlags = BindFlags.None,
-                    CPUAccessFlags = CpuAccessFlags.Read
-                });
-                _stagingW = w; _stagingH = h;
+                Log($"[Pool] {_hmonitor:X}: GPU 锁超时 (500ms)，跳过本帧 HDR 读取");
+                LogInfo($"GPU 锁超时 (500ms)，跳过 HDR 帧");
+                return null;
             }
-
-            ctx.CopyResource(_stagingTex, texture);
-            var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-
-            unsafe
+            try
             {
-                byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
-                int srcRowPitch = (int)mapped.RowPitch;
-                int halfsPerRow = w * 4;
+                var ctx = _d3dDevice.ImmediateContext;
 
-                fixed (float* dst = pixels)
+                if (_stagingTex is null || _stagingW != w || _stagingH != h)
                 {
-                    for (int row = 0; row < h; row++)
+                    _stagingTex?.Dispose();
+                    _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                     {
-                        byte* srcRow = srcBase + row * srcRowPitch;
-                        float* dstRow = dst + row * w * 4;
-                        TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(srcRow, dstRow, halfsPerRow);
+                        Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                        Format = Vortice.DXGI.Format.R16G16B16A16_Float,
+                        SampleDescription = new(1, 0),
+                        Usage = ResourceUsage.Staging,
+                        BindFlags = BindFlags.None,
+                        CPUAccessFlags = CpuAccessFlags.Read
+                    });
+                    _stagingW = w; _stagingH = h;
+                }
+
+                ctx.CopyResource(_stagingTex, texture);
+                var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+
+                unsafe
+                {
+                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                    int srcRowPitch = (int)mapped.RowPitch;
+                    int halfsPerRow = w * 4;
+
+                    fixed (float* dst = pixels)
+                    {
+                        for (int row = 0; row < h; row++)
+                        {
+                            byte* srcRow = srcBase + row * srcRowPitch;
+                            float* dstRow = dst + row * w * 4;
+                            TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(srcRow, dstRow, halfsPerRow);
+                        }
                     }
                 }
+                ctx.Unmap(_stagingTex, 0);
             }
-            ctx.Unmap(_stagingTex, 0);
+            finally
+            {
+                Monitor.Exit(_gpuLock);
             }
 
             return pixels;
@@ -941,18 +975,20 @@ public sealed partial class WgcCaptureService : IDisposable
         var fullPixels = new byte[vw * vh * 4];
         var fullStride = vw * 4;
 
-        // 从各显示器的池化会话取帧并拼接
-        foreach (var display in displays)
+        // 从各显示器的池化会话取帧并拼接（2026-08-10: 按显示器并行，显示器矩形不重叠，
+        // 各行写入互不竞争；双 4K 拼接 30-60ms → ~15-25ms）
+        var displaysArr = displays.ToArray();
+        Parallel.ForEach(displaysArr, display =>
         {
             var session = GetOrCreateSdrSession(display.MonitorHandle);
             if (!session.HasFrame && !session.WaitForFirstFrame(config.FrameTimeoutMs))
             {
                 Log($"[WGC] 显示器 {display.Name} 首帧超时，跳过");
-                continue;
+                return;
             }
 
             var pixels = session.GetLatestSdr();
-            if (pixels is null) continue;
+            if (pixels is null) return;
 
             int dx = display.X - vx;
             int dy = display.Y - vy;
@@ -965,7 +1001,7 @@ public sealed partial class WgcCaptureService : IDisposable
                 int dstOff = ((dy + row) * fullStride) + (dx * 4);
                 Buffer.BlockCopy(pixels, srcOff, fullPixels, dstOff, srcStride);
             }
-        }
+        });
 
         sw.Stop();
         Log($"[WGC] CaptureAllMonitors 完成: {vw}x{vh} {sw.ElapsedMilliseconds}ms");

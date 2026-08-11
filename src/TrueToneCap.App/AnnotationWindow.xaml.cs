@@ -29,6 +29,11 @@ public sealed partial class AnnotationWindow : Window
     private bool _isDrawing;
     private readonly List<UIElement> _renderedShapes = [];
 
+    // 画笔轨迹累积（拖动期间逐点追加，完成后一次性提交为 FreehandLayer）
+    private readonly List<System.Numerics.Vector2> _penPoints = [];
+    // 文字插入位置（图像坐标）
+    private System.Numerics.Vector2 _textInsertPos;
+
     // 保存回调：由 MainWindow 注入
     public Func<byte[], int, int, Task>? OnSaveRequested { get; set; }
     public Func<byte[], int, int, Task>? OnCopyRequested { get; set; }
@@ -183,8 +188,20 @@ public sealed partial class AnnotationWindow : Window
     {
         var pt = e.GetCurrentPoint(AnnotationCanvas).Position;
         var canvasPt = new System.Numerics.Vector2((float)pt.X, (float)pt.Y);
-        _dragStart = CanvasToImage(canvasPt);  // 存储为图像坐标
+        var imagePt = CanvasToImage(canvasPt);
+
+        // 文字工具：点击位置弹输入框，不进入拖拽
+        if (_currentTool == "Text")
+        {
+            _textInsertPos = imagePt;
+            ShowTextInput(canvasPt);
+            return;
+        }
+
+        _dragStart = imagePt;  // 存储为图像坐标
         _isDrawing = true;
+        _penPoints.Clear();
+        _penPoints.Add(imagePt);
         AnnotationCanvas.CapturePointer(e.Pointer);
     }
 
@@ -194,6 +211,14 @@ public sealed partial class AnnotationWindow : Window
         var pt = e.GetCurrentPoint(AnnotationCanvas).Position;
         var canvasPt = new System.Numerics.Vector2((float)pt.X, (float)pt.Y);
         var imageEnd = CanvasToImage(canvasPt);
+        if (_currentTool == "Pen")
+        {
+            // 画笔：累积轨迹点，绘制实时折线预览
+            var last = _penPoints[^1];
+            if ((imageEnd - last).Length() > 0.5f) _penPoints.Add(imageEnd);
+            DrawPenPreview();
+            return;
+        }
         // 预览用 Canvas 坐标绘制
         DrawPreview(ImageToCanvas(_dragStart), canvasPt);
     }
@@ -206,6 +231,19 @@ public sealed partial class AnnotationWindow : Window
         var pt = e.GetCurrentPoint(AnnotationCanvas).Position;
         var canvasPt = new System.Numerics.Vector2((float)pt.X, (float)pt.Y);
         var imageEnd = CanvasToImage(canvasPt);
+
+        if (_currentTool == "Pen")
+        {
+            if (_penPoints.Count >= 2)
+            {
+                _penPoints.Add(imageEnd);
+                _annotationManager.AddLayer(new FreehandLayer { Points = [.. _penPoints] });
+                RenderAllLayers();
+            }
+            else AnnotationCanvas.Children.Clear();
+            _penPoints.Clear();
+            return;
+        }
         CommitShape(_dragStart, imageEnd);  // 使用图像坐标存储
     }
 
@@ -219,20 +257,120 @@ public sealed partial class AnnotationWindow : Window
 
         if (w < 2 && h < 2) return;
 
-        Shape? shape = _currentTool switch
+        UIElement? element = _currentTool switch
         {
             "Rect" => new Rectangle { Width = w, Height = h, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
             "Ellipse" => new Ellipse { Width = w, Height = h, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
-            "Arrow" => new Line { X1 = start.X, Y1 = start.Y, X2 = end.X, Y2 = end.Y, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
+            "Arrow" => CreateArrowElement(start, end),
             _ => new Rectangle { Width = w, Height = h, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 }
         };
 
-        if (shape != null)
+        if (element is Shape shape)
         {
             Canvas.SetLeft(shape, x);
             Canvas.SetTop(shape, y);
-            AnnotationCanvas.Children.Add(shape);
         }
+        if (element != null)
+            AnnotationCanvas.Children.Add(element);
+    }
+
+    /// <summary>画笔实时预览：按轨迹点绘制折线。</summary>
+    private void DrawPenPreview()
+    {
+        AnnotationCanvas.Children.Clear();
+        if (_penPoints.Count < 2) return;
+        var poly = new Microsoft.UI.Xaml.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red),
+            StrokeThickness = 2,
+            StrokeLineJoin = PenLineJoin.Round
+        };
+        foreach (var p in _penPoints)
+        {
+            var cp = ImageToCanvas(p);
+            poly.Points.Add(new Windows.Foundation.Point(cp.X, cp.Y));
+        }
+        AnnotationCanvas.Children.Add(poly);
+    }
+
+    /// <summary>箭头元素：主线 + 箭头头部。</summary>
+    private static UIElement CreateArrowElement(System.Numerics.Vector2 start, System.Numerics.Vector2 end)
+    {
+        var stroke = new SolidColorBrush(Microsoft.UI.Colors.Red);
+        var geom = new Microsoft.UI.Xaml.Media.PathGeometry();
+        var fig = new Microsoft.UI.Xaml.Media.PathFigure { StartPoint = new Windows.Foundation.Point(start.X, start.Y) };
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = new Windows.Foundation.Point(end.X, end.Y) });
+
+        // 箭头头部两条短线（与主线 ±30°）
+        float dx = end.X - start.X, dy = end.Y - start.Y;
+        float len = MathF.Sqrt(dx * dx + dy * dy);
+        const float ang = MathF.PI / 6f;
+        float ca = MathF.Cos(ang), sa = MathF.Sin(ang);
+        float ux = len > 1e-3f ? dx / len : 1f, uy = len > 1e-3f ? dy / len : 0f;
+        float head = 12f;
+        var h1 = new Windows.Foundation.Point(end.X - head * (ux * ca - uy * sa), end.Y - head * (ux * sa + uy * ca));
+        var h2 = new Windows.Foundation.Point(end.X - head * (ux * ca + uy * sa), end.Y - head * (-ux * sa + uy * ca));
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = h1 });
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = new Windows.Foundation.Point(end.X, end.Y) });
+        fig.Segments.Add(new Microsoft.UI.Xaml.Media.LineSegment { Point = h2 });
+        geom.Figures.Add(fig);
+
+        return new Microsoft.UI.Xaml.Shapes.Path
+        {
+            Data = geom,
+            Stroke = stroke,
+            StrokeThickness = 2,
+            StrokeLineJoin = PenLineJoin.Round,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+        };
+    }
+
+    // ────────────── 文字输入 ──────────────
+
+    private void ShowTextInput(System.Numerics.Vector2 canvasPt)
+    {
+        TextInputPanel.Margin = new Thickness(
+            Math.Clamp(canvasPt.X + 8, 0, Math.Max(0, AnnotationCanvas.Width - 300)),
+            Math.Clamp(canvasPt.Y + 8, 0, Math.Max(0, AnnotationCanvas.Height - 60)), 0, 0);
+        TextInputPanel.Visibility = Visibility.Visible;
+        AnnoTextInput.Text = "";
+        AnnoTextInput.Focus(FocusState.Programmatic);
+    }
+
+    private void HideTextInput()
+    {
+        TextInputPanel.Visibility = Visibility.Collapsed;
+        RootGrid.Focus(FocusState.Programmatic);
+    }
+
+    private void OnTextInputKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            e.Handled = true;
+            OnTextInputOk(null!, null!);
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            e.Handled = true;
+            HideTextInput();
+        }
+    }
+
+    private void OnTextInputOk(object sender, RoutedEventArgs e)
+    {
+        string text = AnnoTextInput.Text.Trim();
+        if (text.Length > 0)
+        {
+            _annotationManager.AddLayer(new TextLayer
+            {
+                X = _textInsertPos.X, Y = _textInsertPos.Y,
+                Text = text, FontSize = 16
+            });
+            RenderAllLayers();
+        }
+        HideTextInput();
     }
 
     private void CommitShape(System.Numerics.Vector2 start, System.Numerics.Vector2 end)
@@ -261,28 +399,68 @@ public sealed partial class AnnotationWindow : Window
         AnnotationCanvas.Children.Clear();
         foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible))
         {
-            Shape? shape = layer switch
+            UIElement? element = layer switch
             {
                 RectangleLayer r => new Rectangle { Width = r.Width, Height = r.Height, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2, Fill = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(30, 255, 0, 0)) },
                 EllipseLayer el => new Ellipse { Width = el.RadiusX * 2, Height = el.RadiusY * 2, Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red), StrokeThickness = 2 },
+                ArrowLayer al => CreateArrowElement(
+                    ImageToCanvas(new System.Numerics.Vector2(al.StartX, al.StartY)),
+                    ImageToCanvas(new System.Numerics.Vector2(al.EndX, al.EndY))),
+                FreehandLayer fl => CreatePolylineElement(
+                    fl.Points.Select(p => ImageToCanvas(p))),
+                TextLayer tl => CreateTextElement(tl, ImageToCanvas(new System.Numerics.Vector2(tl.X, tl.Y))),
                 MosaicLayer m => new Rectangle { Width = m.Width, Height = m.Height, Fill = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(200, 100, 100, 100)) },
                 _ => null
             };
 
-            if (shape != null)
+            if (element is null) continue;
+
+            // Polyline/Path(箭头)/TextBlock 自带绝对坐标，其余按边界定位
+            if (element is not Microsoft.UI.Xaml.Shapes.Polyline
+                && element is not Microsoft.UI.Xaml.Shapes.Path
+                && element is not TextBlock)
             {
                 var bounds = layer.GetBounds();
-                // 图像坐标 → Canvas 显示坐标
                 var canvasPos = ImageToCanvas(new System.Numerics.Vector2(bounds.Left, bounds.Top));
                 var canvasSize = ImageToCanvas(new System.Numerics.Vector2(bounds.Right, bounds.Bottom))
                     - new System.Numerics.Vector2(canvasPos.X, canvasPos.Y);
-                shape.Width = Math.Abs(canvasSize.X);
-                shape.Height = Math.Abs(canvasSize.Y);
-                Canvas.SetLeft(shape, canvasPos.X);
-                Canvas.SetTop(shape, canvasPos.Y);
-                AnnotationCanvas.Children.Add(shape);
+                if (element is FrameworkElement fe)
+                {
+                    fe.Width = Math.Abs(canvasSize.X);
+                    fe.Height = Math.Abs(canvasSize.Y);
+                }
+                Canvas.SetLeft(element, canvasPos.X);
+                Canvas.SetTop(element, canvasPos.Y);
             }
+            AnnotationCanvas.Children.Add(element);
         }
+    }
+
+    /// <summary>折线元素（画笔轨迹，Polyline 坐标为画布绝对坐标）。</summary>
+    private static Microsoft.UI.Xaml.Shapes.Polyline CreatePolylineElement(IEnumerable<System.Numerics.Vector2> canvasPts)
+    {
+        var poly = new Microsoft.UI.Xaml.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red),
+            StrokeThickness = 2,
+            StrokeLineJoin = PenLineJoin.Round
+        };
+        foreach (var p in canvasPts) poly.Points.Add(new Windows.Foundation.Point(p.X, p.Y));
+        return poly;
+    }
+
+    /// <summary>文字元素（TextBlock，画布绝对定位）。</summary>
+    private static TextBlock CreateTextElement(TextLayer tl, System.Numerics.Vector2 canvasPos)
+    {
+        var tb = new TextBlock
+        {
+            Text = tl.Text,
+            FontSize = tl.FontSize,
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red),
+        };
+        Canvas.SetLeft(tb, canvasPos.X);
+        Canvas.SetTop(tb, canvasPos.Y);
+        return tb;
     }
 
     // ────────────── 撤销/重做 ──────────────
@@ -297,8 +475,9 @@ public sealed partial class AnnotationWindow : Window
         InfoTxt.Text = "💾 编码中...";
         try
         {
-            if (OnSaveRequested != null)
-                await OnSaveRequested(GetFinalPixels(), _imgW, _imgH);
+            var pixels = await ComposeFinalPixelsAsync();
+            if (OnSaveRequested != null && pixels != null)
+                await OnSaveRequested(pixels, _imgW, _imgH);
             else InfoTxt.Text = "⚠ 未配置保存回调";
         }
         catch (Exception ex) { InfoTxt.Text = $"❌ {ex.Message}"; }
@@ -309,11 +488,19 @@ public sealed partial class AnnotationWindow : Window
         InfoTxt.Text = "📋 复制中...";
         try
         {
-            if (OnCopyRequested != null)
-                await OnCopyRequested(GetFinalPixels(), _imgW, _imgH);
+            var pixels = await ComposeFinalPixelsAsync();
+            if (OnCopyRequested != null && pixels != null)
+                await OnCopyRequested(pixels, _imgW, _imgH);
             else InfoTxt.Text = "⚠ 未配置复制回调";
         }
         catch (Exception ex) { InfoTxt.Text = $"❌ {ex.Message}"; }
+    }
+
+    /// <summary>标注合成移出 UI 线程（大图马赛克/文字合成不再卡界面）。</summary>
+    private async Task<byte[]> ComposeFinalPixelsAsync()
+    {
+        if (_annotationManager.Layers.Count == 0) return _rawPixels;
+        return await Task.Run(GetFinalPixels);
     }
 
     private void OnDiscard(object sender, RoutedEventArgs e) { CloseWindow(); }
@@ -328,43 +515,7 @@ public sealed partial class AnnotationWindow : Window
         Buffer.BlockCopy(_rawPixels, 0, result, 0, _rawPixels.Length);
 
         foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible))
-        {
-            var bounds = layer.GetBounds();
-            int lx = Math.Max(0, (int)bounds.Left), ly = Math.Max(0, (int)bounds.Top);
-            int rx = Math.Min(_imgW - 1, (int)bounds.Right), ry = Math.Min(_imgH - 1, (int)bounds.Bottom);
-
-            if (layer is MosaicLayer)
-            {
-                for (int y = ly; y <= ry; y += 6)
-                for (int x = lx; x <= rx; x += 6)
-                {
-                    int r = 0, g = 0, b = 0, cnt = 0;
-                    for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
-                    for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
-                    { int idx = ((y + dy) * _imgW + (x + dx)) * 4; b += result[idx]; g += result[idx + 1]; r += result[idx + 2]; cnt++; }
-                    byte av = (byte)((r + g + b) / (cnt * 3));
-                    for (int dy = 0; dy < 6 && y + dy <= ry; dy++)
-                    for (int dx = 0; dx < 6 && x + dx <= rx; dx++)
-                    { int idx = ((y + dy) * _imgW + (x + dx)) * 4; result[idx] = result[idx + 1] = result[idx + 2] = av; }
-                }
-            }
-            else
-            {
-                int t = 2;
-                for (int y = ly; y <= Math.Min(ly + t, ry); y++)
-                for (int x = lx; x <= rx; x++)
-                { int idx = (y * _imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
-                for (int y = Math.Max(ly, ry - t); y <= ry; y++)
-                for (int x = lx; x <= rx; x++)
-                { int idx = (y * _imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
-                for (int x = lx; x <= Math.Min(lx + t, rx); x++)
-                for (int y = ly; y <= ry; y++)
-                { int idx = (y * _imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
-                for (int x = Math.Max(lx, rx - t); x <= rx; x++)
-                for (int y = ly; y <= ry; y++)
-                { int idx = (y * _imgW + x) * 4; result[idx] = 0; result[idx + 1] = 0; result[idx + 2] = 255; }
-            }
-        }
+            AnnotationRasterizer.RenderLayer(result, _imgW, _imgH, layer);
         return result;
     }
 }

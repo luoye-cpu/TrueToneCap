@@ -15,6 +15,7 @@ using TrueToneCap.Core.Encoding;
 using TrueToneCap.Core.Processing;
 using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Metadata;
+using TrueToneCap.Core.Annotation;
 using TrueToneCap.App.Services;
 using TrueToneCap.App.Models;
 using TrueToneCap.Core.Services;
@@ -33,6 +34,7 @@ public sealed partial class MainWindow : Window
     private bool _isExiting;           // 托盘退出标志（跳过最小化）
     private SelectionOverlay? _activeSelectionOverlay;   // 当前活动选区覆盖层（应用退出时强制关闭）
     private Services.HdrCaptureWindow? _activeHdrWindow; // 当前活动 HDR 覆盖窗口（应用退出时强制关闭）
+    private AnnotationWindow? _activeAnnotationWindow;   // 当前活动标注窗口（应用退出时强制关闭）
     private TextBox? _recordingTarget; // 正在录制的快捷键输入框
     private string _hdrSystemHint = ""; // 系统 HDR 状态基础提示 (DetectAndApplySystemCapabilitiesAsync 写入)
     private bool _hdrHardwareSupported; // 硬件是否支持 HDR (能力检测写入, 供格式联动禁用开关)
@@ -1279,6 +1281,49 @@ public sealed partial class MainWindow : Window
 
     // ── 选区动作 ──
 
+    /// <summary>
+    /// HDR 窗口内联标注合成：有标注层时把标注光栅化到 SDR 区域像素
+    /// （与 SDR 路径同用 AnnotationRasterizer，保证输出一致）。
+    /// </summary>
+    private static byte[]? ComposeAnnotatedSdr(Services.HdrCaptureWindow hdrWnd, byte[]? sdrRegion, int rw, int rh)
+    {
+        if (hdrWnd.AnnoManager.LayerCount == 0 || sdrRegion is null) return sdrRegion;
+        var result = new byte[sdrRegion.Length];
+        Buffer.BlockCopy(sdrRegion, 0, result, 0, sdrRegion.Length);
+        foreach (var layer in hdrWnd.AnnoManager.Layers.Where(l => l.IsVisible))
+            Services.AnnotationRasterizer.RenderLayer(result, rw, rh, layer);
+        return result;
+    }
+
+    /// <summary>打开独立标注窗口（HDR 路径的"标注"动作：SDR 预览 + 标注 + 保存/复制）。</summary>
+    private void OpenAnnotationWindow(byte[] regionPixels, int w, int h)
+    {
+        try
+        {
+            var annoWindow = new AnnotationWindow(regionPixels, w, h);
+            _activeAnnotationWindow = annoWindow;
+            annoWindow.OnSaveRequested = async (pixels, pw, ph) =>
+            {
+                await EncodeAndSaveAsync(pixels, pw, ph);
+            };
+            annoWindow.OnCopyRequested = async (pixels, pw, ph) =>
+            {
+                await EncodeAndCopyAsync(pixels, pw, ph);
+            };
+            annoWindow.Closed += (_, _) => _activeAnnotationWindow = null;
+            annoWindow.Activate();
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("MainWindow", $"打开标注窗口失败: {ex.Message}", ex);
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                StatusTxt.Text = $"❌ 标注窗口失败: {ex.Message}";
+                ToastService.ShowCaptureFailed(ex.Message);
+            });
+        }
+    }
+
     // ── 选区截图（QQ 风格，WGC 多显示器拼接）──
 
     /// <summary>从预捕获桌面像素中提取区域。</summary>
@@ -1490,6 +1535,14 @@ public sealed partial class MainWindow : Window
             sw.Stop();
             LogService.Info("MainWindow", $"阶段1 WGC捕获完成: {captureResult.Width}x{captureResult.Height} {sw.ElapsedMilliseconds}ms");
 
+            // ── 诊断开关: TTC_FORCE_SDR=1 强制走 SDR 预览路径 (SelectionOverlay), 用于测试/排查 ──
+            bool forceSdr = Environment.GetEnvironmentVariable("TTC_FORCE_SDR") == "1";
+            if (forceSdr)
+            {
+                LogService.Warn("MainWindow", "诊断开关 TTC_FORCE_SDR=1: 强制走 SDR 预览路径");
+                hdrDesktopPixels = null;
+            }
+
             // 阶段2: 截图预览窗口
             sw.Restart();
 
@@ -1499,11 +1552,12 @@ public sealed partial class MainWindow : Window
             if (hasHdr)
             {
                 StatusTxt.Text = "🖥️ HDR 预览";
-                var sharedDevice = AppServices.Wgc?.GetOrCreateDevice(
-                    DisplayEnumerator.GetMonitorUnderCursor());
-                using var hdrWnd = new Services.HdrCaptureWindow(sharedDevice);
+                // 独立 D3D11 设备：渲染线程独占 context，不与 WGC 共享设备竞争
+                using var hdrWnd = new Services.HdrCaptureWindow();
                 _activeHdrWindow = hdrWnd; // 注册：应用退出时强制关闭
+                LogService.Info("MainWindow", "HDR 预览窗口初始化...");
                 bool initOk = hdrWnd.Initialize(vx, vy, vw, vh);
+                LogService.Info("MainWindow", $"HDR 预览窗口初始化 {(initOk ? "成功" : $"失败: {hdrWnd.LastError}")}");
 
                 if (initOk)
                 {
@@ -1539,16 +1593,23 @@ public sealed partial class MainWindow : Window
                     {
                         case HdrCaptureAction.Save:
                             LogService.Info("MainWindow", "HDR 选区保存");
-                            if (hdrRegion is not null)
+                            // 2026-08-11 A方案: 窗口内联标注后, 有标注层时输出带标注的 SDR 图像
+                            if (hdrWnd.AnnoManager.LayerCount == 0 && hdrRegion is not null)
                                 await EncodeAndSaveHdrAsync(hdrRegion, rw, rh,
                                     captureResult.IccProfile, captureResult.GpuTexture);
-                            else if (sdrRegion is not null)
-                                await EncodeAndSaveAsync(sdrRegion, rw, rh);
+                            else if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx1)
+                                await EncodeAndSaveAsync(outPx1, rw, rh);
+                            break;
+                        case HdrCaptureAction.Annotate:
+                            // 2026-08-11 A方案: 标注已在窗口内内联完成, 此分支为兼容兜底
+                            LogService.Info("MainWindow", "HDR 选区标注（窗口内联，兜底打开独立窗口）");
+                            if (sdrRegion is not null)
+                                OpenAnnotationWindow(sdrRegion, rw, rh);
                             break;
                         case HdrCaptureAction.Copy:
                             LogService.Info("MainWindow", "HDR 选区复制到剪贴板");
-                            if (sdrRegion is not null)
-                                await EncodeAndCopyAsync(sdrRegion, rw, rh);
+                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx2)
+                                await EncodeAndCopyAsync(outPx2, rw, rh);
                             break;
                         case HdrCaptureAction.Ocr:
                             LogService.Info("MainWindow", "HDR 选区 OCR 识别");
@@ -2535,8 +2596,10 @@ public sealed partial class MainWindow : Window
         // ── 应用退出：强制关闭可能仍打开的全屏选区覆盖层（避免残留遮挡屏幕/挂起）──
         try { _activeSelectionOverlay?.Cancel(); } catch { }
         try { _activeHdrWindow?.RequestCancel(); } catch { }
+        try { _activeAnnotationWindow?.Close(); } catch { }
         _activeSelectionOverlay = null;
         _activeHdrWindow = null;
+        _activeAnnotationWindow = null;
 
         // 自动保存设置
         try { SaveSettings(); } catch { }
@@ -2648,6 +2711,9 @@ public sealed partial class MainWindow : Window
     private string _logCategoryFilter = "All";
     private string _logSearch = "";
     private readonly List<LogEntry> _logEntries = [];
+    // 2026-08-11: 显示顺序 + 自动滚动开关
+    private bool _logNewestFirst = true;   // 最新在前 (默认)
+    private bool _logAutoScroll = true;    // 自动滚动到最新 (默认)
 
     /// <summary>刷新日志列表视图。</summary>
     private void RefreshLogView()
@@ -2665,7 +2731,7 @@ public sealed partial class MainWindow : Window
         // 修复: XAML 初始化期间 SelectionChanged 事件触发时控件尚未创建
         if (LogListView is null) return;
 
-        var filtered = _logEntries.AsEnumerable();
+        IEnumerable<LogEntry> filtered = _logEntries.AsEnumerable();
 
         // 级别筛选
         if (_logFilter != "All")
@@ -2703,9 +2769,58 @@ public sealed partial class MainWindow : Window
         if (!string.IsNullOrEmpty(_logSearch))
             filtered = filtered.Where(e =>
                 e.Message.Contains(_logSearch, StringComparison.OrdinalIgnoreCase) ||
-                e.Tag.Contains(_logSearch, StringComparison.OrdinalIgnoreCase));
+                e.Tag.Contains(_logSearch, StringComparison.OrdinalIgnoreCase) ||
+                e.CallerDisplay.Contains(_logSearch, StringComparison.OrdinalIgnoreCase));
 
-        LogListView.ItemsSource = filtered.ToList();
+        // 2026-08-11: 最新在前 — 逆序显示 (最新一条在顶部)
+        var list = filtered.ToList();
+        if (_logNewestFirst)
+            list.Reverse();
+
+        bool atBottom = _logAutoScroll; // 记录当前是否应保持在最新位置
+        var scrollViewer = FindScrollViewer(LogListView);
+        double oldOffset = scrollViewer?.VerticalOffset ?? 0;
+        double oldExtent = scrollViewer?.ScrollableHeight ?? 0;
+        bool wasAtEnd = oldOffset >= oldExtent - 2; // 之前在底部
+
+        LogListView.ItemsSource = list;
+
+        // 自动滚动: 开关开 且 (之前就在底部 或 首次加载) → 滚到最新位置
+        if (_logAutoScroll && scrollViewer is not null && list.Count > 0)
+        {
+            bool shouldScroll = wasAtEnd || _logNewestFirst; // 最新在前时总是保持顶部
+            if (shouldScroll)
+                scrollViewer.ChangeView(null, _logNewestFirst ? 0 : scrollViewer.ScrollableHeight, null);
+        }
+        _ = atBottom;
+    }
+
+    /// <summary>查找 ListView 内部的 ScrollViewer。</summary>
+    private static Microsoft.UI.Xaml.Controls.ScrollViewer? FindScrollViewer(DependencyObject root)
+    {
+        int count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is Microsoft.UI.Xaml.Controls.ScrollViewer sv) return sv;
+            var found = FindScrollViewer(child);
+            if (found is not null) return found;
+        }
+        return null;
+    }
+
+    private void OnLogOrderChanged(object sender, RoutedEventArgs e)
+    {
+        if (LogNewestFirstSwitch is null) return;
+        _logNewestFirst = LogNewestFirstSwitch.IsOn;
+        ApplyLogFilter();
+    }
+
+    private void OnLogAutoScrollChanged(object sender, RoutedEventArgs e)
+    {
+        if (LogAutoScrollSwitch is null) return;
+        _logAutoScroll = LogAutoScrollSwitch.IsOn;
+        ApplyLogFilter();
     }
 
     private void UpdateLogStatus()
@@ -2746,6 +2861,13 @@ public sealed partial class MainWindow : Window
     /// <summary>订阅实时日志推送（在 InitializeComponent 后调用）。</summary>
     private void SubscribeLogEvents()
     {
+        // 初始填充（订阅前已产生的日志）
+        try
+        {
+            _logEntries.AddRange(LogService.GetUiEntries());
+        }
+        catch { }
+
         LogService.OnLogEntry += entry =>
         {
             try
@@ -2762,6 +2884,13 @@ public sealed partial class MainWindow : Window
                 });
             }
             catch { }
+        };
+
+        // 日志页首次打开时刷新（可能未经过实时推送的旧条目）
+        NavLog.PointerPressed += (_, _) =>
+        {
+            if (PageLog.Visibility == Visibility.Visible)
+                RefreshLogView();
         };
     }
 }

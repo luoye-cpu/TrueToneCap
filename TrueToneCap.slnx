@@ -2,6 +2,9 @@
   <Folder Name="/src/">
     <Project Path="src/TrueToneCap.App/TrueToneCap.App.csproj" />
     <Project Path="src/TrueToneCap.Core/TrueToneCap.Core.csproj" />
+    <Project Path="src/TrueToneCap.LogViewer/TrueToneCap.LogViewer.csproj">
+      <Platform Project="x64" />
+    </Project>
     <Project Path="src/TrueToneCap.Test/TrueToneCap.Test.csproj" />
     <Project Path="src/TrueToneCap.Tools/TrueToneCap.Tools.csproj" />
   </Folder>
