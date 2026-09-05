@@ -14,6 +14,13 @@ if (args.Length >= 1 && args[0] == "--ocr-bench")
     return;
 }
 
+// ═══ OCR 真实语料基准 (--ocr-bench-real [seed]) — 多样化真实内容+真实截图风格 ═══
+if (args.Length >= 1 && args[0] == "--ocr-bench-real")
+{
+    OcrRealBench.Run(args);
+    return;
+}
+
 // ═══ OCR 模型诊断 (--ocr-diag <modelDir>) ═══
 if (args.Length >= 1 && args[0] == "--ocr-diag")
 {

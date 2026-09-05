@@ -53,10 +53,15 @@ public static class NativeWebPEncoder
             throw new DllNotFoundException("[WebP] cwebp.exe 不可用");
 
         // 写临时 PNG（使用最快压缩，仅为中间文件）
-        var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_{Environment.CurrentManagedThreadId:x8}.png");
+        // ⚠ 必须用不可预测的随机名：之前用线程 ID，路径可预测，同主机低权限用户可预置
+        // 指向敏感文件的硬链接，程序会以用户权限覆写该文件（TOCTOU / 符号链接攻击）。
+        var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_webp_{Guid.NewGuid():N}.png");
         try
         {
             ManagedPngEncoder.EncodeFast(bgra, w, h, tmpPng, iccProfile);
+
+            // 路径直接拼接进命令行 → 校验不含引号/换行，防止参数注入
+            FormatHelper.ValidateNativePath(path, nameof(path));
 
             var exePath = NativeLibraryResolver.GetExePath("cwebp.exe");
             var qualityArg = lossless ? "-lossless" : $"-q {(int)quality}";

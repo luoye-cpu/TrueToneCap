@@ -20,6 +20,8 @@ public sealed class EncodingSettings
     public AvifEncoderBackend AvifBackend { get; set; } = AvifEncoderBackend.Auto;
     /// <summary>是否为 AVIF 文件添加 .png 后缀（兼容不支持 .avif 的软件）。</summary>
     public bool AvifPngSuffix { get; set; }
+    /// <summary>是否为 JXL 文件添加 .png 后缀（兼容不支持 .jxl 的软件）。</summary>
+    public bool JxlPngSuffix { get; set; }
     /// <summary>AVIF 色度采样: 420 / 422 / 444。默认 444。</summary>
     public string AvifChroma { get; set; } = "444";
     /// <summary>色度采样: 420 / 422 / 444。适用于 AVIF/WebP/JPEG XL。默认 444。</summary>

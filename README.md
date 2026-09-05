@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.2-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
+> **v0.3.3-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
 
 TrueToneCap 是一把为像素而生的手术刀。
 
@@ -21,7 +21,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 ## Quick Start / 快速开始
 
-1. Download `TrueToneCap-v0.3.2-beta-win-x64.zip`, extract / 下载解压
+1. Download `TrueToneCap-v0.3.3-beta-win-x64.zip`, extract / 下载解压
 2. Run `TrueToneCap.exe` / 双击运行
 3. Press `Ctrl+Shift+S` to capture / 按快捷键截图
 
@@ -70,6 +70,60 @@ dotnet run --project src\TrueToneCap.App -c Release
 
 ## Changelog / 更新日志
 
+### v0.3.3-beta — 2026-08-29 ~ 08-31
+
+- ⚡ **NVENC 硬件编码修复（重大）** — 此前 NVENC 从未成功初始化过，实测定位并修复 6 处缺陷：
+  - `NV_ENCODE_API_FUNCTION_LIST.version` 缺 `(1<<16)|(0x7<<28)` → `NvEncodeAPICreateInstance` 恒返回 `NV_ENC_ERR_INVALID_VERSION(15)`，**任何系统都无法初始化**
+  - `NV_ENC_DEVICE_TYPE` 枚举语义混淆：现代定义 DX11=2，但实测驱动（616.56 / RTX 5080）按旧版语义（DIRECTX=0）解释 → 现运行时依次尝试
+  - 各结构体 subversion 不同（`INITIALIZE_PARAMS`=5、`CONFIG`=6、`PIC_PARAMS`=4、`REGISTER_RESOURCE`=3、`MAP_INPUT_RESOURCE`=4），原实现统一用 1
+  - `NV_ENC_INITIALIZE_PARAMS` 字段偏移全部错位 +4（GUID 对齐为 4 而非 8）→ `encodeGUID`/`encodeConfig` 等读到垃圾
+  - `NvEncDestroyEncoder` 函数索引误用 24（实为 `NvEncUnregisterAsyncEvent`）→ 会话从未销毁、累积达上限
+  - 纹理直通路径 3 个函数索引同样错位 → 该路径完全不可用
+- ⚠️ 已知限制: `NV_ENC_CONFIG` 内部偏移（qp 等）需按现代 SDK 头文件重排，故硬件编码仍会回退 libaom。功能与画质不受影响，修复已使 NVENC 从"完全不可用"推进到"会话可建立"
+- 🐛 NVENC 补充修复: codec GUID 与 nvEncodeAPI.h 标准值不符（HEVC 应为 `790CDC88-4522-4D7B-9425-BDA9975F7603`，AV1 为 `0A78D0B8-1D63-4B45-8E6B-C5F41C7C8C2C`）
+- 🐛 NVENC 补充修复: `NV_ENC_CONFIG` 缓冲区仅 512 字节（实际需 3400+）→ 驱动读写越界；改用 **NvEncGetEncodePresetConfig 由驱动填充**，并加入三级渐进回退（完整/仅GOP/纯预设）
+- 🐛 NVENC 补充修复: preset GUID 改为运行时枚举（NvEncGetEncodePresetGUIDs），不再硬编码，避免驱动不接受时 profileGUID 全零
+- 🧪 新增 `NvEncoderNative.EnumerateCodecGuids()`，测试工具可列出驱动报告的 codec GUID 与标准值比对
+- 🐛 **NVENC: 修正 AV1 codec GUID** — 实测驱动（RTX 5080/4060）报告的真实值为 `0a352289-0aa7-4759-862d-5d15cd16d254`，原代码用 `0a78d0b8-...` 导致 `NO_ENCODE_CAPABILITY(0x8)`
+- 🐛 NVENC: `profileGUID` 改为运行时枚举（`NvEncGetEncodeProfileGUIDs`），此前全零使驱动拒绝初始化
+- 🐛 NVENC: 修正 `NV_ENC_PRESET_P1_GUID` 为标准值 `49DF21C5-6DFA-4FEB-9781-51BEE52B390C`
+- ⚠️ **NVENC 仍回退 libaom**: 驱动对 AV1 **不提供任何 preset**（实测 `GetEncodePresetGUIDs` 返回空），故必须手工构造 `NV_ENC_CONFIG.encodeCodecConfig.av1Config`；该联合体成员的偏移需现代 SDK 头文件（本地仅有旧版 8.1）才能确定。当前配置层级已改为驱动填充+渐进回退，profileGUID 有效，仅缺 av1Config 字段。功能与画质无影响。
+- ⚡ Perf: Auto 模式下硬件 AVIF 后端**从未被选中** — 原优先级把内嵌的 libaom 置于最高（avifenc.exe 随程序发布，恒可用），NVENC/QSV 分支成死代码。现改为有明确 AV1 能力的硬件优先
+- 🐛 Fix: 后端选择仅校验 `Available` 未校验 `SupportsAv1`，导致不支持 AV1 编码的显卡（如 RTX 30）被误选后失败回退
+- 🐛 Fix: NVENC 可用性探测创建的 D3D11 设备未释放，每次探测泄漏一个设备
+- 🧪 Test: 新增 WGC 真实捕获 + AVIF 后端验证工具（`--wgc-avif-tests`），含 GPU 能力探测、逐后端编码计时、容器结构独立解析
+
+---
+
+- 🔧 Refactor: MainWindow.xaml.cs 按职责拆分为 5 个 partial 文件（主文件 3233→2653 行）/ MainWindow split into partial classes
+- 🖼️ Encoding: TIFF 输入位深改为显式参数，消除按数组长度推断的歧义 / TIFF explicit input bit depth
+- 🌐 Translation: 有道翻译增加文本长度上限校验，超限显式降级而非静默失败 / Youdao length guard
+- 🐛 Critical: **修复启动即崩溃** — P/Invoke 未指定 W 入口点（user32.dll 只导出 RegisterWindowMessageW/A），解析失败抛异常于 App 构造函数早期 → WinUI FailFast (0xC000027B)。同时修复 SetProcessDpiAwarenessContext 参数应为指针尺寸类型 / startup crash fix
+- ⚡ Perf: **修复 Auto 模式下硬件 AVIF 编码从未生效** — 原优先级把 libaom 置于最高，而 avifenc.exe 随程序内嵌发布（恒可用），导致 NVENC/QSV 分支成为永不执行的死代码。4K AVIF 无论显卡如何都跑约 22 秒软件编码。现改为「有明确 AV1 能力(SupportsAv1)的硬件优先」，后端内部有完善的失败回退 / hardware AVIF never selected in Auto mode
+- 🐛 Fix: 后端选择仅校验 Available（NVENC 会话可创建）而未校验 SupportsAv1，导致 RTX 30 等不支持 AV1 编码的显卡被选中后失败回退 / AV1 capability not checked
+- 🐛 Fix: NVENC 可用性探测创建的 D3D11 设备未释放，每次探测泄漏一个设备 / D3D device leak in NVENC probe
+- 🖼️ Encoding: 修复 AVIF iloc box 的 sizes 字段 — 原写 0x44 (offset_size=4) 为 ISOBMFF 无效值，与 4 字节写入自相矛盾 / AVIF iloc sizes fix
+- 🎨 Color: **修复 SDR 白点处的亮度断崖** — SegmentedReinhardMap 在 y=1 处非单调，导致刚超过 SDR 白点的高光反而更暗（暗环伪影）。重建为单调曲线 / tone mapping dark-ring fix
+- ⚡ Async: 移除编码路径的双层 Task.Run + GetAwaiter().GetResult()，一次编码不再占用 2 个线程池线程 / async encoding fix
+- 🔒 Capture: 捕获闸门由"立即失败"改为带超时排队，连续按截图键不再直接报错 / capture gate queuing
+- 🧪 Test: 修复色调映射单调性测试的尺寸盲区（64 像素按 16 调用，从未采样到 y=1），新增 5 项断崖回归用例 / tone map test blind spot fixed
+
+- 🛡️ Stability: 修复 `PAINTSTRUCT` 结构体尺寸不足导致的栈溢出（每次 WM_PAINT 破坏栈帧）/ stack buffer overflow fix
+- 🛡️ Stability: 帧状态改为原子发布，修复渲染线程"新数组+旧尺寸"撕裂导致的越界读写 / frame state torn-read fix
+- 🛡️ Stability: D3D `Map`/`Unmap` 全部改为 finally 保护，异常后资源不再永久无法写入 / map/unmap exception safety
+- 🖼️ Encoding: TIFF IFD 条目补齐 12 字节、条目计数修正、值区与像素数据不再重叠 / TIFF IFD layout fixes
+- 🖼️ Encoding: TIFF 16-bit 路径步长与 Alpha 扩展修复（此前通道错位且近乎全透明）/ TIFF 16-bit stride & alpha
+- 🖼️ Encoding: AVIF `mdat` box 长度改大端；`iloc` 回填偏移修正（原少 2 字节）/ AVIF box endianness & iloc fix
+- 🖼️ Encoding: MFT drain 命令常量修正（原误用 TICK，导致 MFT 后端 100% 回退 libaom）/ MFT drain command fix
+- 🖼️ Encoding: `av1C` 配置记录按 AV1 ISOBMFF 规范重写 / av1C config record rewrite
+- 🔒 Security: LLM API Key 与有道 AppSecret 改用 DPAPI 加密存储，不再明文落盘 / credential encryption
+- 🔒 Security: WebP 临时文件改用随机名，修复可预测路径的 TOCTOU 风险 / temp file TOCTOU fix
+- ⚖️ Compliance: 移除硬编码的有道网页端私有密钥，改走官方开放平台 API（用户自备凭据）/ Youdao open API
+- 🎨 Color: 修复后台编码线程读取 WinUI 控件被静默吞异常导致的色域/ICC 设置静默失效 / silent colorspace fallback fix
+- 🧪 Test: 新增输出结构合法性套件（30 项），覆盖 TIFF IFD 与 AVIF box 容器结构 / format structure tests
+- 🔧 Build: 修复 slnx 编译错误，新增 GitHub Actions CI / build fix & CI
+- ⚠️ QSV: AVIF QSV 后端暂停启用（P/Invoke 结构体与 oneVPL 官方定义不符，待重写后验证）/ QSV backend disabled
+
 ### v0.3.2-beta — 2026-08-10
 
 - ✏️ Annotate: 预览/输出一致性修复 — Arrow/Pen/Text 预览可见，输出不再画成矩形框 / annotation preview-output consistency
@@ -93,7 +147,7 @@ dotnet run --project src\TrueToneCap.App -c Release
 - 🔧 JPEG: 全面迁移到 jpegli，Gain Map 加入崩溃隔离+色域转换 / JPEG migration to jpegli
 - 🖥️ ACM: ACM 开启时 ICC 烘焙不再禁用，Float16 广色域路径 / ACM+ICC coexistence fix
 - 🔤 Font: 界面字体自定义功能，支持任意系统已安装字体 / Custom UI font selection
-- 🧪 Test: 192/192 测试全部通过 / 192/192 tests pass
+- 🧪 Test: 全部测试通过（含新增的输出结构合法性套件）/ all tests pass
 - 📦 Package: 原生工具链嵌入资源，运行时自动提取 / Native tools embedded as resources
 
 ### v0.2.0 — 2026-07-28

@@ -58,103 +58,157 @@ public class TranslationService
     }
 
     // ═══════════════════════════════════════
-    //  有道翻译（国内首选，免费、免 Key）
+    //  有道翻译（有道智云开放平台官方 API）
     // ═══════════════════════════════════════
 
-    private static readonly string[] s_youdaoKeys =
-    [
-        "sr_3(QOHT)L2dx#aaGRZO@'C2x}7w3x",
-        "YgyPzGhdNMGTPaqLvyzP",
-        "n%A-rKaT5fb[Gy?;N,^v@1i5",
-    ];
+    /// <summary>有道智云开放平台 文本翻译 API 端点。</summary>
+    private const string YoudaoApiUrl = "https://openapi.youdao.com/api";
 
+    /// <summary>
+    /// 有道翻译（需用户在设置中填入开放平台 应用ID/应用密钥）。未配置凭据时直接跳过，
+    /// 由调用方降级到 Google。
+    /// <para>
+    /// ⚠ 历史实现说明：此前使用硬编码的网页端私有签名密钥（逆向 fanyi.youdao.com 所得）
+    /// 调用非公开的 translate_o 接口。该做法违反有道服务条款，且密钥一旦轮换功能即静默
+    /// 失效，同时把第三方私有密钥硬编码进 Apache-2.0 公开仓库存在合规风险。
+    /// 现已改为调用官方开放平台 API，凭据由用户自备并加密存储。
+    /// </para>
+    /// </summary>
     private async Task<string?> TryYoudaoAsync(string text, string targetLang,
         string? sourceLang, CancellationToken ct)
     {
-        // 有道语言代码映射
+        if (string.IsNullOrWhiteSpace(_config.YoudaoAppKey) ||
+            string.IsNullOrWhiteSpace(_config.YoudaoAppSecret))
+        {
+            System.Diagnostics.Debug.WriteLine("[Translate] 有道未配置凭据，跳过");
+            return null;
+        }
+
         string sl = MapToYoudaoLang(sourceLang ?? "auto");
         string tl = MapToYoudaoLang(targetLang);
 
-        string saltBase = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
-        // 固定 User-Agent 哈希（有道用 bv 字段做浏览器校验，固定值即可）
-        string bv = "4.6";
-
-        foreach (var key in s_youdaoKeys)
+        // ⚠ 有道智云文本翻译对 q 有长度上限（约 5000 字符，按 UTF-8 计更长）。
+        // 超出后接口返回错误码，而本方法的外层会静默降级到 Google —— 用户以为有道生效。
+        // 此处显式拒绝并留痕，让降级原因可查。
+        const int YoudaoMaxChars = 5000;
+        if (text.Length > YoudaoMaxChars)
         {
-            try
-            {
-                string salt = saltBase + "0";
-                string sign = ComputeMd5("fanyideskweb" + text + salt + key);
-
-                var formData = new Dictionary<string, string>
-                {
-                    ["i"] = text,
-                    ["from"] = sl,
-                    ["to"] = tl,
-                    ["smartresult"] = "dict",
-                    ["client"] = "fanyideskweb",
-                    ["salt"] = salt,
-                    ["sign"] = sign,
-                    ["lts"] = saltBase,
-                    ["bv"] = bv,
-                    ["doctype"] = "json",
-                    ["version"] = "2.1",
-                    ["keyfrom"] = "fanyi.web",
-                    ["action"] = "FY_BY_REALTlME",
-                };
-
-                using var content = new FormUrlEncodedContent(formData);
-                using var cts5 = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, cts5.Token);
-
-                var request = new HttpRequestMessage(HttpMethod.Post,
-                    "https://fanyi.youdao.com/translate_o?smartresult=dict&smartresult=rule")
-                {
-                    Content = content
-                };
-                request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
-                request.Headers.Add("Referer", "https://fanyi.youdao.com/");
-                request.Headers.Add("Cookie", "OUTFOX_SEARCH_USER_ID=-1234567890@127.0.0.1");
-
-                var response = await _http.SendAsync(request, linked.Token);
-
-                var json = await response.Content.ReadAsStringAsync(linked.Token);
-                var result = ParseYoudaoResponse(json);
-                if (result is not null)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[Translate] 有道成功 (key idx)");
-                    return result;
-                }
-            }
-            catch (TaskCanceledException) { }
-            catch (HttpRequestException) { }
-            catch (Exception) { }
+            System.Diagnostics.Debug.WriteLine(
+                $"[Translate] 有道: 文本过长 ({text.Length} 字符 > {YoudaoMaxChars})，跳过并降级");
+            return null;
         }
 
-        System.Diagnostics.Debug.WriteLine("[Translate] 有道所有 key 均失败");
+        try
+        {
+            string salt = Guid.NewGuid().ToString("N");
+            string curtime = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+
+            // v3 签名: SHA256(appKey + input + salt + curtime + appSecret)
+            // input 规则: q 长度 ≤ 20 取 q 本身，否则取 前10字符 + q长度 + 后10字符
+            string input = text.Length <= 20
+                ? text
+                : text[..10] + text.Length + text[^10..];
+            string sign = ComputeSha256Hex(
+                _config.YoudaoAppKey + input + salt + curtime + _config.YoudaoAppSecret);
+
+            var query = new Dictionary<string, string>
+            {
+                ["q"] = text,
+                ["from"] = sl,
+                ["to"] = tl,
+                ["appKey"] = _config.YoudaoAppKey,
+                ["salt"] = salt,
+                ["sign"] = sign,
+                ["signType"] = "v3",
+                ["curtime"] = curtime,
+            };
+            // 开放平台要求参数做 URL 编码（q 常含中文与换行）
+            var qs = string.Join("&", query.Select(kv =>
+                $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+
+            using var cts8 = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, cts8.Token);
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, YoudaoApiUrl)
+            {
+                // ⚠ 必须写全 System.Text.Encoding：本文件命名空间为 TrueToneCap.Core.Services，
+                // 但项目内存在 TrueToneCap.Core.Encoding 命名空间，简写 Encoding 会被解析到它。
+                Content = new StringContent(qs, System.Text.Encoding.UTF8, "application/x-www-form-urlencoded")
+            };
+
+            var response = await _http.SendAsync(request, linked.Token);
+            var json = await response.Content.ReadAsStringAsync(linked.Token);
+
+            var result = ParseYoudaoResponse(json);
+            if (result is not null)
+            {
+                System.Diagnostics.Debug.WriteLine("[Translate] 有道开放平台成功");
+                return result;
+            }
+            System.Diagnostics.Debug.WriteLine($"[Translate] 有道返回错误: {json}");
+        }
+        catch (TaskCanceledException) { }
+        catch (HttpRequestException) { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Translate] 有道异常: {ex.Message}");
+        }
+
         return null;
     }
 
-    private static string MapToYoudaoLang(string lang) => lang switch
+    /// <summary>计算 SHA-256 十六进制摘要（有道 v3 签名用）。</summary>
+    private static string ComputeSha256Hex(string input)
     {
-        "auto" => "AUTO",
-        "zh-CN" => "zh-CHS",
-        "zh-TW" => "zh-CHT",
-        "en" => "en",
-        "ja" => "ja",
-        "ko" => "ko",
-        "fr" => "fr",
-        "de" => "de",
-        "es" => "es",
-        "ru" => "ru",
-        "pt" => "pt",
-        "it" => "it",
-        "vi" => "vi",
-        "th" => "th",
-        "ar" => "ar",
-        _ => lang, // 直接透传其他语言码
-    };
+        var bytes = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
 
+    /// <summary>映射到有道智云开放平台语言代码。开放平台用小写 "auto"（网页端用 "AUTO"）。</summary>
+    /// <summary>映射到有道智云开放平台语言代码（开放平台用小写 "auto"，网页端用 "AUTO"）。
+    /// <para>
+    /// ⚠ 有道只接受固定的语言代码，不接受 "en-US"/"zh-Hans" 这类 BCP-47 区域变体。
+    /// 之前 default 分支直接透传原值，导致"目标语言=英语(美国)"时请求被拒（错误码 108/102），
+    /// 而翻译链路会静默降级到 Google，用户以为有道已生效。
+    /// 现按"取主语言子标签 + 中文特殊处理"归一化。
+    /// </para>
+    /// </summary>
+    private static string MapToYoudaoLang(string lang)
+    {
+        if (string.IsNullOrWhiteSpace(lang)) return "auto";
+        // 取 BCP-47 主子标签: "en-US" → "en", "zh-Hans-CN" → "zh"
+        var primary = lang.Split('-')[0].ToLowerInvariant();
+        // 中文需区分简体/繁体，用区域判断
+        if (primary == "zh")
+        {
+            var upper = lang.ToUpperInvariant();
+            if (upper.Contains("TW") || upper.Contains("HK") || upper.Contains("MO") ||
+                upper.Contains("HANT") || lang.Contains("繁"))
+                return "zh-CHT";
+            return "zh-CHS";
+        }
+        return primary switch
+        {
+            "auto" => "auto",
+            "en" => "en",
+            "ja" or "jp" => "ja",
+            "ko" or "kr" => "ko",
+            "fr" => "fr",
+            "de" => "de",
+            "es" => "es",
+            "ru" => "ru",
+            "pt" => "pt",
+            "it" => "it",
+            "vi" => "vi",
+            "th" => "th",
+            "ar" => "ar",
+            _ => primary, // 主子标签兜底（有道支持的其它代码多为两字母）
+        };
+    }
+
+    /// <summary>解析有道智云开放平台响应。
+    /// 成功: <c>{"errorCode":"0", "translation":["译文"], "query":"原文", ...}</c>
+    /// 失败: <c>{"errorCode":"108", ...}</c>（108=无效应用ID，202=签名错误 等）。</summary>
     private static string? ParseYoudaoResponse(string json)
     {
         try
@@ -162,25 +216,25 @@ public class TranslationService
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            if (root.TryGetProperty("errorCode", out var ec) && ec.GetInt32() != 0)
+            // errorCode 在开放平台返回的是字符串（如 "0"），兼容数值形态
+            if (!root.TryGetProperty("errorCode", out var ec))
                 return null;
+            var code = ec.ValueKind == JsonValueKind.String ? ec.GetString() : ec.ToString();
+            if (code != "0")
+            {
+                System.Diagnostics.Debug.WriteLine($"[Translate] 有道错误码: {code}");
+                return null;
+            }
 
-            if (root.TryGetProperty("translateResult", out var results) &&
+            if (root.TryGetProperty("translation", out var results) &&
                 results.ValueKind == JsonValueKind.Array &&
                 results.GetArrayLength() > 0)
             {
-                var first = results[0];
-                if (first.ValueKind == JsonValueKind.Array)
-                {
-                    var sb = new StringBuilder();
-                    foreach (var item in first.EnumerateArray())
-                    {
-                        if (item.TryGetProperty("tgt", out var t))
-                            sb.Append(t.GetString());
-                    }
-                    var result = sb.ToString();
-                    if (!string.IsNullOrWhiteSpace(result)) return result;
-                }
+                var sb = new StringBuilder();
+                foreach (var item in results.EnumerateArray())
+                    sb.Append(item.GetString());
+                var result = sb.ToString();
+                if (!string.IsNullOrWhiteSpace(result)) return result;
             }
         }
         catch (JsonException) { }
@@ -346,6 +400,12 @@ public class LlmConfig
     public string SystemPrompt { get; set; } = "";
     public string SourceLanguage { get; set; } = "auto";
     public string TargetLanguage { get; set; } = "zh-CN";
+
+    /// <summary>有道智云开放平台 应用ID（AppKey）。为空则跳过有道后端，降级到 Google。</summary>
+    public string YoudaoAppKey { get; set; } = "";
+
+    /// <summary>有道智云开放平台 应用密钥（AppSecret，仅用于本地计算签名）。</summary>
+    public string YoudaoAppSecret { get; set; } = "";
 }
 
 /// <summary>预置 LLM 提供商端点（供 UI 下拉选择）— 2026-07 更新。</summary>

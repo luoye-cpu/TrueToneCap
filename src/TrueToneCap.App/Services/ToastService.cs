@@ -61,6 +61,16 @@ public static class ToastService
         });
     }
 
+    /// <summary>显示截图降级警告通知（截图成功但功能有损）。</summary>
+    public static void ShowCaptureDegraded(string warning)
+    {
+        Show(new Dictionary<string, string>
+        {
+            ["title"] = "⚠️ 截图降级",
+            ["body"] = warning
+        });
+    }
+
     /// <summary>显示录制完成通知。</summary>
     public static void ShowRecordingCompleted(string filePath, int frameCount)
     {

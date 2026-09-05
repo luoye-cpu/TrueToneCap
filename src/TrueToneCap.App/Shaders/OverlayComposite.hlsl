@@ -107,7 +107,9 @@ float4 main(PSInput input) : SV_Target
     }
 
     // ═══ 2. 选区边框（2px）═══
-    if (selComplete > 0.5)
+    // ═══ 2026-08-25 修复: 拖拽过程中 (down=true, selComplete=false) 也要画橡皮筋框 ═══
+    // 旧实现仅 selComplete 后显示 → 用户按下拖拽时看不到选区框 → 误以为无法框选。
+    if (selComplete > 0.5 || down > 0.5)
     {
         float2 d = min(pos - selMin, selMax - pos);
         float minD = min(d.x, d.y);

@@ -108,6 +108,9 @@ public static class NativeAvifEncoder
                 catch { }
             }
 
+            // 路径直接拼接进命令行 → 校验不含引号/换行，防止参数注入
+            FormatHelper.ValidateNativePath(path, nameof(path));
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,

@@ -265,7 +265,8 @@ public sealed class TiffEncoder : ImageEncoder
                 // TIFF 无 CICP 机制, 必须嵌 ICC。但标准 ICC 是 sRGB TRC, 与 PQ 像素矛盾。
                 // 用 PQ TRC ICC (GetHdrStandardIccProfile), 否则解码器按 sRGB gamma 解码 PQ 值。
                 byte[]? iccHdr = ColorManagement.ColorProfileProvider.GetHdrStandardIccProfile(csTag);
-                ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, iccHdr);
+                // 显式声明输入为 16-bit，避免依赖数组长度推断
+                ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, iccHdr, inputBitDepth: 16);
             }, ct);
         }
         else
@@ -280,7 +281,8 @@ public sealed class TiffEncoder : ImageEncoder
         {
             ct.ThrowIfCancellationRequested();
             var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
-            ManagedTiffEncoder.Encode(px, w, h, path, s.OutputBitDepth, icc);
+            // SDR 输入恒为 8-bit BGRA（每像素 4 字节），显式声明避免按长度推断
+            ManagedTiffEncoder.Encode(px, w, h, path, s.OutputBitDepth, icc, inputBitDepth: 8);
         }, ct);
     }
 }
@@ -300,16 +302,33 @@ public static class AvifEncoderSelector
     {
         if (pref == AvifEncoderBackend.Auto)
         {
-            // 优先级: libaom (avifenc 嵌入, 最可靠) > MFT (系统硬件) > NVENC > QSV
-            // libaom 优先于 MFT，因为 MFT 可能检测为可用但实际编码失败
-            if (LibAomAvailable) return _be[AvifEncoderBackend.LibAom];
-            if (s_mftBackend.IsAvailable) return s_mftBackend;
-
             var encoders = GpuCapability.DetectEncoders();
-            var nv = encoders.FirstOrDefault(e => e.Type == GpuEncoderType.NVENC && e.Available);
-            var qsv = encoders.FirstOrDefault(e => e.Type == GpuEncoderType.QSV && e.Available);
+
+            // ⚠ 必须同时校验 SupportsAv1：GpuCapability 已通过 DeviceId 范围与适配器名称
+            // 精确判定 AV1 编码能力，而 Available 仅表示"NVENC 会话可创建"
+            // （RTX 30 的 HEVC 可用即返回 true），并不代表支持 AV1 编码。
+            // 缺少该过滤会导致 RTX 30 及更早显卡被选中 → AV1 编码失败 → 回退软件编码，
+            // 白白经历一次硬件初始化开销。
+            var nv = encoders.FirstOrDefault(e => e.Type == GpuEncoderType.NVENC && e.Available && e.SupportsAv1);
+            var qsv = encoders.FirstOrDefault(e => e.Type == GpuEncoderType.QSV && e.Available && e.SupportsAv1);
+
+            // ═══ 2026-08-30 修复: Auto 模式下硬件编码从未被选中 ═══
+            // 原实现把 libaom 置于最高优先级，而 avifenc.exe 是**随程序内嵌发布**的，
+            // 因此 LibAomAvailable 恒为 true —— NVENC/QSV 分支成为永远走不到的死代码。
+            // 后果：即使配备 RTX 4090，4K AVIF 也要跑约 22 秒软件编码。
+            //
+            // 现调整为「有明确 AV1 能力的硬件优先」：
+            //   · 硬件后端内部均有完善回退（NvencAvifBackend 失败 → AvifFallbackHelper → libaom），
+            //     故优先尝试硬件不会降低可靠性，最坏情况等价于原行为。
+            //   · SupportsAv1 为 false 的设备（如 RTX 30）不会被选中，避免无谓的失败回退。
+            //   · DetectEncoders() 结果有缓存，探测开销只发生一次。
             if (nv is not null) return _be[AvifEncoderBackend.Nvenc];
             if (qsv is not null) return _be[AvifEncoderBackend.Qsv];
+
+            // 无可用硬件 AV1 编码器 → 软件路径
+            // libaom 优先于 MFT：MFT 可能检测为可用但实际编码失败
+            if (LibAomAvailable) return _be[AvifEncoderBackend.LibAom];
+            if (s_mftBackend.IsAvailable) return s_mftBackend;
             return _be[AvifEncoderBackend.LibAom];
         }
         var b = _be.GetValueOrDefault(pref) ?? _be[AvifEncoderBackend.LibAom];
@@ -353,7 +372,7 @@ public sealed class QsvAvifBackend : IAvifEncoder
 
             if (result.Success)
             {
-                IvfWriter.WriteAvif(result.Value!, w, h, path);
+                IvfWriter.WriteAvif(result.Value!, w, h, path, colorSpaceTag);
                 return;
             }
 
@@ -366,12 +385,20 @@ public sealed class QsvAvifBackend : IAvifEncoder
 public sealed class NvencAvifBackend : IAvifEncoder
 {
     public AvifEncoderBackend Backend => AvifEncoderBackend.Nvenc;
+
+    // ═══ 2026-08-25 P2 性能优化: NVENC 失败缓存 ═══
+    // 纹理路径失败后缓存结果, 避免后续每次调用都重试纹理直通路径.
+    // 场景: 用户第一次截图纹理路径失败 (设备/驱动状态), 后续每次仍重试 → 浪费.
+    private static volatile bool s_texturePathFailed;
+    private static volatile bool s_nvencFailed;
+
     public bool IsAvailable
     {
         get
         {
             try
             {
+                if (s_nvencFailed) return false; // 快速短路: 上次已失败
                 var avail = NvEncoderNative.IsAvailable;
                 System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC IsAvailable: {avail}");
                 return avail;
@@ -379,9 +406,17 @@ public sealed class NvencAvifBackend : IAvifEncoder
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC 检测异常: {ex.Message}");
+                s_nvencFailed = true;
                 return false;
             }
         }
+    }
+
+    /// <summary>重置失败缓存 (驱动恢复/显示器切换时调用)。</summary>
+    public static void ResetFailureCache()
+    {
+        s_texturePathFailed = false;
+        s_nvencFailed = false;
     }
 
     // 缓存的 D3D11 设备 (避免每次编码创建新设备)
@@ -395,6 +430,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
         {
             s_cachedD3DDevice?.Dispose();
             s_cachedD3DDevice = device;
+            ResetFailureCache(); // 新设备 = 重置缓存
         }
     }
 
@@ -404,20 +440,34 @@ public sealed class NvencAvifBackend : IAvifEncoder
         {
             ct.ThrowIfCancellationRequested();
 
-            // ═══ GPU 纹理直通路径：NVENC 直接从 D3D11 纹理编码，跳过 CPU 回读 ═══
-            if (texture is not null)
+            // 快速短路: 若 NVENC 完全不可用, 直接回退 libaom
+            if (s_nvencFailed)
+            {
+                System.Diagnostics.Debug.WriteLine("[AVIF] NVENC 已缓存失败, 直接回退 libaom");
+                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+                return;
+            }
+
+            // 获取共享 D3D11 设备 (纹理路径 + CPU 路径共用)
+            ID3D11Device? device = null;
+            lock (s_deviceLock) { device = s_cachedD3DDevice; }
+            bool ownDevice = false;
+            if (device is null)
+            {
+                System.Diagnostics.Debug.WriteLine("[AVIF] NVENC: 创建新 D3D11 设备...");
+                device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+                ownDevice = true;
+            }
+
+            try
+            {
+            // ═══ GPU 纹理直通路径 (仅当纹理可用且未缓存失败) ═══
+            if (texture is not null && !s_texturePathFailed)
             {
                 System.Diagnostics.Debug.WriteLine("[AVIF] NVENC: GPU 纹理直通路径");
                 var result = NativeEncoderGuard.TryEncode("NVENC_Texture", () =>
                 {
-                    ID3D11Device? device = null;
-                    lock (s_deviceLock) { device = s_cachedD3DDevice; }
-                    if (device is null)
-                    {
-                        System.Diagnostics.Debug.WriteLine("[AVIF] NVENC: 创建新 D3D11 设备...");
-                        device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
-                    }
-                    using var nv = new NvEncoderNative(device);
+                    using var nv = new NvEncoderNative(device!);
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     var bs = nv.EncodeAv1FromTexture(texture, w, h, crf);
                     System.Diagnostics.Debug.WriteLine($"[AVIF] ✅ NVENC 纹理直通: {w}x{h} CRF={crf} {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB");
@@ -425,45 +475,98 @@ public sealed class NvencAvifBackend : IAvifEncoder
                 });
                 if (result.Success)
                 {
-                    IvfWriter.WriteAvif(result.Value!, w, h, path);
+                    IvfWriter.WriteAvif(result.Value!, w, h, path, colorSpaceTag);
                     return;
                 }
-                System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC 纹理路径失败 ({result.Error?.GetType().Name}: {result.Error?.Message})，回退 CPU 路径");
-                // 纹理路径失败，回退到 CPU 像素路径（可能纹理被设备释放）
+                System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC 纹理路径失败 ({result.Error?.GetType().Name}: {result.Error?.Message})，缓存失败+回退");
+                s_texturePathFailed = true; // 缓存失败, 后续不再尝试纹理路径
             }
 
-            // ═══ CPU 像素路径（原有回退）：纹理不可用或纹理路径失败时使用 ═══
+            // ═══ CPU 像素路径 (纹理不可用/纹理路径失败时使用) ═══
             var result2 = NativeEncoderGuard.TryEncode("NVENC", () =>
             {
-                ID3D11Device? device = null;
-                lock (s_deviceLock) { device = s_cachedD3DDevice; }
-
-                if (device is null)
-                {
-                    System.Diagnostics.Debug.WriteLine("[AVIF] NVENC: 创建新 D3D11 设备...");
-                    device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
-                }
-                else
-                {
-                    System.Diagnostics.Debug.WriteLine("[AVIF] NVENC: 复用共享 D3D11 设备");
-                }
-
-                using var nv = new NvEncoderNative(device);
+                using var nv = new NvEncoderNative(device!);
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var bs = nv.EncodeAv1(bgra, w, h, crf);
                 System.Diagnostics.Debug.WriteLine($"[AVIF] ✅ NVENC AV1: {w}x{h} CRF={crf} {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB");
                 return bs;
             });
 
+            // ═══ 2026-08-31: 共享设备失败时改用 N 卡专用设备重试 ═══
+            // 混合显卡系统（Intel 核显 + NVIDIA 独显）上，WGC 注入的共享设备可能位于核显，
+            // 无法打开 NVENC 会话 → 此前直接回退软件编码，4K AVIF 需 20+ 秒。
+            // CPU 像素路径不依赖纹理所属设备，故可改用一块真正的 N 卡设备重试。
+            if (!result2.Success && !ownDevice)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[AVIF] NVENC 共享设备失败 ({result2.Error?.Message})，尝试 N 卡专用设备...");
+                using var nvDevice = NvEncoderNative.CreateNvidiaDevice();
+                if (nvDevice is not null)
+                {
+                    var result3 = NativeEncoderGuard.TryEncode("NVENC_Nvidia", () =>
+                    {
+                        using var nv = new NvEncoderNative(nvDevice);
+                        var sw = System.Diagnostics.Stopwatch.StartNew();
+                        var bs = nv.EncodeAv1(bgra, w, h, crf);
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[AVIF] ✅ NVENC AV1 (N 卡设备): {w}x{h} CRF={crf} {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB");
+                        return bs;
+                    });
+                    if (result3.Success)
+                    {
+                        IvfWriter.WriteAvif(result3.Value!, w, h, path, colorSpaceTag);
+                        return;
+                    }
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[AVIF] NVENC N 卡设备亦失败: {result3.Error?.Message}");
+                }
+            }
+
             if (result2.Success)
             {
-                IvfWriter.WriteAvif(result2.Value!, w, h, path);
+                IvfWriter.WriteAvif(result2.Value!, w, h, path, colorSpaceTag);
                 return;
             }
 
             System.Diagnostics.Debug.WriteLine($"[AVIF] NVENC 失败 ({result2.Error?.GetType().Name}: {result2.Error?.Message})，回退 libaom");
+            s_nvencFailed = true; // 缓存失败, 后续不再尝试 NVENC
             AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+            }
+            finally
+            {
+                // 自己创建的设备用完释放 (共享设备由调用方管理)
+                if (ownDevice && device is not null)
+                {
+                    lock (s_deviceLock) { if (s_cachedD3DDevice == null) s_cachedD3DDevice = device; else device.Dispose(); }
+                }
+            }
         }, ct);
+    }
+
+    /// <summary>从纹理直接编码 HEVC (预留, 未来 HEIF 支持)。</summary>
+    public static byte[] EncodeHevcFromTexture(ID3D11Texture2D texture, int w, int h, int qp, ID3D11Device? device = null)
+    {
+        if (device is null)
+        {
+            lock (s_deviceLock) { device = s_cachedD3DDevice; }
+            if (device is null)
+                device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+        }
+        using var nv = new NvEncoderNative(device);
+        return nv.EncodeHevcFromTexture(texture, w, h, qp);
+    }
+
+    /// <summary>从像素缓冲编码 HEVC (预留, 未来 HEIF 支持)。</summary>
+    public static byte[] EncodeHevc(byte[] bgra, int w, int h, int qp, ID3D11Device? device = null)
+    {
+        if (device is null)
+        {
+            lock (s_deviceLock) { device = s_cachedD3DDevice; }
+            if (device is null)
+                device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+        }
+        using var nv = new NvEncoderNative(device);
+        return nv.EncodeHevc(bgra, w, h, qp);
     }
 }
 
@@ -492,7 +595,7 @@ public sealed class MftAvifBackend : IAvifEncoder
 
             if (result.Success)
             {
-                IvfWriter.WriteAvif(result.Value!, w, h, path);
+                IvfWriter.WriteAvif(result.Value!, w, h, path, colorSpaceTag);
                 return;
             }
 
@@ -537,6 +640,25 @@ file static class AvifFallbackHelper
 // ────── 辅助 ──────
 public static class FormatHelper
 {
+    /// <summary>路径中禁止出现的字符（会破坏命令行引号配对）。</summary>
+    private const string InvalidPathChars = "\"\n\r\0";
+
+    /// <summary>校验传给原生命令行编码器的路径参数，防止命令行引号被破坏。
+    /// <para>
+    /// 原生编码器（avifenc / cwebp）通过 Process.Start 拼接命令行，路径若含
+    /// 引号/换行会破坏参数引号配对，导致参数注入或编码到错误路径。
+    /// Windows 文件名本身不允许这些字符，正常路径不会被误伤。
+    /// </para>
+    /// </summary>
+    public static void ValidateNativePath(string path, string paramName)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException($"路径参数为空: {paramName}");
+        // 用 span 重载（IndexOfAny 的定参重载最多支持 3 个）
+        if (path.AsSpan().IndexOfAny(InvalidPathChars) >= 0)
+            throw new ArgumentException($"路径参数含非法字符（引号/换行/空字符）: {paramName}");
+    }
+
     public static byte[] ToSdr(HdrFrameData f, EncodingSettings s) => Processing.ToneMapper.FloatToSRgbBytes(f.Pixels, f.Width, f.Height, s.ToneMappingParams, s.ColorSpaceTag);
 
     /// <summary>

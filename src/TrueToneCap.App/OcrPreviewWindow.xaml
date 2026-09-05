@@ -57,6 +57,19 @@
                 <Canvas x:Name="OverlayCanvas" Background="Transparent"
                         HorizontalAlignment="Center" VerticalAlignment="Center"
                         IsHitTestVisible="True"/>
+
+                <!-- ═══ 左上角覆盖层开关 (2026-08-25) ═══ -->
+                <ToggleButton x:Name="OverlayToggle"
+                              HorizontalAlignment="Left" VerticalAlignment="Top"
+                              Margin="10" Height="32" Padding="12,0"
+                              IsChecked="True"
+                              Checked="OnOverlayToggleChanged" Unchecked="OnOverlayToggleChanged"
+                              ToolTipService.ToolTip="显示 / 关闭文字覆盖层">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE8D4;" FontSize="14"/>
+                        <TextBlock x:Name="OverlayToggleTxt" Text="隐藏覆盖" FontSize="12" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </ToggleButton>
             </Grid>
         </Border>
 

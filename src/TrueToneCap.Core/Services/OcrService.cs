@@ -266,6 +266,8 @@ public class OcrResult
     public string? Error { get; set; }
     public string? Mode { get; set; }  // 预处理模式
     public List<OcrLine> Lines { get; set; } = [];
+    /// <summary>兜底来源引擎 (2026-08-25: ONNX 无结果时 fallback Windows OCR, 记录原引擎类型)。</summary>
+    public string? FallbackFrom { get; set; }
 }
 
 public class OcrLine

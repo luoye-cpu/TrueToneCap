@@ -4,20 +4,39 @@
     Title="TrueToneCap 标注"
     Closed="OnClosed">
 
-    <Grid x:Name="RootGrid" RowDefinitions="Auto,*,Auto">
+    <Grid x:Name="RootGrid" RowDefinitions="Auto,Auto,Auto,*,Auto">
         <!-- 工具栏 -->
         <Grid Grid.Row="0" Padding="8" Background="{ThemeResource CardBackgroundFillColorDefault}">
             <StackPanel Orientation="Horizontal" Spacing="4">
-                <Button x:Name="RectBtn" Content="□" Width="36" Click="OnToolClick" Tag="Rect" ToolTipService.ToolTip="矩形"/>
-                <Button x:Name="EllipseBtn" Content="○" Width="36" Click="OnToolClick" Tag="Ellipse" ToolTipService.ToolTip="椭圆"/>
-                <Button x:Name="ArrowBtn" Content="→" Width="36" Click="OnToolClick" Tag="Arrow" ToolTipService.ToolTip="箭头"/>
-                <Button x:Name="PenBtn" Content="✎" Width="36" Click="OnToolClick" Tag="Pen" ToolTipService.ToolTip="画笔"/>
-                <Button x:Name="TextBtn" Content="T" Width="36" Click="OnToolClick" Tag="Text" ToolTipService.ToolTip="文字"/>
-                <Button x:Name="MosaicBtn" Content="▣" Width="36" Click="OnToolClick" Tag="Mosaic" ToolTipService.ToolTip="马赛克"/>
+                <Button x:Name="RectBtn" Content="□" Width="36" Click="OnToolClick" Tag="Rect" ToolTipService.ToolTip="矩形 (拖动绘制)"/>
+                <Button x:Name="EllipseBtn" Content="○" Width="36" Click="OnToolClick" Tag="Ellipse" ToolTipService.ToolTip="椭圆 (拖动绘制)"/>
+                <Button x:Name="ArrowBtn" Content="→" Width="36" Click="OnToolClick" Tag="Arrow" ToolTipService.ToolTip="箭头 (拖动绘制)"/>
+                <Button x:Name="PenBtn" Content="✎" Width="36" Click="OnToolClick" Tag="Pen" ToolTipService.ToolTip="画笔 (按住自由绘制)"/>
+                <Button x:Name="TextBtn" Content="T" Width="36" Click="OnToolClick" Tag="Text" ToolTipService.ToolTip="文字 (点击位置添加)"/>
+                <Button x:Name="MosaicBtn" Content="▣" Width="36" Click="OnToolClick" Tag="Mosaic" ToolTipService.ToolTip="马赛克 (拖动区域打码)"/>
                 <Rectangle Width="1" Fill="{ThemeResource TextFillColorSecondaryBrush}" Margin="8,4"/>
-                <Button Content="↩" Width="36" Click="OnUndo" ToolTipService.ToolTip="撤销"/>
-                <Button Content="↪" Width="36" Click="OnRedo" ToolTipService.ToolTip="重做"/>
+                <!-- 颜色选择 -->
+                <ComboBox x:Name="ColorCbo" Width="64" SelectionChanged="OnColorChanged" ToolTipService.ToolTip="标注颜色">
+                    <ComboBoxItem Tag="#FFFF0000" IsSelected="True"><Rectangle Width="44" Height="14" Fill="Red"/></ComboBoxItem>
+                    <ComboBoxItem Tag="#FF0088FF"><Rectangle Width="44" Height="14" Fill="#0088FF"/></ComboBoxItem>
+                    <ComboBoxItem Tag="#FF00C853"><Rectangle Width="44" Height="14" Fill="#00C853"/></ComboBoxItem>
+                    <ComboBoxItem Tag="#FFFFAA00"><Rectangle Width="44" Height="14" Fill="#FFAA00"/></ComboBoxItem>
+                    <ComboBoxItem Tag="#FFAA44FF"><Rectangle Width="44" Height="14" Fill="#AA44FF"/></ComboBoxItem>
+                    <ComboBoxItem Tag="#FFFFFFFF"><Rectangle Width="44" Height="14" Fill="White"/></ComboBoxItem>
+                    <ComboBoxItem Tag="#FF000000"><Rectangle Width="44" Height="14" Fill="Black"/></ComboBoxItem>
+                </ComboBox>
+                <!-- 粗细选择 -->
+                <ComboBox x:Name="StrokeWidthCbo" Width="78" SelectionChanged="OnStrokeWidthChanged" ToolTipService.ToolTip="线条粗细">
+                    <ComboBoxItem Tag="2">2 px</ComboBoxItem>
+                    <ComboBoxItem Tag="4" IsSelected="True">4 px</ComboBoxItem>
+                    <ComboBoxItem Tag="6">6 px</ComboBoxItem>
+                    <ComboBoxItem Tag="10">10 px</ComboBoxItem>
+                </ComboBox>
                 <Rectangle Width="1" Fill="{ThemeResource TextFillColorSecondaryBrush}" Margin="8,4"/>
+                <Button Content="↩" Width="36" Click="OnUndo" ToolTipService.ToolTip="撤销 (Ctrl+Z)"/>
+                <Button Content="↪" Width="36" Click="OnRedo" ToolTipService.ToolTip="重做 (Ctrl+Y)"/>
+                <Button Content="🗑" Width="36" Click="OnClearAll" ToolTipService.ToolTip="清空所有标注"/>
+                <Button x:Name="LayersToggleBtn" Content="📋" Width="36" Click="OnToggleLayers" ToolTipService.ToolTip="显示/隐藏图层面板"/>
                 <Button Click="OnSave" Style="{StaticResource AccentButtonStyle}" Width="70" Height="34" Margin="2,0"
                         ToolTipService.ToolTip="保存图片到文件 (S)">
                     <StackPanel Orientation="Horizontal" Spacing="4">
@@ -42,32 +61,53 @@
             </StackPanel>
         </Grid>
 
-        <!-- 画布区域（图片+标注层居中对齐） -->
-        <Border Grid.Row="1" Background="#400000FF">
-            <Grid x:Name="CanvasGrid" Background="Transparent">
-                <Image x:Name="PreviewImage" Stretch="Uniform"
-                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                <Canvas x:Name="AnnotationCanvas" Background="Transparent"
-                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        <!-- 图层面板 (右侧浮动) -->
+        <Border Grid.Row="1" x:Name="LayersPanel" Background="{ThemeResource CardBackgroundFillColorDefault}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"
+                Padding="8" Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="图层:" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Button x:Name="LayerPrevBtn" Content="◀" Width="32" Click="OnLayerPrev" ToolTipService.ToolTip="上一个图层"/>
+                <Button x:Name="LayerNextBtn" Content="▶" Width="32" Click="OnLayerNext" ToolTipService.ToolTip="下一个图层"/>
+                <TextBlock x:Name="LayerInfoTxt" VerticalAlignment="Center" MinWidth="120"/>
+                <Button x:Name="LayerDeleteBtn" Content="🗑" Width="32" Click="OnLayerDelete" ToolTipService.ToolTip="删除选中图层"/>
+                <Button x:Name="LayerUpBtn" Content="↑" Width="32" Click="OnLayerMoveUp" ToolTipService.ToolTip="上移图层"/>
+                <Button x:Name="LayerDownBtn" Content="↓" Width="32" Click="OnLayerMoveDown" ToolTipService.ToolTip="下移图层"/>
+                <ComboBox x:Name="LayersCombo" Width="140" SelectionChanged="OnLayerSelected" ToolTipService.ToolTip="选择图层"/>
+            </StackPanel>
+        </Border>
 
-                <!-- 文字标注输入浮层 -->
-                <Border x:Name="TextInputPanel" Visibility="Collapsed" CornerRadius="6"
-                        Background="{ThemeResource CardBackgroundFillColorDefault}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        Padding="8" HorizontalAlignment="Left" VerticalAlignment="Top"
-                        IsHitTestVisible="True">
-                    <StackPanel Orientation="Horizontal" Spacing="6">
-                        <TextBox x:Name="AnnoTextInput" Width="220" FontSize="16"
-                                 PlaceholderText="输入标注文字" KeyDown="OnTextInputKeyDown"/>
-                        <Button x:Name="TextInputOk" Content="✓" Width="40" Height="32"
-                                Click="OnTextInputOk" ToolTipService.ToolTip="确认文字 (Enter)"/>
-                    </StackPanel>
-                </Border>
-            </Grid>
+        <!-- 画布区域: ScrollViewer 缩放适配, Image 与 AnnotationCanvas 尺寸恒等 → 坐标零换算 -->
+        <Border Grid.Row="3" Background="#400000FF">
+            <ScrollViewer x:Name="CanvasScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                          Background="Transparent">
+                <Grid x:Name="CanvasGrid" Background="Transparent"
+                      HorizontalAlignment="Center" VerticalAlignment="Center" MinWidth="200" MinHeight="150">
+                    <Image x:Name="PreviewImage" Stretch="Fill"
+                           HorizontalAlignment="Left" VerticalAlignment="Top"/>
+                    <!-- 标注画布与图片同区域同尺寸 (代码后台同步设置), 坐标即图像像素坐标 -->
+                    <Canvas x:Name="AnnotationCanvas" Background="Transparent"
+                            HorizontalAlignment="Left" VerticalAlignment="Top"/>
+
+                    <!-- 文字标注输入浮层 -->
+                    <Border x:Name="TextInputPanel" Visibility="Collapsed" CornerRadius="6"
+                            Background="{ThemeResource CardBackgroundFillColorDefault}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                            Padding="8" HorizontalAlignment="Left" VerticalAlignment="Top"
+                            IsHitTestVisible="True">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBox x:Name="AnnoTextInput" Width="220" FontSize="16"
+                                     PlaceholderText="输入标注文字" KeyDown="OnTextInputKeyDown"/>
+                            <Button x:Name="TextInputOk" Content="✓" Width="40" Height="32"
+                                    Click="OnTextInputOk" ToolTipService.ToolTip="确认文字 (Enter)"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </ScrollViewer>
         </Border>
 
         <!-- 底部状态 -->
-        <Grid Grid.Row="2" Padding="8" Background="{ThemeResource CardBackgroundFillColorDefault}">
+        <Grid Grid.Row="4" Padding="8" Background="{ThemeResource CardBackgroundFillColorDefault}">
             <TextBlock x:Name="InfoTxt" Text="选择工具后在图像上拖动以添加标注" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
         </Grid>
     </Grid>

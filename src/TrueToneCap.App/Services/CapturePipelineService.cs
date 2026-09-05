@@ -193,6 +193,7 @@ public sealed class CapturePipelineService
             HdrOutput = hdrOutput,
             AvifBackend = avifBackend,
             AvifPngSuffix = s.AvifPngSuffix,
+            JxlPngSuffix = s.JxlPngSuffix,
             AvifChroma = chroma,
             ChromaSubsampling = chroma,
             OutputBitDepth = bitDepth,
@@ -271,6 +272,7 @@ public sealed class CapturePipelineService
             _ => ".png"
         };
         if (format == OutputFormat.AVIF && s.AvifPngSuffix) ext += ".png";
+        else if (format == OutputFormat.JPEG_XL && s.JxlPngSuffix) ext += ".png";
         return Path.Combine(outDir, $"{s.FileNamePrefix}{DateTime.Now:yyyyMMdd_HHmmssfff}{ext}");
     }
 
@@ -329,7 +331,7 @@ public sealed class CapturePipelineService
         PowerManager.PreventSleep();
         try
         {
-        await Task.Run(() =>
+        await Task.Run(async () =>
         {
             ct.ThrowIfCancellationRequested();
             var (pixels, iccProfile) = PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
@@ -338,7 +340,7 @@ public sealed class CapturePipelineService
 
             // 始终走 SDR 路径：byte[] 输入是 SDR BGRA8 像素，不应转为 HDR float16 编码
             // 如需 HDR 编码，使用 EncodeHdrFrameAsync 传入 HdrFrameData
-            EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
+            await encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct);
         }, ct);
         }
         finally { PowerManager.AllowSleep(); }
@@ -348,17 +350,11 @@ public sealed class CapturePipelineService
         return path;
     }
 
-    /// <summary>后台线程中同步执行 HDR 编码（避免 GetAwaiter().GetResult() 阻塞线程池）。</summary>
-    private static void EncodeSync(ImageEncoder encoder, HdrFrameData frame, EncodingSettings settings, string path, CancellationToken ct)
-    {
-        encoder.EncodeAsync(frame, settings, path, ct).GetAwaiter().GetResult();
-    }
-
-    /// <summary>后台线程中同步执行 SDR 编码。</summary>
-    private static void EncodeSyncSdr(ImageEncoder encoder, byte[] pixels, int w, int h, EncodingSettings settings, string path, CancellationToken ct)
-    {
-        encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct).GetAwaiter().GetResult();
-    }
+    // ═══ 2026-08-30 修复: 移除 EncodeSync / EncodeSyncSdr 两个同步包装 ═══
+    // 原实现用 encoder.EncodeXxxAsync(...).GetAwaiter().GetResult() 在 Task.Run 内阻塞等待，
+    // 而编码器内部又各自包了一层 Task.Run —— 一次编码同时占用 2 个线程池线程
+    // （1 个阻塞在 GetResult + 1 个真正执行）。连续/并发截图时有线程池饥饿风险。
+    // 现改为在 Task.Run 内直接 await，外层线程在等待期间归还线程池。
 
     /// <summary>编码并保存（使用调用方提供的显式设置，供 MainWindow UI 路径使用）。</summary>
     /// <remarks>
@@ -382,7 +378,7 @@ public sealed class CapturePipelineService
         PowerManager.PreventSleep();
         try
         {
-        await Task.Run(() =>
+        await Task.Run(async () =>
         {
             ct.ThrowIfCancellationRequested();
             var (pixels, iccProfile) = PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
@@ -391,7 +387,7 @@ public sealed class CapturePipelineService
 
             ct.ThrowIfCancellationRequested();
             // 始终走 SDR 路径
-            EncodeSyncSdr(encoder, pixels, w, h, settings, path, ct);
+            await encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct);
         }, ct);
         }
         finally { PowerManager.AllowSleep(); }
@@ -415,7 +411,7 @@ public sealed class CapturePipelineService
         PowerManager.PreventSleep();
         try
         {
-        await Task.Run(() =>
+        await Task.Run(async () =>
         {
             ct.ThrowIfCancellationRequested();
 
@@ -426,11 +422,13 @@ public sealed class CapturePipelineService
             {
                 LogService.Info("Pipeline", $"HDR 帧降级到 SDR 色调映射: {settings.Format}");
                 var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
-                if (hdrFrame.GpuTexture is not null)
-                    settings.GpuTexture = hdrFrame.GpuTexture;
+                // ═══ 2026-08-16 P1-2 修复: 派生像素 (色调映射后) 禁止带 GPU 纹理 ═══
+                // 纹理是原始捕获帧的内容, 与色调映射后的像素不一致 → NVENC 会编码
+                // 原始桌面帧而非映射结果 → 色彩/亮度错误。统一规则: 派生像素不带纹理。
+                settings.GpuTexture = null;
                 // 色调映射后像素为 sRGB 色域
                 settings.ColorSpaceTag = "sRGB";
-                EncodeSyncSdr(encoder, sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
+                await encoder.EncodeSdrAsync(sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
                 return;
             }
 
@@ -456,18 +454,18 @@ public sealed class CapturePipelineService
                     settings.IccProfile = null;
                 }
                 LogService.Debug("Pipeline", $"HDR 直通编码: {settings.Format}");
-                EncodeSync(encoder, hdrFrame, settings, path, ct);
+                await encoder.EncodeAsync(hdrFrame, settings, path, ct);
             }
             else
             {
                 // 编码器不支持 HDR → 色调映射到 SDR
                 LogService.Info("Pipeline", $"编码器不支持 HDR，色调映射到 SDR: {settings.Format}");
                 var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
-                if (hdrFrame.GpuTexture is not null)
-                    settings.GpuTexture = hdrFrame.GpuTexture;
+                // ═══ 2026-08-16 P1-2 修复: 派生像素禁止带 GPU 纹理 (同上) ═══
+                settings.GpuTexture = null;
                 settings.ColorSpaceTag = "sRGB";
                 settings.HdrOutput = false;
-                EncodeSyncSdr(encoder, sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
+                await encoder.EncodeSdrAsync(sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
             }
         }, ct);
         }
