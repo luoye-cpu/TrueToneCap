@@ -129,9 +129,9 @@ public static class NativeJxlEncoder
                 CreateNoWindow = true
             };
 
-            // ═══ 2026-08-10 诊断: 输出实际命令行 (验证 -d 是否正确传递) ═══
-            // Release 下 Debug.WriteLine 不输出 → 写临时文件供分析
-            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JXL] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
+            // 2026-08-10 诊断代码（无条件写 %TEMP%\ttc_encoder_cmd.log）已移除：
+            // 该日志在 Release 下也会持续写入并最终无限增长，且命令行只在排查时才有意义。
+            System.Diagnostics.Debug.WriteLine($"[JXL] {psi.FileName} {psi.Arguments}");
 
             var result = NativeEncoderGuard.TryEncode("JXL", () =>
             {
@@ -202,9 +202,9 @@ public static class NativeJxlEncoder
                 CreateNoWindow = true
             };
 
-            // ═══ 2026-08-10 诊断: 输出实际命令行 (验证 -d 是否正确传递) ═══
-            // Release 下 Debug.WriteLine 不输出 → 写临时文件供分析
-            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JXL_HDR] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
+            // 2026-08-10 诊断代码（无条件写 %TEMP%\ttc_encoder_cmd.log）已移除：
+            // 该日志在 Release 下也会持续写入并最终无限增长。
+            System.Diagnostics.Debug.WriteLine($"[JXL_HDR] {psi.FileName} {psi.Arguments}");
 
             var result = NativeEncoderGuard.TryEncode("JXL_HDR", () =>
             {

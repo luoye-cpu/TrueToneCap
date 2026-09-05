@@ -362,7 +362,20 @@ public sealed partial class SelectionOverlay : Window
             case VirtualKey.Enter:
                 if (_selectionComplete) { Finish(ActionResult.Confirm); e.Handled = true; }
                 break;
+            default:
+                // ═══ 2026-08-25: 用户自定义保存/取消快捷键支持 ═══
+                if (_selectionComplete && MatchesShortcut(e, AppServices.Settings.Current.SaveShortcut))
+                { Finish(ActionResult.Confirm); e.Handled = true; }
+                break;
         }
+    }
+
+    /// <summary>检查按键事件是否匹配快捷键字符串 (如 "S", "Ctrl+S")。</summary>
+    private static bool MatchesShortcut(KeyRoutedEventArgs e, string? shortcut)
+    {
+        var parsed = MainWindow.ParseShortcut(shortcut);
+        if (parsed is null) return false;
+        return parsed.Value.Key == e.Key; // 修饰键由全局热键场景简化处理
     }
 
     [LibraryImport("user32.dll")]
@@ -652,61 +665,62 @@ public sealed partial class SelectionOverlay : Window
         if (_finished) return; // 防止双重触发
         _finished = true;
         _closed = true; // 通知硬看门狗已响应（防止误杀）
+        Volatile.Write(ref _isClosed, 1); // 区域刷新定时器回调据此自行停表
 
         // 停止超时定时器 + 硬看门狗
         _timeoutTimer?.Stop();
         _timeoutTimer = null;
         _hardWatchdog?.Dispose();
         _hardWatchdog = null;
-        _regionRefreshTimer?.Dispose();
-        _regionRefreshTimer = null;
+        DisposeRegionRefreshTimer();
+
+        // ═══ 2026-08-25 性能修复: 先关窗口, 后做合成+编码 (UI 即刻消失) ═══
+        // 旧实现: 标注合成/像素提取 → 关 HDR 背景窗 → ActionCompleted(编码) → Close()
+        //   用户点击"确定"后覆盖层仍显示直到编码完成 → 感知卡顿
+        // 新实现: 立即关闭窗口释放视觉资源, 合成/编码全部后台执行。
+        // 注意: this.Close() 会触发 OnClosed → 兜底触发 Cancel。必须先置 _finished=true。
 
         // 标注模式下先退出标注
         if (_isAnnotating) ExitAnnotationMode();
 
-        // 在关闭前将标注合成到像素（后台线程执行，避免大图马赛克/文字合成阻塞 UI）
+        // 先在后台启动像素提取/合成 (窗口关闭不影响内存中的桌面像素数据)
+        Task<byte[]?>? composeTask = null;
         if (result is ActionResult.Confirm or ActionResult.Copy)
         {
-            if (_annotationManager.Layers.Count > 0)
-            {
-                // 超时保护：合成卡死（如 Win2D 共享设备异常）时 10s 后跳过合成，
-                // 保证 ActionCompleted 必然触发、防重入锁必然释放（用户感知=不卡死）
-                var composeTask = Task.Run(GetAnnotatedRegionPixels);
-                var done = await Task.WhenAny(composeTask, Task.Delay(10000));
-                if (done == composeTask)
-                {
-                    AnnotatedRegionPixels = await composeTask;
-                }
-                else
-                {
-                    System.Diagnostics.Debug.WriteLine("[SelectionOverlay] 标注合成超时 (10s)，跳过合成直接关闭");
-                    AnnotatedRegionPixels = ExtractRegionPixels(SelectedRect); // 无标注像素兜底
-                }
-            }
-            else
-                AnnotatedRegionPixels = ExtractRegionPixels(SelectedRect);
+            composeTask = _annotationManager.Layers.Count > 0
+                ? Task.Run(GetAnnotatedRegionPixels)
+                : Task.Run(() => (byte[]?)ExtractRegionPixels(SelectedRect));
         }
 
-        // 关闭 HDR 背景窗口
-        _hdrBgWnd?.Close();
-        _hdrBgWnd?.Dispose();
-        _hdrBgWnd = null;
+        // ★ 立即关闭窗口 — UI 即刻消失, 用户感知零延迟
+        try { this.Close(); } catch { /* 窗口可能已被系统关闭 */ }
+
+        // 关闭后再合成像素 (后台线程)
+        if (composeTask is not null)
+        {
+            // 超时保护：合成卡死时 10s 后跳过合成，保证 ActionCompleted 必然触发
+            var done = await Task.WhenAny(composeTask, Task.Delay(10000));
+            AnnotatedRegionPixels = done == composeTask
+                ? await composeTask
+                : ExtractRegionPixels(SelectedRect); // 无标注像素兜底
+            System.Diagnostics.Debug.WriteLineIf(done != composeTask,
+                "[SelectionOverlay] 标注合成超时 (10s)，跳过合成直接关闭");
+        }
 
         ActionCompleted?.Invoke(result, SelectedRect);
-        try { this.Close(); } catch { /* 窗口可能已被系统关闭 */ }
     }
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
         _closed = true; // 通知硬看门狗已关闭（防止误杀）
+        Volatile.Write(ref _isClosed, 1); // 区域刷新定时器回调据此自行停表
 
         // 停止超时定时器 + 硬看门狗
         _timeoutTimer?.Stop();
         _timeoutTimer = null;
         _hardWatchdog?.Dispose();
         _hardWatchdog = null;
-        _regionRefreshTimer?.Dispose();
-        _regionRefreshTimer = null;
+        DisposeRegionRefreshTimer();
 
         // 关闭 HDR 背景窗口
         _hdrBgWnd?.Close();
@@ -1160,9 +1174,18 @@ public sealed partial class SelectionOverlay : Window
         }
 
         // 定时刷新（每 3 秒, 未选中时; 响应新开/关闭/移动窗口）
+        // ⚠ 定时器必须在窗口关闭/选区完成时释放，否则会随窗口一起泄漏。
         _regionRefreshTimer?.Dispose();
+        if (Volatile.Read(ref _isClosed) != 0) { _regionRefreshTimer = null; return; }
         _regionRefreshTimer = new System.Threading.Timer(_ =>
         {
+            // 窗口已关闭则停表：GetWindowHandle(this) 在已销毁窗口上会抛异常，
+            // 若被空 catch 吞掉则该泄漏完全不可见（定时器继续每 3 秒轮询到进程退出）。
+            if (Volatile.Read(ref _isClosed) != 0)
+            {
+                DisposeRegionRefreshTimer();
+                return;
+            }
             try
             {
                 var selfHwnd2 = WinRT.Interop.WindowNative.GetWindowHandle(this);
@@ -1175,8 +1198,24 @@ public sealed partial class SelectionOverlay : Window
                     if (_hoveredRegionIndex >= regions.Count) _hoveredRegionIndex = -1;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // 空 catch 会把"窗口已销毁"与"真正的检测失败"一并吞掉；
+                // 至少留痕，避免定时器泄漏长期无法察觉。
+                System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] 区域定时刷新失败: {ex.Message}");
+                if (Volatile.Read(ref _isClosed) != 0) DisposeRegionRefreshTimer();
+            }
         }, null, 3000, 3000);
+    }
+
+    /// <summary>标记窗口已关闭。置位后区域刷新定时器将在下一次回调时自行停表。</summary>
+    private int _isClosed;
+
+    /// <summary>释放区域刷新定时器（幂等）。窗口关闭与选区完成时调用。</summary>
+    private void DisposeRegionRefreshTimer()
+    {
+        var t = Interlocked.Exchange(ref _regionRefreshTimer, null);
+        t?.Dispose();
     }
 
     /// <summary>QQ截图式：仅高亮当前悬停的窗口（最小面积优先），显示标题提示。</summary>

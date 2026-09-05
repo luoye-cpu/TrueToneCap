@@ -45,14 +45,17 @@ public sealed class AppSettingsData
     public string Hotkey { get; set; } = "Ctrl+Shift+S";
     public string RecordHotkey { get; set; } = "Ctrl+Shift+G";
     public string SilentHotkey { get; set; } = "Ctrl+Shift+Q";
+    public string SaveShortcut { get; set; } = "S";
+    public string CancelShortcut { get; set; } = "Esc";
 
     // ── 行为 ──
     public bool AutoStart { get; set; }
     public bool ShowPreview { get; set; } = true;
     public bool MinimizeToTray { get; set; } = true;
 
-    // ── AVIF ──
+    // ── PNG 后缀（提高兼容性） ──
     public bool AvifPngSuffix { get; set; }
+    public bool JxlPngSuffix { get; set; }
     public int AvifBackendIndex { get; set; } // 0=Auto, 1=LibAom, 2=Qsv, 3=Nvenc
     public string AvifChroma { get; set; } = "444";
 
@@ -86,11 +89,22 @@ public sealed class AppSettingsData
     public bool UseCustomLlm { get; set; }
     public string TranslationMode { get; set; } = "Free";
     public string LlmEndpoint { get; set; } = "";
+    /// <summary>LLM API Key。
+    /// ⚠ 明文不进 settings.json —— 由 SettingsService 转存至 SecretStore（DPAPI 加密）。</summary>
+    [JsonIgnore]
     public string LlmApiKey { get; set; } = "";
     public string LlmModel { get; set; } = "deepseek-chat";
     public string LlmSystemPrompt { get; set; } = "";
     public string TargetLanguage { get; set; } = "zh-CN";
     public string OcrLanguage { get; set; } = "";
+
+    /// <summary>有道智云开放平台 应用ID（AppKey）。非敏感，随 settings.json 明文保存。</summary>
+    public string YoudaoAppKey { get; set; } = "";
+
+    /// <summary>有道智云开放平台 应用密钥（AppSecret）。
+    /// ⚠ 明文不进 settings.json —— 由 SettingsService 转存至 SecretStore（DPAPI 加密）。</summary>
+    [JsonIgnore]
+    public string YoudaoAppSecret { get; set; } = "";
 
     // ── 系统检测（运行时填充，不持久化到用户设置文件）──
     [JsonIgnore]
@@ -128,6 +142,7 @@ public sealed class AppSettingsData
     public string Language { get; set; } = "zh";
     public string OcrEngineMode { get; set; } = "OnnxGpu";
     public string ThemeMode { get; set; } = "Default";
+    public bool EnableUiAnimations { get; set; } = true;
 
     // ── Toast ──
     public bool ToastOnCapture { get; set; } = true;

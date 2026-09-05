@@ -37,6 +37,18 @@ if (args.Contains("--ocr-tests"))
     return TrueToneCap.Test.OcrServiceTests.RunAll();
 }
 
+// ── 文件结构合法性测试入口 ──
+if (args.Contains("--format-tests"))
+{
+    return TrueToneCap.Test.FormatStructureTests.RunAll();
+}
+
+// ── WGC 捕获 + AVIF 后端验证入口 ──
+if (args.Contains("--wgc-avif-tests"))
+{
+    return TrueToneCap.Test.WgcAvifBackendTests.RunAll();
+}
+
 // ── 全部测试入口 ──
 if (args.Contains("--all"))
 {
@@ -50,6 +62,8 @@ if (args.Contains("--all"))
     totalExit += TrueToneCap.Test.ServiceTests.RunAll();
     Console.WriteLine();
     totalExit += TrueToneCap.Test.OcrServiceTests.RunAll();
+    Console.WriteLine();
+    totalExit += TrueToneCap.Test.FormatStructureTests.RunAll();
     Console.WriteLine();
     totalExit += TrueToneCap.Test.UsabilityTests.RunAll();
     Console.WriteLine("\n══════════════════════════════════════");
@@ -69,5 +83,7 @@ Console.WriteLine("  --encoding-tests   编码管线集成测试");
 Console.WriteLine("  --usability-tests  综合可用性测试");
 Console.WriteLine("  --service-tests    基础设施服务测试 (ShaderLoader, NativeLibraryResolver)");
 Console.WriteLine("  --ocr-tests        OCR 服务测试 (BitmapPreprocessor, LlmProviders)");
+Console.WriteLine("  --format-tests     输出结构合法性测试 (TIFF IFD / AVIF box)");
+Console.WriteLine("  --wgc-avif-tests   WGC 真实捕获 + AVIF 各后端编码验证 (需桌面会话)");
 Console.WriteLine("  --all              全部测试\n");
 return 0;

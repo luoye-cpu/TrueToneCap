@@ -5,24 +5,20 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 允许捕获 P/Invoke CSE (AccessViolationException/SEHException)，防止原生编码器崩溃终止进程 -->
+    <LegacyCorruptedStateExceptionsPolicy>true</LegacyCorruptedStateExceptionsPolicy>
     <RootNamespace>TrueToneCap.Core</RootNamespace>
     <AssemblyName>TrueToneCap.Core</AssemblyName>
     <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
     <NoWarn>$(NoWarn);MSB3884</NoWarn>
-    <!-- ═══ Core 无 WinUI 依赖，可启用 AOT 编译 ═══ →
-         发布时 Publish.ps1 传递 -p:CorePublishAot=true
-         启用后 Core 以 NativeAOT 编译为本机代码，App 通过 JIT 桥接调用 ═══ -->
+    <InternalsVisibleTo>TrueToneCap.Test</InternalsVisibleTo>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="JxlNet" Version="0.11.2.2" />
+    <PackageReference Include="MozJpegSharp.Core" Version="3.0.8" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
-  </ItemGroup>
-  <!-- 嵌入原生工具链 (avifenc.exe / cwebp.exe / cjpegli.exe / cjxl.exe) 作为嵌入资源 -->
-  <ItemGroup>
-    <EmbeddedResource Include="Resources\avifenc.exe" />
-    <EmbeddedResource Include="Resources\cwebp.exe" />
-    <EmbeddedResource Include="Resources\cjpegli.exe" />
-    <EmbeddedResource Include="Resources\cjxl.exe" />
+    <PackageReference Include="libwebp" Version="1.0.0" />
   </ItemGroup>
 </Project>

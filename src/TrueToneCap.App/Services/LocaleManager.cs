@@ -42,7 +42,8 @@ public static class LocaleManager
     public static string AvifOptions => s_lang == AppLanguage.Chinese ? "AVIF 选项" : "AVIF Options";
     public static string EncoderBackend => s_lang == AppLanguage.Chinese ? "编码后端" : "Backend";
     public static string ChromaSampling => s_lang == AppLanguage.Chinese ? "色度采样" : "Chroma";
-    public static string AvifPngSuffix => s_lang == AppLanguage.Chinese ? "添加 .avif.png 双后缀（兼容旧软件）" : "Add .avif.png suffix (legacy compat)";
+    public static string AvifPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
+    public static string JxlPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
     public static string GainMapOptions => s_lang == AppLanguage.Chinese ? "JPEG Gain Map (Ultra HDR)" : "JPEG Gain Map (Ultra HDR)";
     public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "输出兼容 JPEG 的 HDR 照片。SDR 查看器显示基础图，HDR 查看器自动还原完整动态范围。" : "Outputs HDR photos compatible with JPEG. SDR viewers see base image, HDR viewers recover full dynamic range.";
     public static string GainMapModeLabel => s_lang == AppLanguage.Chinese ? "增益图模式" : "Gain Map Mode";

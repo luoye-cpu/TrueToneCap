@@ -7,7 +7,21 @@
 | 目录 | 内容 | 是否上传 |
 |------|------|----------|
 | `manual/` | 手动调试/验证脚本（`analyze_*`、`verify_*`、`check_*`、`test_*`、`glm_*` 等一次性分析脚本） | ❌ 被 `.gitignore` 忽略 |
-| `src/TrueToneCap.Test/`（项目内） | 正式自动化测试（318 项，随 slnx 构建） | ✅ 上传 |
+| `src/TrueToneCap.Test/`（项目内） | 正式自动化测试（随 slnx 构建） | ✅ 上传 |
+
+## 自动化测试
+
+运行方式：`dotnet run --project src/TrueToneCap.Test -- --all`
+
+| 套件 | 参数 |
+|------|------|
+| 核心管线（PixelOps / ToneMapper / ICC / 标注 / 编码器） | `--unit-tests` |
+| 色彩管线精度 | `--color-tests` |
+| 编码管线集成 | `--encoding-tests` |
+| 输出结构合法性（TIFF IFD / AVIF box） | `--format-tests` |
+| 基础设施服务 | `--service-tests` |
+| OCR 服务 | `--ocr-tests` |
+| 综合可用性 | `--usability-tests` |
 
 ## 约定
 

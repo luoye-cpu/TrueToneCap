@@ -38,6 +38,10 @@ public sealed class CaptureResult : IDisposable
     /// <summary>捕获耗时（毫秒）。</summary>
     public long CaptureTimeMs { get; set; }
 
+    /// <summary>捕获质量降级警告 (非空 = 可能有功能降级，UI 应向用户提示)。
+    /// 如: WGC CreateForMonitor 失败回退到此仅捕获壁纸 (不含应用窗口)。</summary>
+    public string? DegradationWarning { get; set; }
+
     /// <summary>获取可用于显示/编码的 BGRA8 像素。HDR 帧会自动执行色调映射。</summary>
     /// <param name="toneParams">色调映射参数，默认分段 Reinhard (与主管线一致)。
     /// 注意: 必须用构造函数 (保留默认 PaperWhite=200/MaxNits=1000), 对象初始化器会置 0。</param>

@@ -3,7 +3,7 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$OutputDir = "publish\TrueToneCap-v0.3.2-beta",
+    [string]$OutputDir = "publish\TrueToneCap-v0.3.3-beta",
     [switch]$CoreAot = $false,
     [switch]$NoReadyToRun = $false
 )
@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "╔══════════════════════════════════════╗"
-Write-Host "║  TrueToneCap v0.3.2 Beta 发布脚本   ║"
+Write-Host "║  TrueToneCap v0.3.3 Beta 发布脚本   ║"
 Write-Host "║  ReadyToRun: $(-not $NoReadyToRun)                     ║"
 Write-Host "║  Core AOT: $CoreAot                           ║"
 Write-Host "╚══════════════════════════════════════╝"

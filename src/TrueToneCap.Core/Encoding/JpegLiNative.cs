@@ -144,9 +144,10 @@ public static class JpegLiNative
                 CreateNoWindow = true
             };
 
-            // ═══ 2026-08-10 诊断: 输出实际命令行 (验证 --distance 是否正确传递) ═══
-            // Release 下 Debug.WriteLine 不输出 → 写临时文件供分析
-            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JPEGLI] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
+            // 2026-08-10 诊断代码（无条件写 %TEMP%\ttc_encoder_cmd.log）已移除：
+            // 该日志在 Release 下也会持续写入并最终无限增长，且命令行只在排查时才有意义。
+            // 需要排查参数传递时用 Debug 输出即可。
+            System.Diagnostics.Debug.WriteLine($"[JPEGLI] {psi.FileName} {psi.Arguments}");
 
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");
@@ -259,8 +260,7 @@ public static class JpegLiNative
                 CreateNoWindow = true
             };
 
-            // ═══ 2026-08-10 诊断: 输出实际命令行 ═══
-            try { System.IO.File.AppendAllText(Path.Combine(Path.GetTempPath(), "ttc_encoder_cmd.log"), $"[JPEGLI_GRAY] {DateTime.Now:HH:mm:ss.fff} {psi.Arguments}\n"); } catch { }
+            System.Diagnostics.Debug.WriteLine($"[JPEGLI_GRAY] {psi.FileName} {psi.Arguments}");
 
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");

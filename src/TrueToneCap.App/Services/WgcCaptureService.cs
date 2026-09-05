@@ -79,6 +79,10 @@ public sealed partial class WgcCaptureService : IDisposable
     // ═══ P1: HDR 能力缓存 ═══
     private static readonly Dictionary<nint, bool> s_hdrCapabilityCache = [];
 
+    // ═══ P0: 捕获降级警告传播 ═══
+    // 当 CreateItemForMonitor 回退到方法3 (桌面窗口=仅壁纸) 时，记录警告文本供给 CaptureResult 传播
+    private static string? s_lastItemDegradation;
+
     // P2: Staging 纹理复用已移入 PooledSession 内部
 
     // IGraphicsCaptureItemInterop COM GUID
@@ -129,6 +133,10 @@ public sealed partial class WgcCaptureService : IDisposable
         private int _latestTexW, _latestTexH;
         private bool _latestTexValid;
 
+        /// <summary>本会话的捕获降级警告 (null = 正常)。设置于 Start() 时读取静态标记。</summary>
+        private string? _degradationWarning;
+        public string? DegradationWarning => _degradationWarning;
+
         public int Width => _width;
         public int Height => _height;
         public bool HasFrame => _hasFrame;
@@ -157,6 +165,11 @@ public sealed partial class WgcCaptureService : IDisposable
                 if (_item is null) { Log($"[Pool] {_hmonitor:X}: CreateItem 失败"); return false; }
                 _width = _item.Size.Width;
                 _height = _item.Size.Height;
+
+                // ═══ 降级检测: 如果 CreateItem 用了方法3 回退 (桌面窗口=仅壁纸)，记录警告 ═══
+                // 供调用方 (CaptureMonitorInternal/CaptureAllMonitorsInternal) 传播到 CaptureResult，
+                // 让 UI 向用户提示"截图仅包含桌面背景，不含应用窗口"。
+                _degradationWarning = s_lastItemDegradation;
 
                 // 帧池（2 帧缓冲，FreeThreaded 避免 UI 线程依赖）
                 _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
@@ -783,7 +796,8 @@ public sealed partial class WgcCaptureService : IDisposable
             HdrPixels = hdrPixels,
             Width = w,
             Height = h,
-            GpuTexture = gpuTexture
+            GpuTexture = gpuTexture,
+            DegradationWarning = sdrSession.DegradationWarning // 传播降级警告 (来自会话)
         };
 
         // 附加 ICC + 显示器信息
@@ -1010,7 +1024,8 @@ public sealed partial class WgcCaptureService : IDisposable
             SdrPixels = fullPixels,
             Width = vw,
             Height = vh,
-            CaptureTimeMs = sw.ElapsedMilliseconds
+            CaptureTimeMs = sw.ElapsedMilliseconds,
+            DegradationWarning = s_lastItemDegradation // 传播降级警告 (任一会话回退到壁纸)
         };
     }
 
@@ -1026,6 +1041,7 @@ public sealed partial class WgcCaptureService : IDisposable
             var item = CreateItemFromDisplayId(hmonitor);
             if (item is not null)
             {
+                s_lastItemDegradation = null; // 成功捕获显示器内容
                 Log($"[WGC] 方法0(DisplayId): OK {item.Size.Width}x{item.Size.Height}");
                 return item;
             }
@@ -1040,7 +1056,7 @@ public sealed partial class WgcCaptureService : IDisposable
             var interop = GraphicsCaptureItem.As<IGraphicsCaptureItemInterop>();
             int hr = interop.CreateForMonitor(hmonitor, itemGuid, out var ptr);
             Log($"[WGC] 方法1(CsWinRT): hr=0x{hr:X8}");
-            if (hr >= 0 && ptr != 0) return MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr);
+            if (hr >= 0 && ptr != 0) { s_lastItemDegradation = null; return MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr); }
         }
         catch (Exception ex) { Log($"[WGC] 方法1: {ex.Message}"); }
 
@@ -1062,7 +1078,7 @@ public sealed partial class WgcCaptureService : IDisposable
                         try
                         {
                             hr = VtblCall4(interopPtr, hmonitor, itemGuid, out var itemPtr);
-                            if (hr >= 0 && itemPtr != 0) return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemPtr);
+                            if (hr >= 0 && itemPtr != 0) { s_lastItemDegradation = null; return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemPtr); }
                         }
                         finally { Marshal.Release(interopPtr); }
                     }
@@ -1072,11 +1088,16 @@ public sealed partial class WgcCaptureService : IDisposable
         }
         catch (Exception ex) { Log($"[WGC] 方法2 异常: {ex.Message}"); }
 
-        // 方法3: TryCreateFromWindowId（桌面窗口回退）
+        // 方法3: TryCreateFromWindowId（桌面窗口回退）— ⚠️ 仅捕获桌面壁纸/桌面窗口，不含应用窗口
         try
         {
             var item = CreateItemFromDesktopWindow(hmonitor);
-            if (item is not null) return item;
+            if (item is not null)
+            {
+                s_lastItemDegradation = "WGC 捕获回退到桌面窗口模式，截图可能仅包含桌面壁纸，不含应用窗口。请检查系统/驱动兼容性。";
+                Log("[WGC] ⚠️ 回退到桌面窗口捕获 (方法3) — 仅包含壁纸/桌面背景，不含应用窗口！");
+                return item;
+            }
         }
         catch (Exception ex) { Log($"[WGC] 方法3 异常: {ex.Message}"); }
 

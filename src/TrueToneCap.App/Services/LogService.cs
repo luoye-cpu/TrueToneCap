@@ -99,6 +99,9 @@ public static class LogService
     private static readonly TimeSpan s_cleanupInterval = TimeSpan.FromHours(1);
     private static DateTime s_lastCleanup = DateTime.MinValue;
 
+    /// <summary>后台清理任务的取消源。由 <see cref="Shutdown"/> 取消，保证进程可干净退出。</summary>
+    private static CancellationTokenSource? s_cleanupCts;
+
     // ── 2026-08-11: Debug 级别是否写入文件 (默认 false 防刷屏; 排障时可开) ──
     public static bool FileDebugEnabled { get; set; }
 
@@ -134,19 +137,35 @@ public static class LogService
             RotateLogFile();
         }
 
-        // 启动后台定时清理任务
+        // 启动后台定时清理任务（旧实现无取消机制，进程退出时任务仍在等待）
+        s_cleanupCts = new CancellationTokenSource();
         _ = Task.Run(async () =>
         {
-            while (true)
+            var token = s_cleanupCts.Token;
+            while (!token.IsCancellationRequested)
             {
                 try
                 {
-                    await Task.Delay(3600000); // 每小时检查一次
+                    // 用 s_cleanupInterval 常量（旧实现把 1 小时硬编码为 3600000ms）
+                    await Task.Delay(s_cleanupInterval, token);
                     CleanupOldLogs();
                 }
-                catch { }
+                catch (OperationCanceledException) { break; }
+                catch
+                {
+                    // 清理失败不致命；继续等待下一个周期（但避免异常时忙循环）
+                    try { await Task.Delay(s_cleanupInterval, token); } catch (OperationCanceledException) { break; }
+                }
             }
         });
+    }
+
+    /// <summary>停止后台清理任务。应用退出时调用，避免进程无法干净退出。</summary>
+    public static void Shutdown()
+    {
+        s_cleanupCts?.Cancel();
+        s_cleanupCts?.Dispose();
+        s_cleanupCts = null;
     }
 
     /// <summary>按日期轮转日志文件。同一天超过大小上限时创建分片 app_日期_N.log。</summary>

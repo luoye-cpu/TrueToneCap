@@ -87,7 +87,8 @@ public static class AvifHardwareProbe
                 return false;
             }
 
-            var tmpPath = Path.Combine(Path.GetTempPath(), $"ttc_avif_probe_{backend}.avif");
+            // 随机文件名：固定名可被同主机低权限用户预置硬链接（TOCTOU）
+            var tmpPath = Path.Combine(Path.GetTempPath(), $"ttc_avif_probe_{backend}_{Guid.NewGuid():N}.avif");
             // 使用 Task.Run 确保编码在线程池上运行，可直接 .GetAwaiter().GetResult()
             var task = Task.Run(() => encoder.EncodeAsync(bgra, w, h, 30, tmpPath, CancellationToken.None));
             if (!task.Wait(TimeSpan.FromSeconds(5)))

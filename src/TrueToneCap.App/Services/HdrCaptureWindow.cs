@@ -21,6 +21,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private nint _hwnd;
     private int _winX, _winY, _winW, _winH;
     private volatile bool _disposed;
+    private volatile bool _closing; // ═══ 2026-08-16 P1-2: Close 后渲染循环感知退出 ═══
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _ctx;
     private IDXGISwapChain? _swapChain;
@@ -28,6 +29,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private ID3D11RenderTargetView? _rtv;
     private ID3D11VertexShader? _vs;
     private ID3D11PixelShader? _ps;
+
+    // ═══ 2026-08-16 方案A: GSYNC/FreeSync (VRR) 支持 ═══
+    // 检测到允许撕裂时交换链加 AllowTearing + Present(Tear), 让 DWM 在 VRR 面板
+    // 刷新窗口内任意相位呈现 → 选区拖拽更平滑、输入延迟更低。不支持时回退 Present(0)。
+    /// <summary>中心行亮度打点的一次性开关（0=未打点）。</summary>
+    private int _diagSampleDone;
+
+    private bool _vrrSupported; // 仅用于启动时诊断输出（Present 路径已固定 Present(0)）
+    // ═══ 2026-08-16 增强: 多平面覆盖层 (MPO) / 硬件缩放合成支持 (独立翻转前提) ═══
+    // 窗口化 DirectFlip 由 DWM 自动协商, 但可查询确认 — 诊断日志供排障。
+    private bool _mpoWindowed;
+    private bool _mpoFullscreen;
+
     // ── GPU 合成 (Phase 2, 2026-08-11): OverlayComposite 着色器替代 CPU CompositeUI ──
     private ID3D11PixelShader? _overlayPs;
     private ID3D11Buffer? _uiCb;                 // 常量缓冲 (UI 状态)
@@ -42,8 +56,21 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private ID3D11Texture2D? _pooledStaging;
     private int _pooledStW, _pooledStH;
     private bool _hasFrame;
-    private float[]? _origPixels;  // 原始帧（不可修改）
-    private float[]? _compPixels; // 合成缓冲（每帧从原始数据重建）
+
+    /// <summary>原始捕获帧（像素 + 其真实宽高）。不可变，供 UI 线程与渲染线程间原子传递。</summary>
+    private sealed class FrameData
+    {
+        public readonly float[] Pixels;
+        public readonly int W, H;
+        public FrameData(float[] pixels, int w, int h) { Pixels = pixels; W = w; H = h; }
+    }
+
+    // ═══ 帧状态原子发布 ═══
+    // 渲染线程会并发读取"像素数组 + 其宽高"。三者若为独立字段，渲染线程可能观察到
+    // "新数组 + 旧尺寸"的撕裂组合 → 按错误的 w*h*4 索引数组 → 托管堆越界读写。
+    // 打包为单个不可变对象后通过 Volatile.Write/Read 发布/读取，杜绝撕裂。
+    private FrameData? _frame;     // 原始帧（不可修改）+ 其真实尺寸
+    private float[]? _compPixels; // 合成缓冲（按窗口尺寸分配，见 CompositeUI）
     private int _dragHandle = -1; // 当前拖拽的手柄 (0=TL, 1=TR, 2=BL, 3=BR, -1=无)
     private int _handleSize = 8; // 手柄尺寸（物理像素，随 DPI 缩放）
     private int _handleHit = 12; // 手柄命中区域（物理像素，随 DPI 缩放）
@@ -149,7 +176,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSW { public uint style; public nint proc; public int cbCls; public int cbWnd; public nint inst; public nint icon; public nint cur; public nint bg; public string? menu; public string? cls; }
-    [StructLayout(LayoutKind.Sequential)] private struct PAINTSTRUCT { public nint hdc; public bool fErase; public RECT rc; }
+    // ⚠ 必须与 Win32 PAINTSTRUCT 完全同构（x64 下 72 字节）。
+    // 之前只声明了前 3 个字段（32 字节），BeginPaint 会写满整个结构
+    // （含 fRestore/fIncUpdate/rgbReserved[32]）→ 每次 WM_PAINT 溢出约 40 字节破坏栈帧。
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PAINTSTRUCT
+    {
+        public nint hdc;
+        public int fErase;
+        public RECT rc;
+        public int fRestore;
+        public int fIncUpdate;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] public byte[] rgbReserved;
+    }
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int l, t, r, b; }
     private delegate nint WndProcDelegate(nint h, uint m, nint w, nint l);
 
@@ -157,9 +196,13 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private static extern ushort RegisterClassW(ref WNDCLASSW wc);
 
     private const uint WS_POPUP = 0x80000000, WS_VIS = 0x10000000;
-    // WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP
+    // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
     // 注意: 不能用 WS_EX_NOACTIVATE（键盘失效）和 WS_EX_TRANSPARENT（鼠标穿透）
-    private const uint WS_EX = 0x00000008 | 0x00000080 | 0x00200000;
+    // ═══ 2026-08-26 关键修复: 移除 WS_EX_NOREDIRECTIONBITMAP ═══
+    // NOREDIRECTIONBITMAP 窗口没有 redirection surface, DWM 不能从 CreateSwapChainForHwnd
+    // 获取 swap chain 内容 → DWM 呈现透明 → 用户看到实时桌面而非截图内容。
+    // 移除后窗口有正常 redirection surface, DWM 合成 swap chain 内容到屏幕。
+    private const uint WS_EX = 0x00000008 | 0x00000080;
     private const uint SWP_F = 0x0040 | 0x0010;
     private static readonly nint TOP = new(-1), CROSS = new(32515);
     private const uint WM_PAINT = 0x000F, WM_ERASE = 0x0014, WM_KEY = 0x0100, WM_LD = 0x0201, WM_LU = 0x0202, WM_MM = 0x0200;
@@ -236,8 +279,45 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
             using var dxgiD = _device.QueryInterface<IDXGIDevice>();
             using var adapter = dxgiD.GetAdapter();
-            using var factory = adapter.GetParent<IDXGIFactory2>();
-            var desc = new SwapChainDescription1 { Width = (uint)w, Height = (uint)h, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 2, Scaling = Scaling.Stretch, SwapEffect = SwapEffect.FlipSequential, AlphaMode = AlphaMode.Ignore };
+            // ═══ 2026-08-16 方案A: 升级到 IDXGIFactory7 以访问 PresentAllowTearing ═══
+            using var factory = adapter.GetParent<IDXGIFactory7>();
+            // 检测 VRR/撕裂支持 (Win10 1607+ 驱动 + 显示器): present_allow_tearing 非零即支持
+            try { _vrrSupported = factory.PresentAllowTearing; }
+            catch { _vrrSupported = false; }
+            LogService.Info("HdrCapture", $"VRR (GSYNC/FreeSync) 支持: {(_vrrSupported ? "✓ 启用" : "✗ 不可用, 回退常规呈现")}");
+
+            // ═══ 2026-08-16 增强: 检测 MPO/硬件合成 (独立翻转/DirectFlip 前提) ═══
+            // 窗口化 DirectFlip + MPO 时 DWM 可绕过合成直接扫描出画面, 延迟进一步降低。
+            // 仅诊断输出, 实际协商由 DWM 自动完成 (全屏 3840x2160 窗口满足前置条件)。
+            try
+            {
+                using var output = adapter.EnumOutputs(0, out var o0).Success ? o0 : null;
+                if (output is not null)
+                {
+                    using var output6 = output.QueryInterface<IDXGIOutput6>();
+                    var mpo = output6.CheckHardwareCompositionSupport();
+                    _mpoWindowed = mpo.HasFlag(HardwareCompositionSupportFlags.Windowed);
+                    _mpoFullscreen = mpo.HasFlag(HardwareCompositionSupportFlags.Fullscreen);
+                    LogService.Info("HdrCapture", $"MPO 硬件合成: 窗口化={(_mpoWindowed ? "✓" : "✗")} 全屏={(_mpoFullscreen ? "✓" : "✗")} (独立翻转/DirectFlip 自动协商)");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn("HdrCapture", $"MPO 检测失败: {ex.Message}", LogCategory.Capture);
+            }
+
+            // ═══ 2026-08-25 修复: 创建交换链时强制不带 AllowTearing ═══
+        // 用户环境 Present(1, AllowTearing) 静默失败 (不抛异常, 画面不更新)。
+        // 即使 VRR 支持, 也先创建不带 AllowTearing 的交换链, 确保 Present(0) 正常。
+        // 若后续需要在 PresentFrame 中尝试 VRR, 可在此处加 AllowTearing 并在失败时重建。
+        // ═══ 2026-08-26 关键修复: AlphaMode.Ignore → Premultiplied ═══
+        // 窗口为 WS_EX_NOREDIRECTIONBITMAP (DWM 直接合成交换链)。此模式下 DWM 按
+        // 后台缓冲 alpha 与桌面混合 — Ignore 使 DWM 将窗口视为不透明, 但 Flip 模型
+        // 合成路径实际按预乘 alpha 处理; PS 输出 alpha=1 的区域正常, 而未写入区域
+        // (alpha=0) 透出实时桌面 → 表现为"覆盖层透明/只有桌面"。
+        // Premultiplied + PS 输出 alpha=1 (OverlayComposite 已 return float4(rgb,1))
+        // → DWM 完全不透明合成, 修复透明问题。
+        var desc = new SwapChainDescription1 { Width = (uint)w, Height = (uint)h, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 2, Scaling = Scaling.Stretch, SwapEffect = SwapEffect.FlipSequential, AlphaMode = AlphaMode.Ignore, Flags = SwapChainFlags.None };
             _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, desc);
             factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);
             using var sc3 = _swapChain.QueryInterface<IDXGISwapChain3>();
@@ -264,14 +344,30 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 if (osp is not null && _vs is not null)
                 {
                     _overlayPs = _device.CreatePixelShader(File.ReadAllBytes(osp));
+                    // ═══ 2026-08-26 根因修复: 常量缓冲大小必须 ≥ HLSL cbuffer 声明大小 ═══
+                    // 旧: ByteWidth = Marshal.SizeOf<UiCbData>() = 4624
+                    // HLSL 需要: 9×vec4(144) + TextSubs[40]×16(640) + TextPos[40]×16(640)
+                    //           + 4×vec4(64) + AnnoLayers[256]×16(4096) = 5584
+                    // D3D11 规则: ByteWidth < 着色器声明 → Draw 静默失败/无输出
+                    //   (桌面帧仍显示因为走 CopyResource 不依赖 cbuffer; UI 层全灭)
+                    // 硬编码 5584 而非依赖 Marshal.SizeOf (ByValArray float[] 封送大小不可靠)
+                    const uint UiCbByteWidth = 5584;
                     _uiCb = _device.CreateBuffer(new BufferDescription
                     {
-                        ByteWidth = (uint)Marshal.SizeOf<UiCbData>(),
+                        ByteWidth = UiCbByteWidth,
                         Usage = ResourceUsage.Dynamic,
                         BindFlags = BindFlags.ConstantBuffer,
                         CPUAccessFlags = CpuAccessFlags.Write
                     });
                     _useGpuCompositor = true;
+                    // ═══ 2026-08-26 对照测试开关: TTC_GPU_COMPOSITE=0 强制 CPU 合成路径 ═══
+                    if (Environment.GetEnvironmentVariable("TTC_GPU_COMPOSITE") == "0")
+                    {
+                        _useGpuCompositor = false;
+                        LogService.Warn("HdrCapture", "诊断开关 TTC_GPU_COMPOSITE=0: 强制 CPU 合成路径", LogCategory.Capture);
+                    }
+                    else
+                        LogService.Info("HdrCapture", "GPU 合成已启用 (OverlayComposite)");
                     _rsNoCull = _device.CreateRasterizerState(new RasterizerDescription
                     {
                         FillMode = FillMode.Solid,
@@ -292,6 +388,30 @@ public sealed partial class HdrCaptureWindow : IDisposable
             SetWindowPos(_hwnd, TOP, x, y, w, h, SWP_F);
             IsInitialized = true;
             LogService.Info("HdrCapture", $"窗口初始化成功 {w}x{h} @({x},{y})", LogCategory.Capture);
+
+            // ═══ 2026-08-25 P1 优化: 预创建首帧 GPU 资源 ═══
+            // UploadFrame 首次调用会创建 _desktopTex + _pooledStaging (~5-10ms),
+            // 提前到 Initialize 阶段 (窗口显示前) 完成, 首帧只需 Map+转换+Copy。
+            // 尺寸为窗口分辨率 (全屏时=显示器桌面分辨率)。_ctx 仅创建纹理, 无渲染操作, UI 线程安全。
+            try
+            {
+                if (_desktopTex is null || _desktopTex.Description.Width != w || _desktopTex.Description.Height != h)
+                {
+                    _desktopSrv?.Dispose(); _desktopTex?.Dispose();
+                    _desktopTex = _device.CreateTexture2D(new Texture2DDescription { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Default, BindFlags = BindFlags.ShaderResource });
+                    _desktopSrv = _device.CreateShaderResourceView(_desktopTex);
+                }
+                if (_pooledStaging is null || _pooledStW != w || _pooledStH != h)
+                {
+                    _pooledStaging?.Dispose();
+                    _pooledStaging = _device.CreateTexture2D(new Texture2DDescription { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Staging, BindFlags = BindFlags.None, CPUAccessFlags = CpuAccessFlags.Write });
+                    _pooledStW = w; _pooledStH = h;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[HC] 预创建纹理失败 (首帧将惰性创建): {ex.Message}");
+            }
 
             // ── DPI 缩放：全屏 CPU 渲染的 UI（工具栏/手柄/文字）按物理像素绘制，
             // 4K 200% 缩放下必须放大，否则 UI 过小无法操作 ──
@@ -344,9 +464,15 @@ public sealed partial class HdrCaptureWindow : IDisposable
     public void LoadFrame(float[] pixels, int w, int h)
     {
         if (_disposed) return;
+        if (pixels is null || (long)w * h * 4 > pixels.Length)
+        {
+            LogService.Error("HdrCapture", $"LoadFrame 参数无效: len={pixels?.Length ?? -1} w={w} h={h}", LogCategory.Capture);
+            return;
+        }
         // 2026-08-10: 132MB 合成缓冲分配移入渲染线程（CompositeUI 懒创建）——
         // UI 线程不再做 LOH 大分配（4K 分配曾引起长 GC 停顿，实机表现为弹出预览瞬间卡顿）
-        _origPixels = pixels;
+        // 一次性原子发布（数组 + 尺寸打包），渲染线程 Volatile.Read 读取
+        Volatile.Write(ref _frame, new FrameData(pixels, w, h));
         _compPixels = null;
         _hasFrame = false;
         LogService.Info("HdrCapture", $"LoadFrame: {w}x{h} (win={_winW}x{_winH})", LogCategory.Capture);
@@ -356,8 +482,9 @@ public sealed partial class HdrCaptureWindow : IDisposable
     /// <summary>请求渲染线程重绘（UI 线程仅发信号，微秒级返回）。</summary>
     public void RequestRedraw()
     {
-        if (_disposed || _hwnd == 0) return;
-        _renderSignal.Set();
+        if (_disposed || _closing || _hwnd == 0) return;
+        // ═══ 2026-08-25 诊断: 确认渲染信号发出 ═══
+        bool wasSignaled = _renderSignal.Set();
     }
 
     private void StartRenderThread()
@@ -374,20 +501,35 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private void RenderLoop()
     {
         long lastRender = System.Diagnostics.Stopwatch.GetTimestamp();
-        while (!_disposed)
+        bool isFirstFrame = true;
+        int frameCount = 0;
+        while (!_disposed && !_closing)
         {
             _renderSignal.WaitOne();
-            if (_disposed) return;
-            try { RenderCore(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[HC] RenderLoop: {ex.Message}"); }
+            if (_disposed || _closing) return;
+            try
+            {
+                RenderCore();
+                frameCount++;
+                // 每 10 帧打点属调试信息，降级为 Debug（默认不落盘），
+                // 避免正常使用时日志文件被高频渲染打点持续撑大。
+                if (frameCount % 10 == 1)
+                    LogService.Debug("HdrCapture", $"渲染帧 #{frameCount}", LogCategory.Capture);
+                if (isFirstFrame)
+                    LogService.Info("HdrCapture", "首帧 RenderCore 完成", LogCategory.Capture);
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("HdrCapture", $"渲染线程异常: {ex.Message}\n{ex}", LogCategory.Capture);
+            }
 
-            // 2026-08-10: 最小帧间隔 16ms（~60fps 上限）— 鼠标风暴时削峰，
-            // 选区完成后 hover 工具栏等轻负载场景不再满速空转。信号在 Sleep 期间仍会合并。
+            if (isFirstFrame) isFirstFrame = false;
             long elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - lastRender) * 1000 / System.Diagnostics.Stopwatch.Frequency;
             int wait = 16 - (int)elapsedMs;
             if (wait > 0) Thread.Sleep(wait);
             lastRender = System.Diagnostics.Stopwatch.GetTimestamp();
         }
+        LogService.Debug("HdrCapture", $"渲染循环退出, 总帧数={frameCount}", LogCategory.Capture);
     }
 
     private void RenderCore()
@@ -402,29 +544,38 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
             // ═══ Phase 2 (2026-08-11): GPU 合成路径 — 桌面帧纹理 + OverlayComposite PS 直接画 UI ═══
             // CPU 路径（CompositeUI 全屏混合）仅作回退。收益: 拖拽合成 ~20-30ms → GPU <2ms
-            if (_useGpuCompositor && _origPixels is not null && _overlayPs is not null && _uiCb is not null)
+            var frame = Volatile.Read(ref _frame);
+            if (_useGpuCompositor && frame is not null && _overlayPs is not null && _uiCb is not null)
             {
                 // 首次渲染时上传桌面帧到 _desktopTex（帧内容不变，只传一次）
                 if (!_hasFrame)
                 {
                     var sw = System.Diagnostics.Stopwatch.StartNew();
-                    UploadFrame(_origPixels, _winW, _winH);
+                    UploadFrame(frame.Pixels, frame.W, frame.H);
                     LogService.Info("HdrCapture", $"首帧 UploadFrame: {sw.ElapsedMilliseconds}ms", LogCategory.Capture);
                 }
                 if (_desktopTex is not null)
                 {
+                    // ═══ 2026-08-26 关键修复: GPU 合成分支禁止 CopyResource ═══
+                    // RenderGpuComposite 已用 OverlayComposite PS 把 UI 绘到后台缓冲。
+                    // 之前的 CopyResource(_backBuffer, _desktopTex) 用桌面纹理覆盖了后台缓冲
+                    // → UI 被桌面擦掉 → 用户看到"直接显示桌面"无任何覆盖层。
                     RenderGpuComposite();
-                    _swapChain.Present(0, PresentFlags.None);
+                    PresentFrame();
                     return;
                 }
             }
 
             // ═══ CPU 回退路径（原实现）═══
             // 从原始帧重建合成缓冲（不破坏原始数据；_compPixels 由 CompositeUI 懒创建）
-            if (_origPixels is not null)
+            if (frame is not null)
             {
-                CompositeUI();
-                UploadFrame(_compPixels!, _winW, _winH);
+                CompositeUI(frame);
+                // ⚠ 必须用"窗口"尺寸上传：下方 CopyResource(_backBuffer, _desktopTex) 要求
+                // 二者同尺寸，而 _backBuffer 恒为窗口尺寸。之前传的是帧尺寸，帧尺寸≠窗口尺寸
+                // 时 _desktopTex 尺寸与后台缓冲不符 → CopyResource 失败 → CPU 回退路径黑屏。
+                if (_compPixels is not null)
+                    UploadFrame(_compPixels, _winW, _winH);
             }
 
             // 直接 CopyResource：桌面纹理和后台缓冲区都是 R16G16B16A16_Float 同尺寸
@@ -434,9 +585,21 @@ public sealed partial class HdrCaptureWindow : IDisposable
             }
 
             // Present(0)：不等待 vsync，避免渲染线程被垂直同步阻塞
-            _swapChain.Present(0, PresentFlags.None);
+            PresentFrame();
         }
         catch (Exception ex) { LogService.Error("HdrCapture", $"RenderCore 异常: {ex.Message}"); }
+    }
+
+    /// <summary>统一帧呈接入口 (2026-08-26 修复: VRR 路径彻底禁用)。
+    /// ═══ 根因确认: 交换链已改为不带 ALLOW_TEARING (04:0x 修复), 但 PresentFrame
+    /// 仍走 _vrrSupported=true 的 Present(1, AllowTearing) 分支 → DXGI 规范不允许
+    /// 无标志交换链传 ALLOW_TEARING → Present 静默失败 (不抛异常) → 画面永不更新。
+    /// 最终方案: 无论 VRR 检测结果如何, 一律 Present(0, None) — 截图工具不需要 VRR
+    /// 的毫秒级延迟优化, 稳定可靠优先。</summary>
+    private void PresentFrame()
+    {
+        if (_swapChain is null) return;
+        _swapChain.Present(0, PresentFlags.None);
     }
 
     /// <summary>每次渲染前重新获取后台缓冲 + RTV（FlipSequential Present 后缓冲翻转）。</summary>
@@ -445,7 +608,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
         if (_swapChain is null) return;
         var bb = _swapChain.GetBuffer<ID3D11Texture2D>(0);
         if (bb is null) return; // 获取失败
-        if (bb == _backBuffer) { bb.Dispose(); return; } // 同一缓冲, 无需重建
+        // ═══ 2026-08-25 修复: NativePointer 比较替代 COM 引用比较 ═══
+        // bb == _backBuffer 在 Vortice 中比较的是托管包装引用, 不是底层 COM 指针。
+        // FlipSequential 交换链 Present 后 GetBuffer(0) 返回的是不同的内部缓冲,
+        // 但 Vortice 可能返回相同包装对象 → 错误跳过重建 → RTV 指向过期缓冲。
+        if (bb.NativePointer == _backBuffer?.NativePointer) { bb.Dispose(); return; }
         _backBuffer?.Dispose();
         _rtv?.Dispose();
         _backBuffer = bb;
@@ -552,7 +719,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 // 行 2: 文字槽 8 个 × 256×64 (槽 18-25) — 每个 256×64 固定 (2048/256=8 个, 超限不显示但输出合成仍正确)
                 const int slotW = 256, slotH = 64;
                 int slot = 0;
-                foreach (var layer in _annoManager.Layers.Where(l => l is TextLayer && l.IsVisible))
+                // ═══ 2026-08-16 P1-3: 快照遍历 (渲染线程与 UI 线程修改互斥) ═══
+                foreach (var layer in _annoManager.GetLayersSnapshot().Where(l => l is TextLayer && l.IsVisible))
                 {
                     if (slot >= 8) break;
                     var tl = (TextLayer)layer;
@@ -604,16 +772,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 var m = _ctx.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
                 if (m.DataPointer != 0)
                 {
-                    unsafe
+                    try
                     {
-                        fixed (byte* src = atlasBytes)
+                        unsafe
                         {
-                            int rowPitch = atlasW * 4;
-                            for (int row = 0; row < atlasH; row++)
-                                Buffer.MemoryCopy(src + row * rowPitch, (byte*)m.DataPointer.ToPointer() + row * m.RowPitch, rowPitch, rowPitch);
+                            fixed (byte* src = atlasBytes)
+                            {
+                                int rowPitch = atlasW * 4;
+                                for (int row = 0; row < atlasH; row++)
+                                    Buffer.MemoryCopy(src + row * rowPitch, (byte*)m.DataPointer.ToPointer() + row * m.RowPitch, rowPitch, rowPitch);
+                            }
                         }
                     }
-                    _ctx.Unmap(staging, 0);
+                    finally { _ctx.Unmap(staging, 0); } // 异常路径也必须 Unmap，否则该资源永久无法再写入
                 }
                 _ctx.CopyResource(_textAtlas, staging);
             }
@@ -644,6 +815,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         cb.OverlayColor = new System.Numerics.Vector4(ovR, ovG, ovB, ovA);
         var (bdR, bdG, bdB, _) = ParseColorToLinear(AppServices.Settings.Current.BorderColor);
         cb.BorderColor = new System.Numerics.Vector4(bdR, bdG, bdB, 1);
+
+        // ═══ 2026-08-26 诊断日志已移除 (确认根因: cbuffer 大小不匹配) ═══
 
         // 选区
         if (_sx1 != _sx2 || _sy1 != _sy2)
@@ -729,6 +902,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         var mapped = _ctx.Map(_uiCb!, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
         if (mapped.DataPointer != 0)
         {
+            try
+            {
             unsafe
             {
                 var p = (byte*)mapped.DataPointer;
@@ -752,7 +927,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 fixed (float* al = cb.AnnoLayers)
                     Buffer.MemoryCopy(al, p + 1488, 4096, 4096);
             }
-            _ctx.Unmap(_uiCb!, 0);
+            }
+            finally { _ctx.Unmap(_uiCb!, 0); } // 异常路径也必须 Unmap，否则常量缓冲永久无法再写入
         }
     }
 
@@ -770,7 +946,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         cb.AnnoStroke = new System.Numerics.Vector4(2f, 1f, 0, 0);
 
         int slot = 0;
-        foreach (var layer in _annoManager.Layers.Where(l => l.IsVisible))
+        // ═══ 2026-08-16 P1-3: 快照遍历 ═══
+        foreach (var layer in _annoManager.GetLayersSnapshot().Where(l => l.IsVisible))
         {
             if (slot >= 15) break; // 层 0-14 提交层, 15 保留预览
             WriteAnnoLayer(ref cb, slot, layer);
@@ -863,7 +1040,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private float TextSlotOf(TextLayer tl)
     {
         int slot = 0;
-        foreach (var layer in _annoManager.Layers)
+        // ═══ 2026-08-16 P1-3: 快照遍历 ═══
+        foreach (var layer in _annoManager.GetLayersSnapshot())
         {
             if (layer is not TextLayer t) continue;
             if (ReferenceEquals(t, tl)) return slot;
@@ -909,6 +1087,15 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     private unsafe void UploadFrame(float[] pixels, int w, int h)
     {
+        // ⚠ 长度校验：下方按 w*h*4 索引 pixels。尺寸与数组不匹配时 fixed 会固定住
+        // 长度不符的数组并越界读写托管堆。用 long 计算避免 int 溢出导致校验失效。
+        if (pixels is null || w <= 0 || h <= 0 || (long)w * h * 4 > pixels.Length)
+        {
+            LogService.Error("HdrCapture",
+                $"UploadFrame 参数无效: len={pixels?.Length ?? -1} 需要={w}x{h}x4", LogCategory.Capture);
+            return;
+        }
+
         if (_desktopTex is null || _desktopTex.Description.Width != w || _desktopTex.Description.Height != h)
         {
             _desktopSrv?.Dispose(); _desktopTex?.Dispose();
@@ -930,32 +1117,87 @@ public sealed partial class HdrCaptureWindow : IDisposable
             return;
         }
         long dbBase = (long)m.DataPointer; int dp = (int)m.RowPitch;
-        // 按行并行转换（行间无依赖；long 基址避免在 lambda 中捕获 fixed/指针变量）
-        Parallel.For(0, h, r =>
+
+        // 中心行亮度打点（排查"源像素全黑"用）。
+        // ⚠ 原实现注释写"一次性"但没有实际开关：CPU 回退路径下 UploadFrame 每帧执行，
+        // 于是每帧多一次 O(w) 扫描 + 一次同步磁盘写（LogService.Info 内部 lock + AppendAllText）。
+        // 改为真正的一次性。
+        if (Volatile.Read(ref _diagSampleDone) == 0)
         {
-            fixed (float* sp = pixels)
-                TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(
-                    sp + r * w * 4, (ushort*)(dbBase + r * dp), w * 4);
-        });
-        _ctx.Unmap(st, 0); _ctx.CopyResource(_desktopTex, st);
+            Volatile.Write(ref _diagSampleDone, 1);
+            int midR = h / 2, midOff = midR * w * 4;
+            float mn = float.MaxValue, mx = float.MinValue, sum = 0;
+            for (int i = midOff; i < midOff + w * 4; i += 4)
+            { float v = pixels[i]; if (v < mn) mn = v; if (v > mx) mx = v; sum += v; }
+            int n = w;
+            LogService.Info("HdrCapture", $"UploadFrame 源中心行 R: min={mn:F4} max={mx:F4} avg={sum / n:F4} (行{midR})");
+        }
+
+        // 按行并行转换（行间无依赖；long 基址避免在 lambda 中捕获 fixed/指针变量）
+        // ⚠ Unmap 必须在 finally 中：Map 与 Unmap 之间若抛异常（越界/DeviceRemoved/GC），
+        // 不 Unmap 会导致该 subresource 后续 Map 永久失败 → 渲染线程静默停止出图。
+        try
+        {
+            Parallel.For(0, h, r =>
+            {
+                fixed (float* sp = pixels)
+                    TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(
+                        sp + r * w * 4, (ushort*)(dbBase + r * dp), w * 4);
+            });
+        }
+        finally
+        {
+            _ctx.Unmap(st, 0);
+        }
+        _ctx.CopyResource(_desktopTex, st);
         _hasFrame = true;
     }
 
     public void Render() => RequestRedraw(); // 兼容旧调用（MainWindow 启动首帧）
 
-    /// <summary>从原始帧重建合成缓冲，叠加 UI 元素（每帧从 _origPixels 拷贝，不累积）。
-    /// 合成缓冲懒创建：分配发生在渲染线程，UI 线程不承担 132MB LOH 大分配。</summary>
-    private void CompositeUI()
+    /// <summary>从原始帧重建合成缓冲，叠加 UI 元素（每帧从原始帧拷贝，不累积）。
+    /// 合成缓冲懒创建：分配发生在渲染线程，UI 线程不承担 132MB LOH 大分配。
+    /// ⚠ 合成缓冲按"窗口"尺寸分配：本函数内所有 UI 元素（遮罩/选区/工具栏/悬停高亮）
+    /// 均在窗口坐标系中定位，且 RenderCore 以 (_winW,_winH) 上传该缓冲。
+    /// 之前按 src.Length（帧尺寸）分配，而帧尺寸可能≠窗口尺寸（多显示器拼接/DPI）
+    /// → Array.Copy 源越界（被上层空 catch 吞掉，表现为 CPU 回退路径黑屏）或行错位。</summary>
+    private void CompositeUI(FrameData frame)
     {
-        if (_origPixels is null) return;
-        // 懒分配合成缓冲（尺寸变化时重建）
-        if (_compPixels is null || _compPixels.Length != _origPixels.Length)
-            _compPixels = new float[_origPixels.Length];
         int w = _winW, h = _winH;
-        var src = _origPixels;
+        if (w <= 0 || h <= 0) return;
+
+        var src = frame.Pixels;
+        // 懒分配合成缓冲（按窗口尺寸，非帧尺寸）
+        int need = w * h * 4;
+        if (_compPixels is null || _compPixels.Length != need)
+            _compPixels = new float[need];
         var px = _compPixels;
 
-        // 1+2. 拷贝 + 遮罩合并为单次遍历（2026-08-10: 两次全屏遍历→一次）
+        // 1. 帧 → 合成缓冲 基线拷贝
+        // 帧尺寸可能与窗口尺寸不等，故按各自行宽逐行拷贝重叠区域。
+        // ⚠ 未覆盖区域必须显式清零：_compPixels 在同一帧序列内复用，
+        // 若帧小于窗口（多显示器 + 单屏 HDR 时会出现 frame.W < _winW），
+        // 右侧/下方残留区会保留上一帧绘制的 UI（选区边框/手柄/工具栏），并逐帧累积。
+        int copyW = Math.Min(frame.W, w), copyH = Math.Min(frame.H, h);
+        if (copyW > 0 && copyH > 0)
+        {
+            Parallel.For(0, copyH, row =>
+            {
+                Array.Copy(src, row * frame.W * 4, px, row * w * 4, copyW * 4);
+                // 行内右侧未覆盖部分清零
+                if (copyW < w) Array.Clear(px, row * w * 4 + copyW * 4, (w - copyW) * 4);
+            });
+            // 下方未覆盖的整行清零
+            if (copyH < h)
+                Parallel.For(copyH, h, row => Array.Clear(px, row * w * 4, w * 4));
+        }
+        else
+        {
+            // 帧完全不可用（尺寸为 0 或帧尚未就绪）：整块清零，避免显示陈旧内容
+            Array.Clear(px, 0, px.Length);
+        }
+
+        // 2. 遮罩（2026-08-11 区域化: 拆成 上/下/左/右 4 个矩形直接遍历 — 无逐列 skip 分支判断）
         // 2026-08-11 区域化: 拆成 上/下/左/右 4 个矩形直接遍历 — 无逐列 skip 分支判断
         if (!_selComplete || _down)
         {
@@ -978,8 +1220,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // ⚠️ 步长必须 c += 2 (2像素/向量)! 写成 c += 8 会漏掉 6 像素 → 细格!
             void BlendRow(int row, int c0, int c1)
             {
+                // 基线拷贝已在上方整体完成，此处只做遮罩混合
                 int rowOff = row * w * 4;
-                Array.Copy(src, rowOff, px, rowOff, w * 4);
                 if (TrueToneCap.Core.PixelOps.HasFma && c1 - c0 >= 4) // ≥2 像素才用 SIMD
                 {
                     var invA8 = Vector256.Create(invA, invA, invA, 1f, invA, invA, invA, 1f);
@@ -1032,15 +1274,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // 右带: [Y1, Y2] 行内 (X2, w)
             Parallel.For(Math.Max(0, Y1), Math.Min(Y2 + 1, h), row => BlendRow(row, X2 + 1, w - 1));
         }
-        else
-        {
-            // 无遮罩：并行分行拷贝（比单线程 Array.Copy 快，行间无竞争）
-            Parallel.For(0, h, row =>
-            {
-                int rowOff = row * w * 4;
-                Array.Copy(src, rowOff, px, rowOff, w * 4);
-            });
-        }
+        // else：无遮罩时无需额外处理，基线拷贝已包含完整帧内容
 
         // 2.5 窗口悬停高亮（QQ截图式：未拖拽时高亮悬停窗口）
         if (!_selComplete && !_down && _hoverRegion >= 0 && _hoverRegion < _regions.Count)
@@ -1402,14 +1636,44 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     private nint WndProc(nint h, uint m, nint w, nint l)
     {
+        // ⚠ WndProc 由 native 代码回调：托管异常跨越 native 栈帧无法被 CLR 正常展开，
+        // 会直接终止进程。此处兜底，保证任何未预料异常都降级为"该消息不处理"。
+        try
+        {
+            return WndProcCore(h, m, w, l);
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("HdrCapture", $"WndProc 处理消息 0x{m:X} 时异常", ex);
+            return 0;
+        }
+    }
+
+    private nint WndProcCore(nint h, uint m, nint w, nint l)
+    {
         switch (m)
         {
             // UI 线程绝不渲染：WM_PAINT 仅验证区域 + 通知渲染线程
-            case WM_PAINT: { var ps = new PAINTSTRUCT(); BeginPaint(h, ref ps); EndPaint(h, ref ps); RequestRedraw(); return 0; }
+            case WM_PAINT:
+                {
+                    // ⚠ rgbReserved 必须预先分配：ByValArray 字段为 null 时，
+                    // 封送 ref 结构体存在不确定性（可能抛异常或只写入部分字段）。
+                    var ps = new PAINTSTRUCT { rgbReserved = new byte[32] };
+                    BeginPaint(h, ref ps);
+                    EndPaint(h, ref ps);
+                    RequestRedraw();
+                    return 0;
+                }
             case WM_ERASE: return 1;
-            case WM_LD: Down(GX(l), GY(l)); SetCapture(h); return 0;
+            case WM_LD:
+                // 2026-08-25 诊断日志已降级：鼠标按下/抬起是高频事件，
+                // 原本每次都写 Info 级日志会淹没有效信息并持续增大日志文件。
+                LogService.Debug("HdrCapture", $"WM_LBUTTONDOWN ({GX(l)},{GY(l)}) annoMode={_annoMode} selComplete={_selComplete}", LogCategory.Capture);
+                Down(GX(l), GY(l)); SetCapture(h); return 0;
             case WM_MM: Move(GX(l), GY(l)); return 0;
-            case WM_LU: Up(GX(l), GY(l)); ReleaseCapture(); return 0;
+            case WM_LU:
+                LogService.Debug("HdrCapture", $"WM_LBUTTONUP ({GX(l)},{GY(l)}) moved={_moved} down={_down}", LogCategory.Capture);
+                Up(GX(l), GY(l)); ReleaseCapture(); return 0;
             case WM_KEY: Key((int)w); return 0;
             case WM_CLOSE: // Alt+F4 / 系统关闭 → 兜底触发 Cancel，保证 MainWindow 防重入锁必然释放
                 FireAction(HdrCaptureAction.Cancel, 0, 0, 0, 0);
@@ -1852,6 +2116,12 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _autoTimer?.Dispose(); _autoTimer = null;
         _hardTimer?.Dispose(); _hardTimer = null;
         _regionRefreshTimer?.Dispose(); _regionRefreshTimer = null;
+        // ═══ 2026-08-16(复审 P1-2): Close 置 _closing, 渲染循环立刻感知 ═══
+        // 旧实现 Close 不置任何标志 → 渲染线程在 _swapChain 已 Dispose 后仍空转
+        // 直到 MainWindow 的 using 作用域结束 (Dispose)。置位后渲染循环退出,
+        // 不再对已释放资源操作。
+        _closing = true;
+        _renderSignal.Set(); // 唤醒渲染线程检查退出
         StopRenderThread(); // 先停渲染线程，再销毁窗口/释放资源
         if (_hwnd != 0) { s_windows.TryRemove(_hwnd, out _); DestroyWindow(_hwnd); _hwnd = 0; }
         IsInitialized = false;
@@ -1878,18 +2148,35 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _autoTimer?.Dispose(); _autoTimer = null;
         _hardTimer?.Dispose(); _hardTimer = null;
         _regionRefreshTimer?.Dispose(); _regionRefreshTimer = null;
+        _closing = true; // ═══ 2026-08-16 P1-2: 清理前让渲染循环退出 ═══
         StopRenderThread();
         _overlayPs?.Dispose(); _overlayPs = null;
         _uiCb?.Dispose(); _uiCb = null;
         _rsNoCull?.Dispose(); _rsNoCull = null;
         _textAtlasSrv?.Dispose(); _textAtlasSrv = null;
         _textAtlas?.Dispose(); _textAtlas = null;
-        _desktopSrv?.Dispose(); _desktopTex?.Dispose();
+        _desktopSrv?.Dispose(); _desktopSrv = null;
+        _desktopTex?.Dispose(); _desktopTex = null;
         _pooledStaging?.Dispose(); _pooledStaging = null;
-        _rtv?.Dispose(); _backBuffer?.Dispose(); _swapChain?.Dispose();
-        _vs?.Dispose(); _ps?.Dispose(); _samp?.Dispose();
+        _rtv?.Dispose(); _rtv = null;
+        _backBuffer?.Dispose(); _backBuffer = null;
+        _swapChain?.Dispose(); _swapChain = null;
+        _vs?.Dispose(); _vs = null;
+        _ps?.Dispose(); _ps = null;
+        _samp?.Dispose(); _samp = null;
         if (_hwnd != 0) { s_windows.TryRemove(_hwnd, out _); DestroyWindow(_hwnd); _hwnd = 0; }
     }
 
-    public void Dispose() { if (_disposed) return; _disposed = true; Cleanup(); }
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        Cleanup();
+        // ═══ 2026-08-16(复审 P1-1): 释放独立 D3D11 设备+上下文 ═══
+        // HdrCaptureWindow 构造时创建独立设备 (渲染线程独占), 旧实现 Dispose
+        // 从不释放 → 每次 HDR 截图泄漏一整套 D3D11 设备/上下文/显存。
+        // Cleanup() 已先停渲染线程, 此处安全释放。
+        _ctx?.Dispose();
+        _device.Dispose();
+    }
 }

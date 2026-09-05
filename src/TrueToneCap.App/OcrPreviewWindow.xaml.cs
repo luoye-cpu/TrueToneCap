@@ -144,13 +144,17 @@ public sealed partial class OcrPreviewWindow : Window
     }
 
     // ═══════════════════════════════════════
-    //  覆盖层：按 OCR 坐标点对点绘制命中块
+    //  覆盖层：按 OCR 坐标点对点绘制文字覆盖
     // ═══════════════════════════════════════
 
     /// <summary>原图像素坐标 → 覆盖层(Canvas)显示坐标的缩放比。</summary>
-    /// <remarks>当 OverlayCanvas 尺寸与 PreviewImage 渲染尺寸一致时，x/y 缩放比相同。</remarks>
     private double ScaleX => _imgW > 0 ? OverlayCanvas.Width / _imgW : 1.0;
     private double ScaleY => _imgH > 0 ? OverlayCanvas.Height / _imgH : 1.0;
+
+    // ═══ 2026-08-25: 用户选择的字体（注入到文字覆盖层） ═══
+    private string _fontFamily = "";
+    private string EffectiveFontFamily => string.IsNullOrWhiteSpace(_fontFamily)
+        ? FontLoader.DefaultFontFamily : _fontFamily;
 
     private void RenderOverlay()
     {
@@ -160,7 +164,10 @@ public sealed partial class OcrPreviewWindow : Window
         double canvasW = OverlayCanvas.Width, canvasH = OverlayCanvas.Height;
         double sx = ScaleX, sy = ScaleY;
 
-        // ═══ 第一层：整体标暗（轻度暗化，保留原图可见性）═══
+        // 获取用户字体
+        _fontFamily = AppServices.Settings.Current.FontFamily;
+
+        // ═══ 第一层：整体标暗（轻度暗化，保留原图可见性） ═══
         var darkOverlay = new Border
         {
             Width = canvasW, Height = canvasH,
@@ -171,7 +178,7 @@ public sealed partial class OcrPreviewWindow : Window
         Canvas.SetTop(darkOverlay, 0);
         OverlayCanvas.Children.Add(darkOverlay);
 
-        // ═══ 第二层：逐行渲染 ═══
+        // ═══ 第二层：逐行文字覆盖 ═══
         for (int i = 0; i < _ocr.Lines.Count; i++)
         {
             var line = _ocr.Lines[i];
@@ -180,101 +187,77 @@ public sealed partial class OcrPreviewWindow : Window
 
             double cx = rect.X * sx, cy = rect.Y * sy, cw = rect.Width * sx, ch = rect.Height * sy;
             bool hasTranslation = _translatedLines is not null && i < _translatedLines.Count;
-            string translated = hasTranslation ? _translatedLines![i] : "";
+            string displayText = _showTranslation && hasTranslation
+                ? _translatedLines![i]
+                : line.Text;
+            // 原文模式下若译文已就绪，ToolTip 显示译文
+            string tooltipText = hasTranslation
+                ? $"原文: {line.Text}\n译文: {_translatedLines![i]}"
+                : line.Text;
 
-            if (_showTranslation && hasTranslation)
+            // 高亮背景块 (原文模式=半透明蓝, 译文模式=深色不透明)
+            byte bgA = _showTranslation ? (byte)235 : (byte)80;
+            var bgColor = _showTranslation
+                ? Windows.UI.Color.FromArgb(235, 15, 23, 42)    // 深色不透明
+                : Windows.UI.Color.FromArgb(80, 56, 120, 210);  // 半透明蓝
+            var borderColor = _showTranslation
+                ? Windows.UI.Color.FromArgb(120, 56, 189, 248)  // 蓝边框
+                : Windows.UI.Color.FromArgb(100, 100, 180, 255); // 浅蓝边框
+
+            var overlay = new Border
             {
-                // ═══ 译文模式：条形覆盖块，刚好覆盖原文区域 ═══
-                var bar = new Border
-                {
-                    Width = Math.Max(1, cw), Height = Math.Max(1, ch),
-                    CornerRadius = new CornerRadius(2),
-                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(235, 15, 23, 42)), // 深色不透明底
-                    BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(120, 56, 189, 248)),
-                    BorderThickness = new Thickness(1),
-                };
-                Canvas.SetLeft(bar, cx);
-                Canvas.SetTop(bar, cy);
+                Width = Math.Max(1, cw), Height = Math.Max(1, ch),
+                CornerRadius = new CornerRadius(2),
+                Background = new SolidColorBrush(bgColor),
+                BorderBrush = new SolidColorBrush(borderColor),
+                BorderThickness = new Thickness(1),
+                // ═══ 2026-08-25: 文字块可点击复制 + 悬停高亮 ═══
+            };
+            Canvas.SetLeft(overlay, cx);
+            Canvas.SetTop(overlay, cy);
 
-                // 译文文字：直接设置字体大小，不使用 Viewbox
-                var textBlock = new TextBlock
-                {
-                    Text = translated,
-                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)),
-                    FontWeight = Microsoft.UI.Text.FontWeights.Medium,
-                    TextWrapping = TextWrapping.NoWrap,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    TextTrimming = TextTrimming.CharacterEllipsis,
-                    Margin = new Thickness(6, 0, 6, 0),
-                    // 字体大小与 OCR 框高度自适应：最小 10px，最大 48px
-                    FontSize = Math.Clamp(ch * 0.7, 10.0, 48.0),
-                };
-                bar.Child = textBlock;
-                ToolTipService.SetToolTip(bar, $"原文: {line.Text}\n译文: {translated}");
-
-                int idx = i;
-                bar.Tapped += (_, _) => CopyLine(idx);
-                OverlayCanvas.Children.Add(bar);
-            }
-            else
+            // ═══ 文字覆盖层 — 使用用户选择的字体，与OCR区域对齐 ═══
+            var textBlock = new TextBlock
             {
-                // ═══ 原文模式：透明边框标记 + 悬停显示译文预览 ═══
-                var block = new Border
-                {
-                    Width = Math.Max(1, cw), Height = Math.Max(1, ch),
-                    CornerRadius = new CornerRadius(2),
-                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0)),
-                    BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(160, 56, 189, 248)),
-                    BorderThickness = new Thickness(1),
-                };
-                Canvas.SetLeft(block, cx);
-                Canvas.SetTop(block, cy);
+                Text = displayText,
+                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)),
+                FontWeight = Microsoft.UI.Text.FontWeights.Medium,
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 0, 4, 0),
+                FontSize = Math.Clamp(ch * 0.65, 10.0, 48.0),
+                // ═══ 2026-08-25: 使用用户选择的字体覆盖 ═══
+                FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(EffectiveFontFamily),
+            };
+            overlay.Child = textBlock;
 
-                // 悬停时：如果有译文，显示译文预览条；否则微亮
-                int idx = i;
-                TextBlock? hoverLabel = null;
+            // 悬停效果：增加亮度
+            overlay.PointerEntered += (_, _) =>
+            {
+                overlay.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 56, 189, 248));
+                overlay.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(
+                    _showTranslation ? (byte)255 : (byte)120, 30, 60, 180));
+            };
+            overlay.PointerExited += (_, _) =>
+            {
+                overlay.BorderBrush = new SolidColorBrush(borderColor);
+                overlay.Background = new SolidColorBrush(bgColor);
+            };
 
-                block.PointerEntered += (_, _) =>
-                {
-                    block.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 56, 189, 248));
-                    if (hasTranslation && !string.IsNullOrEmpty(translated))
-                    {
-                        // 悬停显示译文预览条（覆盖在原文上方）
-                        block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(220, 15, 23, 42));
-                        if (hoverLabel is null)
-                        {
-                            hoverLabel = new TextBlock
-                            {
-                                Text = translated,
-                                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)),
-                                FontSize = Math.Max(10, ch * 0.7),
-                                TextWrapping = TextWrapping.NoWrap,
-                                TextTrimming = TextTrimming.CharacterEllipsis,
-                                VerticalAlignment = VerticalAlignment.Center,
-                                Margin = new Thickness(4, 0, 4, 0),
-                            };
-                            block.Child = hoverLabel;
-                        }
-                    }
-                    else
-                    {
-                        block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(30, 56, 189, 248));
-                    }
-                };
-                block.PointerExited += (_, _) =>
-                {
-                    block.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0));
-                    block.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(160, 56, 189, 248));
-                    block.Child = null;
-                    hoverLabel = null;
-                };
-                block.Tapped += (_, _) => CopyLine(idx);
-
-                // 默认 ToolTip 显示原文
-                ToolTipService.SetToolTip(block, hasTranslation ? $"{line.Text} → {translated}" : line.Text);
-                OverlayCanvas.Children.Add(block);
-            }
+            ToolTipService.SetToolTip(overlay, tooltipText);
+            int idx = i;
+            overlay.Tapped += (_, _) => CopyLine(idx);
+            OverlayCanvas.Children.Add(overlay);
         }
+    }
+
+    // ═══ 2026-08-25: 覆盖层显示/关闭开关 ═══
+    private void OnOverlayToggleChanged(object sender, RoutedEventArgs e)
+    {
+        bool show = OverlayToggle.IsChecked == true;
+        OverlayCanvas.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        OverlayToggleTxt.Text = show ? "隐藏覆盖" : "显示覆盖";
     }
 
     /// <summary>取行的原图边界矩形，带 4px padding。</summary>
@@ -412,11 +395,27 @@ public sealed partial class OcrPreviewWindow : Window
 
         try
         {
-            // 逐行并行翻译，保证与 Lines 一一对应（点对点覆盖的前提）
+            // ═══ P-4/R-5 修复: 并发限制 + 行级容错 ═══
+            // 旧实现 Task.WhenAll 无并发限制 → 免费通道 (有道/Google) 可能限流/封 IP;
+            // 且任一行异常导致 WhenAll 快速失败 → 全部译文丢失。
+            // 新实现: SemaphoreSlim(4) 限并发 + 逐行 try/catch (失败行回填原文, 不影响其他行)。
             var translator = new TranslationService(_translationConfig);
-            var tasks = _ocr.Lines.Select(l => translator.TranslateAsync(l.Text, _translationConfig.TargetLanguage));
-            var results = await Task.WhenAll(tasks);
-            _translatedLines = results.ToList();
+            using var sem = new System.Threading.SemaphoreSlim(4);
+            var lines = _ocr.Lines;
+            var tasks = new Task<string>[lines.Count];
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var lineText = lines[i].Text;
+                tasks[i] = Task.Run(async () =>
+                {
+                    await sem.WaitAsync();
+                    try { return await translator.TranslateAsync(lineText, _translationConfig.TargetLanguage); }
+                    catch { return lineText; } // 行级容错: 失败行显示原文
+                    finally { sem.Release(); }
+                });
+            }
+            await Task.WhenAll(tasks);
+            _translatedLines = tasks.Select(t => t.Result).ToList();
 
 DispatcherQueue.TryEnqueue(() =>
             {
@@ -424,7 +423,10 @@ DispatcherQueue.TryEnqueue(() =>
                 ModeToggle.IsChecked = true;
                 ModeToggle.Content = "显示原文";
                 RenderOverlay();
-                InfoTxt.Text = $"✅ 翻译完成（{_translatedLines.Count} 行），点击文字块可复制译文";
+                int failed = _translatedLines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
+                InfoTxt.Text = failed > 0
+                    ? $"⚠ 翻译完成（{failed}/{_translatedLines.Count} 行失败，已保留原文），点击文字块可复制"
+                    : $"✅ 翻译完成（{_translatedLines.Count} 行），点击文字块可复制译文";
             });
         }
         catch (Exception ex)
@@ -475,8 +477,8 @@ DispatcherQueue.TryEnqueue(() =>
     {
         int n = _ocr.Lines?.Count ?? 0;
         InfoTxt.Text = _showTranslation
-            ? $"译文覆盖模式 · {n} 行 · 点击文字块复制译文 · 切“显示原文”看高亮"
-            : $"原文高亮模式 · {n} 行 · 点击文字块复制原文 · 点“翻译”或切“显示译文”";
+            ? $"译文覆盖模式 · {n} 行 · 用户字体渲染 · 点击文字块复制译文 · 左上角可隐藏覆盖层"
+            : $"原文高亮模式 · {n} 行 · 识别文字以用户字体覆盖显示 · 点击文字块复制原文 · 点「翻译」切译文";
     }
 
     private static void SetClipboard(string text)

@@ -59,14 +59,19 @@ public static class AppServices
             new CapturePipelineService(sp.GetRequiredService<SettingsService>()));
 
         // ── WGC + GPU 管线（可能失败，不阻塞启动）──
+        // ⚠ 异常路径必须释放已创建的 WGC/GPU 对象：
+        // 之前 wgc 在 GetOrCreateDevice 抛异常时既未注册进容器（容器不会负责释放），
+        // 也没有被 Dispose → 其内部的 D3D11 设备与非托管资源泄漏。
+        WgcCaptureService? wgc = null;
+        GpuToneMapper? gpuToneMapper = null;
         try
         {
-            var wgc = new WgcCaptureService();
+            wgc = new WgcCaptureService();
             var primaryMonitor = TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplays()
                 .FirstOrDefault(d => d.IsPrimary)?.MonitorHandle
                 ?? TrueToneCap.Core.Capture.DisplayEnumerator.GetMonitorUnderCursor();
             var d3dDevice = wgc.GetOrCreateDevice(primaryMonitor);
-            var gpuToneMapper = new GpuToneMapper(d3dDevice);
+            gpuToneMapper = new GpuToneMapper(d3dDevice);
 
             // 共享 D3D11 设备给 NVENC 后端
             TrueToneCap.Core.Encoding.NvencAvifBackend.SetSharedD3DDevice(d3dDevice);
@@ -74,11 +79,20 @@ public static class AppServices
             services.AddSingleton(wgc);
             services.AddSingleton(gpuToneMapper);
 
-            LogService.Info("AppServices", $"WGC/GPU 管线就绪, GPU色调映射={gpuToneMapper.IsAvailable}");
+            // 已移交容器托管，避免 finally 中重复释放
+            wgc = null;
+            gpuToneMapper = null;
+
+            LogService.Info("AppServices", "WGC/GPU 管线就绪");
         }
         catch (Exception ex)
         {
             LogService.Error("AppServices", "WGC/GPU 初始化失败（将以 CPU 回退模式运行）", ex);
+        }
+        finally
+        {
+            gpuToneMapper?.Dispose();
+            wgc?.Dispose();
         }
 
         // ── Phase 1 (2026-08-11): 启动后台预热预览 UI 缓存（Win2D 设备 + 工具栏文字位图）──
@@ -108,5 +122,9 @@ public static class AppServices
         _serviceProvider?.Dispose();
         _serviceProvider = null;
         _provider = null;
+
+        // 最后停止日志后台清理任务 —— 必须放在最后，
+        // 以便上述各步的释放过程仍能被记录到日志文件。
+        try { LogService.Shutdown(); } catch { }
     }
 }

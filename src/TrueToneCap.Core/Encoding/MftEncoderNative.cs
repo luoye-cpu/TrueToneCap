@@ -23,6 +23,10 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
     // ── NV12 子类型 ──
     private static readonly Guid MFVideoFormat_NV12 = new(0x3231564E, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
 
+    // ── MFT_MESSAGE_TYPE (mftransform.h) ──
+    private const int MftMessageCommandDrain = 0x00000001; // MFT_MESSAGE_COMMAND_DRAIN
+    private const int MftMessageCommandTick = 0x00000004;  // MFT_MESSAGE_COMMAND_TICK（仅心跳，不触发排空）
+
     private nint _mft; // IMFTransform*
     private readonly int _width, _height;
     private bool _disposed;
@@ -130,7 +134,10 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
         if (hr < 0) throw new InvalidOperationException($"MFT ProcessInput: 0x{hr:X8}");
 
         // 发送 drain 命令
-        ProcessMessage(0x00000004, 0); // MFT_MESSAGE_COMMAND_DRAIN
+        // ⚠ MFT_MESSAGE_COMMAND_DRAIN = 0x00000001。之前误用 0x00000004
+        // （MFT_MESSAGE_COMMAND_TICK），发 TICK 不会触发排空 → ProcessOutput 返回
+        // MF_E_TRANSFORM_NEED_MORE_INPUT → MFT 后端 100% 失败并静默回退 libaom。
+        ProcessMessage(MftMessageCommandDrain, 0);
 
         // 获取输出
         return GetOutput();

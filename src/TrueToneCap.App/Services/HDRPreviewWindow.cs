@@ -31,6 +31,14 @@ public sealed partial class HdrPreviewWindow : IDisposable
     // 是否内部创建的独占设备（共享设备时绝不释放 device/context，否则 WGC 会话会挂起）
     private readonly bool _ownsDevice;
 
+    // ═══ 2026-08-16 方案A: VRR (GSYNC/FreeSync) ═══
+    // 背景窗口通常是静态帧, VRR 收益小; 但启用无成本, 且 DWM 合成下不产生实际撕裂。
+    private bool _vrrSupported;
+    private bool _vrrTearFailed;
+    // ═══ 2026-08-16 增强: 多平面覆盖层 (MPO) 硬件合成支持 (诊断) ═══
+    private bool _mpoWindowed;
+    private bool _mpoFullscreen;
+
     // ── 状态 ──
     public bool IsInitialized { get; private set; }
     public string? LastError { get; private set; }
@@ -166,7 +174,29 @@ public sealed partial class HdrPreviewWindow : IDisposable
             // ── 创建 DXGI 交换链 ──
             using var dxgiDevice = _device.QueryInterface<IDXGIDevice>();
             using var adapter = dxgiDevice.GetAdapter();
-            using var factory = adapter.GetParent<IDXGIFactory2>();
+            // ═══ 2026-08-16 方案A: 升级到 IDXGIFactory7 以访问 PresentAllowTearing ═══
+            using var factory = adapter.GetParent<IDXGIFactory7>();
+            try { _vrrSupported = factory.PresentAllowTearing; }
+            catch { _vrrSupported = false; }
+            System.Diagnostics.Debug.WriteLine($"[HdrPreview] VRR 支持: {_vrrSupported}");
+
+            // ═══ 2026-08-16 增强: MPO/硬件合成检测 (诊断, 与 HdrCaptureWindow 一致) ═══
+            try
+            {
+                using var output = adapter.EnumOutputs(0, out var o0).Success ? o0 : null;
+                if (output is not null)
+                {
+                    using var output6 = output.QueryInterface<IDXGIOutput6>();
+                    var mpo = output6.CheckHardwareCompositionSupport();
+                    _mpoWindowed = mpo.HasFlag(HardwareCompositionSupportFlags.Windowed);
+                    _mpoFullscreen = mpo.HasFlag(HardwareCompositionSupportFlags.Fullscreen);
+                    System.Diagnostics.Debug.WriteLine($"[HdrPreview] MPO: 窗口化={_mpoWindowed} 全屏={_mpoFullscreen}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[HdrPreview] MPO 检测失败: {ex.Message}");
+            }
 
             var desc = new SwapChainDescription1
             {
@@ -178,7 +208,8 @@ public sealed partial class HdrPreviewWindow : IDisposable
                 BufferCount = 2,
                 Scaling = Scaling.Stretch,
                 SwapEffect = SwapEffect.FlipSequential,
-                AlphaMode = AlphaMode.Ignore
+                AlphaMode = AlphaMode.Ignore,
+                Flags = _vrrSupported ? SwapChainFlags.AllowTearing : SwapChainFlags.None
             };
 
             _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, desc);
@@ -255,6 +286,14 @@ public sealed partial class HdrPreviewWindow : IDisposable
         if (_disposed || _swapChain is null || _context is null || _device is null || _backBuffer is null)
             return;
 
+        // ⚠ 长度校验：下方按 width*height*4 索引 pixels，尺寸不符会越界读写托管堆
+        if (pixels is null || width <= 0 || height <= 0 || (long)width * height * 4 > pixels.Length)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[HdrPreview] PresentFrameCore 参数无效: len={pixels?.Length ?? -1} 需要={width}x{height}x4");
+            return;
+        }
+
         // ── 尺寸变化时重建交换链 ──
         EnsureSwapChainSize(width, height);
 
@@ -271,23 +310,48 @@ public sealed partial class HdrPreviewWindow : IDisposable
         int halfsPerRow = width * 4;
 
         long baseAddr = (long)dstBase; // long 基址避免在 lambda 中捕获 fixed/指针变量 (CS1764)
-        fixed (float* src = pixels)
+        // ⚠ Unmap 必须在 finally 中：Map/Unmap 之间若抛异常，该 subresource 后续 Map 会永久失败
+        try
         {
-            long srcBase = (long)src;
-            Parallel.For(0, height, row =>
+            fixed (float* src = pixels)
             {
-                byte* dstRow = (byte*)(baseAddr + row * dstRowPitch);
-                float* srcRow = (float*)(srcBase + (long)row * width * 4 * sizeof(float));
-                // .NET 10 JIT 自动将 Half 转换编译为 F16C VCVTPS2PH (x86)
-                TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(
-                    srcRow, (ushort*)dstRow, halfsPerRow);
-            });
+                long srcBase = (long)src;
+                Parallel.For(0, height, row =>
+                {
+                    byte* dstRow = (byte*)(baseAddr + row * dstRowPitch);
+                    float* srcRow = (float*)(srcBase + (long)row * width * 4 * sizeof(float));
+                    // .NET 10 JIT 自动将 Half 转换编译为 F16C VCVTPS2PH (x86)
+                    TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(
+                        srcRow, (ushort*)dstRow, halfsPerRow);
+                });
+            }
         }
+        finally { _context.Unmap(staging, 0); }
 
-        _context.Unmap(staging, 0);
-
-        // ── 复制到后台缓冲区并呈现（Present(0) 去 vsync，静态帧无撕裂）──
+        // ── 复制到后台缓冲区并呈现（静态帧; 2026-08-16 方案A 支持 VRR Tear 呈现）──
         _context.CopyResource(_backBuffer!, staging);
+        PresentFrame();
+    }
+
+    /// <summary>统一帧呈接入口 (2026-08-16 方案A VRR)。
+    /// 与 HdrCaptureWindow.PresentFrame 同语义: VRR 支持时 Present(1, Tear),
+    /// 失败回退 Present(0)。测试图案路径不经过此封装 (保留固定同步, 验证用)。</summary>
+    private void PresentFrame()
+    {
+        if (_swapChain is null) return;
+        if (_vrrSupported && !_vrrTearFailed)
+        {
+            try
+            {
+                _swapChain.Present(1, PresentFlags.AllowTearing);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _vrrTearFailed = true;
+                System.Diagnostics.Debug.WriteLine($"[HdrPreview] VRR Tear 失败, 回退: {ex.Message}");
+            }
+        }
         _swapChain.Present(0, PresentFlags.None);
     }
 
@@ -299,7 +363,9 @@ public sealed partial class HdrPreviewWindow : IDisposable
         {
             _backBuffer?.Dispose();
             _backBuffer = null;
-            _swapChain?.ResizeBuffers(2, (uint)width, (uint)height, Format.R16G16B16A16_Float, SwapChainFlags.None);
+            // ═══ 2026-08-16 方案A: ResizeBuffers 的 flags 替换现有标志, 必须保留 AllowTearing ═══
+            _swapChain?.ResizeBuffers(2, (uint)width, (uint)height, Format.R16G16B16A16_Float,
+                _vrrSupported ? SwapChainFlags.AllowTearing : SwapChainFlags.None);
             _winW = width;
             _winH = height;
             _backBuffer = _swapChain!.GetBuffer<ID3D11Texture2D>(0);
@@ -364,6 +430,8 @@ public sealed partial class HdrPreviewWindow : IDisposable
             if (mapped.DataPointer == IntPtr.Zero)
                 return;
 
+            try
+            {
             byte* db = (byte*)mapped.DataPointer.ToPointer();
             int dp = (int)mapped.RowPitch;
 
@@ -413,7 +481,8 @@ public sealed partial class HdrPreviewWindow : IDisposable
                 }
             }
 
-            _context.Unmap(staging, 0);
+            }
+            finally { _context.Unmap(staging, 0); } // 异常路径也必须 Unmap，否则该资源永久无法再写入
             _context.CopyResource(_backBuffer, staging);
             _swapChain.Present(1, PresentFlags.None);
         }

@@ -126,7 +126,7 @@
                                         <ComboBoxItem Tag="444" IsSelected="True">4:4:4 ✓ 截图推荐</ComboBoxItem><ComboBoxItem Tag="422">4:2:2</ComboBoxItem><ComboBoxItem Tag="420">4:2:0 (体积最小)</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <CheckBox x:Name="AvifPngSuffixChk" Content="添加 .avif.png 双后缀（兼容旧软件）" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
+                                <CheckBox x:Name="AvifPngSuffixChk" Content="额外添加 .png 后缀来提高兼容性" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                             </StackPanel>
                         </Border>
 
@@ -208,6 +208,7 @@
                                         <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
+                                <CheckBox x:Name="JxlPngSuffixChk" Content="额外添加 .png 后缀来提高兼容性" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                             </StackPanel>
                         </Border>
 
@@ -246,6 +247,8 @@
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="快捷键" VerticalAlignment="Center"/><TextBox x:Name="HotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+S" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="CaptureHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnCaptureHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="无感截图快捷键" VerticalAlignment="Center"/><TextBox x:Name="SilentHotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+Q" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="SilentHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnSilentHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <CheckBox x:Name="PreviewChk" Content="截图后右下角缩略图预览" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
+                                <Grid ColumnDefinitions="120,*,60"><TextBlock Text="保存快捷键" VerticalAlignment="Center"/><TextBox x:Name="SaveShortcutTxt" Grid.Column="1" PlaceholderText="S" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="SaveShortcutRecordBtn" Grid.Column="2" Content="录制" Click="OnSaveShortcutRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
+                                <Grid ColumnDefinitions="120,*,60"><TextBlock Text="取消快捷键" VerticalAlignment="Center"/><TextBox x:Name="CancelShortcutTxt" Grid.Column="1" PlaceholderText="Esc" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="CancelShortcutRecordBtn" Grid.Column="2" Content="录制" Click="OnCancelShortcutRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                             </StackPanel>
                         </Border>
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
@@ -448,14 +451,7 @@
                                 <TextBlock x:Name="FontTitle" Text="界面字体" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*">
                                     <TextBlock x:Name="FontLabel" Text="字体" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="FontCbo" SelectionChanged="OnFontChanged">
-                                        <ComboBoxItem Tag="">默认 (微软雅黑)</ComboBoxItem>
-                                        <ComboBoxItem Tag="Microsoft YaHei">微软雅黑</ComboBoxItem>
-                                        <ComboBoxItem Tag="Segoe UI">Segoe UI</ComboBoxItem>
-                                        <ComboBoxItem Tag="Noto Sans SC">Noto Sans SC</ComboBoxItem>
-                                        <ComboBoxItem Tag="Microsoft YaHei UI">Microsoft YaHei UI</ComboBoxItem>
-                                        <ComboBoxItem Tag="CUSTOM">自定义...</ComboBoxItem>
-                                    </ComboBox>
+                                    <ComboBox x:Name="FontCbo" SelectionChanged="OnFontChanged"></ComboBox>
                                 </Grid>
                                 <Grid x:Name="FontCustomPanel" ColumnDefinitions="120,*" Visibility="Collapsed">
                                     <TextBlock Text="字体名称" VerticalAlignment="Center"/>
@@ -487,6 +483,7 @@
                                 <TextBlock x:Name="BehaviorTitle" Text="行为" FontSize="14" FontWeight="SemiBold"/>
                                 <CheckBox x:Name="AutoStartChk" Content="开机自动启动" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                                 <CheckBox x:Name="MinimizeTrayChk" Content="关闭时最小化到托盘" IsChecked="True" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
+                                <CheckBox x:Name="UiAnimationsChk" Content="启用界面过渡动画（更流畅）" IsChecked="True" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>

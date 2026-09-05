@@ -200,32 +200,49 @@ public static class ToneMapper
     }
 
     /// <summary>
-    /// 分段 Reinhard 映射核心 (GainMap 与所有格式 HDR→SDR 共用同款曲线)。
-    /// 输入: y = scRGB / sdrWhiteScrgb（SDR 白点 = 1.0, 即 PaperWhite 归一化后）。
-    /// 分段 (修复过曝的关键):
-    ///   - y ≤ 1.0 (SDR 内容): 完全直通 → 增益恒 1x
-    ///   - 1.0 &lt; y &lt; 1+eps: smoothstep 混合直通与 Reinhard（单调无过冲, 消除 SDR 白点亮度跳变）
-    ///   - y ≥ 1+eps: Reinhard 压缩 (libultrahdr ReinhardMap 公式)
-    /// 公式: ReinhardMap(y, headroom) = (1 + y/headroom²) / (1 + y) × y
-    ///       ReinhardMap(headroom) = 1.0 (HDR 峰值恰好映射 SDR 白点)
-    /// 说明: 曾用 Hermite 插值追求 C1, 但端点斜率差过大 (直通 1.0 vs R'(1)≈0.26)
-    ///       导致过渡区内部负斜率过冲 (非单调) — 已废弃, 改用 smoothstep 混合。
+    /// 分段色调映射核心（GainMap 与所有格式的 HDR→SDR 路径共用同款曲线）。
+    /// 输入 y = scRGB / sdrWhiteScrgb（PaperWhite 归一化后，SDR 白点 = 1.0），即该像素的最大通道值。
+    /// 输出为 SDR 显示值 [0, 1]，调用方再按比例缩放其余通道以保持色相。
     /// </summary>
+    /// <param name="y">归一化亮度（最大通道值），SDR 白点 = 1.0。</param>
+    /// <param name="headroom">HDR 峰值 / SDR 白点（nits 比值）。当前实现不参与运算，仅为兼容既有调用方保留。</param>
+    /// <param name="eps">兼容保留参数。</param>
+    /// <returns>SDR 显示值，范围 [0, 1]。</returns>
+    /// <remarks>
+    /// ═══ 2026-08-30 修复：消除 SDR 白点处的亮度断崖 ═══
+    /// <para>
+    /// <b>旧实现的缺陷</b>：y ≥ 1+eps 分支直接套用 libultrahdr 的
+    /// <c>ReinhardMap(y,h) = (1 + y/h²)/(1 + y) · y</c>，其 <c>R(1) = (1 + 1/h²)/2</c>。
+    /// 以典型参数 headroom=5 计，<c>R(1) = 0.52</c>，而左分支（y ≤ 1 直通）返回 <b>1.0</b>。
+    /// 过渡区的 smoothstep 只是在 1.0 与 R(y) 之间插值，而 R 在 y ∈ [1, 1.25] 仍只有 0.52~0.58，
+    /// 于是 f 在 y=1 处由 1.0 骤降后再缓慢回升 —— <b>函数非单调</b>。
+    /// </para>
+    /// <para>
+    /// <b>视觉后果</b>：亮度刚超过 SDR 白点的像素，输出反而比 SDR 白更暗（降幅达 42%，
+    /// 且 headroom 越大越深）。在高光边缘形成一圈"暗环"伪影，天空、灯光、反光场景尤其明显。
+    /// </para>
+    /// <para>
+    /// <b>新实现的数学依据</b>：8-bit SDR 的输出上界为 1.0。在
+    /// "SDR 白点保真（f(1)=1.0）" + "输出不超过上界（f ≤ 1）" + "单调不减"
+    /// 三重约束下，<c>f(y&gt;1) ≡ 1.0</c>（饱和）是<b>唯一解</b>。
+    /// 超出 SDR 白点的能量改由 GainMap 的增益图承载（<c>gain = log2(y / f(y)) = log2(y)</c>），
+    /// HDR 查看器据其完整还原；纯 SDR 输出则体现为高光削平，属 SDR 显示 HDR 的固有限制。
+    /// </para>
+    /// <para>
+    /// 该行为同时保证：① SDR 内容（y ≤ 1）100% 保真，SDR 与 HDR 查看器观感一致；
+    /// ② GainMap 的 SDR 区域增益恒为 0（符合 ISO 21496-1）；③ 全程单调不减，无暗环。
+    /// </para>
+    /// </remarks>
     public static float SegmentedReinhardMap(float y, float headroom, float eps = 0.25f)
     {
+        // SDR 范围（含白点）：恒等映射 → SDR 内容完全保真，GainMap 增益为 0
         if (y <= 1.0f) return Math.Clamp(y, 0f, 1f);
-        float h = Math.Max(headroom, 1.0f);
-        float h2 = h * h;
-        // ReinhardMap(y, headroom) = (1 + y/headroom²) / (1 + y) × y
-        float rY = (1.0f + y / h2) / (1.0f + y) * y;
-        if (y < 1.0f + eps)
-        {
-            // smoothstep 混合: f(y) = (1-s)·1.0 + s·R(y), s = smoothstep((y-1)/eps)
-            float t = (y - 1.0f) / eps;
-            float s = t * t * (3.0f - 2.0f * t);
-            return (1.0f - s) * 1.0f + s * rY;
-        }
-        return rY;
+
+        // 高光：单调饱和到 SDR 上界 1.0。
+        // 超出部分由 GainMap 增益图还原；纯 SDR 输出则为高光削平。
+        // （headroom / eps 不参与运算 —— 详见 XML 备注中的数学推导）
+        _ = headroom; _ = eps;
+        return 1.0f;
     }
 
     // ────────────── sRGB 编码（线性 → gamma） ──────────────

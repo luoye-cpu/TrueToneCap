@@ -16,10 +16,28 @@ public sealed unsafe class QsvEncoderNative : IDisposable
     private static readonly string[] DllNames = ["libvpl.dll", "libmfx64-gen.dll", "libmfxhw64.dll"];
     private static nint _dll;
 
+    /// <summary>QSV 后端是否可用。
+    /// <para>
+    /// ⚠ 2026-08-29: 本后端已停用。Intel 不存在 oneVPL 的官方 .NET 绑定
+    /// （nuget.org/packages/Intel.ONE.VPL 返回 404，Intel 官方仅提供 C/C++ 头文件），
+    /// 而本文件的 P/Invoke 结构体是自造的，与 oneVPL 官方定义不符：
+    /// mfxVideoParam / mfxInfoMFX / mfxFrameInfo / mfxFrameSurface1 / mfxFrameData /
+    /// mfxBitstream 均忽略了官方结构中的 reserved[] 前置字段与 union 布局，
+    /// 参数会被写进 reserved 区，MFXVideoENCODE_Init 拿到垃圾（CodecId ≈ 0）。
+    /// 此外 TargetKbps 用 ushort 承载 4K 码率必然溢出，EncodeFrameAsync 也缺少 drain 循环。
+    /// 在具备 Intel GPU 与 oneVPL 运行时的环境完成重写并验证之前，一律返回 false，
+    /// 避免向用户提供"已启用硬件加速但实际静默失败"的错误预期。
+    /// </para>
+    /// <para>重新启用需同时满足：① 用 Intel.ONE.VPL 或按官方头文件重写全部结构体；
+    /// ② 改用 MFXLoad + MFXCreateSession；③ 补齐 drain 循环；④ 在 Intel GPU 上实测通过。</para>
+    /// </summary>
     public static bool IsAvailable
     {
         get
         {
+            // QSV 后端停用中（详见属性文档）。保留代码以便后续重写。
+            return false;
+#pragma warning disable CS0162 // 以下代码暂不可达，重写时恢复
             try
             {
                 // 先确认 Intel GPU 存在
@@ -27,6 +45,7 @@ public sealed unsafe class QsvEncoderNative : IDisposable
                 return TryLoadLibrary();
             }
             catch { return false; }
+#pragma warning restore CS0162
         }
     }
 

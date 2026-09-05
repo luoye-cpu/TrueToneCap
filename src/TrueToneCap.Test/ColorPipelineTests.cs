@@ -65,6 +65,14 @@ public static class ColorPipelineTests
         ToneMap_BlackPreservation();
         ToneMap_WhitePreservation();
 
+        // ─── 6b. 分段 Reinhard 曲线（SDR 白点断崖回归防护）───
+        Console.WriteLine("\n── 6b. 分段 Reinhard 曲线 ──");
+        SegmentedReinhard_Monotonic_NoDarkRing();
+        SegmentedReinhard_ContinuousAtSdrWhite();
+        SegmentedReinhard_SdrRangeIdentity();
+        SegmentedReinhard_SdrWhiteMapsToUnity();
+        SegmentedReinhard_Pipeline_NoDarkRing();
+
         // ─── 7. 色域映射 ───
         Console.WriteLine("\n── 7. 色域映射 ──");
         GamutMap_SrgbToP3_Identity();
@@ -441,28 +449,149 @@ public static class ColorPipelineTests
     static void ToneMap_AllModes_Monotonic()
     {
         // 所有色调映射模式应保持单调性（亮度更高的输入 → 亮度更高的输出）
+        //
+        // ⚠ 2026-08-30 修复: 原测试声明 64 像素却按 8×2=16 像素调用 FloatToSRgbBytes，
+        // 导致渐变只覆盖 t∈[0,0.234]（归一化后 maxY≤0.469），
+        // 完全没采样到 SDR 白点 (y=1) 附近 —— 正是 SegmentedReinhardMap 断崖所在区间。
+        // 这是该缺陷长期未被发现的原因。现尺寸与像素数一致，覆盖完整动态范围。
         var modes = new[] { ToneMapMode.Reinhard, ToneMapMode.Hable, ToneMapMode.SegmentedReinhard };
+        const int pixelCount = 64;
         foreach (var mode in modes)
         {
-            var hdr = new float[64 * 4];
+            var hdr = new float[pixelCount * 4];
             for (int i = 0; i < hdr.Length; i += 4)
             {
                 float t = i / (float)hdr.Length;
+                // 覆盖到 headroom 之外: maxY = t*5*0.4 = t*2 → 最高 2× SDR 白点
                 hdr[i] = t * 5f; hdr[i + 1] = t * 3f; hdr[i + 2] = t * 2f; hdr[i + 3] = 1f;
             }
             var p = new ToneMappingParams { Mode = mode };
-            var bytes = ToneMapper.FloatToSRgbBytes(hdr, 8, 2, p);
+            var bytes = ToneMapper.FloatToSRgbBytes(hdr, pixelCount, 1, p);
 
             bool monotonic = true;
             int prevLum = 0;
             for (int i = 0; i < bytes.Length; i += 4)
             {
                 int lum = (bytes[i] + bytes[i + 1] + bytes[i + 2]) / 3;
-                if (lum < prevLum - 5) { monotonic = false; break; }
+                if (lum < prevLum - 1) { monotonic = false; break; }  // 容差收紧到 1
                 prevLum = lum;
             }
             Assert($"ToneMap.{mode}: 单调性", monotonic);
         }
+    }
+
+    // ═══════════════════════════════════════════════
+    //  6b. 分段 Reinhard 曲线（SDR 白点断崖回归防护）
+    // ═══════════════════════════════════════════════
+    //
+    // 背景: SegmentedReinhardMap 曾在 y=1（SDR 白点）处不连续 ——
+    // 左分支返回 1.0，右分支接 libultrahdr 的 ReinhardMap（R(1)≈0.52@headroom=5），
+    // 使刚超过 SDR 白点的高光反而更暗（暗环伪影）。
+    // 以下用例直接针对曲线本身，防止回归。
+
+    /// <summary>曲线必须全程单调不减（暗环的直接成因就是非单调）。</summary>
+    static void SegmentedReinhard_Monotonic_NoDarkRing()
+    {
+        foreach (float headroom in new[] { 1.5f, 2f, 5f, 10f })
+        {
+            bool monotonic = true;
+            float prev = float.NegativeInfinity;
+            float worstDrop = 0f;
+            // 细密扫过 SDR 白点两侧，最高到 2×headroom
+            for (float y = 0f; y <= headroom * 2f; y += 0.001f)
+            {
+                float f = ToneMapper.SegmentedReinhardMap(y, headroom);
+                if (f < prev) { monotonic = false; worstDrop = Math.Max(worstDrop, prev - f); }
+                prev = f;
+            }
+            Assert($"SegmentedReinhard(headroom={headroom}): 全程单调不减",
+                monotonic, monotonic ? "" : $"最大回退={worstDrop:F4}");
+        }
+    }
+
+    /// <summary>曲线在 SDR 白点 (y=1) 处必须连续 —— 断崖的核心判据。</summary>
+    static void SegmentedReinhard_ContinuousAtSdrWhite()
+    {
+        bool ok = true;
+        string detail = "";
+        foreach (float headroom in new[] { 1.5f, 2f, 5f, 10f })
+        {
+            float below = ToneMapper.SegmentedReinhardMap(1.0f, headroom);
+            float above = ToneMapper.SegmentedReinhardMap(1.0f + 1e-6f, headroom);
+            float jump = Math.Abs(above - below);
+            if (jump > 1e-4f)
+            {
+                ok = false;
+                detail += $" headroom={headroom}: 跳变={jump:F4};";
+            }
+        }
+        Assert("SegmentedReinhard: SDR 白点处连续 (无断崖)", ok, detail);
+    }
+
+    /// <summary>SDR 范围内必须恒等映射 —— 保证 SDR 内容 100% 保真、GainMap 增益为 0。</summary>
+    static void SegmentedReinhard_SdrRangeIdentity()
+    {
+        bool ok = true;
+        string detail = "";
+        // y=1 旧值示意: headroom=5 时旧实现返回 (1.0, 但 y>1 分支 R(1)=0.52)
+        foreach (float y in new[] { 0f, 0.1f, 0.25f, 0.5f, 0.75f, 0.9f, 1.0f })
+        {
+            float f = ToneMapper.SegmentedReinhardMap(y, 5f);
+            if (Math.Abs(f - y) > 1e-5f)
+            {
+                ok = false;
+                detail += $" y={y}: f={f:F4};";
+            }
+        }
+        Assert("SegmentedReinhard: SDR 范围 (y≤1) 恒等映射", ok, detail);
+    }
+
+    /// <summary>SDR 白点必须映射到 SDR 上界 1.0（SDR 查看器与 HDR 查看器观感一致）。</summary>
+    static void SegmentedReinhard_SdrWhiteMapsToUnity()
+    {
+        bool ok = true;
+        string detail = "";
+        foreach (float headroom in new[] { 1.5f, 2f, 5f, 10f })
+        {
+            float f = ToneMapper.SegmentedReinhardMap(1.0f, headroom);
+            if (Math.Abs(f - 1.0f) > 1e-5f)
+            {
+                ok = false;
+                detail += $" headroom={headroom}: f(1)={f:F4};";
+            }
+        }
+        Assert("SegmentedReinhard: SDR 白点映射为 1.0", ok, detail);
+    }
+
+    /// <summary>端到端: 经完整管线的亮度斜坡不得出现暗环（亮度回退）。</summary>
+    static void SegmentedReinhard_Pipeline_NoDarkRing()
+    {
+        const int pixelCount = 256;
+        var hdr = new float[pixelCount * 4];
+        // 中性灰斜坡，亮度从 0 扫到 6× SDR 白点（PaperWhite=200 → 归一化后 y = scRGB/2.5）
+        for (int pi = 0; pi < pixelCount; pi++)
+        {
+            float y = pi / (float)pixelCount * 15f;   // scRGB 值，15/2.5 = 6× 白点
+            hdr[pi * 4] = y; hdr[pi * 4 + 1] = y; hdr[pi * 4 + 2] = y; hdr[pi * 4 + 3] = 1f;
+        }
+        var p = new ToneMappingParams { Mode = ToneMapMode.SegmentedReinhard };
+        var bytes = ToneMapper.FloatToSRgbBytes(hdr, pixelCount, 1, p);
+
+        bool monotonic = true;
+        int prevLum = -1;
+        int worstDrop = 0;
+        for (int i = 0; i < bytes.Length; i += 4)
+        {
+            int lum = (bytes[i] + bytes[i + 1] + bytes[i + 2]) / 3;
+            if (lum < prevLum)
+            {
+                monotonic = false;
+                worstDrop = Math.Max(worstDrop, prevLum - lum);
+            }
+            prevLum = lum;
+        }
+        Assert("SegmentedReinhard 管线: 亮度斜坡无暗环", monotonic,
+            monotonic ? "" : $"最大亮度回退={worstDrop} 灰阶");
     }
 
     static void ToneMap_BlackPreservation()

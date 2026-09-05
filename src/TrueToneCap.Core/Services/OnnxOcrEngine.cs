@@ -296,6 +296,13 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         if (!_available || _detSession is null || _recSession is null)
             return new OcrResult { Error = "ONNX 引擎不可用" };
 
+        // ═══ P0-2: 识别超时看门狗 (防 DirectML 死锁) ═══
+        // DirectML 推理可能卡死不抛异常, 导致 UI 永久卡死。在此加总超时 (默认 60s)。
+        const int OcrTimeoutSeconds = 60;
+        using var ocrCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        ocrCts.CancelAfter(TimeSpan.FromSeconds(OcrTimeoutSeconds));
+        var token = ocrCts.Token;
+
         return await Task.Run(() =>
         {
             try
@@ -308,7 +315,7 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                 var allText = new List<string>();
                 foreach (var box in boxes)
                 {
-                    ct.ThrowIfCancellationRequested();
+                    token.ThrowIfCancellationRequested(); // 用带超时的 token
                     string text = RunRecognition(bgra, w, h, box);
                     if (!string.IsNullOrWhiteSpace(text))
                     {
@@ -339,11 +346,15 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
                 return (OcrResult)result;
             }
+            catch (OperationCanceledException)
+            {
+                return new OcrResult { Error = $"OCR 识别超时（超过 {OcrTimeoutSeconds}s），DirectML 可能卡死" };
+            }
             catch (Exception ex)
             {
                 return new OcrResult { Error = $"ONNX 异常: {ex.Message}" };
             }
-        }, ct);
+        }, token);
     }
 
     // ═══════════════════════════════════════
@@ -465,10 +476,24 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
             }
         });
 
-        // 推理
+        // 推理 - 添加 SEH 保护防止 DirectML 原生崩溃
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("x", input) };
-        using var results = _detSession!.Run(inputs);
-        var output = results.First().AsTensor<float>();
+        Tensor<float>? output = null;
+        try
+        {
+            using var results = _detSession!.Run(inputs);
+            output = results.First().AsTensor<float>();
+        }
+        catch (Exception ex) when (ex is AccessViolationException || ex.GetType().Name.Contains("SEH"))
+        {
+            Debug.WriteLine($"[OCR] 检测推理 SEH 崩溃: {ex.GetType().Name} → 返回空框");
+            return [];
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[OCR] 检测推理异常: {ex.Message} → 返回空框");
+            return [];
+        }
 
         // 后处理: 二值化 + 膨胀 + 置信度过滤
         int oh = output.Dimensions[2], ow = output.Dimensions[3];
@@ -581,10 +606,24 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         }
         // 右侧 padding 保持为 0 (已初始化)
 
-        // 推理
+        // 推理 - 添加 SEH 保护防止 DirectML 原生崩溃
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("x", input) };
-        using var results = _recSession!.Run(inputs);
-        var output = results.First().AsTensor<float>();
+        Tensor<float>? output = null;
+        try
+        {
+            using var results = _recSession!.Run(inputs);
+            output = results.First().AsTensor<float>();
+        }
+        catch (Exception ex) when (ex is AccessViolationException || ex.GetType().Name.Contains("SEH"))
+        {
+            Debug.WriteLine($"[OCR] 识别推理 SEH 崩溃: {ex.GetType().Name} → 丢弃该区域");
+            return "";
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[OCR] 识别推理异常: {ex.Message} → 丢弃该区域");
+            return "";
+        }
 
         // CTC greedy decode (PP-OCRv6 多语言统一字典)
         // 不做置信度过滤，仅用 greedy argmax + 去重
