@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/MainWindow.OcrSettings.cs
 // MainWindow 的「OCR 引擎 / 翻译 / LLM 配置 UI」职责（partial class 拆分）
 //
@@ -17,7 +19,7 @@ public sealed partial class MainWindow : Window
 {
     /// <summary>
     /// 2026-08-09: 按引擎类型更新语言 UI。
-    /// ONNX (PP-OCRv6) 为 50 语言统一字典 (ppocrv6_dict.txt), 语言选择不影响识别
+    /// ONNX (PP-OCRv6) 是统一字典单模型，语言参数不改变识别结果（OnnxOcrEngine 收下 lang 后从不使用）
     /// → 隐藏语言下拉框 + 显示统一模型说明; 仅 Windows OCR 真正按语言工作 → 显示选择。
     /// </summary>
     private void UpdateOcrLanguageVisibility(OcrEngineType engineType)
@@ -28,7 +30,8 @@ public sealed partial class MainWindow : Window
         OcrLangHintTxt.Visibility = isWindowsOcr ? Visibility.Collapsed : Visibility.Visible;
         OcrLangHintTxt.Text = isWindowsOcr
             ? ""
-            : "ℹ PP-OCRv6 为 50 语言统一字典 (ppocrv6_dict.txt) — 自动识别所有语言，无需选择。";
+            : "ℹ PP-OCRv6 是单模型统一字典（18708 字），不随语言切换。实测中文/英文最准，" +
+              "日文需字高 ≥24px，韩文不支持（会自动改走 Windows OCR 兜底，需系统装韩文语言包）。";
     }
 
     private void UpdateOcrEngineStatus()
@@ -134,13 +137,17 @@ public sealed partial class MainWindow : Window
             LlmConfigCard.Visibility = showLlm ? Visibility.Visible : Visibility.Collapsed;
         if (FreeModeHint is not null)
             FreeModeHint.Visibility = tag == "Free" ? Visibility.Visible : Visibility.Collapsed;
+        // 有道凭据输入 + 非官方端点开关整组一起显隐（藏在面板里，否则 LLM 模式下会多出一排无关控件）
+        if (FreeModePanel is not null)
+            FreeModePanel.Visibility = tag == "Free" ? Visibility.Visible : Visibility.Collapsed;
 
         if (LlmModeHint is not null)
         {
             if (tag == "LLM")
                 LlmModeHint.Text = "OCR 识别文字后，通过 LLM API 翻译为高质量译文";
             else if (tag == "Vision")
-                LlmModeHint.Text = "截图直接发送给视觉 LLM，一步完成识别+翻译（实验性，需支持 Vision 的模型）";
+                LlmModeHint.Text = "整张截图直传给支持图片输入的 LLM，一次完成识别+翻译" +
+                                   "（不经 OCR 文本；该模型不支持图片或返回行数与图中不符时会报错，不会错位覆盖）";
         }
 
         // 同步到设置

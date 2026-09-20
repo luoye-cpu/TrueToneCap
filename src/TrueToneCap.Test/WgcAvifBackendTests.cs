@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Test/WgcAvifBackendTests.cs
 // WGC 真实捕获 + AVIF 各后端编码验证
 //
@@ -34,8 +36,17 @@ namespace TrueToneCap.Test;
 public static partial class WgcAvifBackendTests
 {
     private static int _passed, _failed;
+    /// <summary>因环境不满足而【显式跳过】的用例数 —— 既不算通过也不算失败。</summary>
+    private static int _skipped;
     private static readonly string OutDir =
         Path.Combine(Path.GetTempPath(), "TrueToneCap_WgcAvifTest");
+
+    /// <summary>显式跳过一条用例：不计入通过/失败，但必须留下原因（禁止静默通过）。</summary>
+    static void Skip(string name, string reason)
+    {
+        _skipped++;
+        Console.WriteLine($"  ⏭  {name} — 跳过: {reason}");
+    }
 
     public static int RunAll()
     {
@@ -66,7 +77,7 @@ public static partial class WgcAvifBackendTests
         }
 
         Console.WriteLine($"\n══════════════════════════════════════");
-        Console.WriteLine($"  结果: {_passed} 通过, {_failed} 失败");
+        TestSummary.Report("--wgc-avif-tests", _passed, _failed, 0, null, _skipped);
         Console.WriteLine($"══════════════════════════════════════");
         return exit != 0 || _failed > 0 ? 1 : 0;
     }
@@ -96,12 +107,39 @@ public static partial class WgcAvifBackendTests
         Console.WriteLine("\n── 2. GPU 编码器能力探测 ──");
         ReportGpuEncoders();
 
+        // ═══ 2.5 显示器能否给出 >8-bit 源（播报，不断言）═══
+        // 2026-09-19 起源精度只由这个能力决定（CanDeliverExtendedRange）：本机若这里全是
+        // SDR/8-bit，那么"恒请求 Float16"在本机等价于回退 8-bit，改动看不出效果 ——
+        // 需要在 10-bit 或 ACM 屏上复看，故每次运行都把判据打出来，避免"改了却看不见"。
+        Console.WriteLine("\n── 2.5 显示器高精度源能力（源精度判据）──");
+        try
+        {
+            // ACM 那一档判据在 App 侧（AppSettingsData.AcmeDetected，Test 工程不引用 App）⇒ 这里只报 DXGI 部分
+            foreach (var d in TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplays())
+            {
+                bool can = d.IsHdr || d.SupportsHdr;
+                Console.WriteLine($"  [{d.Index}] {d.Name} {d.Width}x{d.Height} "
+                    + $"IsHdr={d.IsHdr} SupportsHdr={d.SupportsHdr} ColorSpace={d.ColorSpace} "
+                    + $"⇒ 仅凭 DXGI 判据源精度 = {(can ? "Float16 (>8-bit)" : "8-bit BGRA（除非本机开了 ACM）")}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ⏭ 能力查询失败：{ex.GetType().Name}: {ex.Message}");
+        }
+
         // ═══ 3. Auto 模式后端选择结果 ═══
         Console.WriteLine("\n── 3. Auto 模式后端选择 ──");
         try
         {
             var auto = AvifEncoderSelector.Select(AvifEncoderBackend.Auto);
-            Assert("Auto 后端选择", true, $"选中 {auto.Backend}");
+            // ═══ 2026-09-19 修假绿：条件位原来是字面量 true ⇒ 结构上不可能失败 ═══
+            // Auto 解析成 Auto 本身、或解析到一个根本不可用的后端，原写法都照样绿。
+            // 拆成两条真断言：① 必须落到一个具体后端；② 那个后端必须真的可用。
+            Assert("Auto 后端选择: 解析到具体后端（不得把 Auto 本身当结果交回）",
+                auto.Backend != AvifEncoderBackend.Auto, $"选中 {auto.Backend}");
+            Assert("Auto 后端选择: 选中的后端确实可用",
+                auto.IsAvailable, $"选中 {auto.Backend} 却 IsAvailable=false ⇒ Auto 会交出编不出东西的后端");
             Console.WriteLine($"  ℹ Auto 选中: {auto.Backend}");
             if (auto.Backend == AvifEncoderBackend.LibAom)
                 Console.WriteLine("     （若本机有支持 AV1 的 N 卡，此处应为 Nvenc）");
@@ -123,6 +161,7 @@ public static partial class WgcAvifBackendTests
         {
             Console.WriteLine($"\n  ─── {b} ───");
             TestBackend(b, frame, w, h);
+            if (b == AvifEncoderBackend.Nvenc) TestNvencChromaDisclosure(frame, w, h);
         }
 
         device.Dispose();
@@ -139,8 +178,13 @@ public static partial class WgcAvifBackendTests
             HdrOutput = false,
             ChromaSubsampling = "420",
             OutputBitDepth = 8,
-            DisplayBitDepth = 8,
-            AvifBackend = backend,
+            AvifEncoderKind = backend switch
+            {
+                AvifEncoderBackend.Nvenc => AvifEncoderKind.Nvenc,
+                AvifEncoderBackend.Qsv => AvifEncoderKind.Qsv,
+                AvifEncoderBackend.LibAom => AvifEncoderKind.LibAom,
+                _ => AvifEncoderKind.Auto,
+            },
         };
 
         try
@@ -149,15 +193,26 @@ public static partial class WgcAvifBackendTests
             try { encoder = AvifEncoderSelector.Select(backend); }
             catch (Exception ex)
             {
-                Assert($"{backend}/后端可用", false, $"选择失败: {ex.Message}");
+                Assert($"{backend}/Select 返回编码器实例", false, $"选择失败: {ex.Message}");
                 return;
             }
-            Assert($"{backend}/后端可用", true, "");
+            // ═══ 2026-09-19 修假绿：这一刻 IsAvailable 还没查过，"后端可用"是越权命名 ═══
+            // 原 Assert($"{backend}/后端可用", true, "") 恒绿，而紧接着的
+            // if (!encoder.IsAvailable) Skip(...) 恰恰说明此处"可用"仍是未知数 ——
+            // "后端可用"的 ✅/⏭ 只能由 IsAvailable 那一支决定，这里只处理"没拿到实例"这一种缺陷。
+            // ⚠ 这里必须是【前置守卫】而不是 Assert(…, encoder is not null, …)：后者不向流分析
+            //   传递信息，下面 encoder.IsAvailable 仍会报 CS8602（编译期就把它判成可能的空引用）；
+            //   而非 null 时也不补一条 ✅ —— 那又会变成结构上不可能为假的断言。
+            if (encoder is null)
+            {
+                Assert($"{backend}/Select 返回编码器实例", false, "Select 返回 null");
+                return;
+            }
 
             if (!encoder.IsAvailable)
             {
-                Console.WriteLine($"  ⚠ {backend} 不可用，跳过编码");
-                Assert($"{backend}/跳过(不可用)", true, "");
+                // 后端不可用属环境限制 —— 显式跳过，而非恒真断言伪装成通过
+                Skip($"{backend}/编码", "后端不可用（环境限制）");
                 return;
             }
 
@@ -183,6 +238,45 @@ public static partial class WgcAvifBackendTests
         catch (Exception ex)
         {
             Assert($"{backend}/编码未抛异常", false, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 实机验证：绕过 UI 能力协商、直接以 4:4:4 调 NVENC 时，"驱动恒按 4:2:0 编"必须留下痕迹
+    /// （交接 §26.4 P2-3）。
+    /// <para>unit 侧的 <c>Test_Nvenc_ChromaDowngradeNote</c> 只证明那个函数会返回说明；
+    /// 这里证明编码真的成功之后 <c>LastFallbackReason</c> 上确实带着它 —— 也就是三个成功落点
+    /// 真的接上了线。本机 NVENC 没产出码流（无 N 卡 / 驱动拒绝 444 已回退软件）时【显式跳过】，
+    /// 不做恒真断言。</para>
+    /// </summary>
+    private static void TestNvencChromaDisclosure(byte[] frame, int w, int h)
+    {
+        Console.WriteLine("\n  ─── NVENC 色度降级留痕（实机）───");
+        NvencAvifBackend.LastFallbackReason = null;
+        try
+        {
+            var encoder = AvifEncoderSelector.Select(AvifEncoderBackend.Nvenc);
+            string path = Path.Combine(OutDir, $"wgc_nvenc_444_{Guid.NewGuid():N}.avif");
+            encoder.EncodeAsync(frame, w, h, 50, path, CancellationToken.None,
+                chroma: "444", displayBitDepth: 8).GetAwaiter().GetResult();
+
+            var reason = NvencAvifBackend.LastFallbackReason;
+            if (!NvencAvifBackend.LastEncodeUsedHardware)
+            {
+                Skip("NVENC 444 降级留痕", "本次码流非 NVENC 产出（本机不可用或已回退软件）");
+                return;
+            }
+            Assert("NVENC 444 降级留痕: 产出后 LastFallbackReason 带「444 未生效」",
+                reason is not null && reason.Contains("444") && reason.Contains("4:2:0"),
+                reason ?? "null ⇒ 成功落点未接线");
+        }
+        catch (Exception ex)
+        {
+            Assert("NVENC 444 降级留痕", false, $"{ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            NvencAvifBackend.LastFallbackReason = null;   // 不把原因泄漏给后续用例
         }
     }
 
@@ -218,11 +312,19 @@ public static partial class WgcAvifBackendTests
         long ilocOffset = -1, ilocLength = -1;
         ScanMeta(d, meta, ref ispeW, ref ispeH, ref ilocOffset, ref ilocLength);
 
+        // ═══ 2026-09-19 修假绿：解析器读不到 ispe/iloc 本身就是容器缺陷 ═══
+        // 原写法把两条断言整个圈在 if 里 ⇒ 读不到时一条都不发、passed 计数不变，
+        // "容器坏到解析不出来"与"这个文件根本没被检查"在输出上长得一模一样。
+        // 拆成无条件两条：先断"解析到了"，再比值。
+        Assert($"{tag}/meta 内解析到 ispe", ispeW is not null && ispeH is not null,
+            $"ispe={ispeW}x{ispeH} ⇒ meta（含 iprp/ipco）里没有可读的 ispe");
         if (ispeW is not null && ispeH is not null)
             Assert($"{tag}/ispe 尺寸正确", ispeW == expectW && ispeH == expectH,
                 $"{ispeW}x{ispeH} (期望 {expectW}x{expectH})");
 
         // iloc 的 extent_offset 必须落在 mdat 数据区内
+        Assert($"{tag}/meta 内解析到 iloc extent_offset", ilocOffset >= 0,
+            $"extent_offset={ilocOffset}（-1 ⇒ iloc 定位失败，容器又不合规）");
         if (ilocOffset >= 0 && mdat is not null)
         {
             long mdatDataStart = mdat.Offset + mdat.HeaderSize;
@@ -230,6 +332,63 @@ public static partial class WgcAvifBackendTests
             Assert($"{tag}/iloc 偏移落在 mdat 内", inRange,
                 $"extent_offset={ilocOffset} len={ilocLength}, mdat 数据区 [{mdatDataStart}, {d.Length}]");
         }
+
+        ValidateColourDeclaration(tag, d);
+    }
+
+    /// <summary>
+    /// 色彩声明的**规范结构**校验（2026-09-19 加，起因是两个存量缺陷）：
+    ///  ① hdlr 是 FullBox，旧实现漏写 version/flags ⇒ 读者把 'pict' 当成 pre_defined，
+    ///     libavif 直接 "Box[hdlr] contains a pre_defined value that is nonzero" 拒读整份文件；
+    ///  ② colr/nclx 的 primaries/transfer/matrix 是 **16-bit**，旧实现每个只写 1 字节 ⇒
+    ///     盒体 16 B（合法恒 19 B）⇒ colr 被丢弃 ⇒ HDR 内容对外没有色彩声明。
+    /// ffmpeg 对这两处都宽容，所以"能解码 + ffprobe 有 pix_fmt"并不能证明容器合规；
+    /// 判据必须写成规范形状，而不是复刻写入器自己的假设（交接 §3 的容器层版本）。
+    /// </summary>
+    private static void ValidateColourDeclaration(string tag, byte[] d)
+    {
+        // ── ① hdlr：type 之后必须是 [version(1)+flags(3)] [pre_defined=0 (4)] ['pict'] ──
+        int hdlr = IndexOfAscii(d, "hdlr");
+        if (hdlr < 0) { Assert($"{tag}/含 hdlr", false, "未找到 hdlr"); return; }
+        int p = hdlr + 4;
+        Assert($"{tag}/hdlr 是 FullBox 且 pre_defined=0",
+            p + 12 <= d.Length
+            && d[p] == 0                                  // version
+            && d[p + 1] == 0 && d[p + 2] == 0 && d[p + 3] == 0   // flags
+            && d[p + 4] == 0 && d[p + 5] == 0 && d[p + 6] == 0 && d[p + 7] == 0  // pre_defined
+            && Encoding.ASCII.GetString(d, p + 8, 4) == "pict",
+            $"type 后 12 字节 = {BitConverter.ToString(d, p, Math.Min(12, d.Length - p))}");
+
+        // ── ② colr(nclx)：盒体恒 19 字节，三字段各 16-bit 大端 + 1 字节 range ──
+        // 布局：[size(4)][type='colr'(4)][colour_type='nclx'(4)][prim(2)][trc(2)][mat(2)][range(1)]
+        // ⇒ 命中的 "colrnclx" 起点就是 type，size 在其前 4 字节，字段在其后 8 字节。
+        int colr = IndexOfAscii(d, "colrnclx");
+        if (colr < 0) { Assert($"{tag}/含 colr(nclx)", false, "未找到 nclx 型 colr"); return; }
+        long boxStart = colr - 4;
+        uint boxSize = ReadU32BE(d, (int)boxStart);
+        Assert($"{tag}/colr 盒体长度 = 19（nclx 规范形状）", boxSize == 19,
+            $"size={boxSize}（字段按 16-bit 编码时应为 19；写成 1 字节/字段会是 16）");
+        if (boxSize != 19 || colr + 8 + 7 > d.Length) return;
+        int f = colr + 8;                                  // 跳过 'colr' 与 'nclx'
+        ushort prim = (ushort)((d[f] << 8) | d[f + 1]);
+        ushort trc = (ushort)((d[f + 2] << 8) | d[f + 3]);
+        ushort mat = (ushort)((d[f + 4] << 8) | d[f + 5]);
+        // 值域校验：这些码点若被按 8-bit 写出，高位会被当成下一个字段的低位 → 立刻落圈外
+        Assert($"{tag}/nclx 字段可解码为合法码点",
+            prim is 1 or 9 or 11 or 12 && trc is 13 or 16 && mat is 0 or 1 or 5 or 9,
+            $"prim={prim} trc={trc} matrix={mat} range={d[f + 6]}");
+    }
+
+    private static int IndexOfAscii(byte[] d, string needle)
+    {
+        var n = Encoding.ASCII.GetBytes(needle);
+        for (int i = 0; i + n.Length <= d.Length; i++)
+        {
+            int j = 0;
+            while (j < n.Length && d[i + j] == n[j]) j++;
+            if (j == n.Length) return i;
+        }
+        return -1;
     }
 
     // ═══════════════════════════════════════
@@ -270,19 +429,29 @@ public static partial class WgcAvifBackendTests
         return list;
     }
 
-    /// <summary>扫描 meta 内的 ispe 与 iloc。</summary>
+    /// <summary>
+    /// 扫描 meta 内的 ispe 与 iloc。
+    /// <para>2026-09-19：ispe 按规范嵌在 meta&gt;iprp&gt;ipco 里（生产写入见 IvfWriter.WriteAvif），
+    /// 只扫 meta 第一层永远读不到它 —— 上面那条 "meta 内解析到 ispe" 的断言正是在暴露这一点，
+    /// 所以这里必须能下沉进容器盒，断言才有意义（否则测的是解析器的盲区而不是容器）。</para>
+    /// </summary>
     private static void ScanMeta(byte[] d, Box meta, ref int? ispeW, ref int? ispeH,
         ref long ilocOffset, ref long ilocLength)
+        => ScanAvifBoxes(d, meta.Offset + meta.HeaderSize + 4, meta.Offset + meta.TotalSize, 0,
+            ref ispeW, ref ispeH, ref ilocOffset, ref ilocLength);
+
+    /// <summary>遍历 [from,to) 内的同级 box；遇容器盒（meta/iprp/ipco）下沉，最多 3 层。</summary>
+    private static void ScanAvifBoxes(byte[] d, long from, long to, int depth,
+        ref int? ispeW, ref int? ispeH, ref long ilocOffset, ref long ilocLength)
     {
-        long end = meta.Offset + meta.TotalSize;
-        long pos = meta.Offset + meta.HeaderSize + 4; // meta 是 FullBox
-        while (pos + 8 <= end)
+        long pos = from;
+        while (pos + 8 <= to)
         {
             uint size = ReadU32BE(d, (int)pos);
             string type = Encoding.ASCII.GetString(d, (int)pos + 4, 4);
-            if (size < 8 || pos + size > end) break;
+            if (size < 8 || pos + size > to) break;
 
-            if (type == "ispe" && pos + 20 <= end)
+            if (type == "ispe" && pos + 20 <= to)
             {
                 ispeW = (int)ReadU32BE(d, (int)pos + 12);
                 ispeH = (int)ReadU32BE(d, (int)pos + 16);
@@ -297,6 +466,13 @@ public static partial class WgcAvifBackendTests
                     ilocOffset = ReadU32BE(d, off);
                     ilocLength = ReadU32BE(d, off + 4);
                 }
+            }
+            else if (depth < 3 && type is "iprp" or "ipco" or "iref" or "meta")
+            {
+                // 容器盒：8 字节盒头之后就是子盒；meta 是 FullBox，还要再多 4 字节 version/flags
+                int extra = type is "meta" or "iref" ? 4 : 0;
+                ScanAvifBoxes(d, pos + 8 + extra, pos + size, depth + 1,
+                    ref ispeW, ref ispeH, ref ilocOffset, ref ilocLength);
             }
             pos += size;
         }
@@ -773,8 +949,11 @@ public static partial class WgcAvifBackendTests
     /// ① CsWinRT As&lt;T&gt;() ② RoGetActivationFactory + vtable ③ TryCreateFromWindowId。
     /// </para>
     /// <para>
-    /// ⚠ IGraphicsCaptureItemInterop 是**激活工厂接口**，不在 GraphicsCaptureItem 实例上，
-    /// 因此 As&lt;T&gt;() 通常失败（"Specified cast is not valid"），真正生效的是方法 ②。
+    /// ⚠ 曾经这里写着"As&lt;T&gt;() 通常失败（Specified cast is not valid），真正生效的是方法②"——
+    /// 那是**把症状当设计**。真相是生产代码把类 IID 顶替了 interop 接口 IID，于是方法①与方法②
+    /// **双双**恒 E_NOINTERFACE，两条路一条都没生效（2026-09-21 用 um/Windows.Graphics.Capture.Interop.h
+    /// 的 3628E81B-… 修好，实机对撞见 publish/probe-wgc-iid.ps1）。把这条留在这儿，是为了记住
+    /// "看起来像预期的失败"最容易被写成注释而不是被追下去。
     /// </para>
     /// </summary>
     private static GraphicsCaptureItem? CreateItemForMonitor(nint hmonitor)

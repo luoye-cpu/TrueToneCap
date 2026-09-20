@@ -1,0 +1,87 @@
+# TrueToneCap 发布与产物校验
+#
+# 为什么不放在 ci.yml 里:
+#   ci.yml 每次 push 都跑；而发布打包 + 全量产物校验要数分钟、产出数百 MB，
+#   放进 CI 会让每次提交都变慢并占满 runner 磁盘。发布是低频动作，
+#   单独一个 workflow、手动触发（workflow_dispatch）更合适。
+#
+# 为什么需要它 (P0-6):
+#   此前 CI 完全不产出、也不校验发布产物 —— AOT 裁剪、native dll、OCR 模型缺件、
+#   WinAppSDK/PRI/XAML 资源缺失等真实风险在 CI 上覆盖为 0，
+#   唯一防线是人工发版时的手工步骤。本 workflow 把这些变成自动检查。
+#
+# ⚠️ 与 ci.yml 一致，使用 self-hosted Windows X64 运行器：
+#   需要 .NET 11 preview SDK、Windows SDK 10.0.26100（编译着色器用 fxc）。
+#
+# ⚠️ 本 workflow 尚未在 GitHub Actions 上实跑过（首次运行请人工确认）。
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号（形如 0.3.4-beta）'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: [self-hosted, Windows, X64]
+    # self-hosted 运行器没有平台侧超时保护，必须自己设，否则卡住会长期占用 runner
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 发布打包
+        shell: pwsh
+        run: .\Publish.ps1 -Version '${{ inputs.version }}'
+
+      - name: 定位发布目录
+        id: locate
+        shell: pwsh
+        run: |
+          $dir = Get-ChildItem -Path publish -Directory -Filter 'TrueToneCap-v*' |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $dir) { throw '未找到发布目录（publish\TrueToneCap-v*）' }
+          "path=$($dir.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "发布目录: $($dir.FullName)"
+
+      - name: 校验发布包（清单 / 体积 / 版本资源 / native 探针）
+        shell: pwsh
+        run: |
+          .\scripts\verify-package.ps1 -PackageDir '${{ steps.locate.outputs.path }}' `
+                                       -ExpectedVersion '${{ inputs.version }}'
+
+      - name: 无头自测（真实启动主程序跑一遍编码链路）
+        # 这一条是 P0-6 的核心：前面的校验都不启动主程序，
+        # 只有 --selftest 会真正跑编码，能暴露"文件都在但一跑就崩"的问题。
+        shell: pwsh
+        run: |
+          $exe = Join-Path '${{ steps.locate.outputs.path }}' 'TrueToneCap.exe'
+          if (-not (Test-Path $exe)) { throw "未找到主程序: $exe" }
+          $out = Join-Path $env:RUNNER_TEMP 'ttc-selftest'
+          & $exe --selftest --out $out
+          $code = $LASTEXITCODE
+          $json = Join-Path $out 'selftest.json'
+          if (Test-Path $json) { Get-Content $json }
+          if ($code -ne 0) { throw "无头自测未通过（退出码 $code）—— 详见 selftest.json" }
+          Write-Host '无头自测通过'
+
+      - name: 打包
+        shell: pwsh
+        run: .\scripts\pack.ps1 -PackageDir '${{ steps.locate.outputs.path }}'
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrueToneCap-v${{ inputs.version }}
+          path: publish/TrueToneCap-v${{ inputs.version }}
+          if-no-files-found: error

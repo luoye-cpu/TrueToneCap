@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Tools/PngCheck.cs
 // PNG cICP + iCCP 双重声明实测验证 (--png-check)
 // 验证: 用真实管线 (PreparePixelsWithIcc + GetColorMetadata + ManagedPngEncoder)
@@ -23,9 +25,10 @@ public static class PngCheck
         {
             var settings = new EncodingSettings { ColorSpaceTag = tag };
             // 真实管线: 解析 System + 烘焙/嵌 ICC
-            var (pixels, icc) = CapturePipelineServiceBridge.PreparePixelsWithIcc(bgra, 16, 16, true, tag);
+            var (pixels, icc, targetTag) = CapturePipelineServiceBridge.PreparePixelsWithIcc(bgra, 16, 16, true, tag);
             if (icc is not null) settings.IccProfile = icc;
-            settings.ColorSpaceTag = ColorProfileProvider.ResolveColorSpaceTag(tag, false);
+            // ★ 声明取的是【同一份决定】给出的目标，不再在这里第二次解析下拉
+            settings.ColorSpaceTag = targetTag;
 
             var (metadataIcc, cicp) = FormatHelper.GetColorMetadata(settings);
             var path = Path.GetTempFileName() + ".png";
@@ -51,7 +54,12 @@ public static class PngCheck
         "DisplayP3" or "DCI_P3" => "[12,13,0,1] (P3 + sRGB)",
         "BT2020" => "[9,13,0,1] (BT.2020 + sRGB)",
         "sRGB" or "System" => "[1,13,0,1] (sRGB + sRGB)",
-        "AdobeRGB" => "[1,13,0,1]",
+        // ⚠️ 2026-09-14 实测修正: 此前期望 "[1,13,0,1]"，与实测输出（cICP 无）不符，
+        //    易被误读为缺陷。实际 H.273 cICP 的 primaries 枚举没有 Adobe RGB 码点
+        //    （1=BT.709/sRGB，9=BT.2020，12=P3），而 Adobe RGB(1998) 的 G 原色
+        //    (0.21,0.71) 与 BT.709 的 (0.30,0.60) 不同，映射为 1 会造成色彩误判。
+        //    正确行为是省略 cICP、改嵌 iCCP（PNG 规范下 iCCP 优先）。
+        "AdobeRGB" => "不适用 (H.273 无 AdobeRGB 码点, 仅 iCCP)",
         _ => "?"
     };
 
@@ -76,12 +84,29 @@ public static class PngCheck
 /// <summary>桥接 CapturePipelineService (App 项目, Tools 无法直接依赖)。</summary>
 public static class CapturePipelineServiceBridge
 {
-    public static (byte[] pixels, byte[]? icc) PreparePixelsWithIcc(byte[] bgra, int w, int h, bool bake, string tag)
+    /// <summary>
+    /// 与 App 层同名函数<b>共用同一份色彩决定</b>（Core 的 <c>ColorDecision</c>）。
+    /// <para>旧写法在这里另抄一遍简化规则（"非 ACM、无显示器 ICC → 嵌标准 ICC (不烘焙)"），
+    /// 于是这个自称"真实管线"的自检测的其实不是真实管线 —— 正是 §41.6 说的"没有那一个点"的第五份。
+    /// 现在解析与收口只在 ColorDecision 里做一次，这里只把那份决定翻译成像素与 ICC。</para>
+    /// <para><c>source=null, systemAcm=false</c> 与本工具旧语义逐位一致（旧代码就把 acm 硬编码成 false），
+    /// 且不触碰任何真实显示器 ⇒ 保持 headless 可跑。</para>
+    /// </summary>
+    public static (byte[] pixels, byte[]? icc, string targetTag) PreparePixelsWithIcc(byte[] bgra, int w, int h, bool bake, string tag)
     {
-        // 简化: 非 ACM、无显示器 ICC → 嵌标准 ICC (不烘焙)
-        var resolved = ColorProfileProvider.ResolveColorSpaceTag(tag, false, false);
-        if (resolved is "sRGB") return (bgra, null);
-        var targetCs = ColorProfileProvider.MapColorSpaceTag(resolved);
-        return (bgra, ColorProfileProvider.GetStandardIccProfile(targetCs));
+        var decision = TrueToneCap.Core.Capture.ColorDecision.Build(null, tag, false, false);
+        if (!bake || decision.TargetTag is "sRGB") return (bgra, null, decision.TargetTag);
+        var targetCs = ColorProfileProvider.MapColorSpaceTag(decision.TargetTag);
+        // 源==目标 ⇒ 像素本就在目标色域，只嵌配套 ICC、不搬动
+        if (decision.SourceTag == decision.TargetTag)
+            return (bgra, ColorProfileProvider.GetStandardIccProfile(targetCs), decision.TargetTag);
+        var srcIcc = ColorProfileProvider.GetStandardIccProfile(decision.SourceTag);
+        if (srcIcc is null)
+            return (bgra, ColorProfileProvider.GetStandardIccProfile(targetCs), decision.TargetTag);
+        var (baked, targetIcc) = ColorProfileProvider.BakeIccToTarget(bgra, w, h, srcIcc, targetCs);
+        // 烘焙失败 ⇒ 像素没动，声明跟着退到源标签（App 层的 D-1 同一取向：声明必须说像素的真话）
+        return baked is null
+            ? (bgra, srcIcc, decision.SourceTag)
+            : (baked, targetIcc, decision.TargetTag);
     }
 }

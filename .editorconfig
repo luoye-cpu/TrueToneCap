@@ -1,0 +1,92 @@
+# TrueToneCap/.editorconfig
+# 2026-09-14 建立。
+#
+# 目的: 让 IDE 与 `dotnet format` 有统一基线，避免格式噪声混入功能改动。
+#
+# ⚠️ 刻意把所有严重级别设为 suggestion / silent:
+#    仓库已启用 TreatWarningsAsErrors=true。虽然 EnforceCodeStyleInBuild 默认 false
+#    （风格规则默认不影响构建），但一旦有人打开它，error 级风格规则会直接打断构建。
+#    故此处只做"提示"，不设 error。需要强制时再单独开 EnforceCodeStyleInBuild 并逐条评估。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# 文档与 Markdown 保留行尾空格（Markdown 的换行语义依赖两个尾空格）
+[*.md]
+trim_trailing_whitespace = false
+
+# 项目文件 / 配置统一 2 空格（与既有 JSON、props 风格一致）
+[*.{json,csproj,props,targets,config,nuspec}]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+# ── C# ──
+[*.cs]
+indent_size = 4
+
+# 换行与括号：Allman 风格（大括号独占一行）—— 与现有代码一致
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_new_line_before_members_in_object_initializers = true
+csharp_new_line_before_members_in_anonymous_types = true
+csharp_new_line_between_query_expression_clauses = true
+
+# 命名空间：文件作用域（现有代码均为 `namespace X;`）
+csharp_style_namespace_declarations = file_scoped:suggestion
+
+# using：置于命名空间外、System 优先
+csharp_using_directive_placement = outside_namespace:suggestion
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = false
+
+# var 使用：内置类型显式，其余用 var
+csharp_style_var_for_built_in_types = false:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+
+# 表达式级偏好
+csharp_style_expression_bodied_methods = when_on_single_line:suggestion
+csharp_style_expression_bodied_properties = true:suggestion
+csharp_style_expression_bodied_accessors = true:suggestion
+csharp_style_pattern_matching_over_is_with_cast_check = true:suggestion
+csharp_style_pattern_matching_over_as_with_null_check = true:suggestion
+csharp_prefer_braces = when_multiline:suggestion
+csharp_prefer_simple_using_statement = true:suggestion
+
+# 命名：私有字段 _camelCase；常量 PascalCase（现有代码两种都有，故仅提示）
+dotnet_naming_rule.private_fields_underscore.severity = suggestion
+dotnet_naming_rule.private_fields_underscore.symbols = private_fields
+dotnet_naming_rule.private_fields_underscore.style = underscore_camel_case
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+dotnet_naming_style.underscore_camel_case.capitalization = camel_case
+dotnet_naming_style.underscore_camel_case.required_prefix = _
+
+# 空格
+csharp_space_after_cast = false
+csharp_space_after_keywords_in_control_flow_statements = true
+csharp_space_between_method_declaration_parameter_list_parentheses = false
+csharp_space_between_method_call_parameter_list_parentheses = false
+
+# 换行
+csharp_preserve_single_line_statements = false
+csharp_preserve_single_line_blocks = true
+
+# ── PowerShell ──
+[*.ps1]
+indent_size = 4
+
+# ── HLSL ──
+[*.hlsl]
+indent_size = 4

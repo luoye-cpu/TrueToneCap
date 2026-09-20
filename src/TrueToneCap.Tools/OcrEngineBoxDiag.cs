@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrEngineBoxDiag.cs — 反射引擎内部，打印 RunDetection 真实框结果
 // 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-ebox <modelDir>
 using System.Drawing;

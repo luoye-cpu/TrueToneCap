@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrRecDiag.cs — rec 模型单独诊断：构造已知文字条，检查解码输出
 // 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-rec <modelDir>
 using Microsoft.ML.OnnxRuntime;

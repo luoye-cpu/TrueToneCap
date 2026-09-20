@@ -1,29 +1,51 @@
 # 仓库规范审查报告 (2026-08-25)
 
+> ⚠️ **状态更新（2026-09-14）**：本报告的多个发现**已在后续处理完毕**，
+> 逐一标注于各条目下方。请以**标注后的状态**为准，勿按原文当作待办重复执行。
+>
+> 处理记录详见 `docs/git-tracking-audit-2026-09-14.md`。
+
 ---
 
 ## 🔴 发现的问题
 
 ### 1. OCR 模型文件四份完全相同的副本被 git 跟踪（~265MB 浪费）
 
+> ✅ **已解决（2026-09-14）**
+> - `models_fp16/`、`models_fp32/`：已删除
+> - `publish/PLAN/models/`：已在 commit `42cc8d8` 解除跟踪（与 `App/Models/` 逐字节相同）
+> - **git 跟踪中现仅剩 `src/TrueToneCap.App/Models/` 一份**（det 29.7MB + rec 36.6MB）
+> - 遗留问题：历史 blob 中含两代模型（FP32 73.1+59.2MB / FP16 36.6+29.7MB），
+>   旧代占 ~132MB，需 `git filter-repo` 重写历史才能释放 —— 见 `git-tracking-audit` 报告
+
 **实测确认**：以下 4 个文件 MD5 完全相同（每个 det 29.7MB + rec 36.6MB）：
 
 ```
-src/TrueToneCap.App/Models/PP-OCRv6_medium_det.onnx     (29.7MB)
-publish/PLAN/models/PP-OCRv6_medium_det.onnx            (29.7MB) ← 重复
-publish/PLAN/models_fp16/PP-OCRv6_medium_det.onnx       (29.7MB) ← 重复
-publish/PLAN/models_fp32/PP-OCRv6_medium_det.onnx       (29.7MB) ← 重复
+src/TrueToneCap.App/Models/PP-OCRv6_medium_det.onnx     (29.7MB)  ← 现唯一保留
+publish/PLAN/models/PP-OCRv6_medium_det.onnx            (29.7MB)  ← 已解除跟踪
+publish/PLAN/models_fp16/PP-OCRv6_medium_det.onnx       (29.7MB)  ← 已删除
+publish/PLAN/models_fp32/PP-OCRv6_medium_det.onnx       (29.7MB)  ← 已删除
 (rec 同样 ×4)
 ```
 
 更严重的问题：**`models_fp16` 目录里放的是 FP32 文件**（与 `models_fp32` 完全相同）— 目录名与内容不符，误导性极强。而 `App/Models` 中实际使用的是 FP16 量化模型？需要核实 — 若 App/Models 也是 FP32，则 FP16 模型根本不在仓库中。
 
+> ✅ **FP16 疑问已澄清（2026-09-14）**：**在库模型确为 FP16**。
+> 实测对比：
+> - `official_models/onnx_fp32/`（FP32 原始）：det 59.2MB / rec 73.0MB
+> - `src/TrueToneCap.App/Models/`（在库）：det 29.7MB / rec 36.6MB ← 约为前者一半，符合 FP16 量化特征
+>
+> 转换工具为 `scripts/onnx_fp16_quantize.py`。`publish/PACKAGE.md` 中标注的
+> "~59MB / ~73MB" 系误用 FP32 体积，**已于 2026-09-14 更正**。
+
 **建议**：
-- `models_fp16/`、`models_fp32/` 二选一保留（或都删，只留 `models/`）
-- 长期方案：模型不入库，用 `download_models.ps1` 脚本按需下载（脚本已存在！），配合 Git LFS 或发布时下载
-- 短期：删除重复的 `models_fp16`、`models_fp32` 两目录（省 ~133MB 仓库体积）
+- ✅ 已做：`models_fp16/`、`models_fp32/` 删除；`publish/PLAN/models/` 解除跟踪
+- 📋 待做：历史 blob 重写（见 `git-tracking-audit` 报告）
+- 📋 长期：模型不入库，用 `download_models.ps1` 脚本按需下载（脚本已存在！）
 
 ### 2. `.gitignore` 第 94 行有可疑条目：单独一个 `0`
+
+> ✅ **已不存在（2026-09-14 核实）**：当前 `.gitignore` 共 147 行，已无单独 `0` 条目。
 
 ```
 # ── Temp / Accidental files ──
@@ -63,7 +85,7 @@ git status 显示 `M src/TrueToneCap.App/Services/HDRPreviewWindow.cs`，但本�
 
 | 检查项 | 结果 |
 |--------|------|
-| .gitignore 完整性 | ✅ 126 行，覆盖 bin/obj/publish/log/crash/签名密钥等 |
+| .gitignore 完整性 | ✅ ~~126 行~~ → **147 行**（2026-09-14），覆盖 bin/obj/publish/log/crash/签名密钥等 |
 | tests/manual 隔离 | ✅ 55 个调试脚本全部在 tests/manual/（gitignore 内，不上传）|
 | scripts 目录 | ✅ 仅 2 个正式工具（migrate-net11.ps1 / onnx_fp16_quantize.py）|
 | 无敏感文件 | ✅ 无 *.pfx/*.snk/API Key 文件（glm_* 含 Key 的教训已在记忆中）|
@@ -77,14 +99,21 @@ git status 显示 `M src/TrueToneCap.App/Services/HDRPreviewWindow.cs`，但本�
 
 ## 📋 建议行动清单
 
-| 优先 | 行动 | 效果 |
+| 优先 | 行动 | 状态 |
 |------|------|------|
-| 🔴 | 删除 `publish/PLAN/models_fp16/` 和 `models_fp32/` 重复目录 | 省 ~133MB |
-| 🔴 | 核实 FP16 模型实际版本; 若仓库中全是 FP32, 更新 download_models.ps1 说明 | 消除目录名误导 |
-| 🟡 | Publish.ps1 加工具链哈希校验 (Resources vs PLAN/tools) | 防同步漂移 |
-| 🟡 | 提交前整理 docs/ 8 个文档 → 合并为 3-4 个主题文档 | 避免文档碎片化 |
-| 🟡 | `git diff HDRPreviewWindow.cs` 核实是否行尾噪音 | 保持提交干净 |
-| 🟢 | 清理 .gitignore L94 的 `0` 条目 | 代码卫生 |
-| 🟢 | 基准输出文件名加时间戳规范 | 可追溯性 |
+| 🔴 | 删除 `publish/PLAN/models_fp16/` 和 `models_fp32/` 重复目录 | ✅ 已完成 |
+| 🔴 | 核实 FP16 模型实际版本 | ✅ 已澄清：在库为 FP16（29.7/36.6MB） |
+| 🔴 | 解除 `publish/PLAN/models/` 重复跟踪 | ✅ 已完成（commit `42cc8d8`） |
+| 🔴 | 解除 `publish/PLAN/tools/` 重复跟踪 | 📋 **待做**（9 个二进制与 Core/Resources 逐字节相同，27MB） |
+| 🔴 | 历史 blob 重写（释放 ~132MB 旧代模型） | 📋 待评估（会改 SHA，需确认协作影响） |
+| 🟡 | Publish.ps1 加工具链哈希校验 (Resources vs PLAN/tools) | ⚠️ **已无必要** —— 已改为单一事实源（Core/Resources），不再有双份同步 |
+| 🟡 | 提交前整理 docs/ 8 个文档 → 合并为 3-4 个主题文档 | 📋 待做（现已有 17 个文档，含 5 个 2026-09-14 新增） |
+| 🟡 | `git diff HDRPreviewWindow.cs` 核实是否行尾噪音 | 📋 待核实（文件仍存在） |
+| 🟢 | 清理 .gitignore L94 的 `0` 条目 | ✅ 已不存在 |
+| 🟢 | 基准输出文件名加时间戳规范 | 📋 待做 |
 
 **长期建议**：模型文件迁移到 Git LFS 或纯下载方案（download_models.ps1 已具备雏形），仓库体积可从 168MB 降至 <40MB。
+
+> **2026-09-14 更新**：仓库实际仍为 **170 MB**（即使已解除 models 跟踪），
+> 因为**历史 blob 未回收**。解除 `publish/PLAN/tools/` + 一次历史重写后可达 ~40MB 目标。
+> 详见 `docs/git-tracking-audit-2026-09-14.md`。

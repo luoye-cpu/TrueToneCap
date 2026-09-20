@@ -1,6 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/MftEncoderNative.cs
 // Windows Media Foundation MFT 编码器 — 系统内置 AV1/HEVC 硬件编码器（非 Intel QSV 专属）
 // Windows 11 24H2+ 内置 AV1/HEVC MFT
+//
+// ═══ 2026-09-19：本路径是 QsvEncoderNative（oneVPL/MFX P/Invoke）的替代者，那条路的教训移到这里 ═══
+// 那条路留下的唯一价值是一条判据：**自造第三方原生结构体布局 = 静默失败**。
+// 原实现把 mfxVideoParam / mfxInfoMFX / mfxFrameInfo / mfxFrameSurface1 / mfxFrameData / mfxBitstream
+// 全部凭猜测重写，忽略官方结构里的 reserved[] 前置字段与 union 布局 ⇒ 参数落进保留区，
+// MFXVideoENCODE_Init 收到的 CodecId ≈ 0；另有 TargetKbps 用 ushort 承载 4K 码率必然溢出、
+// EncodeFrameAsync 缺 drain 循环。这类错误不报错、不改返回值，只能靠"读回产物"才发现。
+// ⇒ 本文件因此只走微软自己导出的扁平函数（MFCreate* / MFSet* / IMFTransform_*）+ 官方 GUID，
+//   不手写任何第三方结构体字段布局；新增属性请用 MFSet* 配官方 GUID 常量，别在此处造结构体。
+//   "QSV" 这个名字依然成立：Intel 显卡上 MFT 会把 AV1 编码调度到 Quick Sync。
 
 using System.Runtime.InteropServices;
 using Vortice.Direct3D11;
@@ -103,7 +115,14 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
         MFCreateMediaType(&outType);
         MFSetGUID(outType, MF_MT_SUBTYPE, av1 ? new Guid(0x31305641, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71) : MFVideoFormat_NV12);
         MFSetUINT64(outType, MF_MT_FRAME_SIZE, frameSize);
-        MFSetUINT32(outType, MF_MT_AVG_BITRATE, 10_000_000); // 10 Mbps 高质量
+        // ═══ 2026-09-19：这一行恒 10 Mbps ⇒ 质量滑块在 MFT/QSV 路径上【完全不生效】═══
+        // 为什么恒：ConfigureMft 拿不到任何质量参数 —— 调用方 MftAvifEncode.EncodeAsync 只把
+        // 像素交给本类，crf 仅用在失败后回退 libaom 的那一次，所以这里只能写死一个常量。
+        // 旧注释"10 Mbps 高质量"没有任何判据（码率与画质无关、也没人核对过产物），保留常量、
+        // 改掉说法，并在能力表的 Qsv 显示名里如实标注"固定 10 Mbps 码率，质量滑块不适用"。
+        // 何时该改成按 crf 推导：先把 crf 透传进来（构造函数或 Encode 形参），再按
+        // NativeAvifEncoder.CrfToQuality 那条线性关系折算目标码率；接通后同步删掉显示名里的限制。
+        MFSetUINT32(outType, MF_MT_AVG_BITRATE, 10_000_000);
 
         SetOutputType(0, outType, 0);
         Marshal.Release(outType);

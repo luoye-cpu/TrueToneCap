@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/IccStore.cs
 // 内嵌标准 ICC Profile 生成器 — 替代 ImageMagick.ColorProfiles
 // 使用 IccProfileBuilder 生成所有标准色彩空间 ICC

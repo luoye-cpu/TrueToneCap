@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrPreprocessDiag.cs — det 输入预处理变体对比：找出模型期望的正确预处理
 // 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-pre <modelDir>
 using Microsoft.ML.OnnxRuntime;

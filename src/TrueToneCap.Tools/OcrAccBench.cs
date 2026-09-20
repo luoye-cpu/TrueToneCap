@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrAccBench.cs — OCR 准确度/可靠性基准测试
 // 测试: 不同字体大小 / 不同语言 / 手写体模拟
 // 由 FormatBench --ocr-bench 分派调用
-// 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-bench <modelDir>
+// 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-bench <modelDir> [gpu]
+//       默认量 CPU 路（与历史基线可比）；传 gpu 量生产默认的 DirectML 路。汇总会标明引擎。
 
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -33,6 +36,16 @@ public static class OcrBench
         foreach (var (name, eng) in engines)
             Console.WriteLine($"{name}: available={eng.Info.IsAvailable}");
 
+        // ⚠ 读数必须标明是哪个引擎给出的：生产默认是 DirectML GPU，而本基准历史上一直用 CPU
+        //   （"优先 CPU 引擎 (验证 DirectML 图优化问题的规避)"），两者准确率与耗时都不同。
+        //   不写引擎的"85.0%"会被当成产线精度引用 —— 那是把两把尺子的读数混用。
+        //   第三参数传 gpu 可切到 DirectML 复量一遍。
+        bool preferGpu = args.Skip(1).Any(a => a.Equals("gpu", StringComparison.OrdinalIgnoreCase));
+        var chosenPair = engines.FirstOrDefault(e => e.Name == (preferGpu ? "GPU(DirectML)" : "CPU"));
+        if (chosenPair.Engine is null) chosenPair = engines[0];
+        Console.WriteLine($"本次读数来自引擎: {chosenPair.Name}" +
+            (preferGpu ? "" : "（默认；要看生产默认的 DirectML 路请再传参数 gpu）") + "\n");
+
         var testCases = new List<(string Name, string[] Lines, bool Handwritten)>
         {
             ("英文大写", ["HELLO WORLD", "QUICK BROWN FOX", "OCR TEST 123"], false),
@@ -47,6 +60,7 @@ public static class OcrBench
         int[] fontSizes = [12, 16, 24, 36, 48];
 
         double totalCharCorrect = 0, totalCharCount = 0;
+        double totalCharHit = 0, totalCharOut = 0, totalExtraChars = 0;
         int totalLineCorrect = 0, totalLineCount = 0;
 
         foreach (var (name, lines, handwritten) in testCases)
@@ -59,27 +73,32 @@ public static class OcrBench
                 var bgra = BitmapToBgra(bmp);
                 bmp.Dispose();
 
-                // 优先 CPU 引擎 (验证 DirectML 图优化问题的规避)
-                var cpuEng = engines.FirstOrDefault(e => e.Name == "CPU");
-                var engine = cpuEng.Name is not null ? cpuEng.Engine : engines[0].Engine;
-                var result = engine.RecognizeAsync(bgra, imgW, imgH, "zh-en").GetAwaiter().GetResult();
+                var result = chosenPair.Engine.RecognizeAsync(bgra, imgW, imgH, "zh-en").GetAwaiter().GetResult();
 
                 var ocrText = result.Text ?? "";
                 var (cc, cn, lc, ln) = CalcAccuracy(ocrText, lines);
                 double acc = cn > 0 ? (double)cc / cn : 0;
+                // 召回(cc/cn) 与 精度(cc/输出字符数) 是两把尺子：旧实现只报前者，
+                // 于是"多吐一整段幻觉文字"照样能拿 100%。
+                int outChars = ocrText.Replace(" ", "").Replace("\r", "").Replace("\n", "").Replace("\t", "").Length;
+                double prec = outChars > 0 ? (double)cc / outChars : (cn == 0 ? 1.0 : 0.0);
+                int extraChars = Math.Max(0, outChars - cn);   // 只有这个才是"多吐"，精度下降不代表它
 
                 totalCharCorrect += cc; totalCharCount += cn;
                 totalLineCorrect += lc; totalLineCount += ln;
+                totalCharHit += cc; totalCharOut += outChars; totalExtraChars += extraChars;
 
                 if (acc > bestAcc) { bestAcc = acc; bestSize = size; }
 
-                Console.WriteLine($"  {size}px: 字符={cc}/{cn} ({acc:P1}) 行={lc}/{ln} | 识别: {(ocrText.Length > 60 ? ocrText[..60] + "..." : ocrText)}");
+                Console.WriteLine($"  {size}px: 召回={cc}/{cn} ({acc:P1}) 精度={cc}/{outChars} ({prec:P1}) 行={lc}/{ln}{(extraChars > 0 ? $" 多余={extraChars}" : "")} | 识别: {(ocrText.Length > 60 ? ocrText[..60] + "..." : ocrText)}");
             }
             Console.WriteLine($"  ★ 最佳: {bestSize}px → {bestAcc:P1}");
         }
 
-        Console.WriteLine($"\n════════ 汇总 ════════");
-        Console.WriteLine($"总字符准确率: {totalCharCorrect}/{totalCharCount} ({(totalCharCount > 0 ? (double)totalCharCorrect / totalCharCount : 0):P1})");
+        Console.WriteLine($"\n════════ 汇总（引擎: {chosenPair.Name}）════════");
+        Console.WriteLine($"总召回率: {totalCharCorrect}/{totalCharCount} ({(totalCharCount > 0 ? (double)totalCharCorrect / totalCharCount : 0):P1})");
+        Console.WriteLine($"总精度: {totalCharHit}/{totalCharOut} ({(totalCharOut > 0 ? (double)totalCharHit / totalCharOut : 0):P1})  ← 输出里有多少是真命中的");
+        Console.WriteLine($"多余字符合计: {totalExtraChars:0}  ← 只有这一项才代表\"多吐/幻觉\"（精度下降也可能只来自替换与漏字）");
         Console.WriteLine($"总行准确率: {totalLineCorrect}/{totalLineCount} ({(totalLineCount > 0 ? (double)totalLineCorrect / totalLineCount : 0):P1})");
 
         foreach (var (_, eng) in engines) eng.Dispose();

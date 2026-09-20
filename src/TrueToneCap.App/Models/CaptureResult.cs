@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Models/CaptureResult.cs
 // 统一捕获结果 DTO — 封装 WGC 捕获的 HDR/SDR 数据
 

@@ -1,8 +1,39 @@
-# TrueToneCap — 架构设计文档 (v0.3.1-beta)
+# TrueToneCap — 架构设计文档
 
-> **目标系统**：Windows 11 24H2+ | **技术栈**：C# 14 / WinUI 3 / .NET 11 / WindowsAppSDK 2.3.1 / Vortice.D3D11
+> ⚠️ **本文部分内容已过时（2026-09-14 核实），阅读时请注意：**
 >
-> **管线审查日期**：2026-08-01 | **总测试**：192/192 ✅ 100%
+> | 项 | 文中标注 | 实际 |
+> |---|---------|------|
+> | 版本 | `v0.3.1-beta` | **v0.3.4-beta** |
+> | WindowsAppSDK | `2.3.1` | **2.4.0** |
+> | 测试总数 | `192/192` | **373 项断言 / 8 个套件**（2026-09-14 实测通过；<br>`roadmap-v0.4.md` 的 `318` 亦不准确） |
+> | 第 1 节项目结构 | — | **6 处文件引用已失效**（见下表，已逐条标注去向） |
+> | 第 7 节保存路径 | `SilentCaptureAllAsync` | 现为 `SilentCapture()`（`MainWindow.xaml.cs:823`） |
+>
+> **第 1 节项目结构树中以下文件当前不存在**（2026-09-14 逐条核实去向）：
+>
+> | 文中引用 | 现状 | 现在的承担者 |
+> |---|---|---|
+> | `Directory.Build.targets` | 已改名/拆分 | `Directory.Build.props` + `Directory.Packages.props` |
+> | `Processing/GpuEffectProcessor.cs` | **类已删除** | `Processing/GpuToneMapper.cs`（`ShaderLoader.cs` 注释里仍留着旧类名） |
+> | `ColorManagement/GamutMapper.cs` | **类已删除** | 色域映射逻辑上移到 App 层（`MainWindow.ColorManagement.cs` 等） |
+> | `Encoding/ManagedJpegEncoder.cs` | **类已删除** | `JpegLiNative.cs`（cjpegli.exe）+ `JpegGainMapEncoder.cs` |
+> | `Encoding/NvencAvifBackend.cs` | 文件删除但**类仍在** | 已合并进 `Encoding/FormatEncoders.cs:385` |
+> | `Shaders/MosaicEffect.hlsl` | **文件已删除** | 马赛克改为 CPU 光栅化（`Services/AnnotationRasterizer.cs`） |
+>
+> **文档原未列出、当前确实存在**（已在下方结构树中补入 `ShaderLoader.cs`、`FormatEncoders.cs`、
+> `OverlayComposite.hlsl`、两个 `.props`；**仍未补入**的有）：
+> `Encoding/IccStore.cs`、`Encoding/NativeEncoderGuard.cs`、
+> `Encoding/ManagedBmpEncoder.cs`、`Encoding/ManagedTiffEncoder.cs`、
+> `Encoding/AvifHardwareProbe.cs`、`Encoding/GpuCapability.cs`、`src/*/packages.lock.json`。
+>
+> **结构树中带 `✗` 前缀的条目表示「该文件已不存在」**，其后注明现在的承担者，勿再按原名查找。
+>
+> 其余章节（管线流程、色彩管理、编码架构）经抽查仍与实际代码一致，可继续参考。
+
+> **目标系统**：Windows 11 24H2+ | **技术栈**：C# 14 / WinUI 3 / .NET 11 / WindowsAppSDK 2.4.0 / Vortice.D3D11
+>
+> **管线审查日期**：2026-08-01（内容基准 v0.3.1-beta）| **总测试**：192/192 ✅ 100%（待核实）
 >
 
 ---
@@ -50,7 +81,9 @@
 │          ├─ PNG (托管)     8/10/12/16-bit  ICC/CICP 共存                    │
 │          ├─ JPEG LI (jpegli) 8-bit  butteraugli 0.5-3.0                    │
 │          ├─ JPEG XL (JxlNet) 8/10/12-bit  HDR: PQ 16-bit                  │
-│          ├─ AVIF (MFT>NVENC>QSV>libaom) 8/10/12-bit  HDR: PNG 中转         │
+│          ├─ AVIF (NVENC>Qsv(=系统MFT)>SVT-AV1>libaom>avifenc) 8/10-bit     │
+│          │    ^ 2026-09-20 更正：原写 "MFT>NVENC>QSV>libaom" 顺序与成员都不对；  │
+│          │      Auto 还先按色度过滤（420⇒硬件，422/444⇒libaom），HDR 走 Y4M/PNG 中转 │
 │          │  └─ NVENC GPU 纹理直通路径 (D3D11→NVENC, 跳过 CPU 回读)         │
 │          ├─ WebP (libwebp/cwebp) 8-bit  回退→PNG                           │
 │          ├─ TIFF (托管)    HDR: 16-bit PQ                                  │
@@ -108,7 +141,9 @@ HDR→SDR 回退路径 (编码器不支持 HDR):
 ```
 TrueToneCap/
 ├── TrueToneCap.slnx                      # 解决方案（slx 格式）
-├── Directory.Build.targets               # SDK 10 兼容修复（PRI 生成禁用）
+├── Directory.Build.props                 # 全仓库公共 MSBuild 属性（唯一声明处）
+├── Directory.Packages.props              # NuGet CPM：依赖版本唯一声明处
+│                                         # （原 Directory.Build.targets 已拆分为以上两个 .props）
 ├── Publish.ps1                           # 发布脚本
 ├── docs/
 │   └── architecture-design.md            # 本文件
@@ -120,7 +155,8 @@ TrueToneCap/
     │   │   └── DisplayInfo.cs            # 显示器枚举 + HDR 检测
     │   ├── Processing/
     │   │   ├── GpuToneMapper.cs          # GPU 色调映射（HLSL + D3D11）
-    │   │   ├── GpuEffectProcessor.cs     # GPU 后处理（马赛克等）
+    │   │   ├── ShaderLoader.cs           # CSO 加载（消除 Gpu* 重复加载代码）
+    │   │   ✗ GpuEffectProcessor.cs       # 【已移除】GPU 后处理由 GpuToneMapper.cs 承担
     │   │   └── ToneMapper.cs             # CPU 色调映射（Reinhard/Hable/ACES）
     │   ├── Encoding/
     │   │   ├── ImageEncoder.cs           # 编码器抽象 + EncodingSettings
@@ -131,20 +167,20 @@ TrueToneCap/
     │   │   ├── NativeAvifEncoder.cs      # AVIF P/Invoke (avifenc)
     │   │   ├── NativeWebPEncoder.cs      # WebP P/Invoke (libwebp)
     │   │   ├── ManagedPngEncoder.cs      # 托管 PNG 编码器
-    │   │   ├── ManagedJpegEncoder.cs     # 托管 JPEG 编码器 (回退)
+    │   │   ✗ ManagedJpegEncoder.cs       # 【已移除】JPEG 现由 JpegLiNative.cs (cjpegli) 承担
     │   │   ├── GpuCapability.cs          # GPU 硬件编码器检测
     │   │   ├── AvifHardwareProbe.cs      # AVIF 硬件探测
     │   │   ├── NvEncoderNative.cs        # NVENC P/Invoke
-    │   │   ├── NvencAvifBackend.cs       # NVENC AVIF 后端 (GPU 纹理直通)
-    │   │   ├── MftEncoderNative.cs       # MFT 编码器
-    │   │   └── QsvEncoderNative.cs       # QSV P/Invoke
+    │   │   ├── FormatEncoders.cs         # 编码器注册表 + NvencAvifBackend 等实现
+    │   │   ✗ NvencAvifBackend.cs         # 【已合并且改名】类仍在，位于 FormatEncoders.cs:385
+    │   │   └── MftEncoderNative.cs       # MFT 编码器（QSV/硬件 AV1 走系统 MFT；原 QsvEncoderNative.cs 已于 2026-09-19 删除：IsAvailable 恒 false、零调用方）
     │   ├── Annotation/
     │   │   ├── AnnotationLayer.cs        # 8 种标注图层
     │   │   ├── AnnotationManager.cs      # 命令模式撤销/重做
     │   │   └── Shapes/                   # 具体形状实现
     │   ├── ColorManagement/
     │   │   ├── ColorProfileProvider.cs   # WCS ICC 获取 + sRGB 内置 + ColorSpaceConverter
-    │   │   └── GamutMapper.cs            # ACES 色域缩限
+    │   │   ✗ GamutMapper.cs              # 【已移除】色域映射上移至 App 层 MainWindow.ColorManagement.cs
     │   ├── Metadata/
     │   │   └── MetadataCollector.cs      # 前台窗口/光标/显示器元数据
     │   ├── Detection/
@@ -184,7 +220,8 @@ TrueToneCap/
     │   ├── Shaders/
     │   │   ├── ToneMapping.hlsl          # 色调映射 PS
     │   │   ├── FullscreenVS.hlsl         # 全屏三角形 VS
-    │   │   ├── MosaicEffect.hlsl         # 马赛克 PS
+    │   │   ├── OverlayComposite.hlsl     # 覆盖层合成 PS（文档中原本缺失此条）
+    │   │   ✗ MosaicEffect.hlsl           # 【已移除】马赛克改由 CPU 光栅化 AnnotationRasterizer.cs
     │   │   └── CompileShaders.ps1        # dxc 编译脚本
     │   └── TrueToneCap.App.csproj
     ├── TrueToneCap.Test/                 # 单元测试
@@ -269,7 +306,8 @@ CaptureMonitorAsync(config)
 |------|------|------|
 | `FullscreenVS.hlsl` | vs_6_0 | SV_VertexID 全屏三角形（无 VB / IB） |
 | `ToneMapping.hlsl` | ps_6_0 | Reinhard/Hable 色调映射 + sRGB gamma |
-| `MosaicEffect.hlsl` | ps_6_0 | 马赛克像素化 |
+| `OverlayComposite.hlsl` | ps_6_0 | 覆盖层合成（文档原先漏列） |
+| ~~`MosaicEffect.hlsl`~~ | ps_6_0 | **已移除** —— 马赛克改由 CPU 光栅化 |
 
 编译：`CompileShaders.ps1`（需要 Windows SDK dxc.exe）
 
@@ -374,10 +412,10 @@ HDR 关闭 + sRGB:
 | 格式 | 后端 | HDR | 质量参数 | 色度控制 | 位深 | 备注 |
 |------|------|-----|---------|---------|------|------|
 | PNG | 托管编码器 | ✅ | 无损 | ✅ (444) | 8/10/12/16 | ICC/CICP 共存 |
-| JPEG LI | jpegli P/Invoke | ❌ | butteraugli 0.5-3.0 | ✅ 420/422/444 | 8 | 回退→ManagedJpegEncoder |
+| JPEG LI | jpegli P/Invoke | ❌ | butteraugli 0.5-3.0 | ✅ 420/422/444 | 8 | `JpegLiNative`；<br>原「回退→ManagedJpegEncoder」已失效，该类已移除 |
 | JPEG Gain Map | jpegli + 增益图 | ✅ | butteraugli 距离 | ❌ | 8 | HDR: 增益比+ICC 嵌入 |
 | JPEG XL | JxlNet | ✅ | butteraugli 0.1-4.0 | ❌ (API 内部) | 8/10/12 | HDR: PQ 16-bit |
-| AVIF | MFT>NVENC>QSV>libaom | ✅ | CRF 0-63 | ✅ 420/422/444 | 8/10/12 | HDR: PNG 中转 |
+| AVIF | NVENC > Qsv(=系统 MFT) > SVT-AV1 > libaom > avifenc（Auto 先按色度过滤：420⇒硬件、422/444⇒libaom） | ✅ | CRF 0-63 | ✅ 420/422/444 | 8/10（硬件固定 10-bit；12-bit 从未实现） | HDR: PNG/Y4M 中转 |
 | WebP | libwebp/cwebp | ❌ | 质量 50-100 | ❌ (简单 API) | 8 | 回退→PNG |
 | TIFF | 托管编码器 | ✅ | 无损 | ❌ | 8/16 | HDR: 16-bit PQ |
 | BMP | 托管编码器 | ❌ | 无损 | ❌ | 8 | — |
@@ -456,10 +494,11 @@ scRGB float[] → LinearToPQ (ST.2084) → ushort[] PQ16 → RGBA16→BGRA16 →
 | # | 方法 | 触发方式 | 特点 |
 |---|------|---------|------|
 | 1 | `EncodeAndSaveAsync` | 选区确认 | 委托 CapturePipelineService，完整 ICC + 编码 |
-| 2 | `SilentCaptureAllAsync` | 静默热键 | 全桌面，右下角 Toast |
+| 2 | `SilentCapture()`（原 `SilentCaptureAllAsync`） | 静默热键 | 全桌面，右下角 Toast |
 | 3 | `EncodeAndCopyAsync` | 选区复制 | 复用完整保存管线 (BuildEncodingSettings + PreparePixelsWithIcc + 编码), 输出到临时目录, 与正式保存完全一致 |
 | 4 | `StartSelectionCapture` | 选区热键/按钮 | WGC → 覆盖层 → 4 种动作 |
-| 5 | `OnCaptureNow` | 全屏按钮 | 单显示器，HDR/SDR 双路径 |
+| 5 | `OnCaptureNow` | 全屏按钮 | ⚠ **2026-09-20 实测不可达**：`MainWindow.xaml` 里对 `CaptureNow` 零命中，
+|   |   | 即该入口没有 XAML 绑定 ⇒ 方法还在（`MainWindow.xaml.cs:2221`）但按不到。接线还是删除待拍板（交接 §32.9-6）|
 | 6 | `CaptureAndOcrFromPixelsAsync` | OCR/翻译 | 调用 OCR 管线 |
 
 ### 架构修复 (v0.3.0-beta)
@@ -602,7 +641,8 @@ s_captureLock (SemaphoreSlim 1,1) — 防止并发截图
 | PixelOps (多ISA加速) | 12 | FixAlphaChannel, BgraToScrgbLinear, 降采样, ISA检测 |
 | ToneMapper (色调映射) | 13 | 3种算法, 曝光, 融合内核, 边界值, 确定性 |
 | ColorProfileProvider (ICC) | 13 | 5种标准ICC, 色彩空间映射, 缓存一致性 |
-| GamutMapper (色域映射) | 9 | 3种算法, ICC烘焙, 4种目标色域 |
+| GamutMapper (色域映射) | ⚠ 2026-09-20 更正：该类**已删除**（本文 `:19`/`:181` 已自认），此行为历史计数；色域映射现由 `ColorManagement/ColorSpaceConverter` + `FormatHelper.PrepareSdrLinearFloat` 承担，目标色域界面只 3 项（跟随显示器/sRGB/BT.2020）|
+
 | AnnotationManager (标注) | 7 | 8种图层, 撤销/重做, 边界条件 |
 | FormatEncoders (编码器) | 28 | 7格式创建, SDR组合, HDR输出, 质量范围 |
 | JPEG专项 | 13 | 7种质量, 3种色度, ICC嵌入, SOI/EOI验证 |
@@ -702,7 +742,9 @@ Auto → MFT (系统硬件) > NVENC (NVIDIA) > QSV (Intel) > libaom (CPU)
 `ColorProfileProvider`：
 - WCS API (`mscms.dll`) 获取显示器 ICC
 - 非阻塞缓存：首次调用后台预热，立即返回 null
-- 内置 sRGB ICC：优先系统 `sRGB Color Space Profile.icm`，回退到内置有效 ICC v2.1
+- 内置 sRGB ICC：一律由 `BuildValidSRgbIcc` 现场生成（v2.1）。**不读**系统
+  `sRGB Color Space Profile.icm` —— 那份的 `cprt`/`creator` 是第三方（HP）的，会以 iCCP/APP2/AVIF
+  `colr(prof)` 的形式随用户产物分发，且模板取自本机意味着换机器产物字节就变（2026-09-20 合规修正）
 
 ### 6.2 色彩管线
 

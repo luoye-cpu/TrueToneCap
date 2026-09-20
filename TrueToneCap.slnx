@@ -1,6 +1,12 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/TrueToneCap.App/TrueToneCap.App.csproj" />
+    <!-- App.csproj 声明了 <Platform>x64</Platform>（影响输出路径，见其注释）。
+         解决方案构建会以全局属性覆盖项目内的 Platform，故此处必须显式映射，
+         否则 App 在「解决方案构建」下会退化为 Any CPU 而丢掉输出路径里的 x64 段，
+         与「单独构建 App.csproj」的结果不一致。 -->
+    <Project Path="src/TrueToneCap.App/TrueToneCap.App.csproj">
+      <Platform Project="x64" />
+    </Project>
     <Project Path="src/TrueToneCap.Core/TrueToneCap.Core.csproj" />
     <Project Path="src/TrueToneCap.LogViewer/TrueToneCap.LogViewer.csproj">
       <Platform Project="x64" />

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/TrayIconManager.cs
 // WinUI3 原生托盘图标 — P/Invoke Shell_NotifyIcon，零外部依赖
 

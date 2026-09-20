@@ -1,16 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- 公共属性见 ../../Directory.Build.props -->
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <!-- 自包含发布（RID/SelfContained 因仅本项目与 App 需要，故在项目内声明） -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
+    <!-- <Platform>/<Platforms> 会影响输出路径与 IDE 平台清单，故在项目内声明 -->
     <Platforms>x64</Platforms>
     <Platform>x64</Platform>
-    <PlatformTarget>x64</PlatformTarget>
-    <LangVersion>14</LangVersion>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TrueToneCap.LogViewer</RootNamespace>
     <AssemblyName>TTCLogViewer</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
@@ -19,12 +17,32 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <ApplicationTitle>TTC日志查看器</ApplicationTitle>
     <ApplicationId>com.truetonecap.logviewer</ApplicationId>
+    <!-- 独立版本号：日志查看器是独立可选工具，版本线不与主程序同步
+         （原值 2.0.0，刻意覆盖 Directory.Build.props 的主程序版本）
+
+         2026-09-21 复核，确认这是【工具自身版本】而非遗留值，依据如下:
+           1) 时序: 本行 <Version>2.0.0</Version> 出现在该文件的首个提交 0dd4215 (2026-08-11)，
+              而 Directory.Build.props 是 6647e17 (2026-09-20) 才引入的 —— 也就是说 2.0.0
+              早于"中央版本声明"存在，它不是被中央版本取代后忘了删的残留，反过来才是事实。
+           2) 分发形态: 它有自己的发布脚本 PublishLogViewer.ps1、独立产物目录
+              publish\TTC日志查看器、独立 AssemblyName TTCLogViewer 与
+              ApplicationId com.truetonecap.logviewer；README 把"单独发布日志查看器"
+              列为可选步骤。已核实它【不在】主包 publish\TrueToneCap-v<版本> 之内
+              （包内无 *LogViewer* / TTCLogViewer 文件），因此 2.0.0 不会被读成主程序版本。
+           3) 实测二进制: TTCLogViewer.exe 的 ProductName/CompanyName 均为 TTCLogViewer，
+              ProductVersion = 2.0.0+<sha>，与主程序 0.3.4-beta 是两条独立版本线。
+         残留风险（已知，未处理）: 2.0.0 自 2026-08-11 起从未递进，也没有独立的版本记录文档，
+         所以"独立版本线"目前只有意图、没有实际执行记录。若将来给它发新版，请同时补一条
+         CHANGELOG 记录，否则本行会退化成真正的僵尸常量。 -->
     <Version>2.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <!-- 版本由 ../../Directory.Packages.props 管理 -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
   </ItemGroup>
 
 </Project>

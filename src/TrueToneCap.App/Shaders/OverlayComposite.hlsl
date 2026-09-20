@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Shaders/OverlayComposite.hlsl
 // HDR 截图预览 UI 合成着色器 (2026-08-11 Phase 2)
 // 桌面帧(scRGB Float16 纹理) + UI 覆盖层(遮罩/边框/手柄/工具栏) 一次绘制到后台缓冲

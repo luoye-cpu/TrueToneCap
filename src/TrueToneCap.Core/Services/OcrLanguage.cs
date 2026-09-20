@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/OcrLanguage.cs
 // OCR 语言定义 — 不同引擎支持不同的语言集合
 
@@ -13,7 +15,13 @@ public sealed record OcrLanguage(
 /// <summary>OCR 语言注册表 — 集中管理所有引擎支持的语言。</summary>
 public static class OcrLanguages
 {
-    /// <summary>PP-OCRv6 统一模型支持的语言（50 语言统一字典）。</summary>
+    /// <summary>
+    /// PP-OCRv6 可选语言标签。⚠ 这些 Id <b>不改变</b> ONNX 的识别结果 —— 单模型统一字典
+    /// (ppocrv6_dict.txt, 18708 字)，<c>OnnxOcrEngine</c> 收下 lang 之后从不使用它。
+    /// 本表存在的意义只有两个：① 给 UI 一项可选语言；② 作为 Windows OCR 兜底时
+    /// <c>MultiOcrService.MapLangToBcp47</c> 的输入形态（"ko" → "ko-KR"）。
+    /// 实测能力：中文/英文最准，日文需字高 ≥24px，韩文 0%（字典不含谚文）。
+    /// </summary>
     public static readonly OcrLanguage[] OnnxLanguages =
     [
         new("zh-en", "中英混合", ["OnnxGpu", "OnnxCpu"]),

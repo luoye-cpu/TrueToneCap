@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Test/ColorPipelineTests.cs
 // 色彩管线精度测试 — 色域映射、ICC/CICP 验证、PQ 曲线、端到端编码校验
 // 运行: dotnet run --project src/TrueToneCap.Test -- --color-tests
@@ -14,11 +16,20 @@ namespace TrueToneCap.Test;
 public static class ColorPipelineTests
 {
     private static int _passed, _failed;
+    /// <summary>因环境不满足而【显式跳过】的用例数 —— 既不算通过也不算失败。</summary>
+    private static int _skipped;
     private static readonly string OutDir = Path.Combine(Path.GetTempPath(), "TrueToneCap_ColorTest");
+
+    /// <summary>显式跳过一条用例：不计入通过/失败，但必须留下原因（禁止静默通过）。</summary>
+    static void Skip(string name, string reason)
+    {
+        _skipped++;
+        Console.WriteLine($"  ⏭  {name} — 跳过: {reason}");
+    }
 
     public static int RunAll()
     {
-        _passed = 0; _failed = 0;
+        _passed = 0; _failed = 0; _skipped = 0;
         Directory.CreateDirectory(OutDir);
         Console.WriteLine("══════════════════════════════════════════════");
         Console.WriteLine("  TrueToneCap 色彩管线精度测试");
@@ -50,6 +61,8 @@ public static class ColorPipelineTests
         IccProfile_MatrixAccuracy();
         IccProfile_BakeToTarget();
         IccProfile_HdrPqProfile();
+        // 2026-09-20 许可合规 A-3：生成的 ICC 不得携带第三方版权字段，也不得取自本机系统文件
+        IccProvenance_NoThirdPartyCopyrightBytes();
 
         // ─── 5. 编码文件色彩标记验证 ───
         Console.WriteLine("\n── 5. 编码文件色彩标记 ──");
@@ -75,25 +88,40 @@ public static class ColorPipelineTests
 
         // ─── 7. 色域映射 ───
         Console.WriteLine("\n── 7. 色域映射 ──");
-        GamutMap_SrgbToP3_Identity();
+        GamutMap_SrgbToP3();
+        // 2026-09-19 §4.3 双路径策略：色域矩阵跟【源精度】走，容器位深跟【用户请求】走，两者解耦。
+        GamutDepth_DecoupledAtEveryOutputDepth();
+        // §30.9 声明与像素矛盾家族：D-1 直通不得冒充目标色域；HDR 意图被改掉必须留痕
+        BakeFailure_DoesNotClaimTargetGamut();
+        Png_HdrBitDepthDowngrade_IsTraceable();
+        // 缺陷 C：生成的 sRGB profile 要满足 D50-PCS，且烘焙矩阵不能 D50/D65 混乘
+        SrgbIcc_PrimaryColumnsSumToD50White();
+        BakeIcc_SrgbToSrgb_IsExactIdentity();
+        // 缺陷 B1：TIFF 没有码点通道 ⇒ sRGB 也必须嵌 ICC，不许零声明
+        Tiff_EmbedsIccEvenForSrgb();
 
         // ─── 8. 色域转换矩阵精度验证 ───
         Console.WriteLine("\n── 8. 色域转换矩阵精度 ──");
         ColorMatrix_ScrgbToP3_Accuracy();
         ColorMatrix_ScrgbToBt2020_Accuracy();
         ColorMatrix_ScrgbToAdobeRgb_Accuracy();
-        ColorMatrix_ApplySrgbToTargetGamut();
+        // 2026-09-19：删去 ColorMatrix_ApplySrgbToTargetGamut()。
+        // 它只为 ColorSpaceConverter.ApplySrgbToTargetGamut 这个零生产调用方的函数而存在
+        // （8→float→矩阵→8 的双重量化陷阱，已随函数一并删除，理由见 ColorProfileProvider.cs 原位注释）。
+        // 留一条"只覆盖永不执行代码"的用例，本身就是假绿灯。
 
         // ─── 9. Gain Map XMP 验证 ───
         Console.WriteLine("\n── 9. Gain Map XMP 验证 ──");
         GainMap_BuildXmpMetadata_Output();
         GainMap_BuildIsoMetadata_Output();
+        GainMap_GainRange_SingleSourceAcrossPixelsXmpAndIso();
 
         sw.Stop();
         Console.WriteLine($"\n══════════════════════════════════════════════");
-        Console.WriteLine($"  完成: {_passed} 通过, {_failed} 失败, {sw.ElapsedMilliseconds}ms");
+        TestSummary.Report("--color-tests", _passed, _failed, 0, sw.ElapsedMilliseconds, _skipped);
         Console.WriteLine("══════════════════════════════════════════════\n");
-        return _failed;
+        // ⚠️ 用失败数当退出码会在「恰好 256 个失败」时溢出为 0（假绿灯）
+        return _failed > 0 ? 1 : 0;
     }
 
     // ═══════════════════════════════════════════════
@@ -145,47 +173,79 @@ public static class ColorPipelineTests
     //  2. PQ 曲线精度
     // ═══════════════════════════════════════════════
 
+    // ═══ 2026-09-19：下面这三条此前测的是【本文件自己抄写的一份 PQ 公式】═══
+    // 生产侧的 FormatHelper.HdrToPq16 / NativeAvifEncoder.LinearToPq 一次都没被碰到，
+    // 而断言只有 `pq > 0 && pq <= 1.0f` —— 注释里写死的 0.5081/0.7515/1.0 从未参与比较。
+    // 现在本地副本（LinearToPq / PqToLinear）已删除，全部改由生产入口求值：
+    //   编码腿 = FormatHelper.HdrToPq16（public，scRGB 线性 → 逐通道 16-bit PQ 码点）
+    //   解码腿 = FormatHelper.ComputePeakNits（public，PQ 正向 EOTF，double 求值）
+    // 判据是 SMPTE ST 2084 逆 EOTF 的锚点值（100/1000/10000 nits），不是我们自己的实现。
+    // scRGB 约定 80 nits = 1.0 ⇒ 输入像素 = nits/80，与生产侧 nits = linear*80 同一条链路。
+
     static void PqCurve_KnownValues()
     {
-        // ST.2084 PQ 已知参考值
-        // 0 nits → 0.0, 100 nits → 0.508, 1000 nits → 0.751, 10000 nits → 1.0
-        var testPixels = new float[] { 0f, 1f, 10f, 100f, 1000f, 10000f };
-        // 实际值根据实现的 PQ 公式计算，使用宽松容差
-        for (int i = 0; i < testPixels.Length; i++)
+        // ST.2084 逆 EOTF 锚点（L = nits/10000 归一化；0 nits 处 PQ 有 ~7.3e-7 的公式固有偏置，
+        // 量化到 16-bit 后仍是码点 0）。1000 nits 一栏用 0.7518270962 而非交接里抄的 0.7515：
+        // 后者与标准差 20 LSB，会被 ±2 LSB 容差直接判失败（0.7515 是不精确的三位小数引用）。
+        (float nits, double pq)[] anchors =
+        [
+            (0f,     0.0000000000),
+            (100f,   0.5080784215),
+            (1000f,  0.7518270962),
+            (10000f, 1.0000000000),
+        ];
+        foreach (var (nits, pq) in anchors)
         {
-            if (i == 0) { Assert("PQ 精度: 0 nits → 0.0", true); continue; }
-            float nits = testPixels[i];
-            float pq = LinearToPq(nits / 10000f);
-            // 只验证单调递增和基本范围
-            bool ok = pq > 0 && pq <= 1.0f;
-            Assert($"PQ 精度: {nits,5} nits → PQ={pq:F3}", ok);
+            int expected = (int)Math.Round(pq * 65535.0);
+            var c = Pq16CodesForNits(nits);
+            Assert($"PQ 码点: {nits,6} nits → {c[0]} (ST.2084 参考 {expected}, |Δ| ≤ 2 LSB)",
+                Math.Abs(c[0] - expected) <= 2 && Math.Abs(c[1] - expected) <= 2 && Math.Abs(c[2] - expected) <= 2,
+                $"[{c[0]},{c[1]},{c[2]},{c[3]}]");
         }
+
+        // 像素打包格式：RGBA 逐通道 16-bit ⇒ 灰像素三通道同码点，alpha=1.0 落在末位 = 65535。
+        // （不写明这一条的话，"取到的是 R 还是被交错打包的某个 16-bit 槽"根本无从判断。）
+        var w = Pq16CodesForNits(10000f);
+        Assert("HdrToPq16 打包: 灰像素 R=G=B、alpha=65535",
+            w[0] == w[1] && w[1] == w[2] && w[3] == 65535, $"[{w[0]},{w[1]},{w[2]},{w[3]}]");
     }
 
     static void PqCurve_Symmetric()
     {
-        // PQ→Linear→PQ 往返
-        for (int i = 0; i < 100; i++)
+        // 往返：nits →(生产 HdrToPq16)→ 16-bit 码点 →(生产 ComputePeakNits)→ nits。
+        // 两条腿都是生产函数，测试文件不再自带逆公式。
+        // 取样区间 [300, 8700] nits：ComputePeakNits 把返回值 clamp 到 [203, 10000]
+        // （它是给 JXL intensity_target 用的，越界必然失真），故不拿区间外的点做往返判据。
+        int prev = -1;
+        bool monotonic = true;
+        float worstRel = 0;
+        const int samples = 60;
+        for (int i = 0; i < samples; i++)
         {
-            float pq = i / 100f;
-            float lin = PqToLinear(pq);
-            float back = LinearToPq(lin);
-            if (Math.Abs(pq - back) > 0.005f)
-            {
-                Assert($"PQ 往返: {pq:F3} → {back:F3} (Δ={Math.Abs(pq - back):F4})", false);
-                return;
-            }
+            float nits = 300f * MathF.Pow(29f, i / (float)(samples - 1));   // 300 → 8700，对数均匀
+            var codes = Pq16CodesForNits(nits);
+            if (codes[0] <= prev) monotonic = false;
+            prev = codes[0];
+            float back = FormatHelper.ComputePeakNits(codes);
+            worstRel = Math.Max(worstRel, Math.Abs(back - nits) / nits);
         }
-        Assert("PQ 往返: 100 个采样点误差 < 0.005", true);
+        Assert($"PQ 往返（生产函数）: {samples} 点最大相对误差 {worstRel * 100:F4}%", worstRel <= 0.0005f);
+        // 单调性同样改成对生产函数求值后的单调 —— 原先是对本地副本的往返恒等式，恒成立
+        Assert($"PQ 码点对 nits 严格单调（{samples} 点，生产 HdrToPq16）", monotonic);
     }
 
     static void PqCurve_ExtremeValues()
     {
-        // 极端值不崩溃
-        float v0 = LinearToPq(0f);
-        float v1 = LinearToPq(1f);
-        Assert("PQ 0→0", v0 == 0f || float.IsNaN(v0) == false); // 允许 0 或非 NaN
-        Assert("PQ 1→1", Math.Abs(v1 - 1.0f) < 0.001f);
+        // 定义域端点与越界行为，全部经生产入口求值。
+        var black = Pq16CodesForNits(0f);
+        Assert($"PQ 0 nits → 码点 {black[0]} (参考 0, |Δ| ≤ 2 LSB)", Math.Abs(black[0] - 0) <= 2);
+        var peak = Pq16CodesForNits(10000f);
+        Assert($"PQ 10000 nits → 码点 {peak[0]} (参考 65535)", peak[0] == 65535);
+        // 越界：LinearToPQ 先把 L clamp 到 [0,1] ⇒ 高侧饱和、低侧归零（不是 NaN、不是回绕）
+        var over = Pq16CodesForNits(20000f);
+        Assert($"PQ 超界 20000 nits 饱和 → 码点 {over[0]}", over[0] == 65535);
+        var under = Pq16CodesForNits(-640f);   // scRGB 负光（浮点会话下会出现）
+        Assert($"PQ 负光 -8 nits 归零 → 码点 {under[0]}", under[0] == 0);
     }
 
     // ═══════════════════════════════════════════════
@@ -236,18 +296,81 @@ public static class ColorPipelineTests
 
     static void IccProfile_MatrixAccuracy()
     {
-        // 验证 sRGB ICC 的矩阵值与已知值一致
+        // 名字承诺"矩阵值与已知值一致 / 包含 D50 白点"，原实现却是 tagCount >= 9 和 xHi > 0
+        // —— 后者连"这个字段是 X 通道"都不证明。现照 IccProfile_HdrPqProfile 的 tag 遍历范式，
+        // 真正把 s15Fixed16 读出来与公布值比对。
         var srgbIcc = ColorProfileProvider.GetDefaultSRgbIcc();
+        Assert($"sRGB ICC: 长度足以容纳 tag 表 ({srgbIcc.Length}B)", srgbIcc.Length >= 144);
+        if (srgbIcc.Length < 144) return;
 
-        // 提取 rXYZ tag (位于 tag table 中，通常偏移 128+8 后)
-        // 简化验证: 检查 ICC 文件包含正确的 tag 数量
         int tagCount = srgbIcc[128] << 24 | srgbIcc[129] << 16 | srgbIcc[130] << 8 | srgbIcc[131];
-        Assert("sRGB ICC: 至少 9 个 tag", tagCount >= 9);
+        Assert($"sRGB ICC: tag 数量 = {tagCount}", tagCount is >= 9 and <= 64);
 
-        // 验证 D50 白点 (PCS 照明体)
-        // 偏移 68: 3 x s15Fixed16 XYZ
-        int xHi = srgbIcc[68] << 24 | srgbIcc[69] << 16 | srgbIcc[70] << 8 | srgbIcc[71];
-        Assert("sRGB ICC: 包含 D50 白点", xHi > 0);
+        // ① 头部 PCS 照明体（偏移 68，3×s15Fixed16）：ICC.1 规定 display profile 的 PCS 恒为 D50。
+        //    这才是"包含 D50 白点"这句话唯一能落地的位置（原实现读的正是这 4 个字节，却只判 >0）。
+        var (pX, pY, pZ) = ReadS15Triple(srgbIcc, 68);
+        Assert($"sRGB ICC: 头部 PCS 照明体 = D50 (0.9642, 1.0000, 0.8249)，实际 ({pX:F4}, {pY:F4}, {pZ:F4})",
+            MathF.Abs(pX - 0.9642f) < 0.002f && MathF.Abs(pY - 1.0f) < 0.002f && MathF.Abs(pZ - 0.8249f) < 0.002f);
+
+        // ② wtpt 标签：sRGB 自己的照明体是 D65（CIE 1931 x=0.3127,y=0.3290 ⇒ Y=1 归一化后
+        //    0.95047 / 1.00000 / 1.08883）。逐值钉死，改动白点即红。
+        //    ⚠ 唯一来源是 Core 手写的 BuildValidSRgbIcc（2026-09-20 起不再读 Windows 的
+        //      "sRGB Color Space Profile.icm"，理由见 IccProvenance_NoThirdPartyCopyrightBytes），
+        //      它的 wtpt 与微软那份一样写成 **未做 D50 适配的 D65**，因此本用例把
+        //      "D50"这条硬要求放在 ① 的头部 PCS 照明体上；wtpt 未做 D50 适配是产物的既有事实
+        //      （ICC.1 严格来说要求 wtpt 也在 D50 PCS 下），已作为 Core 的一致性问题上报。
+        var wtpt = FindIccXyzTag(srgbIcc, tagCount, "wtpt");
+        if (wtpt is null) { Assert("sRGB ICC: 含 wtpt 标签", false, "tag 表里没有 wtpt"); return; }
+        var (wX, wY, wZ) = wtpt.Value;
+        Assert($"sRGB ICC: wtpt = sRGB 照明体 D65 (0.95047, 1.00000, 1.08883)，实际 ({wX:F4}, {wY:F4}, {wZ:F4})",
+            MathF.Abs(wX - 0.95047f) < 0.002f && MathF.Abs(wY - 1.0f) < 0.002f && MathF.Abs(wZ - 1.08883f) < 0.002f);
+
+        // ③ rXYZ / gXYZ / bXYZ：三列 = RGB→XYZ 矩阵。判据是公布值（由 BT.709/sRGB 原色坐标
+        //    经 XYZ 组合得到），容差 ±0.002 覆盖 s15Fixed16 的量化步长 1/65536。
+        var rT = FindIccXyzTag(srgbIcc, tagCount, "rXYZ");
+        var gT = FindIccXyzTag(srgbIcc, tagCount, "gXYZ");
+        var bT = FindIccXyzTag(srgbIcc, tagCount, "bXYZ");
+        if (rT is null || gT is null || bT is null)
+        {
+            Assert("sRGB ICC: rXYZ/gXYZ/bXYZ 三个标签齐全", false,
+                $"rXYZ={rT is not null} gXYZ={gT is not null} bXYZ={bT is not null}");
+            return;
+        }
+        var (rX, rY, rZ) = rT.Value;
+        var (gX, gY, gZ) = gT.Value;
+        var (bX, bY, bZ) = bT.Value;
+        Console.WriteLine($"     rXYZ=({rX:F4},{rY:F4},{rZ:F4}) gXYZ=({gX:F4},{gY:F4},{gZ:F4}) bXYZ=({bX:F4},{bY:F4},{bZ:F4})");
+
+        // 矩阵按哪一个白点表达，由它自己的行和（M·(1,1,1) = 媒体白点）说明。
+        // 两种取值都各有公布矩阵可比：D50 是 ICC.1 要求的 PCS 表达，D65 是 Core 手写回退
+        // （ColorProfileProvider.cs:229-231，未做 D50 适配）实际写出的表达。二者都对不上就是矩阵错。
+        float sumX = rX + gX + bX, sumY = rY + gY + bY, sumZ = rZ + gZ + bZ;
+        static bool Near(float a, float b) => MathF.Abs(a - b) < 0.002f;
+        bool isD50 = Near(sumX, 0.9642f) && Near(sumY, 1.0f) && Near(sumZ, 0.8249f);
+        bool isD65 = Near(sumX, 0.95047f) && Near(sumY, 1.0f) && Near(sumZ, 1.08883f);
+        Assert($"sRGB ICC: rXYZ+gXYZ+bXYZ 自洽于一个公布白点 ({sumX:F4}, {sumY:F4}, {sumZ:F4}) = D50 或 D65",
+            isD50 ^ isD65);
+        if (isD50 == isD65) return;
+
+        // 行 = X/Y/Z，列 = R/G/B
+        float[,] published = isD50
+            ? new float[3, 3] { { 0.4360747f, 0.3850649f, 0.1430804f },
+                                { 0.2225045f, 0.7168786f, 0.0606169f },
+                                { 0.0139322f, 0.0971045f, 0.7141733f } }   // IEC 61966-2-1 的 D50 PCS（Bradford）
+            : new float[3, 3] { { 0.4124547f, 0.3575816f, 0.1804232f },
+                                { 0.2126729f, 0.7151522f, 0.0721750f },
+                                { 0.0193339f, 0.1191920f, 0.9503041f } };   // 未适配的 D65 原值
+        float[,] got = new float[3, 3] { { rX, gX, bX }, { rY, gY, bY }, { rZ, gZ, bZ } };
+        float worst = 0; int wi = 0, wj = 0;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+            {
+                float dd = MathF.Abs(got[i, j] - published[i, j]);
+                if (dd > worst) { worst = dd; wi = i; wj = j; }
+            }
+        string whichWp = isD50 ? "D50" : "D65";
+        Assert($"sRGB ICC: rXYZ/gXYZ/bXYZ 九个值逐个对上 {whichWp} 公布矩阵 (|Δ| ≤ 0.002，最差 [{wi},{wj}] Δ={worst:E2})",
+            worst <= 0.002f);
     }
 
     static void IccProfile_BakeToTarget()
@@ -265,11 +388,30 @@ public static class ColorPipelineTests
             try
             {
                 var (pixels, icc) = ColorProfileProvider.BakeIccToTarget(bgra, 64, 64, srgbIcc, target);
-                bool ok = pixels is null || (pixels.Length == bgra.Length && (icc is null || icc.Length >= 128));
                 if (pixels is null)
-                    Assert($"ICC 烘焙: {target} 返回空(可接受)", true);
+                {
+                    // 无 D3D 设备时返回 null 属环境限制，必须显式跳过而非伪装通过
+                    Skip($"ICC 烘焙: {target}", "无 D3D 设备，BakeIccToTarget 返回空（环境限制）");
+                }
                 else
-                    Assert($"ICC 烘焙: {target} 成功", ok);
+                {
+                    // 有产出时必须满足尺寸契约
+                    Assert($"ICC 烘焙: {target} 像素尺寸正确", pixels.Length == bgra.Length);
+
+                    // ICC 契约（见 ColorProfileProvider.BakeIccToTarget）:
+                    //   sRGB 是隐含默认色域，目标为 sRGB 时刻意不嵌入 ICC（"sRGB 目标不嵌入 ICC"）；
+                    //   其余目标必须嵌入完整 ICC —— 至少 128B 才能容纳 ICC 头。
+                    if (target.Equals("sRGB", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Assert($"ICC 烘焙: {target} 不嵌入 ICC(契约) ({icc?.Length ?? 0}B)",
+                               icc is null || icc.Length == 0);
+                    }
+                    else
+                    {
+                        Assert($"ICC 烘焙: {target} ICC 完整 ({icc?.Length ?? 0}B)",
+                               icc is not null && icc.Length >= 128);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -327,7 +469,8 @@ public static class ColorPipelineTests
 
     static void EncodedPng_CicpChunk_Valid()
     {
-        // 编码 PNG 并验证 cICP chunk 存在
+        // 编码 PNG 并验证 cICP chunk —— 名字写着 _Valid，原实现却只判了 `CheckPngChunk(...)` 存在。
+        // 同文件的 HDR 那条（EncodedPng_HdrCicp_Bt2020Pq）早已逐字节读回，这里照同一口径比较。
         var bgra = GeneratePattern(8, 8);
         string path = Path.Combine(OutDir, "cicp_test.png");
         if (File.Exists(path)) File.Delete(path);
@@ -336,16 +479,40 @@ public static class ColorPipelineTests
         var settings = new EncodingSettings
         {
             Format = OutputFormat.PNG, Quality = 100, HdrOutput = false,
-            ColorSpaceTag = "sRGB", OutputBitDepth = 8, DisplayBitDepth = 8,
+            ColorSpaceTag = "sRGB", OutputBitDepth = 8,
         };
         encoder.EncodeSdrAsync(bgra, 8, 8, settings, path).GetAwaiter().GetResult();
 
         // 验证文件存在
         Assert("PNG cICP: 文件已创建", File.Exists(path) && new FileInfo(path).Length > 0);
+        if (!File.Exists(path)) return;
 
-        // 检查 PNG 文件包含 cICP chunk
-        bool hasCicp = CheckPngChunk(path, "cICP");
-        Assert("PNG cICP: chunk 存在", hasCicp);
+        var chunks = ReadPngChunks(path);
+        // 文件被创建 ≠ 是个 PNG：签名与 IHDR 顺序必须站得住（否则 chunk 链本身就没读对）
+        Assert("PNG cICP: 首块是 IHDR",
+            chunks.Count > 0 && chunks[0].Type == "IHDR",
+            chunks.Count > 0 ? chunks[0].Type : "无 chunk");
+
+        var cicp = FindPngChunk(chunks, "cICP");
+        if (cicp is not { Length: 4 })
+        {
+            Assert("PNG cICP: cICP 块存在且为 4 字节", false,
+                cicp is null ? "无 cICP 块" : $"cICP 长度={cicp.Length}");
+            return;
+        }
+        Assert("PNG cICP: cICP 块存在且为 4 字节", true, $"[{cicp[0]},{cicp[1]},{cicp[2]},{cicp[3]}]");
+
+        // cICP 的 4 字节 = primaries / transfer / matrix / fullRange（ITU-T H.273 + RFC 9327）。
+        // 判据来自标准码点与"PNG 存 RGB 采样、输入是 8-bit sRGB"这一事实，
+        // 不是复刻 ManagedPngEncoder 的写入逻辑。
+        Assert($"PNG cICP: primaries=1 (BT.709/sRGB 原色)，实际 {cicp[0]}", cicp[0] == 1);
+        Assert($"PNG cICP: transfer=13 (sRGB IEC 61966-2-1，非 BT.709 视频 OETF=1)，实际 {cicp[1]}", cicp[1] == 13);
+        Assert($"PNG cICP: matrix=0 (identity，PNG 存 RGB 采样)，实际 {cicp[2]}", cicp[2] == 0);
+        Assert($"PNG cICP: fullRange=1，实际 {cicp[3]}", cicp[3] == 1);
+
+        // sRGB 是隐含默认色域 ⇒ 除 cICP 外不应再嵌 iCCP 与之竞争声明
+        // （对照 EncodedPng_IccpChunk_Valid：非 sRGB 才必须有 iCCP）。
+        Assert("PNG cICP: sRGB 档不嵌 iCCP", FindPngChunk(chunks, "iCCP") is null);
     }
 
     static void EncodedPng_IccpChunk_Valid()
@@ -359,7 +526,7 @@ public static class ColorPipelineTests
         var settings = new EncodingSettings
         {
             Format = OutputFormat.PNG, Quality = 100, HdrOutput = false,
-            ColorSpaceTag = "DisplayP3", OutputBitDepth = 8, DisplayBitDepth = 8,
+            ColorSpaceTag = "DisplayP3", OutputBitDepth = 8,
             IccProfile = ColorProfileProvider.GetDefaultSRgbIcc(),
         };
         encoder.EncodeSdrAsync(bgra, 8, 8, settings, path).GetAwaiter().GetResult();
@@ -370,7 +537,15 @@ public static class ColorPipelineTests
 
     static void EncodedPng_HdrCicp_Bt2020Pq()
     {
-        // HDR 编码 → PNG 16-bit 应包含 CICP [9,16,0,1] (BT.2020 + PQ)
+        // HDR 编码 → PNG 16-bit 的 cICP 块必须逐字节回读校验：[9, 16, 0, 1] = BT.2020 + ST.2084 PQ。
+        //
+        // ═══ 2026-09-19：本用例此前只断言"文件已创建"，等于什么都没验 ═══
+        // 而且原来连输入都没给对：EncodingSettings.ColorSpaceTag 的默认值是 "System"，
+        // PngEncoder 会把它原样交给 BuildHdrCicp，而 GetCicpPrimaries("System") 落到 default 分支
+        // ⇒ 写出的是 primaries=1（BT.709）。也就是说这条用例连"BT2020"这个前提都不成立，
+        // 名字里的 Bt2020Pq 是空头承诺。现在显式指定 ColorSpaceTag="BT2020"，
+        // 让它真的走一遍"用户选 BT.2020 + HDR"的路径。
+        // （ primaries=1 对默认配置而言与像素是一致的 —— 那是另一回事，不在本用例范围内。）
         var hdr = new float[16 * 16 * 4];
         for (int i = 0; i < hdr.Length; i++) hdr[i] = 0.5f;
         string path = Path.Combine(OutDir, "hdr_cicp_test.png");
@@ -380,17 +555,62 @@ public static class ColorPipelineTests
         var settings = new EncodingSettings
         {
             Format = OutputFormat.PNG, Quality = 100, HdrOutput = true,
-            OutputBitDepth = 16, DisplayBitDepth = 10,
+            ColorSpaceTag = "BT2020",
+            OutputBitDepth = 16,
         };
         var hdrFrame = new HdrFrameData { Pixels = hdr, Width = 16, Height = 16 };
         encoder.EncodeAsync(hdrFrame, settings, path).GetAwaiter().GetResult();
 
         Assert("PNG HDR CICP: 文件已创建", File.Exists(path) && new FileInfo(path).Length > 0);
+        if (!File.Exists(path)) return;
+
+        var chunks = ReadPngChunks(path);
+        // 文件被创建 ≠ 是个 PNG：签名、IHDR 顺序都得站得住
+        Assert("PNG HDR CICP: 首块是 IHDR",
+            chunks.Count > 0 && chunks[0].Type == "IHDR",
+            chunks.Count > 0 ? chunks[0].Type : "无 chunk");
+
+        var ihdr = FindPngChunk(chunks, "IHDR");
+        if (ihdr is { Length: >= 13 })
+        {
+            int depth = ihdr[8], colorType = ihdr[9];
+            Assert("PNG HDR CICP: IHDR 位深=16、color type=6(RGBA)",
+                depth == 16 && colorType == 6, $"bitDepth={depth} colorType={colorType}");
+        }
+        else
+        {
+            Assert("PNG HDR CICP: IHDR 位深=16、color type=6(RGBA)", false, "IHDR 缺失或过短");
+        }
+
+        var cicp = FindPngChunk(chunks, "cICP");
+        if (cicp is not { Length: 4 })
+        {
+            Assert("PNG HDR CICP: cICP 块存在且为 4 字节", false,
+                cicp is null ? "无 cICP 块" : $"cICP 长度={cicp.Length}");
+            return;
+        }
+        Assert("PNG HDR CICP: cICP 块存在且为 4 字节", true,
+            $"[{cicp[0]},{cicp[1]},{cicp[2]},{cicp[3]}]");
+
+        // cICP 的 4 字节 = primaries / transfer / matrix / fullRange（ITU-T H.273 + RFC 9327）
+        Assert($"PNG HDR CICP: primaries=9 (BT.2020)，实际 {cicp[0]}", cicp[0] == 9);
+        Assert($"PNG HDR CICP: transfer=16 (ST.2084 PQ)，实际 {cicp[1]}", cicp[1] == 16);
+        Assert($"PNG HDR CICP: matrix=0 (identity，PNG 存 RGB 采样)，实际 {cicp[2]}", cicp[2] == 0);
+        Assert($"PNG HDR CICP: fullRange=1，实际 {cicp[3]}", cicp[3] == 1);
+
+        // 16-bit 容器没有截断 ⇒ 按源码规则不应写 sBIT
+        Assert("PNG HDR CICP: 16-bit 容器不写 sBIT", FindPngChunk(chunks, "sBIT") is null);
     }
 
     static void EncodedJpeg_GainMapMarker()
     {
-        // JPEG Gain Map 编码验证
+        // JPEG Gain Map 编码验证 —— 原来唯一断言是"文件已创建"，等于什么都没验。
+        // 结构证据此前只在 EncodingIntegrationTests.cs:204-262（另一次门禁 --encoding-tests）里读回，
+        // 现在本用例内也逐条读回，使 --color-tests 单独跑时这条不是空承诺。
+        // 判据来自段布局标准本身（T.81 的 marker/长度、CTA-2048 的 XMP+MPF、ISO 21496-1 的
+        // 增益图侧元数据），不是自家 JpegGainMapEncoder 的写入代码：
+        //   Base   : SOI … APP1(hdrgm XMP) … APP2(MPF) … SOS … EOI
+        //   GainMap: 第二个 SOI 之后紧跟 APP2(urn:iso:std:iso:ts:21496:-1)
         var bgra = GeneratePattern(32, 32);
         string path = Path.Combine(OutDir, "gainmap_test.jpg");
         if (File.Exists(path)) File.Delete(path);
@@ -403,22 +623,52 @@ public static class ColorPipelineTests
             {
                 Format = OutputFormat.JPEG_GAINMAP, Quality = 1.0f, HdrOutput = true,
                 GainMapMode = GainMapMode.Rgb,
-                OutputBitDepth = 8, DisplayBitDepth = 10,
+                OutputBitDepth = 8,
             };
             var hdr = PixelOps.BgraToScrgbLinearFast(bgra, 32, 32);
             var hdrFrame = new HdrFrameData { Pixels = hdr, Width = 32, Height = 32 };
             encoder.EncodeAsync(hdrFrame, settings, path).GetAwaiter().GetResult();
             Assert("JPEG Gain Map: 文件已创建", File.Exists(path) && new FileInfo(path).Length > 0);
+            if (!File.Exists(path)) return;
+
+            var bytes = File.ReadAllBytes(path);
+            int secondSoi = -1;
+            for (int i = 2; i + 1 < bytes.Length; i++)
+                if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8) { secondSoi = i; break; }
+            Assert("JPEG Gain Map: 含第二个 SOI（Base + 增益图 = 双 SOI）",
+                secondSoi > 0, secondSoi < 0 ? "全文只有一个 SOI ⇒ 没有增益图" : $"SOI@{secondSoi}");
+            if (secondSoi < 0) return;
+
+            // ① Base 侧（第二个 SOI 之前）的 XMP：hdrgm 命名空间的版本与增益上限
+            var xmp = FindJpegAppPayload(bytes, 0, secondSoi, 0xE1, "http://ns.adobe.com/xap/1.0/");
+            Assert("JPEG Gain Map: Base 内有 APP1 XMP 段（必须落在第二个 SOI 之前）", xmp is not null);
+            if (xmp is not null)
+            {
+                Assert("JPEG Gain Map: XMP 含 hdrgm:Version", xmp.Contains("hdrgm:Version"));
+                Assert("JPEG Gain Map: XMP 含 hdrgm:GainMapMax", xmp.Contains("hdrgm:GainMapMax"));
+            }
+            // ② Base 侧的 MPF（CIPA DC-007）—— 主图靠它把增益图作为衍生图挂上
+            Assert("JPEG Gain Map: Base 内含 MPF APP2 段",
+                FindJpegAppPayload(bytes, 0, secondSoi, 0xE2, "MPF") is not null);
+            // ③ 增益图侧（第二个 SOI 之后）的 ISO 21496-1 二进制元数据
+            Assert("JPEG Gain Map: 增益图侧含 ISO 21496-1 段（必须落在第二个 SOI 之后）",
+                FindJpegAppPayload(bytes, secondSoi, bytes.Length, 0xE2, "urn:iso:std:iso:ts:21496:-1") is not null);
         }
         catch (Exception ex)
         {
-            Assert($"JPEG Gain Map: {ex.GetType().Name} (可接受, 依赖 Native lib)", true);
+            Skip("JPEG Gain Map 编码", $"依赖 Native lib，本机不可用: {ex.GetType().Name}");
         }
     }
 
     static void EncodedAvif_ColorProperties()
     {
-        // AVIF 编码验证
+        // AVIF 编码验证 —— 原来只有 `File.Exists && Length > 0`。
+        // 现在本文件内自带一次最小外部读回：AVIF 是 ISOBMFF，色彩声明就是 ipco 里 colr(nclx)
+        // 盒的那 7 个字节（三个 16-bit 码点 + 1 字节 range），尺寸声明就是 ispe 盒。
+        // 判据来自 ISO/IEC 23091-2 §6.1（nclx 字段宽度与 19 字节规范盒体）、ITU-T H.273 码点、
+        // ISO/IEC 14496-12（ispe/colr 盒布局）—— 不是我们自己那份写入器。
+        // （WgcAvifBackendTests.cs:265 有个更完整的 ValidateAvifContainer，但那是另一个文件、
+        //  且只在 --wgc-avif-tests 门禁里跑，本用例不能指望它兜底。）
         var bgra = GeneratePattern(32, 32);
         string path = Path.Combine(OutDir, "avif_color_test.avif");
         if (File.Exists(path)) File.Delete(path);
@@ -429,16 +679,59 @@ public static class ColorPipelineTests
             var settings = new EncodingSettings
             {
                 Format = OutputFormat.AVIF, Quality = 50f, HdrOutput = false,
-                AvifBackend = AvifEncoderBackend.Auto,
-                ChromaSubsampling = "444", OutputBitDepth = 8, DisplayBitDepth = 8,
+                ChromaSubsampling = "444", OutputBitDepth = 8,
             };
             encoder.EncodeSdrAsync(bgra, 32, 32, settings, path).GetAwaiter().GetResult();
             bool ok = File.Exists(path) && new FileInfo(path).Length > 0;
-            Assert($"AVIF: {(ok ? "文件已创建" : "编码失败(可接受)")}", ok || true); // 允许失败
+            // 2026-09-15 修正：原为 `ok || true` 恒真断言，AVIF 编码彻底失败也判通过。
+            Assert("AVIF: 文件已创建且非空", ok);
+            if (!ok) return;
+
+            var d = File.ReadAllBytes(path);
+
+            // ── ispe：容器声明的图像尺寸必须与请求编码的尺寸一致 ──
+            // ispe 是 FullBox：['ispe'(4)][version+flags(4)][width(4)][height(4)]，均大端。
+            int ispe = IndexOfAscii(d, "ispe");
+            if (ispe < 0 || ispe + 16 > d.Length)
+            {
+                Assert("AVIF: ispe 盒存在且完整", false, ispe < 0 ? "未找到 ispe 盒" : "ispe 越界");
+            }
+            else
+            {
+                int w = (int)ReadBeUInt32(d, ispe + 8);
+                int h = (int)ReadBeUInt32(d, ispe + 12);
+                Assert($"AVIF: ispe 尺寸 = 32×32，实际 {w}×{h}", w == 32 && h == 32);
+            }
+
+            // ── colr(nclx)：8-bit SDR sRGB 内容 ⇒ primaries=1 / transfer=13 / matrix=1 ──
+            int colr = IndexOfAscii(d, "colrnclx");
+            if (colr < 0 || colr + 15 > d.Length)
+            {
+                Assert("AVIF: colr(nclx) 盒存在", false, "未找到 nclx 型 colr ⇒ 内容对外没有色彩声明");
+                return;
+            }
+            uint boxSize = ReadBeUInt32(d, colr - 4);
+            Assert($"AVIF: colr 盒体 = 19 字节（nclx 规范形状），实际 {boxSize}", boxSize == 19,
+                "字段被按 8-bit 写出时盒体是 16 字节，严格解码器会整块丢弃 colr");
+            if (boxSize != 19) return;
+
+            int f = colr + 8;                       // 跳过 'colr' 与 'nclx'
+            int prim = (d[f] << 8) | d[f + 1];
+            int trc = (d[f + 2] << 8) | d[f + 3];
+            int mat = (d[f + 4] << 8) | d[f + 5];
+            int range = (d[f + 6] >> 7) & 1;
+            Assert($"AVIF nclx: primaries=1 (BT.709/sRGB 原色)，实际 {prim}", prim == 1);
+            Assert($"AVIF nclx: transfer=13 (sRGB IEC 61966-2-1)，实际 {trc}", trc == 13);
+            // AV1 恒为 YUV 码流 ⇒ matrix 不能是 identity(0)；8-bit SDR 内容应声明 BT.709(1)
+            Assert($"AVIF nclx: matrix=1 (BT.709，AV1 无 identity 可言)，实际 {mat}", mat == 1);
+            // full_range_flag 只作观测、不钉单值：软件 avifenc 写 0x80(full)、NVENC 自写容器写
+            // 0(limited)，两条路径各自与自己的 RGB→YUV 输出一致（见 NvEncoderNative.cs 的 colr 备注），
+            // 钉成任一个都会把另一条合法路径判成失败。
+            Console.WriteLine($"  ℹ️ AVIF nclx full_range_flag={range} (0=limited / 1=full，随后端而异)");
         }
         catch (Exception ex)
         {
-            Assert($"AVIF: {ex.GetType().Name} (可接受)", true);
+            Skip("AVIF 编码", $"AVIF 编码器不可用: {ex.GetType().Name}");
         }
     }
 
@@ -620,28 +913,522 @@ public static class ColorPipelineTests
     //  7. 色域映射
     // ═══════════════════════════════════════════════
 
-    static void GamutMap_SrgbToP3_Identity()
+    static void GamutMap_SrgbToP3()
     {
-        // sRGB 内容在 sRGB→P3 映射下应保持不变（已经包含在 sRGB 色域内）
-        var bgra = new byte[16 * 16 * 4];
-        for (int i = 0; i < bgra.Length; i += 4)
-        {
-            bgra[i] = 128; bgra[i + 1] = 64; bgra[i + 2] = 192; bgra[i + 3] = 255;
-        }
+        // ═══ 2026-09-19：原名 GamutMap_SrgbToP3_Identity，名实不符 ═══
+        // 原实现传的 target 是 "sRGB"，走的是 BakeIccToTarget 里"sRGB→sRGB 短路、原样返回同一
+        // 个数组引用"的分支（见该方法对 IsSrgbProfile 的判断）—— 一次色域映射都没发生。
+        // 更糟的是：矩阵解析失败时 BakeIccToTarget 会静默"像素直通 + 只嵌目标 ICC"，
+        // 那种回归在这条用例下同样是绿的。故拆成两件事分别钉住。
         var srgbIcc = ColorProfileProvider.GetDefaultSRgbIcc();
-        var (pixels, _) = ColorProfileProvider.BakeIccToTarget(bgra, 16, 16, srgbIcc, "sRGB");
-        // sRGB→sRGB 应几乎不变
-        if (pixels is not null)
+
+        // ── ① 先诚实标注旧用例真正验的东西：sRGB→sRGB 是短路，不是映射 ──
+        var gray = new byte[4] { 128, 128, 128, 255 };
+        var (samePixels, sameIcc) = ColorProfileProvider.BakeIccToTarget(gray, 1, 1, srgbIcc, "sRGB");
+        if (samePixels is null)
         {
-            bool near = true;
-            for (int i = 0; i < bgra.Length; i++)
-                if (Math.Abs(pixels[i] - bgra[i]) > 3) { near = false; break; }
-            Assert("sRGB→sRGB 烘焙: 接近不变", near);
+            Skip("ICC 烘焙 sRGB→sRGB", "BakeIccToTarget 返回空（异常/无标准 profile）");
         }
         else
         {
-            Assert("sRGB→sRGB 烘焙: 返回空(可接受)", true);
+            bool near = true;
+            for (int i = 0; i < gray.Length; i++)
+                if (Math.Abs(samePixels[i] - gray[i]) > 3) { near = false; break; }
+            Assert("sRGB→sRGB 烘焙: 接近不变（短路路径，未做映射）", near,
+                object.ReferenceEquals(samePixels, gray) ? "返回同一数组引用" : "走了矩阵");
+            Assert("sRGB→sRGB 烘焙: sRGB 目标不嵌 ICC", sameIcc is null);
         }
+
+        // ── ② 真正的 sRGB → Display P3 比对 ──
+        // 输入：纯红 (BGRA = 0,0,255,255) + 纯黑 (0,0,0,255)。
+        // P3 原色比 sRGB 宽 ⇒ 同一颜色用 P3 表示时"更淡"：sRGB 纯红在 P3 里不再是纯色，
+        // G/B 必然从 0 抬起（转换矩阵非对角元全正）。这是色域几何的必然结论，
+        // 不依赖具体数值。
+        // ⚠ 这里仍不写死精确字节：本用例钉的是色域几何的定性关系（P3 更宽 ⇒ G/B 抬起），
+        //   绝对值精度归 EncodedPng_* 与 scripts/precision/ 那批探针管。
+        //   （2026-09-20 起源 profile 已确定为本仓库手写件，跨机字节稳定，
+        //    但"写死数字"并不会让这条用例更强 —— 它测的不是序列化。）
+        var bgra = new byte[8] { 0, 0, 255, 255, 0, 0, 0, 255 };
+        var (pixels, targetIcc) = ColorProfileProvider.BakeIccToTarget(bgra, 2, 1, srgbIcc, "DisplayP3");
+        if (pixels is null)
+        {
+            Skip("sRGB→P3 烘焙", "BakeIccToTarget 返回空（环境限制）");
+            return;
+        }
+
+        Assert("sRGB→P3: 返回非空目标 ICC（P3 目标必须嵌 ICC）", targetIcc is { Length: > 128 });
+        // 像素必须真的被改写：直通回退（矩阵解析失败）时输出与输入逐字节相同，这条立刻变红
+        Assert($"sRGB→P3: 纯红像素被改写（未走直通回退）B={pixels[0]} G={pixels[1]} R={pixels[2]}",
+            pixels[0] != 0 || pixels[1] != 0 || pixels[2] != 255, "输入 B=0 G=0 R=255");
+        Assert($"sRGB→P3: sRGB 纯红在 P3 中不再是纯色（G/B 抬起）G={pixels[1]} B={pixels[0]}",
+            pixels[1] > 5 && pixels[0] > 2);
+        Assert($"sRGB→P3: 红仍是主通道（R 未被反超）R={pixels[2]}",
+            pixels[2] > pixels[1] && pixels[2] > pixels[0]);
+        Assert("sRGB→P3: 纯黑保持纯黑（0 不进、矩阵行不凭空造光）",
+            pixels[4] == 0 && pixels[5] == 0 && pixels[6] == 0,
+            $"B={pixels[4]} G={pixels[5]} R={pixels[6]}");
+        Assert("sRGB→P3: Alpha 直通", pixels[3] == 255 && pixels[7] == 255);
+    }
+
+    /// <summary>
+    /// D-1（交接 §30.9 同族）：ICC 转换没做成时，返回值不得携带"目标色域"的 ICC。
+    /// <para>旧写法在源/目标矩阵不可解析时 <c>return (bgra, targetIcc)</c> 并注释"查看器负责转换"——
+    /// 可查看器读到的是"像素已在目标色域"：sRGB 像素被标成 P3，按 P3 解释反而更偏（过饱和）。
+    /// 而调用方以 <c>baked is not null</c> 判成功，"直通"与"转换成功"在返回值上根本不可分辨。
+    /// 现在直通就返回 <c>icc = null</c>，由 App 层（PreparePixelsWithIcc → EncodeAndSaveAsync）
+    /// 把声明退回像素真实所在色域并留痕。⚠ 与 <c>IsIdentityMatrix</c> 那一支不同：那一支像素
+    /// 【确实】已在目标色域，嵌目标 ICC 是对的，不在本判据的射程内。</para>
+    /// </summary>
+    static void BakeFailure_DoesNotClaimTargetGamut()
+    {
+        // 长度够 header(132B)、但 tagCount=0 ⇒ ExtractRgbToXyzMatrix 必返 null ⇒ 走"转换不可完成"分支
+        var bogus = new byte[512];
+        var bgra = new byte[2 * 2 * 4];
+        EncoderFallbackNotifier.LastReason = null;
+
+        var (px, icc) = ColorProfileProvider.BakeIccToTarget(bgra, 2, 2, bogus, "DisplayP3");
+        Assert("源 ICC 不可解析 ⇒ 像素按直通返回且不抛", px is not null && px.Length == bgra.Length);
+        Assert("源 ICC 不可解析 ⇒ 不返回目标 ICC（声明与像素不得矛盾）", icc is null,
+            icc is null ? "null" : $"{icc!.Length}B");
+        Assert("转换失败必须留下对外痕迹（Release 下不能只剩 Debug.WriteLine）",
+            !string.IsNullOrEmpty(EncoderFallbackNotifier.LastReason),
+            EncoderFallbackNotifier.LastReason ?? "无");
+
+        // 合成自检（判据必须敢输出 FAIL）：正常源 ICC 走同一条路仍要拿到目标 ICC，
+        // 否则上面那条"icc 恒为 null"也能混过去。
+        var srgbIcc = ColorProfileProvider.GetStandardIccProfile("sRGB");
+        if (srgbIcc is { Length: > 128 })
+        {
+            // 必须先清：上一条断言刚刚留下过原因，不清就等于拿别人的痕迹自检（恒假红/恒假绿都可能）
+            EncoderFallbackNotifier.LastReason = null;
+            var (px2, icc2) = ColorProfileProvider.BakeIccToTarget(bgra, 2, 2, srgbIcc, "DisplayP3");
+            Assert("合成自检：正常 sRGB→P3 仍返回目标 ICC（判据非恒真）", icc2 is { Length: > 128 },
+                $"{icc2?.Length ?? 0}B");
+            Assert("合成自检：正常路径不误报降级",
+                string.IsNullOrEmpty(EncoderFallbackNotifier.LastReason),
+                EncoderFallbackNotifier.LastReason ?? "无");
+        }
+        else Skip("合成自检：正常路径", "取不到标准 sRGB profile");
+    }
+
+    /// <summary>
+    /// 可追溯性：HDR 意图被容器能力改掉（8-bit 装不下 PQ）时，必须留下对外痕迹。
+    /// <para>全仓 6 类"换参数/换执行者/换格式"的降级里，只有 WebP→PNG、avifenc 拒位深、MFT→libaom
+    /// 三条写了 <c>EncoderFallbackNotifier</c>；PNG 的这条 HDR→SDR 静默翻转是其中之一。
+    /// 不打 native 工具（ManagedPngEncoder 纯 C#）⇒ 任何机器都能跑。</para>
+    /// </summary>
+    static void Png_HdrBitDepthDowngrade_IsTraceable()
+    {
+        const int W = 4, H = 4;
+        var px = new float[W * H * 4];
+        for (int i = 0; i < W * H; i++)
+        {
+            px[i * 4] = 0.5f; px[i * 4 + 1] = 0.3f; px[i * 4 + 2] = 0.2f; px[i * 4 + 3] = 1f;
+        }
+        var path = Path.Combine(OutDir, $"hdr_downgrade_trace_{Guid.NewGuid():N}.png");
+
+        var s = new EncodingSettings
+        {
+            Format = OutputFormat.PNG, HdrOutput = true, OutputBitDepth = 8, ColorSpaceTag = "sRGB",
+        };
+        EncoderFallbackNotifier.LastReason = null;
+        EncoderFactory.Create(OutputFormat.PNG)
+            .EncodeAsync(new HdrFrameData { Pixels = px, Width = W, Height = H }, s, path)
+            .GetAwaiter().GetResult();
+
+        Assert("PNG: HDR+8-bit 降级留下对外痕迹", !string.IsNullOrEmpty(EncoderFallbackNotifier.LastReason),
+            EncoderFallbackNotifier.LastReason ?? "无");
+        Assert("PNG: 降级后确实按 SDR 出图（标志已翻转）", !s.HdrOutput);
+        Assert("PNG: 产物落在请求的 .png 路径", File.Exists(path), path);
+        // 反向自检：≥10-bit 的 HDR 请求不该报降级，否则"留痕"退化成"每句都喊"
+        var sOk = new EncodingSettings
+        {
+            Format = OutputFormat.PNG, HdrOutput = true, OutputBitDepth = 10, ColorSpaceTag = "sRGB",
+        };
+        EncoderFallbackNotifier.LastReason = null;
+        EncoderFactory.Create(OutputFormat.PNG)
+            .EncodeAsync(new HdrFrameData { Pixels = px, Width = W, Height = H }, sOk,
+                Path.Combine(OutDir, $"hdr_ok_trace_{Guid.NewGuid():N}.png"))
+            .GetAwaiter().GetResult();
+        Assert("合成自检：10-bit HDR 不误报降级（判据不是恒真）",
+            string.IsNullOrEmpty(EncoderFallbackNotifier.LastReason),
+            EncoderFallbackNotifier.LastReason ?? "无");
+    }
+
+    /// <summary>读一个 ICC 里 XYZ 型标签的 s15Fixed16 三元组（自带小解析器，不复用产品代码 ⇒ 交叉验证）。</summary>
+    static int BeI32(byte[] d, int o) => d[o] << 24 | d[o + 1] << 16 | d[o + 2] << 8 | d[o + 3];
+
+    static float[]? ReadIccXyzTag(byte[] icc, string sig)
+    {
+        int n = BeI32(icc, 128);
+        for (int i = 0; i < n; i++)
+        {
+            int off = 132 + i * 12;
+            if (off + 12 > icc.Length) return null;
+            if (System.Text.Encoding.ASCII.GetString(icc, off, 4) != sig) continue;
+            int o = BeI32(icc, off + 4);
+            if (o + 20 > icc.Length) return null;
+            return new[] { BeI32(icc, o + 8) / 65536f, BeI32(icc, o + 12) / 65536f, BeI32(icc, o + 16) / 65536f };
+        }
+        return null;
+    }
+
+    static bool Near(float[]? v, float x, float y, float z, float tol)
+        => v is { Length: 3 } && Math.Abs(v[0] - x) <= tol && Math.Abs(v[1] - y) <= tol && Math.Abs(v[2] - z) <= tol;
+
+    /// <summary>
+    /// A-3（2026-09-20 许可合规审计）：本仓库产出的 ICC 必须与第三方 profile 脱钩。
+    /// <para>修之前的链路：<c>GetDefaultSRgbIcc</c> 优先读
+    /// <c>System32\spool\drivers\color\sRGB Color Space Profile.icm</c>（微软随系统的那份，
+    /// <c>cprt</c>="Copyright (c) 1998 Hewlett-Packard Company"、<c>creator</c>="HP  "），
+    /// 而 <c>PatchSrgbPrimaries</c> 以它为模板 <c>Clone</c> 后<b>只覆写 rXYZ/gXYZ/bXYZ+desc</b>
+    /// ⇒ 残留标签让 Display P3 / BT.2020 / Adobe RGB 一起带上 HP 版权串，并随用户导出的
+    /// PNG(iCCP)/TIFF/AVIF(colr prof)/JPEG(APP2) 分发（实测四类容器全命中）。
+    /// 另一个后果：模板取自本机 ⇒ 换台机器产物字节就变。</para>
+    /// <para>判据设计：<c>ContainsAsciiBytes</c> 那条<b>不依赖</b>本测试自己的 tag 解析器
+    /// （解析器与写入器同源会构成"构造恒等"），所以它是本组里最硬的一条；
+    /// cprt 文本比对是第二层，用来抓"字节里没有 HP 但也没写清是谁的"这种情况。</para>
+    /// </summary>
+    static void IccProvenance_NoThirdPartyCopyrightBytes()
+    {
+        var cases = new (string Label, byte[]? Icc)[]
+        {
+            ("sRGB",         ColorProfileProvider.GetDefaultSRgbIcc()),
+            ("Display P3",   ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.DisplayP3, "Display P3")),
+            ("BT.2020",      ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.BT2020, "BT.2020")),
+            ("Adobe RGB",    ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.AdobeRGB, "Adobe RGB (1998)")),
+            ("P3 (PQ)",      ColorProfileProvider.GetHdrStandardIccProfile("DisplayP3")),
+            ("P3 (builder)", IccProfileBuilder.Generate(IccPrimaries.DisplayP3, IccTransferCurve.Srgb)),
+        };
+
+        foreach (var (label, icc) in cases)
+        {
+            if (icc is not { Length: > 132 })
+            {
+                Assert($"{label}: profile 生成成功", false, "返回空或过短");
+                continue;
+            }
+            Assert($"{label}: 结构合法、可嵌入", FormatHelper.IsEmbeddableIcc(icc));
+            Assert($"{label}: 字节里没有第三方版权串",
+                !ContainsAsciiBytes(icc, "Hewlett") && !ContainsAsciiBytes(icc, "Copyright (c) 1998"),
+                "被 Clone 带进来的系统 cprt —— 它会随用户产物分发");
+            var cprt = ReadIccTextTypeTag(icc, "cprt");
+            Assert($"{label}: cprt 写明本项目自己的许可",
+                cprt == ColorProfileProvider.GeneratedIccCopyright, $"实得 {cprt ?? "<无 cprt 标签>"}");
+            Assert($"{label}: deviceManufacturer / creator 留空（不冒充任何厂商）",
+                Be32At(icc, 48) == 0 && Be32At(icc, 80) == 0,
+                $"mfr={Be32At(icc, 48):X8} creator={Be32At(icc, 80):X8}");
+            // ProfileID 刻意留零，不是漏算：本机唯一能实证的配方是 ICC.1:2022(v4.4) 的
+            // "整份 profile 清零 flags/intent/ID 后取 MD5"（scripts/probes/icc_profile_id_check.py
+            // 对 3 份 Windows 自产 v4 profile 3/3 命中），而这里生成的是 v2.1 profile；
+            // v2 时代那套"定长字段拼接"配方在本机拿不到任何非零样本可验（6 份 v2 文件全为 0，
+            // 包括微软自己那份 sRGB）。写一个没验证过的 ID 比留零更坏。
+            Assert($"{label}: ProfileID 留零（v2 配方未实证，见探针注释）", AllZero(icc, 84, 16));
+        }
+
+        // ── 跨机确定性 + 与本机系统件脱钩（策略1 一旦被改回来，这两条立刻分头变红）──
+        var srgb = ColorProfileProvider.GetDefaultSRgbIcc();
+        Assert("生成 sRGB 与手写件逐字节相同（跨机确定性）",
+            srgb.AsSpan().SequenceEqual(ColorProfileProvider.BuildValidSRgbIcc()));
+        var sysPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "spool", "drivers", "color", "sRGB Color Space Profile.icm");
+        if (File.Exists(sysPath))
+        {
+            var sys = File.ReadAllBytes(sysPath);
+            Assert("生成 sRGB ≠ 本机系统 sRGB（策略1 没有被改回来）",
+                !sys.AsSpan().SequenceEqual(srgb), $"系统件 {sys.Length}B");
+            // 对照样本要自证有效，否则"绿"可能只是因为这台机器的系统件本来就没 HP 串
+            Console.WriteLine(ContainsAsciiBytes(sys, "Hewlett")
+                ? $"  ℹ  对照成立：本机系统 sRGB({sys.Length}B) 含 HP 版权串，策略1 若回来就会渗进每个导出文件"
+                : "  ⚠️  对照失效：本机系统 sRGB 不含 HP 串 ⇒ 上面两条仍拦得住\"改回读系统文件\"，"
+                  + "但\"不含第三方版权串\"那条在此机器上不是回归哨兵");
+        }
+        else
+        {
+            Console.WriteLine("  ℹ  本机无系统 sRGB 文件（精简系统），跳过脱钩对照");
+        }
+
+        // ── 端到端：查真正落到用户产物上的那一份，而不是内存里的中间品 ──
+        string path = Path.Combine(OutDir, "provenance_p3.png");
+        if (File.Exists(path)) File.Delete(path);
+        var encoder = EncoderFactory.Create(OutputFormat.PNG);
+        var settings = new EncodingSettings
+        {
+            Format = OutputFormat.PNG, Quality = 100, HdrOutput = false,
+            ColorSpaceTag = "DisplayP3", OutputBitDepth = 8,
+            IccProfile = ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.DisplayP3, "Display P3"),
+        };
+        encoder.EncodeSdrAsync(GeneratePattern(8, 8), 8, 8, settings, path).GetAwaiter().GetResult();
+
+        var iccp = FindPngChunk(ReadPngChunks(path), "iCCP");
+        if (iccp is null)
+        {
+            Assert("端到端 PNG: 有 iCCP 可查", false, "写入器没嵌 ICC ⇒ 本组判据失去出口");
+        }
+        else
+        {
+            var embedded = InflateIccpPayload(iccp);
+            Assert("端到端 PNG: iCCP 解压出的 profile 不含第三方版权串",
+                embedded is { Length: > 132 } && !ContainsAsciiBytes(embedded, "Hewlett"),
+                $"解出 {embedded?.Length ?? 0}B");
+            Assert("端到端 PNG: iCCP 里的 cprt 是本项目自己的声明",
+                embedded is not null && ReadIccTextTypeTag(embedded, "cprt") == ColorProfileProvider.GeneratedIccCopyright,
+                $"实得 {ReadIccTextTypeTag(embedded ?? [], "cprt") ?? "<无>"}");
+        }
+    }
+
+    static uint Be32At(byte[] b, int i)
+        => i + 4 <= b.Length
+            ? ((uint)b[i] << 24 | (uint)b[i + 1] << 16 | (uint)b[i + 2] << 8 | b[i + 3])
+            : 0xFFFFFFFF;
+
+    static bool AllZero(byte[] b, int off, int len)
+    {
+        if (off + len > b.Length) return false;
+        for (int i = 0; i < len; i++) if (b[off + i] != 0) return false;
+        return true;
+    }
+
+    /// <summary>整份字节流里搜 ASCII 子串（与 tag 解析无关，故可作为独立判据）。</summary>
+    static bool ContainsAsciiBytes(byte[] hay, string needle)
+    {
+        byte[] n = System.Text.Encoding.ASCII.GetBytes(needle);
+        if (n.Length == 0 || hay.Length < n.Length) return false;
+        for (int i = 0; i + n.Length <= hay.Length; i++)
+        {
+            int j = 0;
+            while (j < n.Length && hay[i + j] == n[j]) j++;
+            if (j == n.Length) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 读 textType 标签（cprt 用这个：sig(4)+reserved(4)+ASCII\0）。
+    /// 注意与 desc 的 textDescriptionType 不同 —— 后者在偏移 8 处多一个长度字段。
+    /// </summary>
+    static string? ReadIccTextTypeTag(byte[] icc, string sig)
+    {
+        uint want = (uint)((sig[0] << 24) | (sig[1] << 16) | (sig[2] << 8) | sig[3]);
+        int n = (int)Be32At(icc, 128);
+        for (int i = 0; i < n; i++)
+        {
+            int e = 132 + i * 12;
+            if (e + 12 > icc.Length) return null;
+            if (Be32At(icc, e) != want) continue;
+            int o = (int)Be32At(icc, e + 4);
+            int len = (int)Be32At(icc, e + 8);
+            if (o < 128 || len < 9 || o + len > icc.Length) continue;
+            int end = o + 8;
+            while (end < o + len && icc[end] != 0) end++;
+            return System.Text.Encoding.ASCII.GetString(icc, o + 8, end - (o + 8));
+        }
+        return null;
+    }
+
+    /// <summary>iCCP 载荷 = 名称\0 + 压缩方法(0) + zlib(profile)。</summary>
+    static byte[]? InflateIccpPayload(byte[] iccp)
+    {
+        int i = 0;
+        while (i < iccp.Length && iccp[i] != 0) i++;
+        if (i + 2 > iccp.Length) return null;             // 名称之后还要有压缩方法字节
+        try
+        {
+            using var ms = new MemoryStream(iccp, i + 2, iccp.Length - i - 2);
+            using var zs = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionMode.Decompress);
+            using var outMs = new MemoryStream();
+            zs.CopyTo(outMs);
+            return outMs.ToArray();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// 缺陷 C（第 1 半）：本仓库生成的 sRGB ICC 必须满足 ICC 自己的 D50-PCS 约定。
+    /// <para>旧写法把 IEC 61966-2-1 那张【D65 引用】的矩阵直接当 rXYZ/gXYZ/bXYZ 写进 profile
+    /// ⇒ 三列之和是 D65 白，而 ICC 要求 PCS 是 D50。参照数值不是凭记忆：实测本机
+    /// <c>C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm</c>
+    /// （微软随系统的 sRGB，v2.1，3144B）—— rXYZ=(0.4361,0.2225,0.0139)，三列之和=(0.9643,1.0,0.8251)，
+    /// 而它的 wtpt 仍是未适配的 D65 (0.9505,1.0,1.0891) ⇒ "媒体白点照原样记"是它的既有做法，
+    /// 本条同时钉住这一点，防止有人"顺手统一"成 D50 反而改错。</para>
+    /// </summary>
+    static void SrgbIcc_PrimaryColumnsSumToD50White()
+    {
+        var icc = ColorProfileProvider.GetDefaultSRgbIcc();
+        if (icc is not { Length: > 300 }) { Skip("sRGB ICC 结构", "生成失败"); return; }
+
+        var r = ReadIccXyzTag(icc, "rXYZ");
+        var g = ReadIccXyzTag(icc, "gXYZ");
+        var b = ReadIccXyzTag(icc, "bXYZ");
+        var w = ReadIccXyzTag(icc, "wtpt");
+        Assert("rXYZ/gXYZ/bXYZ/wtpt 四个标签都在", r is not null && g is not null && b is not null && w is not null);
+        if (r is null || g is null || b is null || w is null) return;
+
+        var sum = new[] { r[0] + g[0] + b[0], r[1] + g[1] + b[1], r[2] + g[2] + b[2] };
+        Assert($"三原色列之和 = D50 白（实得 {sum[0]:F4},{sum[1]:F4},{sum[2]:F4}）",
+            Near(sum, 0.9642f, 1.0f, 0.8249f, 0.003f),
+            "和落在 D65 (0.9505,1,1.0890) 就是写错 PCS —— 这是缺陷 C 的直接判据");
+        Assert("wtpt 保持未适配 D65（与微软系统 profile 一致，不许顺手改成 D50）",
+            Near(w, 0.9505f, 1.0f, 1.0891f, 0.002f),
+            $"{w[0]:F4},{w[1]:F4},{w[2]:F4}");
+        Assert("rXYZ 与 IsSrgbProfile 的期望同源 (0.4360,0.2225)",
+            Math.Abs(r[0] - 0.4360f) < 0.01f && Math.Abs(r[1] - 0.2225f) < 0.01f,
+            $"{r[0]:F4},{r[1]:F4}");
+    }
+
+    /// <summary>
+    /// 缺陷 C（第 2 半，真正的根因）：ICC 的 D50 源矩阵与硬编码的 D65 目标矩阵不能直接相乘。
+    /// <para>判据取"sRGB→sRGB 烘焙必须是逐字节不变的恒等"：修好之前，源列(D50) 与目标逆矩阵(D65)
+    /// 差一次白点适配 ⇒ 复合矩阵不是单位阵 ⇒ <c>IsIdentityMatrix</c> 判不过 ⇒ 真的对像素乘了一张
+    /// 带偏移的矩阵（同一张 profile 自己转自己都会变色，这是可观察的错误，不是纸面担忧）。</para>
+    /// </summary>
+    static void BakeIcc_SrgbToSrgb_IsExactIdentity()
+    {
+        var srgbIcc = ColorProfileProvider.GetDefaultSRgbIcc();
+        if (srgbIcc is not { Length: > 300 }) { Skip("sRGB→sRGB 恒等", "生成 profile 失败"); return; }
+
+        const int W = 8, H = 4;
+        var bgra = new byte[W * H * 4];
+        var rnd = new Random(20260919);
+        rnd.NextBytes(bgra);
+        for (int i = 0; i < W * H; i++) bgra[i * 4 + 3] = 255;   // alpha 直通，别把差异混进来
+
+        var (outPx, outIcc) = ColorProfileProvider.BakeIccToTarget(bgra, W, H, srgbIcc, "sRGB");
+        Assert("sRGB→sRGB 有产出且不抛", outPx is not null && outPx.Length == bgra.Length);
+        if (outPx is null) return;
+
+        int diffCount = 0;
+        int maxDiff = 0;
+        for (int i = 0; i < bgra.Length; i++)
+        {
+            int d = Math.Abs(bgra[i] - outPx[i]);
+            if (d > 0) diffCount++;
+            if (d > maxDiff) maxDiff = d;
+        }
+        Assert($"sRGB→sRGB 逐字节恒等（差异字节 {diffCount}，最大 {maxDiff}）",
+            diffCount == 0, "非恒等 ⇒ 复合矩阵没回到 D65 同域（D50/D65 混乘回归）");
+        Assert("sRGB 目标按契约不嵌 ICC", outIcc is null, $"{outIcc?.Length ?? 0}B");
+    }
+
+    /// <summary>
+    /// 缺陷 B1：TIFF 没有 cICP 通道，ICC 是唯一能把色域说清楚的标签 ⇒ sRGB 也不能"零声明"。
+    /// <para>旧写法 <c>(tag 是广色域) ? s.IccProfile : null</c> 在 sRGB 目标下产出完全不带色彩标记的
+    /// 文件（16-bit RGBA 上什么声明都没有，读取端各自猜）。判据只问"有没有 ICC 的 acsp 签名"，
+    /// 两条通路（8-bit 源 / Float16 源 ≥10-bit）都要有。</para>
+    /// </summary>
+    static void Tiff_EmbedsIccEvenForSrgb()
+    {
+        const int W = 4, H = 4;
+        var bgra = new byte[W * H * 4];
+        for (int i = 0; i < W * H; i++)
+        {
+            bgra[i * 4] = 40; bgra[i * 4 + 1] = 120; bgra[i * 4 + 2] = 200; bgra[i * 4 + 3] = 255;
+        }
+        var hdrPx = new float[W * H * 4];
+        for (int i = 0; i < W * H; i++)
+        {
+            hdrPx[i * 4] = 0.4f; hdrPx[i * 4 + 1] = 0.5f; hdrPx[i * 4 + 2] = 0.6f; hdrPx[i * 4 + 3] = 1f;
+        }
+        var enc = EncoderFactory.Create(OutputFormat.TIFF);
+
+        var s8 = new EncodingSettings { Format = OutputFormat.TIFF, OutputBitDepth = 8, ColorSpaceTag = "sRGB" };
+        var p8 = Path.Combine(OutDir, $"tiff_srgb8_{Guid.NewGuid():N}.tif");
+        enc.EncodeSdrAsync(bgra, W, H, s8, p8).GetAwaiter().GetResult();
+
+        var s16 = new EncodingSettings { Format = OutputFormat.TIFF, OutputBitDepth = 16, ColorSpaceTag = "sRGB" };
+        var p16 = Path.Combine(OutDir, $"tiff_srgb16_{Guid.NewGuid():N}.tif");
+        enc.EncodeAsync(new HdrFrameData { Pixels = hdrPx, Width = W, Height = H }, s16, p16)
+            .GetAwaiter().GetResult();
+
+        foreach (var (name, path) in new[] { ("8-bit 源", p8), ("Float16 源 ≥10", p16) })
+        {
+            if (!File.Exists(path)) { Assert($"TIFF {name}: 产物存在", false, path); continue; }
+            var bytes = File.ReadAllBytes(path);
+            bool hasAcsp = false;
+            for (int i = 3; i + 1 <= bytes.Length && !hasAcsp; i++)
+                hasAcsp = bytes[i] == (byte)'a' && bytes[i + 1] == (byte)'c'
+                       && bytes[i + 2] == (byte)'s' && bytes[i + 3] == (byte)'p';
+            Assert($"TIFF {name}: sRGB 目标也嵌 ICC（找到 acsp）", hasAcsp,
+                "找不到 ⇒ 又回到零声明：TIFF 没有 cICP，不嵌 ICC 就等于什么也没说");
+        }
+    }
+
+    /// <summary>
+    /// 2026-09-19 §4.3「双路径策略」的行为级证据：<b>色域矩阵跟源精度走，容器位深跟用户请求走</b>，两件事必须解耦。
+    /// <para>回归背景：旧写法用同一个 <c>OutputBitDepth &gt;= 10</c> 一次决定"要不要跑广色域矩阵"和"容器写几 bit"
+    /// —— 16-bit 走 <c>PrepareSdr16Pixels</c>（有矩阵），8-bit 走 <c>ToSdr</c>（无矩阵）。于是用户选 8-bit 输出，
+    /// Display P3 的像素被悄悄退回 sRGB，而容器的 cICP/ICC 仍声明 P3。外部判据
+    /// <c>scripts/precision/gamut_depth_consistency.py</c> 的量：同一样张 8-bit/16-bit 的 cICP 原色都是 12、
+    /// 两档之间 0.000% 的采样差 &gt;1 LSB，而"跑矩阵 vs 不跑矩阵"有 43.2% 的采样不同 —— 修法生效后才是现在这个样子。</para>
+    /// <para>这条不打 native 工具，只在 Core 的浮点链上取证 ⇒ 任何机器都能跑：
+    /// ① 同帧、同 8-bit 容器，tag=P3 与 tag=sRGB 必须显著不同 ⇒ 矩阵在 8-bit 输出上真跑了；
+    /// ② 中性像素 (c,c,c) 必须两档 tag 一致（矩阵行和为 1）⇒ 差别只来自矩阵，没夹白带点缩放；
+    /// ③ 同 tag 的 8-bit 与 16-bit 必须只差量化 ≤1 LSB ⇒ 位深没有改颜色；
+    /// ④ 16-bit 容器的低字节必须大面积非零 ⇒ 浮点链真带出了 8-bit 表达不了的信息（不是升位深假高精度）。</para>
+    /// </summary>
+    static void GamutDepth_DecoupledAtEveryOutputDepth()
+    {
+        const int W = 4, H = 4;
+        // 11 个有彩色 + 5 个中性（r=g=b）。全部落在 [0,1] 内 ⇒ 色调映射对三档输出的影响一致，
+        // 这里的断言也全是【相对】关系，不依赖色调曲线的具体形状。
+        var cols = new (float R, float G, float B)[]
+        {
+            (0.90f, 0.05f, 0.05f), (0.05f, 0.90f, 0.05f), (0.05f, 0.05f, 0.90f),
+            (0.50f, 0.50f, 0.00f), (0.00f, 0.50f, 0.50f), (0.50f, 0.00f, 0.50f),
+            (0.20f, 0.70f, 0.35f), (0.75f, 0.15f, 0.60f), (0.35f, 0.35f, 0.80f),
+            (0.80f, 0.45f, 0.10f), (0.30f, 0.60f, 0.90f),
+            (0.00f, 0.00f, 0.00f), (0.10f, 0.10f, 0.10f), (0.35f, 0.35f, 0.35f),
+            (0.65f, 0.65f, 0.65f), (1.00f, 1.00f, 1.00f),
+        };
+        var src = new float[W * H * 4];
+        for (int i = 0; i < cols.Length; i++)
+        {
+            src[i * 4] = cols[i].R; src[i * 4 + 1] = cols[i].G;
+            src[i * 4 + 2] = cols[i].B; src[i * 4 + 3] = 1f;
+        }
+        var frame = new HdrFrameData { Pixels = src, Width = W, Height = H };
+
+        // ⚠ 每次调用现造一份 settings：准备段会【就地】记账（ColorSpaceTag / IccProfile，16-bit 出口还改 HdrOutput）。
+        // 复用同一个对象会让第二次跑到第一次的副作用上 —— 那等于用被污染的第二份实现自证。
+        EncodingSettings New(string tag) => new EncodingSettings { ColorSpaceTag = tag, HdrOutput = false };
+
+        byte[] p3_8 = FormatHelper.ToSdr(frame, New("DisplayP3"));
+        byte[] srgb_8 = FormatHelper.ToSdr(frame, New("sRGB"));
+        byte[] p3_16 = FormatHelper.PrepareSdr16Pixels(frame, New("DisplayP3"));
+
+        int chromaN = 0, chromaMoved = 0, lowByteN = 0, tested = 0;
+        int maxNeutralDiff = 0, maxDepthDiff = 0;
+        for (int pi = 0; pi < W * H; pi++)
+        {
+            float r = src[pi * 4], g = src[pi * 4 + 1], b = src[pi * 4 + 2];
+            bool neutral = MathF.Abs(r - g) < 1e-4f && MathF.Abs(g - b) < 1e-4f;
+            for (int ch = 0; ch < 3; ch++)
+            {
+                // 两个出口都是 BGRA 序（8-bit: B,G,R,A；16-bit: 大端 B_hi,B_lo,G_hi,G_lo…）⇒ 同位直比
+                int v8 = p3_8[pi * 4 + ch];
+                int v8s = srgb_8[pi * 4 + ch];
+                int v16 = (p3_16[pi * 8 + ch * 2] << 8) | p3_16[pi * 8 + ch * 2 + 1];
+                tested++;
+                if ((v16 & 0xFF) != 0) lowByteN++;
+
+                int d = Math.Abs(v8 - v8s);
+                if (neutral) maxNeutralDiff = Math.Max(maxNeutralDiff, d);
+                else { chromaN++; if (d > 2) chromaMoved++; }
+
+                maxDepthDiff = Math.Max(maxDepthDiff, Math.Abs((v16 >> 8) - v8));
+            }
+        }
+
+        Assert($"① 矩阵在 8-bit 容器上真跑了：有彩通道 {chromaMoved}/{chromaN} 个差 >2 LSB",
+            chromaN > 0 && chromaMoved * 2 >= chromaN,
+            "若为 0 ⇒ 8-bit 路径把色域矩阵又跳回去了（§4.3 回退）");
+        Assert($"② 中性像素不受 tag 影响（矩阵行和为 1）：最大差 {maxNeutralDiff} LSB",
+            maxNeutralDiff <= 1, "差得越多越像夹带了白点缩放/亮度增益，而不是纯矩阵");
+        Assert($"③ 位深只改量化、不改颜色：8-bit vs 16-bit(P3) 最大差 {maxDepthDiff} LSB",
+            maxDepthDiff <= 1);
+        Assert($"④ 16-bit 容器确有 8-bit 表达不了的低位：低字节非零 {lowByteN}/{tested} 通道",
+            lowByteN * 2 >= tested, "低字节几乎全 0 ⇒ 只是把 8-bit 左移了 8 位（升位深式假高精度）");
     }
 
     // ═══════════════════════════════════════════════
@@ -650,10 +1437,21 @@ public static class ColorPipelineTests
 
     static void ColorMatrix_ScrgbToP3_Accuracy()
     {
-        // 验证 SrgbToDisplayP3 矩阵: P3 原色在 scRGB 中 → 矩阵 → 应回 P3 原色
-        // P3 红在 scRGB (BT.709 原色 + 线性 gamma) 中的精确坐标:
-        // 由 SrgbToDisplayP3 的逆矩阵算出: [1.0, 0, 0]^T × inv(SrgbToDisplayP3)
-        // 简化验证: 检查矩阵的行和 ≈ 1.0
+        // 名字承诺 Accuracy，原实现只验了行和 ≈ 1（行和=1 只保证"白不变"，任何错误的
+        // 非对角系数都能通过）与元素非负。现按公布值逐系数比对。
+        // 公布值来源：BT.709/sRGB 原色 (0.640,0.330)(0.300,0.600)(0.150,0.060) 与
+        // Display P3 原色 (0.680,0.320)(0.265,0.690)(0.150,0.060)、同 D65 白点 (0.3127,0.3290)，
+        // 经 XYZ 组合 inv(M_P3)·M_sRGB 得到（本文件不重算这条推导，只钉住结果值）。
+        // 注：交接/审计稿里抄的那组（0.0332/0.9968/-0.0290、-0.0171/0.0724/0.9437）与标准
+        // 原色推不出对应关系（第二行和为 1.001、第三行首项符号相反，偏差 0.034 ≫ 1e-3），
+        // 而生产值与上面的推导逐系数差 ≤ 3.5e-4，故判据取推导结果。
+        AssertGamutMatrix("SrgbToP3", ColorSpaceConverter.SrgbToDisplayP3, new float[3, 3]
+        {
+            { 0.8224621f, 0.1775380f, 0.0000000f },
+            { 0.0331942f, 0.9668058f, 0.0000000f },
+            { 0.0170826f, 0.0723974f, 0.9105199f },
+        });
+
         float[] rowSums = {
             ColorSpaceConverter.SrgbToDisplayP3[0,0] + ColorSpaceConverter.SrgbToDisplayP3[0,1] + ColorSpaceConverter.SrgbToDisplayP3[0,2],
             ColorSpaceConverter.SrgbToDisplayP3[1,0] + ColorSpaceConverter.SrgbToDisplayP3[1,1] + ColorSpaceConverter.SrgbToDisplayP3[1,2],
@@ -686,6 +1484,15 @@ public static class ColorPipelineTests
 
     static void ColorMatrix_ScrgbToBt2020_Accuracy()
     {
+        // 公布值：BT.709 线性 → BT.2020 线性（ITU-R BT.2087 的 XYZ 矩阵组合所得，
+        // 与 NativeAvifEncoder.FloatToPq10 里那份独立写出的系数同一套值）。
+        AssertGamutMatrix("SrgbToBT2020", ColorSpaceConverter.SrgbToBt2020, new float[3, 3]
+        {
+            { 0.6274039f, 0.3292830f, 0.0433131f },
+            { 0.0690973f, 0.9195404f, 0.0113623f },
+            { 0.0163914f, 0.0880133f, 0.8955953f },
+        });
+
         float[] rowSums = {
             ColorSpaceConverter.SrgbToBt2020[0,0] + ColorSpaceConverter.SrgbToBt2020[0,1] + ColorSpaceConverter.SrgbToBt2020[0,2],
             ColorSpaceConverter.SrgbToBt2020[1,0] + ColorSpaceConverter.SrgbToBt2020[1,1] + ColorSpaceConverter.SrgbToBt2020[1,2],
@@ -713,6 +1520,16 @@ public static class ColorPipelineTests
 
     static void ColorMatrix_ScrgbToAdobeRgb_Accuracy()
     {
+        // 公布值：sRGB 线性 → Adobe RGB (1998) 线性。AdobeRGB 与 sRGB 共享红/蓝原色与 D65 白点
+        // （只有绿原色不同）⇒ 第二行恒为 (0,1,0)、第三行首项恒为 0 是**结构性**判据
+        // （原实现只验行和 ≈ 1，把整张矩阵换成任意"行和为 1"的错值都能通过）。
+        AssertGamutMatrix("SrgbToAdobeRGB", ColorSpaceConverter.SrgbToAdobeRgb, new float[3, 3]
+        {
+            { 0.7151256f, 0.2848744f, 0.0000000f },
+            { 0.0000000f, 1.0000000f, 0.0000000f },
+            { 0.0000000f, 0.0411619f, 0.9588381f },
+        });
+
         float[] rowSums = {
             ColorSpaceConverter.SrgbToAdobeRgb[0,0] + ColorSpaceConverter.SrgbToAdobeRgb[0,1] + ColorSpaceConverter.SrgbToAdobeRgb[0,2],
             ColorSpaceConverter.SrgbToAdobeRgb[1,0] + ColorSpaceConverter.SrgbToAdobeRgb[1,1] + ColorSpaceConverter.SrgbToAdobeRgb[1,2],
@@ -724,23 +1541,11 @@ public static class ColorPipelineTests
         Assert("SrgbToAdobeRGB: 所有行和 ≈ 1.0", allRowSumClose);
     }
 
-    static void ColorMatrix_ApplySrgbToTargetGamut()
-    {
-        // 验证 ApplySrgbToTargetGamut: BGRA 纯红 → P3 后红通道保持高值
-        // BGRA 格式: [B, G, R, A, B, G, R, A]
-        // 像素0: 纯红 (B=0, G=0, R=255, A=255)
-        // 像素1: 纯黑 (B=0, G=0, R=0, A=255)
-        var bgra = new byte[] { 0, 0, 255, 255, 0, 0, 0, 255 };
-        var result = ColorSpaceConverter.ApplySrgbToTargetGamut(bgra, 2, 1, "DisplayP3");
-        Assert("ApplySrgbToTargetGamut: 输出长度正确", result.Length == 8);
-        // 像素0 (纯红) 在 P3 中 R 通道应保持高值
-        Assert("ApplySrgbToTargetGamut: 红通道保持高值", result[2] > 200);
-        // 像素1 (纯黑) 应为全黑
-        Assert("ApplySrgbToTargetGamut: 黑色保持", result[4] == 0 && result[5] == 0 && result[6] == 0);
-        // sRGB 目标 → 应返回原始数组引用
-        var sameRef = ColorSpaceConverter.ApplySrgbToTargetGamut(bgra, 2, 1, "sRGB");
-        Assert("ApplySrgbToTargetGamut: sRGB 目标返回原始引用", object.ReferenceEquals(sameRef, bgra));
-    }
+    // 2026-09-19：原 ColorMatrix_ApplySrgbToTargetGamut() 已删除。
+    // 被测对象 ColorSpaceConverter.ApplySrgbToTargetGamut 是"8-bit → float → 矩阵 → 8-bit"的
+    // 双重量化实现，且在 src/ 下没有任何生产调用方 —— 这条用例存在的唯一作用，
+    // 是让一份永不执行的代码看起来有测试覆盖。函数与本用例一并移除，理由写在
+    // ColorProfileProvider.cs 的原位注释里。
 
     // ═══════════════════════════════════════════════
     //  9. Gain Map XMP 验证
@@ -829,33 +1634,170 @@ public static class ColorPipelineTests
         Assert("ISO 元数据 RGB: 多通道标志", (isoRgb[4] & 0x80) != 0);
     }
 
+    /// <summary>
+    /// 增益图的 log2 量程必须只有一个来源：像素量化用的值 == XMP == ISO（交接 §31.3-3）。
+    /// <para>缺陷形态（headroom ≤ 1，即 HDR 峰值不高于 SDR 纸白 —— 在非 HDR 屏上开着 HDR 输出就会遇到，
+    /// 例如 DisplayMaxNits=80 / PaperWhiteNits=80）：像素侧把 maxLog2Gain 兜底成 1.0 去量化，
+    /// 而 XMP 与 ISO 各自<b>又算了一次</b> <c>log2(max(headroom,1)) = 0</c> ⇒
+    ///   ① 声明与像素矛盾：解码 <c>log_boost = min + (max−min)·recovery</c> 恒 0，增益层整层作废；
+    ///   ② 更糟的是 <c>HDRCapacityMin == HDRCapacityMax == 0</c>（ISO 侧 baseHdrHeadroom ==
+    ///      alternateHdrHeadroom），违反"capacity_max 必须严格大于 capacity_min"，
+    ///      libavif / libultrahdr 的权重公式在此除零。</para>
+    /// <para>这里不只比"值对不对"，还钉一条结构性的：<b>XMP 十进制 ×100 必须等于 ISO 的分子整数</b>
+    /// —— 只要还剩一处第二次算 log2、或两侧取整方式不同，这条就会红（原先正是 XMP 走
+    /// <c>ToString("0.00")</c>、ISO 走 <c>MathF.Round</c> 的默认取偶，恰在中点可差 0.01）。</para>
+    /// </summary>
+    static void GainMap_GainRange_SingleSourceAcrossPixelsXmpAndIso()
+    {
+        // (headroom, 期望的百分位整数)：退化 1.0 与 0.5 都兜到 100（=1.00 log2），
+        // 正常档保持 log2 的真实值不变 —— 兜底只作用于退化处，不许把 2.0 也"修"成 1.0。
+        foreach (var (headroom, want) in new[] { (1.0f, 100), (0.5f, 100), (2.0f, 100), (12.5f, 364) })
+        {
+            var xmp = System.Text.Encoding.UTF8.GetString(JpegGainMapEncoder.BuildXmpMetadata(
+                1920, 1080, 481, 271, GainMapMode.Gray, headroom));
+            var iso = JpegGainMapEncoder.BuildIso21496Metadata(GainMapMode.Gray, headroom);
+
+            static string Field(string xmp, string name)
+            {
+                int a = xmp.IndexOf($"<{name}>", StringComparison.Ordinal);
+                int b = xmp.IndexOf('<', a + name.Length + 2, StringComparison.Ordinal);
+                return a < 0 || b < 0 ? "?" : xmp[(a + name.Length + 2)..b];
+            }
+
+            string maxTxt = Field(xmp, "hdrgm:GainMapMax");
+            string capMin = Field(xmp, "hdrgm:HDRCapacityMin");
+            string capMax = Field(xmp, "hdrgm:HDRCapacityMax");
+            int xmpCentibels = (int)Math.Round(
+                double.Parse(maxTxt, System.Globalization.CultureInfo.InvariantCulture) * 100.0);
+
+            Assert($"headroom={headroom}: GainMapMax={maxTxt} 等于唯一整数源 {want / 100m:0.00}",
+                xmpCentibels == want, $"实际 {maxTxt}");
+            Assert($"headroom={headroom}: ISO alternateHdrHeadroom 分子 == 同一个整数",
+                BeI32(iso, 13) == want && BeI32(iso, 17) == 100,
+                $"实际 {BeI32(iso, 13)}/{BeI32(iso, 17)}");
+            Assert($"headroom={headroom}: ISO gainMapMax 分子 == 同一个整数（与 XMP 零漂移）",
+                BeI32(iso, 29) == want && BeI32(iso, 33) == 100,
+                $"实际 {BeI32(iso, 29)}/{BeI32(iso, 33)}");
+            // 除零守卫：capacity 区间必须严格递增，XMP 与 ISO 两侧都要成立
+            Assert($"headroom={headroom}: HDRCapacityMax({capMax}) 严格大于 Min({capMin})",
+                double.Parse(capMax, System.Globalization.CultureInfo.InvariantCulture)
+                > double.Parse(capMin, System.Globalization.CultureInfo.InvariantCulture));
+            Assert($"headroom={headroom}: ISO alternate({BeI32(iso, 13)}) 严格大于 base({BeI32(iso, 5)})",
+                BeI32(iso, 13) > BeI32(iso, 5));
+        }
+
+        // 反向自检：判据不许恒真 —— 退化档与正常档若被判成同一个值，本用例就什么都没钉住
+        static int IsoAlt(float hr)
+            => BeI32(JpegGainMapEncoder.BuildIso21496Metadata(GainMapMode.Gray, hr), 13);
+        Assert("退化档(1.0) 与正常档(12.5) 的分子确实不同（兜底只作用于退化处，没有把所有值抹平）",
+            IsoAlt(1.0f) != IsoAlt(12.5f), $"{IsoAlt(1.0f)} vs {IsoAlt(12.5f)}");
+        Assert("log2(2)=1.00 是真值而非兜底巧合：headroom=2 与 1.0 同为 100 是数学上的相等",
+            IsoAlt(2.0f) == 100, "若这条红，说明兜底或取整被动到了别处");
+    }
+
     // ═══════════════════════════════════════════════
     //  辅助方法
     // ═══════════════════════════════════════════════
 
-    /// <summary>ST.2084 PQ 编码 (线性光 → 非线性 PQ)。</summary>
-    static float LinearToPq(float c)
+    /// <summary>
+    /// 把一个亮度（nits）送进生产入口 <see cref="FormatHelper.HdrToPq16"/>，取回 RGBA 四个 16-bit 码点。
+    /// <para>输入按 scRGB 线性约定 <c>nits / 80</c>（80 nits = 1.0，见 FormatHelper.LinearToPQ 内的
+    /// <c>nits = linear * 80</c>）；帧为 1×1 灰像素、alpha = 1。colorSpaceTag 显式给 "sRGB"，
+    /// 使 <c>ColorSpaceConverter.GetMatrix</c> 返回 null ⇒ 这一条只测 PQ 曲线，不混入色域矩阵。</para>
+    /// <para>2026-09-19：本文件原有的 <c>LinearToPq</c> / <c>PqToLinear</c> 两份本地副本已删除 ——
+    /// 它们让 PQ 用例只在验证测试文件自己抄的公式，生产的编码器一次也没被跑到（自证）。</para>
+    /// </summary>
+    static ushort[] Pq16CodesForNits(float nits)
     {
-        const float m1 = 0.1593017578125f;
-        const float m2 = 78.84375f;
-        const float c1 = 0.8359375f;
-        const float c2 = 18.8515625f;
-        const float c3 = 18.6875f;
-        float cMax = MathF.Pow(MathF.Max(c, 0f), m1);
-        return MathF.Pow((c1 + c2 * cMax) / (1f + c3 * cMax), m2);
+        float v = nits / 80f;
+        var frame = new HdrFrameData { Pixels = [v, v, v, 1f], Width = 1, Height = 1 };
+        return FormatHelper.HdrToPq16(frame, "sRGB", 16);
     }
 
-    /// <summary>ST.2084 PQ 解码 (非线性 PQ → 线性光)。</summary>
-    static float PqToLinear(float pq)
+    /// <summary>
+    /// 逐系数比对 3×3 色域矩阵与公布值（容差 ±1e-3）。原实现只验"行和 ≈ 1 + 元素非负"，
+    /// 而"行和=1"只保证白点不变 —— 任意把两个系数互换都能通过，这不叫 Accuracy。
+    /// </summary>
+    static void AssertGamutMatrix(string tag, float[,] m, float[,] published)
     {
-        const float m1 = 0.1593017578125f;
-        const float m2 = 78.84375f;
-        const float c1 = 0.8359375f;
-        const float c2 = 18.8515625f;
-        const float c3 = 18.6875f;
-        float pqPow = MathF.Pow(MathF.Max(pq, 0f), 1f / m2);
-        return MathF.Pow(MathF.Max(pqPow - c1, 0f) / (c2 - c3 * pqPow), 1f / m1);
+        float worst = 0; int wi = 0, wj = 0;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+            {
+                float d = MathF.Abs(m[i, j] - published[i, j]);
+                if (d > worst) { worst = d; wi = i; wj = j; }
+            }
+        Assert($"{tag}: 9 个系数逐个对上公布值 (|Δ| ≤ 1e-3, 最差 [{wi},{wj}] Δ={worst:E2})", worst <= 1e-3f);
     }
+
+    /// <summary>读 3 个连续的 s15Fixed16（大端）—— ICC 的 XYZ 三元组；越界返回 NaN 三元组。</summary>
+    static (float X, float Y, float Z) ReadS15Triple(byte[] b, int o)
+        => o >= 0 && o + 12 <= b.Length
+            ? (S15Fixed16(b, o), S15Fixed16(b, o + 4), S15Fixed16(b, o + 8))
+            : (float.NaN, float.NaN, float.NaN);
+
+    /// <summary>ICC s15Fixed16：32 位有符号大端，低 16 位是小数（1.0 = 65536）。</summary>
+    static float S15Fixed16(byte[] b, int o) => (b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]) / 65536f;
+
+    /// <summary>
+    /// 在 ICC tag 表里按签名找一个 xyzType 标签并读回它的三个 s15Fixed16（找不到返回 null）。
+    /// <para>tag 表: [4B count]@128 起，每项 [4B sig][4B offset][4B len]；
+    /// 标签体: [4B 'XYZ '][4B reserved][3× s15Fixed16] ⇒ 值从 offset+8 开始（ICC.1 §10.4）。
+    /// 这里按规范布局自己走表，不复用 ColorProfileProvider 的解析函数。</para>
+    /// </summary>
+    static (float X, float Y, float Z)? FindIccXyzTag(byte[] icc, int tagCount, string sig)
+    {
+        int want = sig[0] << 24 | sig[1] << 16 | sig[2] << 8 | sig[3];
+        for (int i = 0; i < tagCount; i++)
+        {
+            int e = 132 + i * 12;
+            if (e + 12 > icc.Length) break;
+            if ((icc[e] << 24 | icc[e + 1] << 16 | icc[e + 2] << 8 | icc[e + 3]) != want) continue;
+            int off = icc[e + 4] << 24 | icc[e + 5] << 16 | icc[e + 6] << 8 | icc[e + 7];
+            var t = ReadS15Triple(icc, off + 8);
+            return float.IsNaN(t.X) ? null : t;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 在 [from,to) 内走 JPEG 段链，返回第一个载荷含 <paramref name="needle"/> 的指定 APP marker 段载荷文本。
+    /// <para>布局判据来自 T.81：marker 两字节 <c>FF Ex</c> + 大端 2 字节长度（含长度自身、不含 marker）
+    /// + 载荷。找不到返回 null。自己走段链而不是问 JpegGainMapEncoder，是为了让"段落位置"
+    /// （XMP/MPF 在 Base 内、ISO 21496-1 在增益图 SOI 之后）成为可判定的事实。</para>
+    /// </summary>
+    static string? FindJpegAppPayload(byte[] d, int from, int to, byte marker, string needle)
+    {
+        int end = Math.Min(to, d.Length);
+        for (int i = Math.Max(from, 0); i + 4 < end; i++)
+        {
+            if (d[i] != 0xFF || d[i + 1] != marker) continue;
+            int len = (d[i + 2] << 8) | d[i + 3];
+            if (len < 2 || i + 2 + len > d.Length) continue;     // 长度越界 ⇒ 段链已损坏，跳过该 marker
+            var payload = System.Text.Encoding.UTF8.GetString(d, i + 4, len - 2);
+            if (payload.Contains(needle)) return payload;
+        }
+        return null;
+    }
+
+    /// <summary>字节序列里首次出现 ASCII 串的位置（找不到 -1）。</summary>
+    static int IndexOfAscii(byte[] d, string needle)
+    {
+        var n = System.Text.Encoding.ASCII.GetBytes(needle);
+        for (int i = 0; i + n.Length <= d.Length; i++)
+        {
+            bool hit = true;
+            for (int j = 0; j < n.Length; j++) if (d[i + j] != n[j]) { hit = false; break; }
+            if (hit) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>大端 u32（ISOBMFF 盒长/尺寸字段一律大端）。</summary>
+    static uint ReadBeUInt32(byte[] d, int o)
+        => o >= 0 && o + 4 <= d.Length
+            ? ((uint)d[o] << 24 | (uint)d[o + 1] << 16 | (uint)d[o + 2] << 8 | d[o + 3])
+            : 0u;
 
     /// <summary>生成 BGRA 8x8 测试图案。</summary>
     static byte[] GeneratePattern(int w, int h)
@@ -873,32 +1815,44 @@ public static class ColorPipelineTests
 
     /// <summary>检查 PNG 文件是否包含指定 chunk。</summary>
     static bool CheckPngChunk(string path, string chunkName)
-    {
-        try
-        {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-            // PNG signature: 8 bytes
-            var sig = new byte[8];
-            if (fs.Read(sig, 0, 8) < 8) return false;
-            if (sig[1] != 0x50 || sig[2] != 0x4E || sig[3] != 0x47) return false; // PNG
+        => FindPngChunk(ReadPngChunks(path), chunkName) is not null;
 
-            byte[] chunkNameBytes = System.Text.Encoding.ASCII.GetBytes(chunkName);
-            while (fs.Position < fs.Length - 4)
-            {
-                // Length (4 bytes) + Type (4 bytes)
-                var lenBytes = new byte[4];
-                var typeBytes = new byte[4];
-                if (fs.Read(lenBytes, 0, 4) < 4) break;
-                if (fs.Read(typeBytes, 0, 4) < 4) break;
-                int len = (lenBytes[0] << 24) | (lenBytes[1] << 16) | (lenBytes[2] << 8) | lenBytes[3];
-                if (typeBytes.SequenceEqual(chunkNameBytes)) return true;
-                // Skip data + CRC (len + 4)
-                if (fs.Position + len + 4 > fs.Length) break;
-                fs.Seek(len + 4, SeekOrigin.Current);
-            }
-            return false;
+    /// <summary>
+    /// 2026-09-19：独立遍历 PNG chunk 链（不复用 ManagedPngEncoder 的写入逻辑）：返回按文件顺序排列的
+    /// <c>(类型, 数据)</c>。签名不符、块长越界时返回已解析到的部分 —— 调用方的"首块是 IHDR"
+    /// 之类的断言因此能区分"文件不是 PNG"和"PNG 但缺元数据"。
+    /// </summary>
+    static List<(string Type, byte[] Data)> ReadPngChunks(string path)
+    {
+        var list = new List<(string Type, byte[] Data)>();
+        byte[] d;
+        try { d = File.ReadAllBytes(path); } catch { return list; }
+        byte[] sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        if (d.Length < 8) return list;
+        for (int i = 0; i < 8; i++) if (d[i] != sig[i]) return list;
+
+        int pos = 8;
+        while (pos + 12 <= d.Length)
+        {
+            int len = (d[pos] << 24) | (d[pos + 1] << 16) | (d[pos + 2] << 8) | d[pos + 3];
+            string type = System.Text.Encoding.ASCII.GetString(d, pos + 4, 4);
+            // 长度越界（含 len 为负 / 加法溢出）⇒ 结构已损坏，停止解析
+            if (len < 0 || (long)pos + 12 + len > d.Length) break;
+            var data = new byte[len];
+            System.Buffer.BlockCopy(d, pos + 8, data, 0, len);
+            list.Add((type, data));
+            pos += 12 + len;
+            if (type == "IEND") break;
         }
-        catch { return false; }
+        return list;
+    }
+
+    /// <summary>取同名 chunk 的数据（不存在返回 null；同名多次出现取第一个）。</summary>
+    static byte[]? FindPngChunk(List<(string Type, byte[] Data)> chunks, string name)
+    {
+        foreach (var c in chunks)
+            if (c.Type == name) return c.Data;
+        return null;
     }
 
     static void Assert(string name, bool ok, string? detail = null)

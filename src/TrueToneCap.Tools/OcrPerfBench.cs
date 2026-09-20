@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrPerfBench.cs — OCR 性能基准测试
 // 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-perf <modelDir> [--size small|medium] [--iterations 5]
 

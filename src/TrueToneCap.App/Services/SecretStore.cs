@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/SecretStore.cs
 // 敏感凭据加密存储 — Windows DPAPI (CryptProtectData, 当前用户 + 当前机器绑定)
 // 用途: LLM API Key 等凭据，避免明文落入 settings.json

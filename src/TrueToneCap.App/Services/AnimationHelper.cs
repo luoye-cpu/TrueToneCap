@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/AnimationHelper.cs
 // 过渡 UI 动画辅助 (可开关) — 2026-08-25 任务6
 // 用 Composition KeyFrameAnimation 做页面切换淡入/位移、状态文本反馈; 开关关闭时全部短路。

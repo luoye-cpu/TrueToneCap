@@ -1,33 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/LogService.cs
 // 统一日志服务 — 全局日志记录，支持文件输出 + UI 实时显示
 // 日志文件: {AppDir}/log/ 目录，按日轮转
 // UI 显示: 内存环形缓冲区，通过 LogEntry 事件实时推送
 // 分类: System / Capture / Encoding / UI / OCR / Network
+//
+// ⚠ 等级与分类的定义在 TrueToneCap.Core.Logging（Core 也要能写日志，而 Core 不引用 App）。
+//   本服务同时充当 CoreLog 的落点，见 InitializeFileLog 里的 Attach 调用。
 
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
+using TrueToneCap.Core.Logging;
 
 namespace TrueToneCap.App.Services;
-
-/// <summary>日志级别。</summary>
-public enum LogLevel { Debug, Info, Warning, Error }
-
-/// <summary>日志分类。</summary>
-public enum LogCategory
-{
-    /// <summary>系统: 启动、服务初始化、设置、托盘。</summary>
-    System,
-    /// <summary>捕获: WGC、截图、HDR、选区。</summary>
-    Capture,
-    /// <summary>编码: 格式编码、色彩管线、文件输出。</summary>
-    Encoding,
-    /// <summary>界面: 窗口、主题、渲染、交互。</summary>
-    UI,
-    /// <summary>OCR: 文字识别、翻译、LLM。</summary>
-    OCR,
-    /// <summary>网络: API 调用、下载、连接。</summary>
-    Network,
-}
 
 /// <summary>日志条目（供 UI 绑定）。</summary>
 public sealed class LogEntry
@@ -39,12 +25,15 @@ public sealed class LogEntry
     public string Message { get; init; } = "";
     public string? Detail { get; init; }
 
+    /// <summary>一次操作的关联 ID。多拍并发时这是唯一能把链路拆开的东西。</summary>
+    public string? OpId { get; init; }
+
     // ── 2026-08-11: 调用者信息 (文件:行号) — 大幅提升日志定位能力 ──
     public string CallerFile { get; init; } = "";
     public int CallerLine { get; init; }
     public string CallerDisplay => CallerFile.Length == 0 ? "" : $" {CallerFile}:{CallerLine}";
-
-    public string FormattedLine => $"{Timestamp:HH:mm:ss.fff} [{Level,-7}] [{CategoryDisplay}/{Tag}] {Message}{CallerDisplay}";
+    public string OpDisplay => string.IsNullOrEmpty(OpId) ? "" : $"#{OpId} ";
+    public string FormattedLine => $"{Timestamp:HH:mm:ss.fff} [{Level,-7}] {OpDisplay}[{CategoryDisplay}/{Tag}] {Message}{CallerDisplay}";
     public string TimeDisplay => Timestamp.ToString("HH:mm:ss.fff");
     public string CategoryDisplay => Category switch
     {
@@ -62,7 +51,7 @@ public sealed class LogEntry
         LogLevel.Warning => "#FFAA00",
         LogLevel.Info => "#CCCCCC",
         LogLevel.Debug => "#888888",
-        _ => "#CCCCCC",
+        _ => "#666666",
     };
     public string Icon => Level switch
     {
@@ -70,6 +59,7 @@ public sealed class LogEntry
         LogLevel.Warning => "⚠️",
         LogLevel.Info => "ℹ️",
         LogLevel.Debug => "🔍",
+        LogLevel.Trace => "·",
         _ => "ℹ️",
     };
     public string CategoryIcon => Category switch
@@ -83,6 +73,7 @@ public sealed class LogEntry
         _ => "📋",
     };
 }
+
 
 /// <summary>统一日志服务（静态，全局可用）。</summary>
 public static class LogService
@@ -102,8 +93,12 @@ public static class LogService
     /// <summary>后台清理任务的取消源。由 <see cref="Shutdown"/> 取消，保证进程可干净退出。</summary>
     private static CancellationTokenSource? s_cleanupCts;
 
-    // ── 2026-08-11: Debug 级别是否写入文件 (默认 false 防刷屏; 排障时可开) ──
-    public static bool FileDebugEnabled { get; set; }
+    // ── 2026-09-20：删除 FileDebugEnabled ──
+    // 原声明注释写着"排障时可开"，但全仓没有任何一处给它赋值 ⇒ 恒 false，
+    // 于是 App 侧所有 LogService.Debug(...)（含 WgcCaptureService 的每一条降级留痕）
+    // 永远进不了日志文件。它的替代者是 CoreLog 的档位模型（Brief / Diagnose / Full）：
+    // 2026-09-20 已接到 设置 → 行为 → "日志详细度"（MainWindow.Settings.ApplyLogVerbosity）。
+    // ⚠ 设置读进来之前的启动早期日志仍固定按 Brief 落盘 —— 那几行里没有 Debug 级的东西。
 
     // ── UI 环形缓冲区 ──
     private const int MaxUiEntries = 2000;
@@ -116,7 +111,59 @@ public static class LogService
     public static event Action<LogEntry>? OnLogEntry;
 
     /// <summary>获取当前 UI 日志条目快照。</summary>
-    public static IReadOnlyList<LogEntry> GetUiEntries() => [.. s_uiEntries];
+    /// <remarks>
+    /// ⚠ 不要写成集合表达式 <c>[.. s_uiEntries]</c>：目标类型 <c>IReadOnlyList&lt;T&gt;</c>
+    /// 是不可变接口，CsWinRT 源码生成器会报 CsWinRT1032（WinRT 场景下无法确定具体类型，
+    /// 不兼容 trimming / AOT），且是 error 而非 warning。显式具体类型即可。
+    /// </remarks>
+    public static IReadOnlyList<LogEntry> GetUiEntries() => s_uiEntries.ToArray();
+
+    /// <summary>
+    /// 把本服务挂成 Core 的日志落点，并一次性写出挂载前的早期缓冲。
+    /// Core 不引用 App，迁移前那 142 处 <c>Debug.WriteLine</c> 在 Release 下无处可去；
+    /// 迁移完成后 Core 的 143 处 <c>CoreLog.*</c> 仍只有这一条落盘线路（交接 §35.1）。
+    /// </summary>
+    private static void AttachCoreSink()
+    {
+        if (CoreLog.HasSink) return;
+        CoreLog.Attach((lvl, cat, tag, msg, file, line, op) =>
+            Write(lvl, cat, tag, msg, null, file, line, op));
+    }
+
+    /// <summary>
+    /// 应用日志详细度档位，并在日志里写一条抬头声明当时生效的档位——
+    /// 否则一份日志文件无法自证它是在哪一档下产生的，"没记录"就分不清是"没发生"还是"没开"。
+    /// </summary>
+    public static void ApplyDetailLevel(LogDetail detail, IReadOnlyDictionary<LogCategory, LogDetail>? floors = null)
+    {
+        CoreLog.SetDetail(detail);
+        if (floors is not null)
+            foreach (var (cat, floor) in floors)
+                CoreLog.SetCategoryFloor(cat, floor);
+
+        var floorText = floors is { Count: > 0 }
+            ? "，分类细调: " + string.Join("、", floors.Select(kv => $"{NameOf(kv.Key)}={NameOf(kv.Value)}"))
+            : "";
+        Info("LogService", $"日志详细度 = {NameOf(detail)}{floorText}");
+    }
+
+    private static string NameOf(LogDetail d) => d switch
+    {
+        LogDetail.Brief => "简",
+        LogDetail.Diagnose => "诊断",
+        _ => "全",
+    };
+
+    private static string NameOf(LogCategory c) => c switch
+    {
+        LogCategory.System => "系统",
+        LogCategory.Capture => "捕获",
+        LogCategory.Encoding => "编码",
+        LogCategory.UI => "界面",
+        LogCategory.OCR => "OCR",
+        LogCategory.Network => "网络",
+        _ => c.ToString(),
+    };
 
     /// <summary>初始化日志服务。</summary>
     public static void InitializeFileLog(string? logDir = null)
@@ -127,6 +174,7 @@ public static class LogService
             Directory.CreateDirectory(s_logDir);
             RotateLogFile();
             CleanupOldLogs();
+            AttachCoreSink();          // 必须在 RotateLogFile 之后：早期缓冲要有地方落
             Info("LogService", $"日志系统初始化，目录: {s_logDir}");
         }
         catch (Exception ex)
@@ -135,13 +183,26 @@ public static class LogService
             s_logDir = Path.Combine(Path.GetTempPath(), "TrueToneCap_logs");
             Directory.CreateDirectory(s_logDir);
             RotateLogFile();
+            AttachCoreSink();
         }
 
         // 启动后台定时清理任务（旧实现无取消机制，进程退出时任务仍在等待）
-        s_cleanupCts = new CancellationTokenSource();
+        //
+        // ═══ 2026-09-15 修复：重复初始化会泄漏后台清理循环 ═══
+        // 本方法在 App.xaml.cs:66 与 AppServices.cs:45 各被调用一次。
+        // 原实现直接 `s_cleanupCts = new CancellationTokenSource()` 覆盖：
+        // 既未 Cancel 也未 Dispose 旧的 ⇒ 第一个后台循环永远挂在 1 小时的 Task.Delay 上
+        // （进程退出前不会醒来，也不会被取消），且此后每小时会有两个循环重复清理。
+        // 这里先停掉上一次的，保证任意时刻最多一个清理循环。
+        Shutdown();
+
+        var cts = new CancellationTokenSource();
+        s_cleanupCts = cts;
+        // 捕获【局部】token：若仍读 s_cleanupCts.Token，一旦字段被后续初始化替换，
+        // 本循环就会与新 CTS 纠缠（取消新循环时旧循环不停，反之亦然）。
+        var token = cts.Token;
         _ = Task.Run(async () =>
         {
-            var token = s_cleanupCts.Token;
             while (!token.IsCancellationRequested)
             {
                 try
@@ -237,8 +298,14 @@ public static class LogService
     // ── 核心写入 ──
 
     private static void Write(LogLevel level, LogCategory category, string tag, string msg, string? detail,
-        string? callerFile, int callerLine)
+        string? callerFile, int callerLine, string? opId = null)
     {
+        // 隐私地板：判据只有一份，在 CoreLog.Scrub（App 与 Core 共用）。
+        // 这条路径今天就已经用得上 —— Error(tag, msg, ex) 把 ex.ToString() 当 detail 传进来，
+        // 而 HttpRequestException 的文本可能带请求 URI，翻译请求的 URI 里挂着 q=<OCR 原文>。
+        msg = CoreLog.Scrub(msg);
+        if (detail is not null) detail = CoreLog.Scrub(detail);
+
         var entry = new LogEntry
         {
             Timestamp = DateTime.Now,
@@ -247,6 +314,7 @@ public static class LogService
             Tag = tag,
             Message = msg,
             Detail = detail,
+            OpId = opId ?? CoreLog.CurrentOpId,
             CallerFile = Path.GetFileName(callerFile ?? ""),
             CallerLine = callerLine,
         };
@@ -264,8 +332,10 @@ public static class LogService
         // 触发 UI 事件
         try { OnLogEntry?.Invoke(entry); } catch { }
 
-        // 文件日志（Info+ 始终写入; Debug 仅当 FileDebugEnabled）
-        if (level < LogLevel.Info && !FileDebugEnabled) return;
+        // 文件日志的门控与 Core 共用一个判据（档位 + 分类地板），Warn/Error 恒写。
+        // UI 环形缓冲区与上面的控制台镜像不受此门控 —— 档位管的是"文件里留不留"，
+        // 不是"屏幕上看不看"。
+        if (!CoreLog.IsEnabled(category, level)) return;
 
         lock (s_lock)
         {

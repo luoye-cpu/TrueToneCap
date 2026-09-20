@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # TrueToneCap.LogViewer Publish Script
 # TTC 日志查看器 — 独立可选工具 (不随主包发布)
 # 用法: .\PublishLogViewer.ps1 [-OutputDir "publish\TTC日志查看器"]
@@ -23,25 +25,50 @@ Remove-Item -Recurse -Force $OutputDir -ErrorAction SilentlyContinue
 
 # 自包含发布 (WinAppSDK 不支持 PublishSingleFile, 用标准目录发布)
 Push-Location $RepoRoot
-dotnet publish src\TrueToneCap.LogViewer\TrueToneCap.LogViewer.csproj `
-    -c $Configuration -r $Runtime `
-    --self-contained true `
-    -p:WindowsAppSDKSelfContained=true `
-    -o $OutputDir
-if ($LASTEXITCODE -ne 0) { throw "编译失败 (Build failed)" }
+try {
+    & dotnet publish src\TrueToneCap.LogViewer\TrueToneCap.LogViewer.csproj `
+        -c $Configuration -r $Runtime `
+        --self-contained true `
+        -p:WindowsAppSDKSelfContained=true `
+        -o $OutputDir
+    if ($LASTEXITCODE -ne 0) { throw "编译失败 (dotnet publish 退出码 $LASTEXITCODE)" }
+} finally {
+    Pop-Location
+}
 
 # ── 复制应用级 PRI (WinUI3 免打包运行必需 — 缺失则 XamlParseException) ──
-$binDir = $null
-foreach ($c in @(
-    "src\TrueToneCap.LogViewer\bin\x64\$Configuration\net11.0-windows10.0.26100.0\$Runtime",
-    "src\TrueToneCap.LogViewer\bin\$Configuration\net11.0-windows10.0.26100.0\$Runtime"
-)) { if (Test-Path $c) { $binDir = $c; break } }
-$pri = Get-ChildItem $binDir -Filter "TTCLogViewer.pri" -ErrorAction SilentlyContinue | Select-Object -First 1
+# 注意: PRI 缺失会导致运行期 XAML 解析失败，属致命缺陷，故校验失败即阻断。
+# ⚠️ 这里曾硬编码 TFM `net11.0-windows10.0.26100.0` 和平台目录 `x64`（2026-09-14 修正）。
+#    升级 .NET 或 Windows SDK 后目录名一变，两个 Test-Path 全部 miss，脚本直接 throw，
+#    而报错写的是"请确认 dotnet publish 成功" —— 把人往完全错误的方向带
+#    （publish 其实成功了，只是脚本找不到它的产物）。
+#    改为按实际目录枚举：在 bin 下找名为 $Runtime、且路径含 $Configuration 段的最新目录，
+#    对 TFM / 平台目录 / 输出路径形状的变化全部免疫。
+$binRoot = Join-Path $RepoRoot "src\TrueToneCap.LogViewer\bin"
+$binDir = Get-ChildItem -Path $binRoot -Directory -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq $Runtime -and $_.FullName -match "[\\/]$([regex]::Escape($Configuration))[\\/]" } |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
+
+if (-not $binDir) {
+    throw "未找到 LogViewer 输出目录：在 $binRoot 下未发现任何名为 '$Runtime' 且位于 '$Configuration' 之下的目录。请确认 dotnet publish 成功。"
+}
+
+$pri = Get-ChildItem $binDir -Filter "TTCLogViewer.pri" -Recurse -ErrorAction SilentlyContinue |
+       Where-Object { $_.DirectoryName -notmatch '\\obj\\' } |
+       Select-Object -First 1
 if ($pri) {
     Copy-Item $pri.FullName $OutputDir -Force
     Write-Host "   ✅ 应用级 PRI ($([math]::Round($pri.Length/1KB,1)) KB)"
 } else {
-    Write-Warning "   ⚠️ 未找到 TTCLogViewer.pri — 运行时可能 XAML 解析失败"
+    # WinAppSDK 2.x 可能已将资源合并到 WindowsAppRuntime.pri，
+    # 此时 bin 下无应用级 PRI 属正常，但仍需确认运行时 PRI 已随包发布。
+    $runtimePri = Get-ChildItem $OutputDir -Filter "WindowsAppRuntime.pri" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($runtimePri) {
+        Write-Host "   ✅ 无应用级 PRI（已合并至 WindowsAppRuntime.pri）"
+    } else {
+        throw "未找到任何 PRI 资源 (TTCLogViewer.pri / WindowsAppRuntime.pri) — 运行时将 XAML 解析失败，拒绝产出残缺包。"
+    }
 }
 
 # 清理 pdb
@@ -76,4 +103,3 @@ Remove-Item "$OutputDir\*.pdb" -Force -ErrorAction SilentlyContinue
 $size = [math]::Round((Get-ChildItem $OutputDir -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB, 1)
 Write-Host ""
 Write-Host "✅ 发布完成: $OutputDir ($size MB)"
-Pop-Location

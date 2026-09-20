@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using System.Runtime.InteropServices;
 using TrueToneCap.App.Services;
 using TrueToneCap.Core.Services;
 using TrueToneCap.Core.Encoding;
+using TrueToneCap.Core.Logging;   // LogCategory
 
 namespace TrueToneCap.App;
 
@@ -65,6 +68,17 @@ public partial class App : Application
     {
         LogService.InitializeFileLog();
         LogService.Info("App", "应用启动开始");
+
+        // ═══ 无头自测模式 (--selftest)，其中含高精度源探针 (--hdr-probe 单跑该探针) ═══
+        // 必须放在【最早期】：早于单实例 Mutex、主题初始化、OCR 引擎加载与窗口创建。
+        // 否则自测会去抢单实例锁（CI 并发时互相干扰）、并白白加载 67MB 的 ONNX 模型。
+        // 用途：让 CI / 发布校验真正跑一遍编码链路，而不是只检查文件是否存在；
+        //       探针则走真实 WGC 捕获入口，验"截图拿到的源是否真的高于 8-bit"（判据见 SelfTest.cs）。
+        if (SelfTest.TryRunFromCommandLine())
+        {
+            Environment.Exit(SelfTest.ExitCode);
+            return;
+        }
 
         // ═══ P0: 进程级异常兜底 ═══
         // WinUI 的 Application.UnhandledException 只能捕获 XAML 消息循环线程的异常；
@@ -151,13 +165,39 @@ public partial class App : Application
         });
 
         // ── 初始化 OCR 引擎（纯内嵌 ONNX + Windows，零外部依赖）──
-        _ = Task.Run(() => { try { MultiOcrService.Initialize(); LogService.Info("App", "OCR 引擎后台初始化"); } catch (Exception ex) { LogService.Warn("App", $"OCR 初始化异常: {ex.Message}"); } });
+        // ═══ 2026-09-15 修复：必须显式传入模型目录 ═══
+        // 原实现调用 Initialize() 不传参，而 MainWindow.xaml.cs:245 会传
+        // ResolveModelDir()（发布产物上是 BaseDirectory\data\Models）。
+        // MultiOcrService.Initialize 用 _initialized 先置位短路（谁先到谁定），
+        // 于是若本处抢先，模型目录就永久定为空字符串 ⇒ ONNX 引擎加载失败，
+        // 只剩 Windows OCR 兜底，而用户完全不知情。
+        // 两处统一走 ResolveModelDir()，竞态就不再有副作用。
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                MultiOcrService.Initialize(TrueToneCap.Core.Services.OnnxOcrEngine.ResolveModelDir());
+                LogService.Info("App", "OCR 引擎后台初始化");
+            }
+            catch (Exception ex) { LogService.Warn("App", $"OCR 初始化异常: {ex.Message}"); }
+        });
 
         // ── 初始化 jpegli 编码器（jxl.dll）──
         _ = Task.Run(() =>
         {
             try { JpegLiNative.Initialize(); LogService.Info("App", "jpegli 编码器初始化"); }
             catch (Exception ex) { LogService.Warn("App", $"jpegli 初始化失败: {ex.Message}"); }
+
+            // ═══ 2026-09-15：本机工具提取失败必须【用户可见】═══
+            // NativeLibraryResolver 的提取失败原先只写 Debug.WriteLine —— Release 下完全无声，
+            // 而 avifenc / cjxl / cwebp / cjpegli 提取失败会让 AVIF / JPEG XL / WebP / JPEG LI
+            // 四种格式全部静默失效：用户选了格式却得到回退产物，且不知道原因。
+            // 这里把失败提升到 Warn 日志（LogService 在 UI 日志面板中可见）。
+            if (TrueToneCap.Core.Services.NativeLibraryResolver.LastError is { } err)
+            {
+                LogService.Warn("App",
+                    $"⚠️ 本机编码工具提取失败，AVIF/JPEG XL/WebP/JPEG LI 可能不可用: {err}");
+            }
         });
 
         this.InitializeComponent();
@@ -169,7 +209,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[App] XamlControlsResources 加载失败 (非致命): {ex.Message}");
+            LogService.Warn("App", $"XamlControlsResources 加载失败 (非致命): {ex.Message}", LogCategory.UI);
         }
 
         // ── 注册全局异常处理器 ──
@@ -182,7 +222,7 @@ public partial class App : Application
             if (msg.Contains("themeresources.xaml", StringComparison.OrdinalIgnoreCase)
                 || msg.Contains("Cannot locate resource", StringComparison.OrdinalIgnoreCase))
             {
-                System.Diagnostics.Debug.WriteLine($"[App] 非致命 XAML 资源警告 (已忽略): {msg}");
+                LogService.Warn("App", $"非致命 XAML 资源警告 (已忽略): {msg}", LogCategory.UI);
                 e.Handled = true;
                 return;
             }
@@ -309,9 +349,10 @@ public partial class App : Application
     {
         try
         {
-            var settingsPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "TrueToneCap", "TrueToneCap.settings.json");
+            // ⚠️ 必须引用 SettingsService.SettingsPath 这个唯一事实源，不得各自拼路径。
+            //    此前本方法注释写着"即 AppContext.BaseDirectory"，代码却拼 LocalApplicationData ——
+            //    注释与实现相反，一旦 SettingsService 换路径，主题加载就会静默读不到而回退默认。
+            var settingsPath = SettingsService.SettingsPath;
             if (File.Exists(settingsPath))
             {
                 var json = File.ReadAllText(settingsPath);

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -12,6 +14,7 @@ using System.Runtime.InteropServices.WindowsRuntime;
 using WinRT.Interop;
 using TrueToneCap.Core.Annotation;
 using TrueToneCap.Core.Detection;
+using TrueToneCap.Core.Logging;   // LogLevel / LogCategory（定义已移到 Core）
 using TrueToneCap.App.Services;
 
 namespace TrueToneCap.App;
@@ -153,11 +156,25 @@ public sealed partial class SelectionOverlay : Window
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] 窗口样式设置失败（非致命）: {ex.Message}");
+            LogService.Warn("Overlay", $"窗口样式设置失败（非致命）: {ex.Message}", LogCategory.UI);
         }
 
         this.Activated += (_, _) =>
         {
+            // ═══ 2026-09-15 修复：Activated 会重复触发 ═══
+            // 窗口失焦再回来就会再次 Activated。原实现在回调里无条件
+            // `new HdrPreviewWindow(...)` 覆盖 _hdrBgWnd —— 旧窗口及其 D3D 交换链
+            // 从不 Dispose ⇒ 每失焦再激活一次就泄漏一整套 GPU 资源 + 一个原生窗口，
+            // 反复切换后会累积多个全屏窗口并持续占用显存。
+            // 注：_bgRendered 此前【只】保护下面的 CPU 分支，GPU 分支完全没有保护。
+            if (_bgRendered)
+            {
+                // 仍需保持置顶（覆盖层可能被背景窗口盖住）
+                _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
+                    SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                return;
+            }
+
             // 全屏无边框覆盖：覆盖整个虚拟桌面（支持负坐标多屏）
             _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
                 SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -210,6 +227,8 @@ public sealed partial class SelectionOverlay : Window
                         LogService.Warn("Overlay", "GPU 呈现超时 (3s)，回退 CPU 渲染", LogCategory.Capture);
 
                     gpuBgOk = presentOk;
+                    // GPU 背景呈现成功 → 置位，后续 Activated 不再重复创建（见回调开头的保护）
+                    if (presentOk) _bgRendered = true;
                 }
                 else
                 {
@@ -238,7 +257,6 @@ public sealed partial class SelectionOverlay : Window
                 _dpiScale = dpi / 96.0;
             else
                 _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
-            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] DPI={dpi} Scale={_dpiScale:F2} GPU背景={gpuBgOk}");
             LogService.Info("Overlay", $"覆盖层就绪 DPI={dpi} Scale={_dpiScale:F2} GPU背景={gpuBgOk} 虚拟桌面={vw}x{vh}@({vx},{vy})", LogCategory.UI);
 
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
@@ -254,7 +272,6 @@ public sealed partial class SelectionOverlay : Window
                 // 2026-08-09: GPU 背景成功时跳过 WriteableBitmap CPU 合成
                 if (!gpuBgOk && desktopPixels is not null)
                     RenderDesktopBackground(desktopPixels, vw, vh);
-                System.Diagnostics.Debug.WriteLine($"[⏱ Overlay] 背景渲染: {sw.ElapsedMilliseconds}ms (GPU={gpuBgOk})");
                 LogService.Info("Overlay", $"背景渲染 {sw.ElapsedMilliseconds}ms (GPU={gpuBgOk})", LogCategory.Capture);
                 DetectAndRenderRegions();
             }
@@ -301,7 +318,7 @@ public sealed partial class SelectionOverlay : Window
     private void HardWatchdogTick(object? state)
     {
         if (_closed || _finished) return; // 窗口已正常关闭
-        System.Diagnostics.Debug.WriteLine("[SelectionOverlay] 硬看门狗触发: 3 分钟强制退出");
+        LogService.Warn("Overlay", "硬看门狗触发: 3 分钟强制退出", LogCategory.UI);
 
         // 先尝试优雅关闭（UI 线程活着时正常走 Finish(Cancel)）
         try
@@ -314,14 +331,24 @@ public sealed partial class SelectionOverlay : Window
         Thread.Sleep(5000);
         if (!_closed && !_finished)
         {
-            System.Diagnostics.Debug.WriteLine("[SelectionOverlay] UI 无响应，强制退出进程");
-            try { LogService.Error("SelectionOverlay", "硬看门狗: UI 无响应，强制退出"); } catch { }
+            try { LogService.Error("Overlay", "硬看门狗: UI 无响应，强制退出"); } catch { }
             Environment.Exit(0);
         }
     }
 
     /// <summary>重置超时计时（任何用户交互时调用）。</summary>
-    private void TouchIdle() => _idleWatch.Restart();
+    private void TouchIdle()
+    {
+        _idleWatch.Restart();
+
+        // ═══ 2026-09-15 修复：硬看门狗必须随用户活跃一起重置 ═══
+        // 原实现只在覆盖层启动时挂一次 3 分钟定时器，之后【无论用户是否在标注】，
+        // 到点一律强制 Cancel —— 用户精心标注到第 3 分钟就全部丢失，且 UI 无响应时
+        // 还会 Environment.Exit(0) 杀掉整个进程（同时截断在途编码）。
+        // 看门狗的语义应是"卡死兜底"，正确判据是"最后一次交互之后 3 分钟"，
+        // 而不是"覆盖层存活满 3 分钟"。用户持续操作时无限顺延，真正卡死时仍会触发。
+        _hardWatchdog?.Change(HardExitMs, Timeout.Infinite);
+    }
 
     /// <summary>外部强制取消（应用退出时由 MainWindow 调用，触发 ActionCompleted + 关闭）。</summary>
     public void Cancel() => Finish(ActionResult.Cancel);
@@ -703,8 +730,8 @@ public sealed partial class SelectionOverlay : Window
             AnnotatedRegionPixels = done == composeTask
                 ? await composeTask
                 : ExtractRegionPixels(SelectedRect); // 无标注像素兜底
-            System.Diagnostics.Debug.WriteLineIf(done != composeTask,
-                "[SelectionOverlay] 标注合成超时 (10s)，跳过合成直接关闭");
+            if (done != composeTask) LogService.Warn("Overlay",
+                "标注合成超时 (10s)，跳过合成直接关闭", LogCategory.Capture);
         }
 
         ActionCompleted?.Invoke(result, SelectedRect);
@@ -1164,13 +1191,13 @@ public sealed partial class SelectionOverlay : Window
             {
                 int uia = _detectedRegions.Count(r => r.Source == RegionSource.Uia);
                 int edge = _detectedRegions.Count(r => r.Source == RegionSource.Edge);
-                System.Diagnostics.Debug.WriteLine(
-                    $"[SelectionOverlay] 窗口检测完成: {_detectedRegions.Count} 个 (UIA={uia}, Edge={edge})");
+                LogService.Info("Overlay",
+                    $"窗口检测完成: {_detectedRegions.Count} 个 (UIA={uia}, Edge={edge})", LogCategory.Capture);
             });
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] 区域检测失败: {ex.Message}");
+            LogService.Warn("Overlay", $"区域检测失败: {ex.Message}", LogCategory.Capture);
         }
 
         // 定时刷新（每 3 秒, 未选中时; 响应新开/关闭/移动窗口）
@@ -1202,7 +1229,7 @@ public sealed partial class SelectionOverlay : Window
             {
                 // 空 catch 会把"窗口已销毁"与"真正的检测失败"一并吞掉；
                 // 至少留痕，避免定时器泄漏长期无法察觉。
-                System.Diagnostics.Debug.WriteLine($"[SelectionOverlay] 区域定时刷新失败: {ex.Message}");
+                LogService.Warn("Overlay", $"区域定时刷新失败: {ex.Message}", LogCategory.Capture);
                 if (Volatile.Read(ref _isClosed) != 0) DisposeRegionRefreshTimer();
             }
         }, null, 3000, 3000);

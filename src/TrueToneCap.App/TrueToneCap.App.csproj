@@ -1,15 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- 公共属性见 ../../Directory.Build.props -->
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <!-- 自包含发布（RID/SelfContained 因仅本项目与 LogViewer 需要，故在项目内声明） -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
-    <LangVersion>14</LangVersion>
-    <Nullable>enable</Nullable>
+    <!-- <Platform> 会影响输出路径，故在项目内声明（原仓库仅有 App 与 LogViewer 声明） -->
     <Platform>x64</Platform>
-    <PlatformTarget>x64</PlatformTarget>
-    <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TrueToneCap.App</RootNamespace>
     <AssemblyName>TrueToneCap</AssemblyName>
     <UseWinUI>true</UseWinUI>
@@ -18,18 +16,15 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationTitle>TrueToneCap</ApplicationTitle>
     <ApplicationId>com.trueonecap.app</ApplicationId>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.3.3-beta</Version>
-    <AssemblyVersion>0.3.3.0</AssemblyVersion>
-    <FileVersion>0.3.3.0</FileVersion>
-    <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
-    <NoWarn>$(NoWarn);MSB3884</NoWarn>
+
+    <!-- ═══ 压制 XAML 运行时绑定裁剪警告（AOT 下日志面板绑定安全） ═══ -->
+    <SuppressXamlTrimWarnings>true</SuppressXamlTrimWarnings>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
-    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="11.0.0-preview.6.26359.118" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
   </ItemGroup>
 
   <ItemGroup>
@@ -41,36 +36,100 @@
     <TrimmerRootDescriptor Include="$(MSBuildProjectDirectory)\..\..\TrimmerRoots.xml" />
   </ItemGroup>
 
-  <!-- ═══ ReadyToRun: 已禁用（体积过大），如需启用取消注释 ═══
-  <PropertyGroup>
-    <PublishReadyToRun>true</PublishReadyToRun>
-    <PublishReadyToRunComposite>true</PublishReadyToRunComposite>
-  </PropertyGroup>
-  -->
-
-  <!-- ═══ 压制 XAML 运行时绑定裁剪警告（AOT 下日志面板绑定安全） ═══ -->
-  <PropertyGroup>
-    <SuppressXamlTrimWarnings>true</SuppressXamlTrimWarnings>
-  </PropertyGroup>
+  <!-- ═══ ReadyToRun ═══
+       ReadyToRun 默认由 Publish.ps1 以命令行 -p: 开启（复合映像）；
+       此处不设默认值，避免与脚本的命令行参数产生双源冲突。 -->
 
   <!-- 数据文件 + OCR 模型 → 输出到 data/ -->
   <ItemGroup>
     <!-- 显式 Link 而非 LinkBase：WinUI 构建目标下 LinkBase 对 Content 未生效，导致 bin 输出到 Shaders/ 而非 data/Shaders -->
     <Content Include="Shaders\*.hlsl" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Shaders\%(Filename)%(Extension)" />
-    <Content Include="Shaders\*.cso" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Shaders\%(Filename)%(Extension)" />
+    <!-- ⚠️ 此处【刻意不】写 Shaders\*.cso —— 见下方 CollectCompiledShaders Target 的说明。
+         静态 glob 在评估阶段展开，会把构建期刚生成的 .cso 漏掉。 -->
     <Content Include="Shaders\*.ps1" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Shaders\%(Filename)%(Extension)" />
     <Content Include="Models\*.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Models\%(Filename)%(Extension)" />
-    <!-- PP-OCRv6 ONNX 模型 (FP16, 内置分发) -->
-    <Content Include="Models\*.onnx" CopyToOutputDirectory="PreserveNewest" Visible="false" LinkBase="data\Models\" />
+    <!-- PP-OCRv6 ONNX 模型 (FP16, 内置分发)
+         必须用显式 Link 而非 LinkBase（理由见上方注释）：此前用 LinkBase 时 .onnx 会落到
+         bin 根目录的 Models\，而 .txt 落在 data\Models\，导致 OnnxOcrEngine.FindFirstExisting
+         只在单一目录内查找，从 bin 输出运行（IDE 调试 / dotnet run）时找不到字典，
+         OCR 直接失败；仅 publish 产物因 CopyPriAndXbf 的兜底移动才正常。 -->
+    <Content Include="Models\*.onnx" CopyToOutputDirectory="PreserveNewest" Visible="false" Link="data\Models\%(Filename)%(Extension)" />
   </ItemGroup>
 
-  <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发） -->
+  <!-- ═══ 第三方许可致谢文件 → 输出目录根（与 exe 同目录）═══
+       ThirdPartyNoticesWindow 的第一查找位置就是 AppContext.BaseDirectory，
+       发布包与"直接从 bin 里跑 exe"都靠这一条把文件放到它眼前。
+
+       ⚠ Condition="Exists(...)" 不是装饰，是必需：Content 指向的文件不存在时，
+         复制任务直接报 MSB3030（"复制文件时出错"）⇒ 整条构建失败。
+         该文件由主循环/发布流程维护，本项目不拥有它 —— 缺失时宁可少一份拷贝
+         （应用侧已有"未找到 THIRD-PARTY-NOTICES.md"的降级界面），也不能拖垮构建。
+
+       ⚠ 必须显式 Link：本项目 LinkBase 对 Content 不生效（见上方 Shaders / Models 那几条同一条理由），
+         且此文件在仓库根、逃出项目目录，不 Link 时输出侧的相对路径形状不可控。
+
+       ⚠ 路径锚在 $(MSBuildProjectDirectory) 上，【不】写成相对的 ..\..\ ：
+         Exists() 这类属性函数里的相对路径是按「MSBuild 进程当前目录」解析的，而当前目录
+         取决于从哪儿发起构建 —— 从仓库根构建（本仓的正式入口就是根上的 .slnx）时，
+         '..\..\THIRD-PARTY-NOTICES.md' 会指到 C:\PLAN\ 下面 ⇒ 恒为 false ⇒ 静默不复制，
+         表现是"文件明明在，界面却说未找到"。 -->
+  <PropertyGroup>
+    <TtcThirdPartyNotices>$(MSBuildProjectDirectory)\..\..\THIRD-PARTY-NOTICES.md</TtcThirdPartyNotices>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(TtcThirdPartyNotices)" Condition="Exists('$(TtcThirdPartyNotices)')"
+             CopyToOutputDirectory="PreserveNewest" Visible="false" Link="THIRD-PARTY-NOTICES.md" />
+  </ItemGroup>
+
+  <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发）。
+       Inputs/Outputs 与 CompileShaders.ps1 实际产出对齐：
+       脚本产出 "<Shader>.hlsl.cso"，故 Outputs 写 *.hlsl.cso —— 与 Shaders/ 目录下
+       实际存在的 ToneMapping.hlsl.cso 等文件名一致，增量构建可正确判定。 -->
   <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\ToneMapping.hlsl;Shaders\FullscreenVS.hlsl;Shaders\OverlayComposite.hlsl" Outputs="Shaders\ToneMapping.hlsl.cso;Shaders\FullscreenVS.hlsl.cso;Shaders\OverlayComposite.hlsl.cso">
     <Message Text="编译 HLSL 着色器..." Importance="high" />
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Shaders\CompileShaders.ps1&quot; -ShaderDir &quot;$(MSBuildProjectDirectory)\Shaders&quot; -OutputDir &quot;$(MSBuildProjectDirectory)\Shaders&quot;" />
+
+    <!-- 宿主探测: 优先 PowerShell 7 (pwsh)，不存在则回退 Windows PowerShell 5.1 (powershell)。
+         ⚠️ 不要写死 `powershell`：只装了 PowerShell 7 的机器上该命令不存在，构建直接失败。
+            写死 `pwsh` 同理会误伤只装 5.1 的机器（含多数 self-hosted 运行器）。 -->
+    <Exec Command="where pwsh &gt;NUL 2&gt;&amp;1" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="TtcHasPwsh" />
+    </Exec>
+    <PropertyGroup>
+      <TtcPsExe Condition="'$(TtcHasPwsh)' == '0'">pwsh</TtcPsExe>
+      <TtcPsExe Condition="'$(TtcHasPwsh)' != '0'">powershell</TtcPsExe>
+    </PropertyGroup>
+    <Message Text="使用 PowerShell 宿主: $(TtcPsExe)" Importance="normal" />
+
+    <Exec Command="&quot;$(TtcPsExe)&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Shaders\CompileShaders.ps1&quot; -ShaderDir &quot;$(MSBuildProjectDirectory)\Shaders&quot; -OutputDir &quot;$(MSBuildProjectDirectory)\Shaders&quot;" />
   </Target>
 
-  <!-- Post-publish: 复制 PRI/XBF + 整理目录 -->
+  <!-- 收集构建期生成的 .cso —— 必须在 Target 内【动态】添加。
+       ⚠️ 不能把 Shaders\*.cso 写进静态 ItemGroup：静态 glob 在项目【评估阶段】展开，
+          而 CompileShaders Target 在其之后才生成 .cso —— 展开时文件尚不存在，
+          于是本轮不会被复制。实测（2026-09-14）：清空 .cso 后单次构建，
+          fxc 日志显示编译成功，但 bin/**/data/Shaders 下 0 个 .cso，第二次构建才有。
+          因 *.cso 被 .gitignore 排除、不入库，全新克隆与 CI 干净检出必然踩到，
+          表现为首次 publish 被 verify-package.ps1 [3/5] 拒绝。
+
+       本 Target 刻意【不带 Inputs/Outputs】：即使 CompileShaders 因增量判定被跳过，
+       已存在的 .cso 也必须每次都进入复制列表，否则第二次构建又会把它们漏掉。 -->
+  <Target Name="CollectCompiledShaders" BeforeTargets="AssignTargetPaths" DependsOnTargets="CompileShaders">
+    <ItemGroup>
+      <_TtcCsoFile Include="Shaders\*.cso" />
+      <!-- ⚠️ Target 内必须用【限定元数据】 %(_TtcCsoFile.Filename)：
+           写成不限定的 %(Filename) 会触发 MSBuild 对整个 Content 集合做任务批处理，
+           把模型等其它 Content 的 Link 一并改写成最后一个值
+           （实测 2026-09-14：模型被复制进了 data\Shaders，并报 MSB3026 文件占用）。 -->
+      <Content Include="@(_TtcCsoFile)">
+        <Link>data\Shaders\%(_TtcCsoFile.Filename)%(_TtcCsoFile.Extension)</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+  <!-- Post-publish: 整理发布目录（PRI/XBF 复制 + 目录规整）。
+       注意: 本 Target 是 PRI/XBF/PDB 处理的唯一实现，Publish.ps1 不再重复执行同样逻辑。 -->
   <Target Name="CopyPriAndXbf" AfterTargets="Publish">
     <ItemGroup>
       <!-- WinAppSDK 2.x: 应用级 PRI 可能不再生成（资源合并到 WindowsAppRuntime.pri） -->

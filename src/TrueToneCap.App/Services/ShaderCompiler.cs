@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/ShaderCompiler.cs
 // HLSL → CSO 后台自动编译（启动时检测，缺失时自动编译）
 
 using System.Diagnostics;
+using TrueToneCap.Core.Logging;   // LogCategory
 
 namespace TrueToneCap.App.Services;
 
@@ -10,22 +13,47 @@ public static class ShaderCompiler
 {
     private record ShaderDef(string File, string Profile);
 
+    // ⚠️ 本清单曾与 Shaders/ 目录下的实际文件长期漂移（2026-09-14 核查后修正）。
+    //    维护规则：新增/删除 .hlsl 源文件时【必须同步这里】，否则
+    //    · 源文件存在但列表没有 → 运行时不会自动补编译（csproj 构建期可能已编译，易产生"本地能跑、别人跑不了"）
+    //    · 列表有但源文件不存在 → 每次启动打一条 Debug 日志后跳过（静默降级，很难发现）
+    //
+    //    当前状态（与 src/TrueToneCap.App/Shaders/ 实际文件逐个核对）：
+    //      ToneMapping.hlsl       ✅ 存在，运行时消费
+    //      OverlayComposite.hlsl  ✅ 存在，运行时消费（HdrCaptureWindow GPU 合成）
+    //      FullscreenVS.hlsl      ✅ 存在，运行时消费
+    //
+    //    已移除的条目（2026-09-14，源文件本就不存在，留着只会让清单与实际不一致）：
+    //      CopyTexture.hlsl       HdrCaptureWindow.cs 会查找 CopyTexture.hlsl.cso，
+    //                             找不到则回退 ToneMapping.hlsl.cso；而回退得到的 _ps
+    //                             【从未被 PSSetShader 绑定】（该文件唯一的 PSSetShader 绑的是
+    //                             _overlayPs），属死代码，移除无行为影响。
+    //      MosaicEffect.hlsl      全仓无消费方（马赛克已改 CPU 实现）。
+    //    注：HdrCaptureWindow 里的 FindCso 查找逻辑与运行时编译无关，移除条目不影响它。
     private static readonly ShaderDef[] s_shaders =
     [
-        new("ToneMapping.hlsl", "ps_6_0"),
-        new("MosaicEffect.hlsl", "ps_6_0"),
-        new("CopyTexture.hlsl", "ps_6_0"),
-        new("FullscreenVS.hlsl", "vs_6_0"),
+        // ⚠️ Profile 必须是 SM5.0（ps_5_0 / vs_5_0），与构建期 CompileShaders.ps1 严格一致。
+        //    2026-08-11 已把构建期从 dxc 改为 fxc，原因写在 CompileShaders.ps1 头部：
+        //      「dxc 强制 SM6/DXIL，D3D11 CreateShader 报 E_INVALIDARG；
+        //        fxc 产出 SM5.0 DXBC，D3D11/Vortice 全兼容。」
+        //    但【运行时这条路径当时漏改】，一直是 ps_6_0/vs_6_0 + dxc ——
+        //    一旦本文件真的触发编译（data/Shaders 下 .cso 缺失且找到 dxc），
+        //    会产出 D3D11 根本加载不了的 SM6 着色器，且只在 Debug 输出里留一行失败日志。
+        //    2026-09-14 修正为 fxc + SM5.0，与构建期对齐。
+        new("ToneMapping.hlsl", "ps_5_0"),
+        new("OverlayComposite.hlsl", "ps_5_0"),
+        new("FullscreenVS.hlsl", "vs_5_0"),
     ];
     private const string s_entry = "main";
 
     /// <summary>确保所有 CSO 文件存在。缺失时后台自动编译。应在应用启动最开始调用。</summary>
     public static void EnsureCompiled(string shaderDir, string outputDir)
     {
-        var dxcPath = FindDxc();
-        if (dxcPath is null)
+        // 必须与构建期 CompileShaders.ps1 用【同一个编译器】(fxc)，否则产出的 CSO 规格不一致。
+        var fxcPath = FindFxc();
+        if (fxcPath is null)
         {
-            Debug.WriteLine("[Shader] DXC 编译器未找到，跳过编译（GPU 将回退 CPU）");
+            LogService.Warn("Shader", "fxc.exe 未找到（需 Windows SDK），跳过运行时编译（GPU 将回退 CPU）", LogCategory.Capture);
             return;
         }
 
@@ -38,29 +66,30 @@ public static class ShaderCompiler
 
             if (File.Exists(outputPath))
             {
-                Debug.WriteLine($"[Shader] {shader.File}.cso 已存在 ({new FileInfo(outputPath).Length} bytes)");
+                LogService.Info("Shader", $"{shader.File}.cso 已存在 ({new FileInfo(outputPath).Length} bytes)", LogCategory.Capture);
                 continue;
             }
 
             if (!File.Exists(inputPath))
             {
-                Debug.WriteLine($"[Shader] {shader.File} 源文件未找到");
+                LogService.Warn("Shader", $"{shader.File} 源文件未找到", LogCategory.Capture);
                 continue;
             }
 
             // 后台编译
-            Task.Run(() => CompileShader(dxcPath, inputPath, outputPath, shader.File, shader.Profile));
+            Task.Run(() => CompileShader(fxcPath, inputPath, outputPath, shader.File, shader.Profile));
         }
     }
 
-    private static void CompileShader(string dxcPath, string input, string output, string name, string profile)
+    private static void CompileShader(string fxcPath, string input, string output, string name, string profile)
     {
         try
         {
+            // fxc 参数风格: /T <profile> /E <entry> /Fo <out> <in>
             var psi = new ProcessStartInfo
             {
-                FileName = dxcPath,
-                Arguments = $"-T {profile} -E {s_entry} \"{input}\" -Fo \"{output}\"",
+                FileName = fxcPath,
+                Arguments = $"/T {profile} /E {s_entry} /Fo \"{output}\" \"{input}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true
@@ -71,26 +100,27 @@ public static class ShaderCompiler
 
             if (proc?.ExitCode == 0 && File.Exists(output))
             {
-                Debug.WriteLine($"[Shader] ✅ {name}.cso 编译成功 ({new FileInfo(output).Length} bytes)");
+                LogService.Info("Shader", $"✅ {name}.cso 编译成功 ({new FileInfo(output).Length} bytes)", LogCategory.Capture);
             }
             else
             {
                 var err = proc?.StandardError.ReadToEnd() ?? "unknown";
-                Debug.WriteLine($"[Shader] ❌ {name} 编译失败: {err}");
+                LogService.Warn("Shader", $"❌ {name} 编译失败: {err}", LogCategory.Capture);
             }
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Shader] ❌ {name} 编译异常: {ex.Message}");
+            LogService.Warn("Shader", $"❌ {name} 编译异常: {ex.Message}", LogCategory.Capture);
         }
     }
 
-    private static string? FindDxc()
+    /// <summary>定位 fxc.exe。候选顺序与构建期 CompileShaders.ps1 保持一致。</summary>
+    private static string? FindFxc()
     {
-        // 1. PATH 中的 dxc.exe
+        // 1. PATH 中的 fxc.exe
         try
         {
-            var psi = new ProcessStartInfo("where", "dxc.exe")
+            var psi = new ProcessStartInfo("where", "fxc.exe")
             { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
             using var proc = Process.Start(psi);
             proc?.WaitForExit(2000);
@@ -99,16 +129,25 @@ public static class ShaderCompiler
         }
         catch { }
 
-        // 2. Windows SDK 默认路径
-        var sdkPaths = new[]
+        // 2. 枚举 Windows Kits\10\bin\<version>\x64\fxc.exe，取版本号最高的可用项。
+        //    ⚠️ 不要写死具体 SDK 版本号（2026-09-14 修正）：原实现硬编码 10.0.26100.0 / 10.0.22621.0，
+        //       只装了其他版本（如 10.0.28000.0）的机器会静默跳过运行时编译，GPU 回退 CPU。
+        //       必须与构建期 Shaders/CompileShaders.ps1 保持同一套查找逻辑。
+        var kitRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "Windows Kits", "10", "bin");
+
+        if (Directory.Exists(kitRoot))
         {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                @"Windows Kits\10\bin\10.0.26100.0\x64\dxc.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                @"Windows Kits\10\bin\10.0.22621.0\x64\dxc.exe"),
-        };
-        foreach (var p in sdkPaths)
-            if (File.Exists(p)) return p;
+            var best = Directory.EnumerateDirectories(kitRoot)
+                .Select(d => new { Dir = d, Name = Path.GetFileName(d) })
+                .Where(x => Version.TryParse(x.Name, out _))
+                .OrderByDescending(x => Version.Parse(x.Name))
+                .Select(x => Path.Combine(x.Dir, "x64", "fxc.exe"))
+                .FirstOrDefault(File.Exists);
+
+            if (best is not null) return best;
+        }
 
         return null;
     }

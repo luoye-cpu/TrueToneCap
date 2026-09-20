@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrBoxDiag.cs — 框级诊断：复刻完整 RunDetection 流程，打印框坐标 + crop 统计
 // 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-box <modelDir>
 using Microsoft.ML.OnnxRuntime;

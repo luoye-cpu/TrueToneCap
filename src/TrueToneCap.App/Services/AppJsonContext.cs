@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/AppJsonContext.cs
 // System.Text.Json 源生成器上下文 — 用于 AOT 兼容
 // 替代运行时的 JsonSerializer.Serialize/Deserialize 反射调用

@@ -1,18 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/ColorManagement/ColorProfileProvider.cs
 // 通过 WCS API 获取显示器 ICC 配置文件 — 带缓存 + 异步
 
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
+using TrueToneCap.Core.Logging;
 
 namespace TrueToneCap.Core.ColorManagement;
 
 /// <summary>显示器 ICC 配置文件提供器（带缓存 + 异步）。</summary>
 public static partial class ColorProfileProvider
 {
-    // ═══ ICC 缓存：按显示器设备名缓存，避免每次截图重复调 WCS API ═══
+    // ═══ ICC 缓存：按显示器 EDID 校验和缓存，避免同名不同物理显示器导致错缓存 ═══
     private static readonly ConcurrentDictionary<string, byte[]?> s_iccCache = new();
     private static readonly ConcurrentDictionary<string, Task<byte[]?>> s_asyncCache = new();
+
+    /// <summary>获取显示器唯一缓存键：设备名 + 物理指纹（防止拔插/重排导致同名错缓存）</summary>
+    private static string GetMonitorCacheKey(nint monitorHandle)
+    {
+        var monitorName = GetMonitorName(monitorHandle);
+        if (string.IsNullOrEmpty(monitorName)) return "";
+
+        // 物理指纹（三级回退：EDID CRC32 → PnP ID → 设备名）
+        string fingerprint = GetMonitorFingerprint(monitorHandle);
+        return string.IsNullOrEmpty(fingerprint) ? monitorName : $"{monitorName}#{fingerprint}";
+    }
 
     /// <summary>获取指定显示器的默认 ICC 配置文件内容（同步读缓存，永不阻塞）。</summary>
     /// <remarks>缓存命中立即返回；缓存未命中时启动后台预热并立即返回 null，
@@ -22,11 +36,11 @@ public static partial class ColorProfileProvider
     {
         try
         {
-            var monitorName = GetMonitorName(monitorHandle);
-            if (string.IsNullOrEmpty(monitorName)) return null;
+            var cacheKey = GetMonitorCacheKey(monitorHandle);
+            if (string.IsNullOrEmpty(cacheKey)) return null;
 
             // 缓存命中 → 零开销返回
-            if (s_iccCache.TryGetValue(monitorName, out var cached))
+            if (s_iccCache.TryGetValue(cacheKey, out var cached))
                 return cached;
 
             // 缓存未命中 → 后台预热，本次立即返回 null（不阻塞）
@@ -44,26 +58,26 @@ public static partial class ColorProfileProvider
     {
         try
         {
-            var monitorName = GetMonitorName(monitorHandle);
-            if (string.IsNullOrEmpty(monitorName)) return Task.FromResult<byte[]?>(null);
+            var cacheKey = GetMonitorCacheKey(monitorHandle);
+            if (string.IsNullOrEmpty(cacheKey)) return Task.FromResult<byte[]?>(null);
 
             // 缓存命中 → 立即返回
-            if (s_iccCache.TryGetValue(monitorName, out var cached))
+            if (s_iccCache.TryGetValue(cacheKey, out var cached))
                 return Task.FromResult(cached);
 
             // 异步获取（防止同一显示器并发重复调 WCS）
-            return s_asyncCache.GetOrAdd(monitorName, name =>
+            return s_asyncCache.GetOrAdd(cacheKey, key =>
                 Task.Run(() =>
                 {
-                    var profile = GetIccProfileFromWcs(name);
+                    var profile = GetIccProfileFromWcs(key.Split('#')[0]); // 只用设备名查 WCS
                     if (profile is not null)
                     {
-                        s_iccCache[name] = profile;
+                        s_iccCache[key] = profile;
                     }
                     else
                     {
                         // 修复: 失败时不永久缓存 null，允许后续重试
-                        s_asyncCache.TryRemove(name, out _);
+                        s_asyncCache.TryRemove(key, out _);
                     }
                     return profile;
                 }));
@@ -93,9 +107,9 @@ public static partial class ColorProfileProvider
         {
             try
             {
-                var monitorName = GetMonitorName(handle);
-                if (string.IsNullOrEmpty(monitorName)) continue;
-                if (s_iccCache.ContainsKey(monitorName)) continue;
+                var cacheKey = GetMonitorCacheKey(handle);
+                if (string.IsNullOrEmpty(cacheKey)) continue;
+                if (s_iccCache.ContainsKey(cacheKey)) continue;
 
                 // 后台异步获取，不阻塞调用线程
                 _ = GetDisplayIccProfileAsync(handle);
@@ -108,84 +122,88 @@ public static partial class ColorProfileProvider
     private static byte[]? s_srgbIccCache;
     private static readonly object s_srgbLock = new();
 
+    /// <summary>本仓库自产 ICC 的 cprt 文本。它会随<b>用户导出的产物</b>分发，
+    /// 所以必须与项目实际许可一致（<c>LICENSE</c> 是 Apache-2.0），且不得含任何第三方版权串。</summary>
+    internal const string GeneratedIccCopyright = "Copyright 2026 TrueToneCap contributors - Apache-2.0";
+
     /// <summary>获取默认 sRGB ICC 配置文件（完整的 IEC 61966-2.1 配置文件）。</summary>
-    /// <remarks>优先从 Windows 系统目录读取 sRGB Color Space Profile.icm，
-    /// 失败时回退到内置的最小有效 sRGB ICC 配置文件。</remarks>
+    /// <remarks>
+    /// ═══ 2026-09-20 许可合规：只用手写件，不再读系统那份 ═══
+    /// 旧策略优先读 <c>System32\spool\drivers\color\sRGB Color Space Profile.icm</c>。两个后果：
+    /// ① 那份的 <c>cprt</c> 是 "Copyright (c) 1998 Hewlett-Packard Company"、<c>creator</c> 是 "HP  "，
+    ///    它会随<b>用户导出的产物</b>分发（PNG iCCP / TIFF / AVIF colr(prof) / JPEG APP2 全部实测命中）。
+    ///    更糟的是 <see cref="PatchSrgbPrimaries"/> 以它为模板 Clone 而只覆写 rXYZ/gXYZ/bXYZ+desc，
+    ///    残留标签把 Display P3 / BT.2020 / Adobe RGB 也一并染上 HP 版权串。
+    /// ② 模板取自本机系统目录 ⇒ 换一台机器（或该文件缺失/损坏而落到回退分支）产物字节就不同，
+    ///    与 <c>build-info.json</c> 主张的可追溯性自相矛盾。
+    /// <para>切换是<b>色度学中性</b>的：手写件的原色列、wtpt、TRC 数值本来就照那份实测抄来
+    /// （见 <see cref="BuildValidSRgbIcc"/> 的注释），变的只有版权归属与跨机一致性。
+    /// 判据：<c>ColorPipelineTests</c> 的 IccProvenance 用例 + 结构判据 <c>IsEmbeddableIcc</c>。</para>
+    /// </remarks>
     public static byte[] GetDefaultSRgbIcc()
     {
         if (s_srgbIccCache is not null) return s_srgbIccCache;
 
         lock (s_srgbLock)
         {
-            if (s_srgbIccCache is not null) return s_srgbIccCache;
-
-            // 策略1: 从 Windows 系统色彩目录读取完整 sRGB 配置文件
-            try
-            {
-                var systemIcc = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.System),
-                    "spool", "drivers", "color", "sRGB Color Space Profile.icm");
-                if (File.Exists(systemIcc))
-                {
-                    var data = File.ReadAllBytes(systemIcc);
-                    if (data.Length > 128) // 有效 ICC 至少 128 字节头
-                    {
-                        s_srgbIccCache = data;
-                        return s_srgbIccCache;
-                    }
-                }
-            }
-            catch { /* 回退到内置配置文件 */ }
-
-            // 策略2: 内置最小有效 sRGB ICC 配置文件 (v2.1, 3144 字节)
-            // 包含: header + tag table + desc/cprt/wtpt/bkpt/rXYZ/gXYZ/bXYZ/rTRC/gTRC/bTRC
-            s_srgbIccCache = BuildValidSRgbIcc();
+            s_srgbIccCache ??= BuildValidSRgbIcc();
             return s_srgbIccCache;
         }
     }
 
-    /// <summary>构建最小但有效的 sRGB ICC 配置文件 (v2.1)。</summary>
-    private static byte[] BuildValidSRgbIcc()
+    /// <summary>构建 sRGB ICC 配置文件 (v2.1) —— 本仓库自产，不引用任何第三方 profile 的字节。</summary>
+    /// <remarks>
+    /// ═══ 历史坑（2026-09-15 修复）：无限递归 ═══
+    /// 本方法曾无条件调用 <see cref="Encoding.IccStore.SRGB"/>，而 <c>IccStore.SRGB</c>
+    /// （IccStore.cs:26）反向调用 <see cref="GetDefaultSRgbIcc"/>，后者又回到本方法 ⇒ 构成环。
+    /// 加重因素：① <c>lock</c> 可重入，不会自锁；② <c>IccStore._srgb</c> 要等调用返回才置位，
+    /// 重入时仍为 null。两者叠加 ⇒ 系统 sRGB ICC 缺失（精简系统 / 文件损坏）时
+    /// **必然栈溢出、进程直接崩溃**，且 catch 拦不住（StackOverflowException 不可捕获）。
+    /// 当时靠 ThreadStatic 哨兵阻断；现在本方法已完全不回指 IccStore，环从源头消失，哨兵一并删除。
+    /// <para>⚠ 不许再把本方法的调用方改成 <c>IccStore.SRGB</c>：那等于把环重新接上。</para>
+    /// <para>⚠ <c>internal</c>（原 private）是给判据看的：这份手写件现在是<b>唯一</b>来源，
+    /// 它若不合格 ⇒ 广色域声明在所有机器上一起消失 ⇒ 必须被直接断言
+    /// （见 <c>Test_IccEmbeddableIsStructuralNotLength</c> 第 ⑧ 项）。</para>
+    /// </remarks>
+    internal static byte[] BuildValidSRgbIcc()
     {
-        // 使用 IccStore 生成的 sRGB ICC（完整有效）
-        try
-        {
-            var bytes = Encoding.IccStore.SRGB;
-            if (bytes.Length > 128) return bytes;
-        }
-        catch { /* 回退到手写最小 ICC */ }
-
         // 最终回退: 手写最小有效 sRGB ICC v2.1 配置文件
         // 结构: Header(128) + TagTable(12+10*12=132) + TagData
         using var ms = new MemoryStream(3200);
         using var bw = new BinaryWriter(ms);
 
+        // ═══ 字节序：BinaryWriter 一律写**小端**，而 ICC 全程**大端** ═══
+        // 非零整数一律走 WriteBE16/WriteBE32。2026-09-20 修正：本方法此前有 5 处裸
+        // bw.Write(int/ushort)（profile 尺寸回填、日期、头部 PCS 照明体、tag 数、
+        // tag 表的 offset/size），产出的字节序是反的 ⇒ 这份"兜底 sRGB ICC"从来没合法过。
+        // 之所以一直没被发现：GetDefaultSRgbIcc 优先读系统 profile，本方法在正常 Windows 上
+        // 根本跑不到（判据 ⑨ 当时也因此是一条假绿灯）。
         // 占位，最后回填 profile size
-        bw.Write(0); // profile size (offset 0)
-        bw.Write(0); // preferred CMM
+        WriteBE32(bw, 0); // profile size (offset 0)
+        WriteBE32(bw, 0); // preferred CMM
         bw.Write(new byte[] { 0x02, 0x10, 0x00, 0x00 }); // version 2.1.0
         bw.Write("mntr"u8); // device class
         bw.Write("RGB "u8); // color space
         bw.Write("XYZ "u8); // PCS
-        // date/time
-        bw.Write((ushort)2024); bw.Write((ushort)1); bw.Write((ushort)1);
-        bw.Write((ushort)0); bw.Write((ushort)0); bw.Write((ushort)0);
+        // date/time（各字段是大端 ushort）
+        WriteBE16(bw, 2024); WriteBE16(bw, 1); WriteBE16(bw, 1);
+        WriteBE16(bw, 0); WriteBE16(bw, 0); WriteBE16(bw, 0);
         bw.Write("acsp"u8); // profile file signature
-        bw.Write(0); // primary platform
-        bw.Write(0); // profile flags
-        bw.Write(0); // device manufacturer
-        bw.Write(0); // device model
-        bw.Write(0L); // device attributes
-        bw.Write(0); // rendering intent (perceptual)
+        WriteBE32(bw, 0); // primary platform
+        WriteBE32(bw, 0); // profile flags
+        WriteBE32(bw, 0); // device manufacturer
+        WriteBE32(bw, 0); // device model
+        WriteBE32(bw, 0); WriteBE32(bw, 0); // device attributes (8 字节)
+        WriteBE32(bw, 0); // rendering intent (perceptual)
         // PCS illuminant (D50): X=0.9642, Y=1.0, Z=0.8249 (s15Fixed16)
-        bw.Write(0x0000F6D6); bw.Write(0x00010000); bw.Write(0x0000D32D);
-        bw.Write(0); // profile creator
+        WriteBE32(bw, 0x0000F6D6); WriteBE32(bw, 0x00010000); WriteBE32(bw, 0x0000D32D);
+        WriteBE32(bw, 0); // profile creator
         bw.Write(new byte[16]); // profile ID (MD5, 留空)
         bw.Write(new byte[28]); // reserved
 
         // Tag table: 10 tags
         int tagCount = 10;
-        bw.Write(tagCount);
+        WriteBE32(bw, tagCount);
 
         // 计算数据区起始 (header 128 + tag count 4 + tags 10*12=120 = 252, 对齐到 4)
         int dataStart = 128 + 4 + tagCount * 12;
@@ -193,12 +211,23 @@ public static partial class ColorProfileProvider
 
         // 准备各标签数据
         byte[] descData = BuildDescTag("sRGB IEC61966-2.1");
-        byte[] cprtData = BuildTextTag("Public Domain");
-        byte[] wtptData = BuildXyzTag(0.9505f, 1.0f, 1.0891f); // D65
+        byte[] cprtData = BuildTextTag(GeneratedIccCopyright);
+        // ═══ 2026-09-19 缺陷 C：三个原色列必须是 D50 适配值，此前写的是 D65 未适配值 ═══
+        // ICC 的 PCS 是 D50 ⇒ rXYZ/gXYZ/bXYZ 必须是"适配到 D50 之后"的列向量。旧写法用的是
+        // IEC 61966-2-1 那张【D65 引用】的矩阵 (0.4124/0.2126/0.0193…)，三列之和 = D65 白
+        // (0.9505,1,1.0890)，与文件自己声明的 D50 PCS 对不上 ⇒ 任何按标签算 RGB↔XYZ 的实现
+        // 都会拿到一张差 ~2-4%（蓝/黄方向）的矩阵。
+        // 下面的数值不是凭记忆写的：实测本机 C:\Windows\System32\spool\drivers\color\
+        //   sRGB Color Space Profile.icm（微软随系统的 sRGB，v2.1，3144B，17 标签），
+        //   rXYZ=(0.4361,0.2225,0.0139) gXYZ=(0.3851,0.7169,0.0971) bXYZ=(0.1431,0.0606,0.7141)，
+        //   三列之和=(0.9643,1.0000,0.8251)=D50 白。自检见 ColorPipelineTests 的 SrgbIcc 判据。
+        // ⚠ wtpt 保持 D65 原值【不是】漏改：同一份微软 profile 的 wtpt 就是 (0.9505,1.0000,1.0891)
+        //   —— 媒体白点按未适配值记录是它的既有做法，与原色列的适配规则不同，别"顺手统一"。
+        byte[] wtptData = BuildXyzTag(0.9505f, 1.0f, 1.0891f); // D65 媒体白点（与系统 profile 一致）
         byte[] bkptData = BuildXyzTag(0f, 0f, 0f);
-        byte[] rXYZData = BuildXyzTag(0.4124f, 0.2126f, 0.0193f);
-        byte[] gXYZData = BuildXyzTag(0.3576f, 0.7152f, 0.1192f);
-        byte[] bXYZData = BuildXyzTag(0.1805f, 0.0722f, 0.9505f);
+        byte[] rXYZData = BuildXyzTag(0.4361f, 0.2225f, 0.0139f);
+        byte[] gXYZData = BuildXyzTag(0.3851f, 0.7169f, 0.0971f);
+        byte[] bXYZData = BuildXyzTag(0.1431f, 0.0606f, 0.7141f);
         byte[] trcData = BuildCurveTag(); // sRGB tone curve
 
         var tags = new (string sig, byte[] data)[]
@@ -220,8 +249,8 @@ public static partial class ColorProfileProvider
         for (int i = 0; i < tagCount; i++)
         {
             bw.Write(System.Text.Encoding.ASCII.GetBytes(tags[i].sig));
-            bw.Write(offsets[i]);
-            bw.Write(tags[i].data.Length);
+            WriteBE32(bw, offsets[i]);
+            WriteBE32(bw, tags[i].data.Length);
         }
 
         // 填充到 dataStart
@@ -237,9 +266,21 @@ public static partial class ColorProfileProvider
         // 回填 profile size
         int totalSize = (int)ms.Position;
         ms.Position = 0;
-        bw.Write(totalSize);
+        WriteBE32(bw, totalSize);
 
         return ms.ToArray();
+    }
+
+    /// <summary>BinaryWriter 只会写小端，ICC 要求大端 ⇒ 非零整数一律经这两个辅助。</summary>
+    private static void WriteBE32(BinaryWriter bw, int v)
+    {
+        bw.Write((byte)(v >>> 24)); bw.Write((byte)(v >> 16));
+        bw.Write((byte)(v >> 8)); bw.Write((byte)v);
+    }
+
+    private static void WriteBE16(BinaryWriter bw, int v)
+    {
+        bw.Write((byte)(v >> 8)); bw.Write((byte)v);
     }
 
     private static byte[] BuildDescTag(string text)
@@ -361,6 +402,123 @@ public static partial class ColorProfileProvider
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfoW(nint hMonitor, ref MONITORINFOEXW lpmi);
 
+    // ── EDID 获取（用于物理显示器标识，防止缓存键碰撞）──
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumDisplayDevicesW(string? lpDevice, uint iDevNum, ref DISPLAY_DEVICEW lpDisplayDevice, uint dwFlags);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DISPLAY_DEVICEW
+    {
+        public uint cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceString;
+        public uint StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceKey;
+    }
+
+    /// <summary>
+    /// 获取显示器物理指纹（三级回退：EDID CRC32 → PnP ID → 设备名），用于缓存键区分不同物理显示器。
+    /// <para>
+    /// 设计权衡：
+    /// 1. EDID CRC32 (注册表) = 面板级唯一标识，含序列号/制造周/白点，最精确。
+    ///    注册表路径: HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\<PnP_ID>\<instance>\Device Parameters\EDID
+    /// 2. PnP ID = 型号级标识 (如 DEL27A0B)，同型号不同面板会碰撞，但比设备名稳定。
+    /// 3. 设备名 (\\.\DISPLAY1) = 逻辑索引，拔插/重排会变，仅作最后兜底。
+    /// </para>
+    /// </summary>
+    private static string GetMonitorFingerprint(nint monitorHandle)
+    {
+        try
+        {
+            var monitorInfo = new MONITORINFOEXW();
+            monitorInfo.cbSize = (uint)Marshal.SizeOf<MONITORINFOEXW>();
+            if (!GetMonitorInfoW(monitorHandle, ref monitorInfo)) return "";
+
+            var dd = new DISPLAY_DEVICEW { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICEW>() };
+            if (!EnumDisplayDevicesW(monitorInfo.szDevice, 0, ref dd, 0)) return "";
+
+            string deviceId = dd.DeviceID ?? "";
+            string pnpId = "";
+
+            // ── Step 1: 解析 PnP ID (从 DeviceID "MONITOR\<PnP_ID>\<instance>" 或 "DISPLAY\<PnP_ID>\<instance>") ──
+            var segments = deviceId.Split('\\');
+            if (segments.Length >= 2 && !string.IsNullOrEmpty(segments[1]))
+            {
+                pnpId = segments[1];
+            }
+            else if (segments.Length >= 3 && !string.IsNullOrEmpty(segments[2]))
+            {
+                // 罕见格式: "ROOT\<PnP_ID>\<something>"
+                pnpId = segments[2];
+            }
+
+            // ── Step 2: 尝试读注册表 EDID (最精确：面板序列号+制造周+白点色度) ──
+            if (!string.IsNullOrEmpty(pnpId))
+            {
+                try
+                {
+                    // 枚举该 PnP ID 下所有实例子键
+                    using var enumKey = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                        $@"SYSTEM\CurrentControlSet\Enum\DISPLAY\{pnpId}");
+                    if (enumKey is not null)
+                    {
+                        foreach (var subName in enumKey.GetSubKeyNames())
+                        {
+                            using var instanceKey = enumKey.OpenSubKey(subName);
+                            if (instanceKey?.OpenSubKey("Device Parameters")?.GetValue("EDID") is byte[] edid && edid.Length >= 128)
+                            {
+                                uint crc = 0xFFFFFFFF;
+                                foreach (var b in edid.Take(128))
+                                    crc = (crc >> 8) ^ Crc32Table[(crc ^ b) & 0xFF];
+                                return (~crc).ToString("X8");  // EDID CRC32
+                            }
+                        }
+                    }
+                }
+                catch { /* 忽略注册表访问错误，继续降级 */ }
+            }
+
+            // ── Step 3: 回退到 PnP ID ──
+            if (!string.IsNullOrEmpty(pnpId))
+                return pnpId;
+
+            // ── Step 4: 最后兜底：设备名 (\\.\DISPLAYx) ──
+            if (!string.IsNullOrEmpty(monitorInfo.szDevice))
+                return monitorInfo.szDevice;
+
+            // ── Step 5: 兜底尾声：DeviceID 末段十六进制片段 ──
+            foreach (var part in deviceId.Split('\\', '&').Reverse())
+            {
+                if (part.Length >= 8 && uint.TryParse(part[^8..], System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture, out uint hash))
+                    return hash.ToString("X8");
+            }
+        }
+        catch { }
+        return "";
+    }
+
+    // CRC32 表 (标准多项式 0xEDB88320) - 供 EDID CRC32 计算
+    private static readonly uint[] Crc32Table = new uint[256];
+    static ColorProfileProvider()
+    {
+        const uint poly = 0xEDB88320;
+        for (uint i = 0; i < 256; i++)
+        {
+            uint crc = i;
+            for (int j = 0; j < 8; j++)
+                crc = (crc & 1) != 0 ? (crc >> 1) ^ poly : crc >> 1;
+            Crc32Table[i] = crc;
+        }
+    }
+
     [LibraryImport("mscms.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool WcsGetDefaultColorProfileSize(
@@ -433,7 +591,7 @@ public static partial class ColorProfileProvider
             var targetIcc = GetStandardIccProfile(targetColorSpace);
             if (targetIcc is null)
             {
-                System.Diagnostics.Debug.WriteLine($"[ICC] 目标色彩空间 '{targetColorSpace}' 无标准 ICC，回退 sRGB");
+                CoreLog.Warn("ICC", $"目标色彩空间 '{targetColorSpace}' 无标准 ICC，回退 sRGB", LogCategory.Encoding);
                 targetIcc = GetStandardIccProfile("sRGB");
                 if (targetIcc is null) return (null, null);
             }
@@ -448,12 +606,43 @@ public static partial class ColorProfileProvider
             var srcMatrix = ExtractRgbToXyzMatrix(sourceIcc);
             var dstMatrix = GetTargetXyzToRgbMatrix(targetColorSpace);
 
+            // ═══ 2026-09-19 缺陷 C 的真正根因：两个操作数不在同一个 PCS 里 ═══
+            // ExtractRgbToXyzMatrix 读出的是 **D50 PCS** 下的列（ICC 规范强制；已实测微软
+            // sRGB Color Space Profile.icm: rXYZ=(0.4361,0.2225,0.0139)，三列之和=D50 白），
+            // 而 GetTargetXyzToRgbMatrix 给的是 **D65 引用** 的 sRGB/P3/Adobe/BT.2020 逆矩阵
+            // （IEC/常见文献那一组）。旧实现直接把两者相乘 ⇒ 复合矩阵里藏了一次未做的
+            // 白点适配（蓝/黄方向系统性偏移），而它偏偏又要靠 IsIdentityMatrix 去判"源≈目标可跳过"
+            // —— 同一张 sRGB 源 profile 本该判成单位阵跳过，实际因为差着适配而不去跳过。
+            // 这里把源矩阵先换算到 D65 引用，两个操作数才真正同域。
+            // 数值来源（不是凭记忆）：A = D50列 · inv(D65列)，两组列向量分别取自
+            //   IEC 61966-2-1 与本机上表实测的微软 profile，再取 inv(A)；取证与三条自检
+            //   （白点必须映到白点）在 scripts/probes/d50_adaptation_derive.py，
+            //   行为侧回归见 ColorPipelineTests.BakeIcc_SrgbToSrgb_IsExactIdentity。
+            if (srcMatrix is not null)
+            {
+                float[] d50ToD65Pcs =
+                [
+                     0.9554865f, -0.0230830f,  0.0632982f,
+                    -0.0285193f,  1.0101327f,  0.0210870f,
+                     0.0122368f, -0.0204462f,  1.3303371f,
+                ];
+                srcMatrix = MultiplyMatrices(d50ToD65Pcs, srcMatrix);
+            }
+
             if (srcMatrix is null || dstMatrix is null)
             {
-                // 无法解析矩阵 → 像素直通 + 嵌入目标 ICC（查看器负责转换）
-                System.Diagnostics.Debug.WriteLine(
-                    $"[ICC] 矩阵解析失败，像素直通: {w}x{h}, 目标={targetColorSpace}");
-                return (bgra, targetIcc);
+                // ═══ 2026-09-19 缺陷 D-1：转换没做成就不能返回"目标 ICC"═══
+                // 旧写法是 `return (bgra, targetIcc)` 并注释"查看器负责转换"—— 可查看器拿到的是
+                // "源 = 目标色域"的声明：像素还留在源色域，却被标成目标广色域，查看器按此解释反而
+                // 更偏（sRGB 像素标成 P3 会被渲染得过饱和）。这里没有任何"我做了转换"的事实支撑，
+                // 所以如实返回 icc=null，由调用方按像素真实所在色域降级声明（见 PreparePixelsWithIcc）。
+                // ⚠ 与下方 IsIdentityMatrix 那一支不同：那一支像素【确实】已在目标色域，嵌目标 ICC 是对的。
+                CoreLog.Warn("ICC",
+                    $"矩阵解析失败，像素未转换（不返回目标 ICC）: {w}x{h}, 目标={targetColorSpace}", LogCategory.Encoding);
+                TrueToneCap.Core.Encoding.EncoderFallbackNotifier.LastReason =
+                    $"ICC 色彩转换未能完成（源/目标矩阵不可解析，目标={targetColorSpace}）"
+                    + "⇒ 本张按像素实际所在色域声明，未做色域搬运";
+                return (bgra, null);
             }
 
             // 计算组合矩阵: src_RGB → XYZ → dst_RGB
@@ -486,13 +675,14 @@ public static partial class ColorProfileProvider
                 converted[idx + 3] = bgra[idx + 3]; // Alpha 直通
             });
 
-            System.Diagnostics.Debug.WriteLine(
-                $"[ICC] 像素转换完成: {w}x{h}, 目标={targetColorSpace}");
+            CoreLog.Debug("ICC", $"像素转换完成: {w}x{h}, 目标={targetColorSpace}", LogCategory.Encoding);
             return (converted, targetColorSpace.Equals("sRGB", StringComparison.OrdinalIgnoreCase) ? null : targetIcc);
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[ICC] 烘焙到 {targetColorSpace} 失败: {ex.Message}");
+            // 带 ex 重载 ⇒ 堆栈进日志。原先只写 ex.Message 且只在 Debug 输出，
+            // 异常类型与出处全部丢失（M8 记的"cause is Debug-only"）。
+            CoreLog.Warn("ICC", $"烘焙到 {targetColorSpace} 失败，本张退回未转换像素", ex, LogCategory.Encoding);
             return (null, null);
         }
     }
@@ -559,11 +749,38 @@ public static partial class ColorProfileProvider
         catch { return null; }
     }
 
+    /// <summary>归一化色彩空间键：忽略大小写、空格、连字符、下划线。</summary>
+    /// <remarks>
+    /// ═══ 历史坑（2026-09-15 修复）═══
+    /// 全仓实际流通的色彩空间标签是 <c>"DisplayP3"</c> / <c>"DCI_P3"</c>
+    /// （见 MainWindow.ColorManagement.cs、PngCheck.cs、本文件 PatchSrgbPrimaries 等处），
+    /// 而原实现直接用 <c>ToUpperInvariant()</c> 去匹配 <c>"DISPLAY P3"</c>（含空格）与
+    /// <c>"DCI-P3"</c>（连字符）—— <c>"DISPLAYP3"</c> 与 <c>"DCI_P3"</c> 均不匹配，
+    /// 于是恒返回 null：像素**直通不转换**，但 ICC 仍按 P3 嵌入，
+    /// 像素内容与色彩声明自相矛盾 → 静默偏色且无任何提示。
+    /// 凡是比较色彩空间字符串的地方都必须走本归一化，不要各自 ToUpperInvariant。
+    /// </remarks>
+    internal static string NormalizeColorSpaceKey(string colorSpace)
+    {
+        if (string.IsNullOrEmpty(colorSpace)) return string.Empty;
+
+        Span<char> buf = stackalloc char[colorSpace.Length];
+        int n = 0;
+        foreach (var ch in colorSpace)
+        {
+            if (ch is ' ' or '-' or '_') continue; // 忽略分隔差异
+            buf[n++] = ch;
+        }
+        return new string(buf[..n]).ToUpperInvariant();
+    }
+
     /// <summary>获取目标色彩空间的 XYZ→RGB 逆矩阵。</summary>
-    private static float[]? GetTargetXyzToRgbMatrix(string colorSpace)
+    /// <remarks>internal 以便测试做"UI 色域 Tag 全集 → 矩阵"的穷尽性校验（防 P0-D 类漏匹配回归）。</remarks>
+    internal static float[]? GetTargetXyzToRgbMatrix(string colorSpace)
     {
         // 返回 XYZ→RGB 矩阵 (3×3, row-major)
-        return colorSpace.ToUpperInvariant() switch
+        // 比较前先归一化 —— 详见 NormalizeColorSpaceKey 备注中的历史坑说明。
+        return NormalizeColorSpaceKey(colorSpace) switch
         {
             "SRGB" or "" => new float[] // sRGB / BT.709 XYZ→RGB (D65)
             {
@@ -571,19 +788,19 @@ public static partial class ColorProfileProvider
                 -0.9692660f,  1.8760108f,  0.0415560f,
                  0.0556434f, -0.2040259f,  1.0572252f
             },
-            "P3" or "DISPLAY P3" or "DCI-P3" => new float[] // Display P3 XYZ→RGB (D65)
+            "P3" or "DISPLAYP3" or "DCIP3" => new float[] // Display P3 XYZ→RGB (D65)
             {
                  2.4934969f, -0.9313836f, -0.4027108f,
                 -0.8294890f,  1.7626641f,  0.0236247f,
                  0.0358458f, -0.0761724f,  0.9568845f
             },
-            "ADOBERGB" or "ADOBE RGB" => new float[] // Adobe RGB (1998) XYZ→RGB (D65)
+            "ADOBERGB" or "ADOBERGB1998" => new float[] // Adobe RGB (1998) XYZ→RGB (D65)
             {
                  2.0413690f, -0.5649464f, -0.3446944f,
                 -0.9692660f,  1.8760108f,  0.0415560f,
                  0.0134474f, -0.1183897f,  1.0154096f
             },
-            "BT2020" or "BT.2020" or "REC2020" => new float[] // BT.2020 XYZ→RGB (D65)
+            "BT2020" or "REC2020" => new float[] // BT.2020 XYZ→RGB (D65)
             {
                  1.7166512f, -0.3556708f, -0.2533663f,
                 -0.6666844f,  1.6164812f,  0.0157685f,
@@ -650,16 +867,22 @@ public static partial class ColorProfileProvider
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[ICC] 获取标准 ICC '{colorSpace}' 失败: {ex.Message}");
+            CoreLog.Warn("ICC", $"获取标准 ICC '{colorSpace}' 失败", ex, LogCategory.Encoding);
             return null;
         }
     }
 
-    /// <summary>基于 sRGB ICC 模板修改 primaries 生成自定义色彩空间 ICC。
-    /// 保留 sRGB 的完整 tag 结构（TRC、wtpt 等），仅替换 rXYZ/gXYZ/bXYZ 和 desc。</summary>
+    /// <summary>基于本仓库自产的 sRGB ICC 模板修改 primaries 生成自定义色彩空间 ICC。
+    /// 保留模板的完整 tag 结构（TRC、wtpt 等），仅替换 rXYZ/gXYZ/bXYZ 和 desc。</summary>
+    /// <remarks>
+    /// 模板<b>必须</b>来自 <see cref="BuildValidSRgbIcc"/>，不能来自 <c>IccStore.SRGB</c> 的系统 profile：
+    /// 本方法只覆写 4 个标签，其余标签原样保留 ⇒ 用系统那份当模板就等于把 HP 的 cprt/creator
+    /// 塞进 Display P3 / BT.2020 / Adobe RGB 的产物里（2026-09-20 许可合规审计实测四类容器全命中）。
+    /// 详见 <see cref="GetDefaultSRgbIcc"/> 的同名注释。
+    /// </remarks>
     public static byte[]? PatchSrgbPrimaries(IccPrimaries p, string name)
     {
-        var template = Encoding.IccStore.SRGB;
+        var template = BuildValidSRgbIcc();
         if (template is null || template.Length < 132) return null;
 
         var icc = (byte[])template.Clone();
@@ -748,7 +971,7 @@ public static partial class ColorProfileProvider
         byte[] wtpt = BuildXyzTag(0.9642f, 1.0f, 0.8249f);   // D50
         byte[] trc = BuildPqCurveTag();                      // 4096 点 PQ EOTF
         byte[] desc = BuildDescTag(name);
-        byte[] cprt = BuildTextTag("Public Domain");
+        byte[] cprt = BuildTextTag(GeneratedIccCopyright);
 
         var tags = new (uint sig, byte[] data)[]
         {
@@ -1003,22 +1226,22 @@ public static partial class ColorProfileProvider
     {
         try
         {
-            // 策略1: 从注册表读取 EDID 硬件原色（不受 ACM 影响）
-            var edid = ReadEdidFromRegistry(monitorHandle);
-            if (edid is not null && edid.Length >= 128)
+            // 策略1: EDID 硬件原色 + 广色域闸门（与三档判据同源，见 ProbeNativeWideGamut）。
+            // ⚠ 闸门就在这一步里面：不宽的面板直接得到 "sRGB"，不会再走下面那套宽松阈值。
+            var probed = ProbeNativeWideGamut(monitorHandle);
+            if (probed.Known)
             {
-                var (rx, ry, gx, gy) = ParseEdidChromaticity(edid);
-                if (rx > 0 || gx > 0) // 有效数据
-                {
-                    var result = ClassifyGamutByChromaticity(rx, ry, gx, gy);
-                    System.Diagnostics.Debug.WriteLine($"[ICC] EDID 原生色域: R({rx:F4},{ry:F4}) G({gx:F4},{gy:F4}) -> {result}");
-                    return result;
-                }
+                CoreLog.Info("ICC", $"EDID 原生色域: {probed.Detail} -> {probed.Tag}", LogCategory.Capture);
+                return probed.Tag;
             }
 
-            // 策略2: 从 ICC profile 提取矩阵（备用，ACM 下可能被修改）
+            // 策略2: 从 ICC profile 提取矩阵（EDID 读不到时的兜底，ACM 下可能被修改）
+            // 原先这里另立一个 `Length >= 500` 的字面量（§31.3-9 数出来的第四套阈值）。
+            // 它想问的其实是"这份 profile 里有没有可解析的 RGB→XYZ 矩阵"，
+            // 而那正是下面 ExtractRgbToXyzMatrix 自己会回答的（取不到就 return null）
+            // ⇒ 长度这道 proxy 只会误杀合法的紧凑件（实测最小合法 matrix profile 396 B），删掉。
             var icc = GetDisplayIccProfile(monitorHandle);
-            if (icc is not null && icc.Length >= 500)
+            if (icc is not null)
             {
                 var matrix = ExtractRgbToXyzMatrix(icc);
                 if (matrix is not null)
@@ -1026,7 +1249,7 @@ public static partial class ColorProfileProvider
                     float rX = matrix[0];
                     float gX = matrix[1];
                     var result = ClassifyGamutByXyzMatrix(rX, gX);
-                    System.Diagnostics.Debug.WriteLine($"[ICC] ICC 矩阵色域: rX={rX:F4} gX={gX:F4} -> {result}");
+                    CoreLog.Info("ICC", $"ICC 矩阵色域: rX={rX:F4} gX={gX:F4} -> {result}", LogCategory.Capture);
                     return result;
                 }
             }
@@ -1039,50 +1262,132 @@ public static partial class ColorProfileProvider
         }
     }
 
-    /// <summary>从注册表读取显示器 EDID 数据。</summary>
-    private static byte[]? ReadEdidFromRegistry(nint monitorHandle)
+    /// <summary>
+    /// 绿点相对 BT.709 绿点要"绿出去"这么多才算确证的广色域面板。
+    /// <para>为什么用绿点而不是"色域面积"：面积要蓝坐标，而绝大多数广色域面板（P3 / AdobeRGB）
+    /// 蓝点与 709 几乎重合，真正拉开差距的就是 G。而且 EDID 解析出来的现成坐标只有 R/G 两点。</para>
+    /// <para>2026-09-22 本机两块屏实测把门限夹出来（注册表 EDID 与逐屏审计两边读数一致）：
+    /// AUO75AC / BOE B160QAN02.7（2560x1600，100% sRGB 笔电屏）ΔG=0.0246；
+    /// PHLC38F / Philips 27M2N5800P（3840x2160，走 HDR 那路）ΔG=0.0963。
+    /// 门限上下各有约 2× 余量（0.05/0.0246=2.03，0.0963/0.05=1.93），不脆。</para>
+    /// <para>标准参考点（同样按对 709 绿点的欧氏距离算）：DCI-P3 的 G=(0.265,0.690) ⇒ ΔG=0.0966
+    /// （本机那块真 P3 屏的 0.0963 与之几乎重合，说明判据量到的就是"面板原生到 P3"）；
+    /// AdobeRGB 的 G=(0.210,0.710) ⇒ ΔG=0.1421；BT.2020 的 G=(0.170,0.797) ⇒ ΔG=0.2360。
+    /// 部分覆盖的 P3 屏，绿点拉伸大致按覆盖率线性缩水，故 0.05 落在这个尺子的低段，
+    /// 只挡住"连一半都不到"的窄屏，不误伤主流广色域面板。</para>
+    /// </summary>
+    internal const float GreenStretchForWide = 0.05f;
+
+    /// <summary>
+    /// 按 <b>EDID 硬件原色</b>回答两个问题：这块屏<b>是不是</b>广色域面板（三态：宽 / 确证不宽 / 读不到），
+    /// 以及<b>原生色域标签</b>。标签与闸门是同一次判定的两个输出 —— 这是刻意的：
+    /// <para>2026-09-22 审查轮之前它们是两套判据（本函数走 <see cref="ClassifyGamutByChromaticity"/>
+    /// 的 <c>rx&gt;0.65 且 gx≤0.30</c>，三档判据走 ΔG≥<see cref="GreenStretchForWide"/>），
+    /// 而本函数的返回值正是**色域搬运所取的源色域** ⇒ 本机那块 ΔG=0.0246 的普通 sRGB 屏被宽松阈值
+    /// 报成 DisplayP3，同一块屏又被三档判据判成窄色域：一份说不用搬、一份说按 P3 搬。
+    /// 现在标签必须先过闸门，不过就只能是 "sRGB"。</para>
+    /// <para>与 <see cref="GetDisplayNativeGamutTag"/> 的分工：本函数是唯一事实源，那个函数在 EDID
+    /// 读不到时还允许走 ICC 矩阵兜底（兜底只能给标签，不能翻案"确证不宽"）。</para>
+    /// </summary>
+    /// <param name="monitorHandle">这块屏的 HMONITOR。<b>必须是真实句柄</b>：无效句柄一律返回
+    /// "不知道"，绝不回落到别块屏的 EDID（详见 <see cref="ReadEdidFromRegistry"/>）。</param>
+    /// <summary>
+    /// 按 <b>EDID 硬件原色</b>确证这块屏是不是广色域面板，并给出**与闸门同源**的原生色域标签。
+    /// <para><see cref="Tag"/> 的规则：过了 <see cref="GreenStretchForWide"/> 才允许是
+    /// DisplayP3 / AdobeRGB / BT2020，过不了就是 "sRGB" —— 不存在"标签说 P3 而闸门说不宽"的中间态。
+    /// 这条是 2026-09-22 审查轮（交接 §41）补的：闸门与标签原先两套阈值并存，
+    /// 宽松那套（<c>rx&gt;0.65 且 gx≤0.30</c>）会把本机那块 ΔG=0.0246 的普通 sRGB 屏报成 DisplayP3，
+    /// 而它正是**色域搬运的源矩阵**所取的值 ⇒ 同一块屏被判窄色域、却被按 P3 搬色。</para>
+    /// <para>只用 EDID，不走 ICC 兜底：ICC 矩阵在 ACM 下可能被校准/改写，不能用来证明"面板原生是宽的"。</para>
+    /// </summary>
+    internal static (bool Known, bool Wide, string Tag, string Detail) ProbeNativeWideGamut(nint monitorHandle)
     {
         try
         {
-            // 遍历注册表 DISPLAY 键，查找匹配的显示器
-            using var displayKey = Registry.LocalMachine.OpenSubKey(
-                @"SYSTEM\CurrentControlSet\Enum\DISPLAY");
-            if (displayKey is null) return null;
-
-            foreach (var subKeyName in displayKey.GetSubKeyNames())
-            {
-                using var subKey = displayKey.OpenSubKey(subKeyName);
-                if (subKey is null) continue;
-
-                foreach (var instanceName in subKey.GetSubKeyNames())
-                {
-                    using var instanceKey = subKey.OpenSubKey(instanceName);
-                    if (instanceKey is null) continue;
-
-                    using var devParams = instanceKey.OpenSubKey("Device Parameters");
-                    if (devParams is null) continue;
-
-                    var edidRaw = devParams.GetValue("EDID");
-                    if (edidRaw is byte[] edidBytes && edidBytes.Length >= 128)
-                    {
-                        // 验证 EDID header: 00 FF FF FF FF FF FF 00
-                        if (edidBytes[0] == 0x00 && edidBytes[1] == 0xFF &&
-                            edidBytes[2] == 0xFF && edidBytes[3] == 0xFF &&
-                            edidBytes[4] == 0xFF && edidBytes[5] == 0xFF &&
-                            edidBytes[6] == 0xFF && edidBytes[7] == 0x00)
-                        {
-                            return edidBytes;
-                        }
-                    }
-                }
-            }
-
-            return null;
+            var edid = ReadEdidFromRegistry(monitorHandle);
+            if (edid is null || edid.Length < 128) return (false, false, "sRGB", "无 EDID");
+            var (rx, ry, gx, gy) = ParseEdidChromaticity(edid);
+            if (rx <= 0 && gx <= 0) return (false, false, "sRGB", "EDID 原色字段为空");
+            double dg = GreenStretchFromGreen(gx, gy);
+            return (true, dg >= GreenStretchForWide, NativeGamutTagFor(rx, ry, gx, gy),
+                    $"ΔG={dg:F4} G=({gx:F4},{gy:F4}) R=({rx:F4},{ry:F4})");
         }
-        catch
+        catch (Exception ex)
         {
-            return null;
+            return (false, false, "sRGB", $"EDID 探测异常 {ex.GetType().Name}");
         }
+    }
+
+    /// <summary>绿点到 BT.709 绿点 (0.3000, 0.6000) 的欧氏距离 —— 闸门量的就是这个。</summary>
+    internal static double GreenStretchFromGreen(double gx, double gy)
+    {
+        const double srgbGx = 0.3000, srgbGy = 0.6000;
+        return Math.Sqrt((gx - srgbGx) * (gx - srgbGx) + (gy - srgbGy) * (gy - srgbGy));
+    }
+
+    /// <summary>
+    /// 闸门与细分类的<b>唯一落点</b>：给 EDID 解出的原色，返回"确证过的原生标签"。
+    /// <para>不宽 ⇒ 只可能是 "sRGB"（不许凭 <see cref="ClassifyGamutByChromaticity"/> 的宽松阈值
+    /// 猜成 P3）；宽 ⇒ 再细分是 P3 / AdobeRGB / BT2020。</para>
+    /// <para>单独成函数的理由是能让判据被<b>真机量到的坐标</b>直接测：闸门原先只在
+    /// <c>ProbeNativeWideGamut(nint)</c> 里面，而那个要真实 HMONITOR ⇒ 单测无法覆盖，
+    /// 结果就是"去掉闸门"没有任何断言会红（2026-09-22 审查轮的突变实验实测到这一点）。</para>
+    /// </summary>
+    internal static string NativeGamutTagFor(double rx, double ry, double gx, double gy)
+        => GreenStretchFromGreen(gx, gy) >= GreenStretchForWide
+            ? ClassifyGamutByChromaticity((float)rx, (float)ry, (float)gx, (float)gy)
+            : "sRGB";
+
+    /// <summary>
+    /// 按 <b>HMONITOR 对应的设备实例路径</b>精确读取该显示器的 EDID。
+    /// <para>⚠ 旧实现完全忽略 <c>monitorHandle</c>：它遍历 <c>Enum\DISPLAY</c> 返回<b>第一个</b>头部合法的
+    /// EDID。多显示器下每块屏都拿到同一份 —— 2026-09-22 本机实测：主屏（Philips PHLC38F，ΔG≈0.099
+    /// 的真 P3）读到的是副屏（AUO75AC，ΔG≈0.025 的普通 sRGB）的原色。这与 0.3.3 那次
+    /// "TryCreateFromDisplayId 忽略入参、恒取 DisplayArea.Primary" 是同一形状的缺陷；
+    /// 影响面不止三档判据，<see cref="GetDisplayNativeGamutTag"/> 一直在吃这份错数据。</para>
+    /// <para>匹配链：HMONITOR → <c>GetMonitorInfo</c> 取 "\.\DISPLAYn" → <c>EnumDisplayDevices</c>
+    /// （<c>EDD_GET_DEVICE_INTERFACE_NAME</c>）取 <c>\\?\DISPLAY#厂商型号#实例路径#{GUID}</c> →
+    /// 换成注册表路径 <c>DIRECTORY\厂商型号\实例路径</c>。取不到就返回 null（= 不知道），
+    /// <b>绝不退化成"随便拿一块屏的 EDID"</b> —— 拿错比拿不到危险得多。</para>
+    /// </summary>
+    private static byte[]? ReadEdidFromRegistry(nint monitorHandle)
+    {
+        var instancePath = GetMonitorRegistryInstancePath(monitorHandle);
+        if (instancePath is null) return null;
+        try
+        {
+            using var devParams = Registry.LocalMachine.OpenSubKey(
+                $@"SYSTEM\CurrentControlSet\Enum\{instancePath}\Device Parameters");
+            if (devParams?.GetValue("EDID") is not byte[] edid || edid.Length < 128) return null;
+            // 验证 EDID header: 00 FF FF FF FF FF FF 00
+            if (edid[0] != 0x00 || edid[7] != 0x00) return null;
+            for (int i = 1; i < 7; i++) if (edid[i] != 0xFF) return null;
+            return edid;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>HMONITOR → <c>DISPLAY\厂商型号\实例路径</c>；任一环节失败返回 null。</summary>
+    private static string? GetMonitorRegistryInstancePath(nint monitorHandle)
+    {
+        try
+        {
+            var mi = new MONITORINFOEXW { cbSize = (uint)Marshal.SizeOf<MONITORINFOEXW>() };
+            if (!GetMonitorInfoW(monitorHandle, ref mi)) return null;
+            var deviceName = (mi.szDevice ?? "").Trim();
+            if (deviceName.Length == 0) return null;
+
+            var dd = new DISPLAY_DEVICEW { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICEW>() };
+            // EDD_GET_DEVICE_INTERFACE_NAME = 1 ⇒ DeviceID 是 \\?\DISPLAY#...#{GUID} 形态的设备接口路径
+            if (!EnumDisplayDevicesW(deviceName, 0u, ref dd, 1u)) return null;
+            var id = (dd.DeviceID ?? "").Trim();
+            if (id.StartsWith(@"\\?\")) id = id[4..];
+            int hash = id.IndexOf("#{", StringComparison.Ordinal);
+            if (hash > 0) id = id[..hash];
+            id = id.Replace('#', '\\');
+            return id.Length > 0 ? id : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>解析 EDID 1.x 色度数据 (block 0, bytes 0x19-0x26)。</summary>
@@ -1130,6 +1435,25 @@ public static partial class ColorProfileProvider
     }
 
     /// <summary>
+    /// 用户可选色彩空间的收口（2026-09-19 产品决定：界面只留 <b>sRGB</b> 与 <b>BT.2020</b>，
+    /// 外加"跟随显示器"）。收口发生在<b>色域矩阵之前</b>，所以它是"把像素搬进 BT.2020"，
+    /// 不是"把 P3 像素标成 BT.2020" —— 搬运由 <c>PrepareSdrLinearFloat</c> 的
+    /// <c>GetMatrix("BT2020")</c>（浮点路）或 <c>BakeIccToTarget</c>（8-bit 烘焙路）承担，
+    /// 两者都保证声明与像素同源。BT.2020 比 Display P3 / Adobe RGB 更宽 ⇒ 不裁色域、不偏色。
+    /// <para>⚠ 这里收的是<b>用户可选的目标</b>，不是仓库表达色域的能力：
+    /// Display P3 / DCI_P3 / Adobe RGB 的矩阵、ICC 模板与 H.273 映射全部保留（Core 侧仍可达，
+    /// 判据样张 <c>cc_*_p3</c> / <c>cc_*_adobe</c> 也继续覆盖它们），因为"检测到的显示器原生色域"
+    /// 与降级路径仍要能如实描述像素。删掉表达能力的代价是 P3 面板上的截图只能错着标。</para>
+    /// </summary>
+    public static string CollapseSelectableTag(string? tag) => tag switch
+    {
+        null or "" or "System" => "System",
+        "sRGB" or "BT2020" => tag,
+        // DisplayP3 / DCI_P3 / AdobeRGB 与任何未知字符串 ⇒ 用户当初要的是"广色域"
+        _ => "BT2020",
+    };
+
+    /// <summary>
     /// 解析色彩空间标签：当用户选择 "System"（跟随系统）时，
     /// 根据 HDR 状态和 ACM 状态自动解析为实际色域。
     /// </summary>
@@ -1137,36 +1461,37 @@ public static partial class ColorProfileProvider
     /// <param name="hdrOutput">是否启用 HDR 输出。</param>
     /// <param name="acmEnabled">系统 ACM 是否启用。</param>
     /// <param name="monitorHandle">可选显示器 HMONITOR，用于 ACM 下检测原生色域。</param>
-    /// <returns>解析后的实际色彩空间标签。</returns>
+    /// <returns>解析后的实际色彩空间标签（已按 <see cref="CollapseSelectableTag"/> 收口）。</returns>
     /// <remarks>
-    /// 解析规则:
+    /// 解析规则（2026-09-19 起，目标标签只剩 sRGB / BT.2020 两种）:
     /// - HDR 开启 + "System" → "BT2020"（HDR10 标准容器色域）
-    /// - HDR 开启 + 显式色域 → 保留用户选择（如 P3/AdobeRGB），通过 3×3 矩阵转换到目标色域线性空间
-    /// - HDR 开启 + sRGB → 保留（色调映射到 SDR 输出）
-    /// - ACM 启用 + 广色域显示器 → 显示器原生色域 (DisplayP3/BT2020/AdobeRGB)
+    /// - HDR 开启 + 显式色域 → 收口后保留（BT.2020；sRGB 由上层降级为 SDR 输出）
+    /// - ACM 启用 + 广色域显示器 → <b>"BT2020"</b>（原先直接返回检测到的原生色域，
+    ///   如 DisplayP3/AdobeRGB；现在把像素搬进 BT.2020 后按 BT.2020 声明）
     /// - 其他 → "sRGB"（WGC SDR 会话输出 DWM 色调映射后的 sRGB 数据）
     /// </remarks>
     public static string ResolveColorSpaceTag(string tag, bool hdrOutput, bool acmEnabled = false, nint? monitorHandle = null)
     {
+        tag = CollapseSelectableTag(tag);   // ← 用户可选面的唯一收口点
         if (hdrOutput)
         {
             // HDR 开启时"System"解析为 BT.2020（HDR10 标准容器色域）
             if (tag == "System")
                 return "BT2020";
 
-            // 用户显式选择的色域、sRGB 均保留
+            // 收口后这里只可能是 sRGB / BT2020；sRGB 的 HDR 降级在上层（BuildEncodingSettings）做
             return tag;
         }
 
         // ── SDR 模式 ──
         if (tag != "System") return tag;
 
-        // ACM 启用 → 尝试检测显示器原生色域（可能是广色域）
+        // ACM 启用 → 检测显示器原生色域；非 sRGB 的面板一律并到 BT.2020（见 CollapseSelectableTag）
         if (acmEnabled && monitorHandle.HasValue)
         {
             var nativeGamut = GetDisplayNativeGamutTag(monitorHandle.Value);
             if (nativeGamut is not "sRGB")
-                return nativeGamut;
+                return CollapseSelectableTag(nativeGamut);
         }
 
         // HDR 关闭时 WGC SDR 会话输出 DWM 色调映射后的 sRGB
@@ -1339,46 +1664,17 @@ public static class ColorSpaceConverter
         return v <= 0.0031308f ? 12.92f * v : 1.055f * MathF.Pow(v, 1f / 2.4f) - 0.055f;
     }
 
-    /// <summary>
-    /// 将 sRGB 线性 byte BGRA8 像素转换到目标色域。
-    /// 用于 ACES 色调映射后：ACES 输出在 sRGB 色域，
-    /// 但用户选择 P3/BT.2020 目标时，需要将像素值转换到目标色域。
-    /// 流程: byte BGRA8 → 去 sRGB gamma → 3×3 矩阵 → 目标 gamma → byte BGRA8
-    /// </summary>
-    public static byte[] ApplySrgbToTargetGamut(byte[] bgra, int w, int h, string colorSpaceTag)
-    {
-        var matrix = GetMatrix(colorSpaceTag);
-        if (matrix is null) return bgra; // sRGB 目标无需转换
-
-        int pixelCount = w * h;
-        float m00 = matrix[0, 0], m01 = matrix[0, 1], m02 = matrix[0, 2];
-        float m10 = matrix[1, 0], m11 = matrix[1, 1], m12 = matrix[1, 2];
-        float m20 = matrix[2, 0], m21 = matrix[2, 1], m22 = matrix[2, 2];
-
-        var result = new byte[bgra.Length];
-        var lut = PixelOps.SrgbToLinearLut;
-        System.Threading.Tasks.Parallel.For(0, pixelCount, i =>
-        {
-            int idx = i * 4;
-            // BGRA → linear (去 sRGB gamma, 查表替代 MathF.Pow)
-            float bLin = lut[bgra[idx]];
-            float gLin = lut[bgra[idx + 1]];
-            float rLin = lut[bgra[idx + 2]];
-
-            // 矩阵转换 (sRGB linear → 目标色域 linear)
-            float rOut = rLin * m00 + gLin * m01 + bLin * m02;
-            float gOut = rLin * m10 + gLin * m11 + bLin * m12;
-            float bOut = rLin * m20 + gLin * m21 + bLin * m22;
-
-            // 目标 gamma + 量化 (ToneMapper LUT, 替代 MathF.Pow)
-            result[idx]     = Processing.ToneMapper.LinearToSrgbByte(bOut);
-            result[idx + 1] = Processing.ToneMapper.LinearToSrgbByte(gOut);
-            result[idx + 2] = Processing.ToneMapper.LinearToSrgbByte(rOut);
-            result[idx + 3] = bgra[idx + 3];
-        });
-        return result;
-    }
-
+    // ═══ 2026-09-19 删除 ApplySrgbToTargetGamut(byte[] bgra, int w, int h, string tag) ═══
+    // 为什么不能这么写：它是一条 8-bit → float → 3×3 矩阵 → 8-bit 的链路，而传进来的字节
+    // 已经被上游量化过一次了。色域矩阵是"往窄色域里挤"的线性运算，结果普遍落在两个相邻
+    // 8-bit 台阶之间，再量化第二次就是【双重量化】—— 每个通道各吃一次 ±0.5 LSB，
+    // 渐变带上直接可见台阶/条带，且误差不可复原。
+    // 本仓库的精度链要求"只量化一次"（见 FormatHelper.PrepareSdrLinearFloat 的备注）：
+    // 要做色域收敛就在还在浮点域时做（ConvertFloat16ToSdrBgra / ConvertScrgbToTarget），
+    // 或者干脆只改容器声明（写 P3/BT.2020 的 cICP / iCCP，不动像素）。
+    // 删除前 src/ 下已无任何生产调用方（grep 只剩自身声明，唯一的"调用者"是
+    // ColorPipelineTests 里为它写的那条用例 —— 自我循环引用，覆盖的是永不执行的代码）。
+    // 留这段注释是防止有人把它当"便捷函数"重新加回来。
 }
 
 // ═══════════════════════════════════════
@@ -1420,7 +1716,7 @@ public static class IccProfileBuilder
         var trc = MakeTrcTag();
         string descStr = $"TrueToneCap {p}";
         var descTag = MakeDescTag(descStr);
-        var cprtTag = MakeTextTag("Public Domain");
+        var cprtTag = MakeTextTag(ColorProfileProvider.GeneratedIccCopyright);
 
         var tags = new (uint sig, byte[] data)[]
         {

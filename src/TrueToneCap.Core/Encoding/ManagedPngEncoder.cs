@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/ManagedPngEncoder.cs
 // 托管 PNG 编码器 — 零原生依赖，使用 System.IO.Compression
 // 支持: 8-bit / 16-bit, RGBA, iCCP chunk, cICP chunk, 最大压缩
@@ -23,25 +25,33 @@ public static class ManagedPngEncoder
     public static void Encode(byte[] bgra, int w, int h, string path,
         int bitDepth = 8, byte[]? iccProfile = null, byte[]? cicp = null)
     {
-        using var fs = File.Create(path);
-        Encode(bgra, w, h, fs, bitDepth, iccProfile, cicp);
+        // 2026-09-19：原为 File.Create(path) 直写 —— 中途任何异常都会在最终路径留下一份
+        // 已写了签名/IHDR 却没有 IEND 的坏 PNG，而上层照样按 ResolveActualPath 回来的那个路径报告"已保存"
+        // （见 CapturePipelineService 的 File.Exists/长度统计）。现走同目录临时文件 + 成功后替换，
+        // 理由与失败语义见 AtomicFileWriter。
+        AtomicFileWriter.Write(path, fs => Encode(bgra, w, h, fs, bitDepth, iccProfile, cicp));
     }
 
     /// <summary>快速编码 8-bit PNG（Filter=None + Fastest 压缩）。用于临时中间文件。</summary>
     public static void EncodeFast(byte[] bgra, int w, int h, string path, byte[]? iccProfile = null)
     {
-        using var fs = File.Create(path);
+        AtomicFileWriter.Write(path, fs => EncodeFast(bgra, w, h, fs, iccProfile));
+    }
+
+    /// <summary>快速编码 8-bit PNG 到 Stream（Filter=None + Fastest 压缩）。用于 stdin 管道传输。</summary>
+    public static void EncodeFast(byte[] bgra, int w, int h, Stream output, byte[]? iccProfile = null)
+    {
         int rowBytes = w * 4;
-        fs.Write(PngSignature);
+        output.Write(PngSignature);
 
         var ihdr = new byte[13];
         BinaryPrimitives.WriteInt32BigEndian(ihdr, w);
         BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), h);
         ihdr[8] = 8; ihdr[9] = 6; // 8-bit RGBA
-        WriteChunk(fs, "IHDR"u8, ihdr);
+        WriteChunk(output, "IHDR"u8, ihdr);
 
-        if (iccProfile is { Length: > 0 })
-            WriteChunk(fs, "iCCP"u8, BuildIccpChunk(iccProfile));
+        if (FormatHelper.IsEmbeddableIcc(iccProfile))
+            WriteChunk(output, "iCCP"u8, BuildIccpChunk(iccProfile));
 
         // Filter=None 扫描线（无自适应选择开销）
         var raw = new byte[h * (1 + rowBytes)];
@@ -63,9 +73,9 @@ public static class ManagedPngEncoder
         using var ms = new MemoryStream();
         using (var zlib = new ZLibStream(ms, CompressionLevel.Fastest, leaveOpen: true))
             zlib.Write(raw);
-        WriteChunk(fs, "IDAT"u8, ms.ToArray());
+        WriteChunk(output, "IDAT"u8, ms.ToArray());
 
-        WriteChunk(fs, "IEND"u8, []);
+        WriteChunk(output, "IEND"u8, []);
     }
 
     /// <summary>编码 BGRA 像素为 PNG 流。</summary>
@@ -107,7 +117,7 @@ public static class ManagedPngEncoder
         // cICP 为现代解码器提供紧凑色彩描述，iCCP 为老旧解码器提供回退
         if (cicp is { Length: 4 })
             WriteChunk(output, "cICP"u8, cicp);
-        if (iccProfile is { Length: > 0 })
+        if (FormatHelper.IsEmbeddableIcc(iccProfile))
         {
             var iccpData = BuildIccpChunk(iccProfile);
             WriteChunk(output, "iCCP"u8, iccpData);
@@ -126,14 +136,14 @@ public static class ManagedPngEncoder
     /// 输入: 每像素 8 字节 (B16 G16 R16 A16, big-endian)，由 Rgba16ToBgra16Bytes 生成。
     /// 支持 IHDR 10/12/16-bit depth（PNG 3.0）。
     /// </summary>
-    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16)
+    /// <param name="fastest">true = 用最快压缩（用于临时中转文件；压缩率不影响最终产物）。</param>
+    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false)
     {
-        using var fs = File.Create(path);
-        Encode16(bgra16, w, h, fs, cicp, iccProfile, bitDepth);
+        AtomicFileWriter.Write(path, fs => Encode16(bgra16, w, h, fs, cicp, iccProfile, bitDepth, fastest));
     }
 
     /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。</summary>
-    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16)
+    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false)
     {
         // PNG 3.0 (ISO/IEC 15948:2023) Table 11: Color type 6 (RGBA) 只允许 8 和 16
         // 10/12-bit 源数据使用 16-bit 容器 + sBIT 标记实际有效位
@@ -167,19 +177,33 @@ public static class ManagedPngEncoder
             WriteChunk(output, "cICP"u8, cicp);
 
         // iCCP（与 cICP 共存，RFC 9327 推荐）
-        if (iccProfile is { Length: > 0 })
+        if (FormatHelper.IsEmbeddableIcc(iccProfile))
         {
             var iccpData = BuildIccpChunk(iccProfile);
             WriteChunk(output, "iCCP"u8, iccpData);
         }
 
         // IDAT
+        // ═══ 2026-09-16：中转用途可走快速压缩 ═══
+        // 16-bit PNG 也被当作 HDR 编码的**临时中转**（如 AVIF HDR：scRGB→PQ16→PNG→avifenc）。
+        // 那种场景文件用完即删，压缩率毫无意义，而 SmallestSize 在 4K 上要多花数秒 ——
+        // 实测这正是 4K HDR AVIF 前处理的主要耗时。故提供 fastest 开关。
         var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth);
-        var compressed = CompressDeflate(rawData);
+        var compressed = fastest ? CompressDeflateFast(rawData) : CompressDeflate(rawData);
         WriteChunk(output, "IDAT"u8, compressed);
 
         // IEND
         WriteChunk(output, "IEND"u8, []);
+    }
+
+    /// <summary>Deflate 压缩（最快）。用于临时中转文件 —— 压缩率不影响最终产物质量。</summary>
+    private static byte[] CompressDeflateFast(byte[] data)
+    {
+        using var ms = new MemoryStream();
+        // Fastest 压缩 (ZLibStream 已包含 zlib 头 + Adler32)
+        using (var zlib = new ZLibStream(ms, CompressionLevel.Fastest, leaveOpen: true))
+            zlib.Write(data, 0, data.Length);
+        return ms.ToArray();
     }
 
     /// <summary>构建 16-bit 扫描线: 输入 BGRA16 BE → 输出 RGBA16 BE + filter byte。
@@ -215,15 +239,22 @@ public static class ManagedPngEncoder
                 ushort aVal = (ushort)((bgra16[si + 6] << 8) | bgra16[si + 7]);
 
                 // 按实际位深缩放：16-bit 容器中存储 10/12-bit 值时左对齐
-                // 注意: HdrToPq16 已量化到目标位深并左对齐，此处仅做安全回退（零填充低位）
+                //
+                // ═══ 2026-09-19：截断改四舍五入 ═══
+                // 旧写法 (v >> shift) << shift 是"向下取整"，注释还自称"仅做安全验证"，
+                // 但它根本不是无操作：SDR ≥10-bit 路径（PrepareSdr16Pixels 用默认
+                // quantizeBits=16，容器被 16-bit 精度写满）每一位都要经过这里，
+                // 于是整张图被系统性压暗 0~(2^shift-1) 个台阶（10-bit 平均 -0.5 LSB、
+                // 最坏 -63 LSB ≈ 半档），且 sBIT 声明的正是这个被压过的位深 ⇒ 偏差被固化进文件。
+                // 现在取"最近的合法台阶"：期望偏差为 0，最大误差从 1 个台阶降到半个台阶。
+                // 低位仍然清零 —— 那是 sBIT 的容器合法性要求（PNG 3.0 12.4 左对齐），与取整方向无关。
                 if (actualBitDepth < 16)
                 {
                     int shift = 16 - actualBitDepth;
-                    // 确保低位为零（HdrToPq16 已保证，此处仅做安全验证）
-                    rVal = (ushort)((rVal >> shift) << shift);
-                    gVal = (ushort)((gVal >> shift) << shift);
-                    bVal = (ushort)((bVal >> shift) << shift);
-                    aVal = (ushort)((aVal >> shift) << shift);
+                    rVal = RoundToSampleDepth(rVal, shift);
+                    gVal = RoundToSampleDepth(gVal, shift);
+                    bVal = RoundToSampleDepth(bVal, shift);
+                    aVal = RoundToSampleDepth(aVal, shift);
                 }
 
                 // 写入 big-endian 16-bit 容器 (RGBA 顺序)
@@ -409,6 +440,22 @@ public static class ManagedPngEncoder
     {
         buf[off] = (byte)(val >> 8);
         buf[off + 1] = (byte)val;
+    }
+
+    /// <summary>
+    /// 2026-09-19：把 16-bit 采样值就近取整到 actualBitDepth（= 16 - shift）能表示的最近台阶，低位保持清零。
+    /// <para>为什么必须就近而不是向下取整：见 <see cref="BuildRawScanlines16"/> 的 2026-09-19 备注 ——
+    /// 向下取整会让整图单向变暗，是偏置；就近取整的偏置期望为 0。</para>
+    /// <para>为什么要钳上界：v 接近 65535 时"最近的台阶"是 65536，容器放不下，
+    /// 直接左移会溢出回绕成 0（纯白变纯黑）。故钳到容器内最高台阶 step*(65535/step)。</para>
+    /// </summary>
+    private static ushort RoundToSampleDepth(ushort v, int shift)
+    {
+        int step = 1 << shift;
+        int q = (v + step / 2) / step;
+        int max = 65535 / step;
+        if (q > max) q = max;
+        return (ushort)(q * step);
     }
 
     /// <summary>Deflate 压缩（最大压缩级别）。ZLibStream 已包含 zlib 头 + Adler32。</summary>

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/CapabilityService.cs
 // 系统能力检测服务 — 从 MainWindow 提取
 // 负责: HDR/ACM 检测、ICC 校色检测、AVIF 硬件编码器探测
@@ -32,8 +34,8 @@ public sealed record CapabilityResult
     /// 用于 GainMap headroom。SDR 显示器回退 1000。</summary>
     public int DisplayMaxNits { get; init; } = 1000;
 
-    /// <summary>ACM 或自定义 ICC 时 ICC 烘焙可用（用户可能需要输出到显示器色域以外的目标）。</summary>
-    public bool IccBakeAvailable => SupportsHdr || SystemAcm || CustomIcc;
+    // IccBakeAvailable 已删除（2026-09-22）：它存在的唯一意义是决定"ICC 烘焙开关能不能开/默认给不给开"，
+    // 而色彩管理现在不可关 ⇒ 没有消费者。别把它当"能力检测缺失"补回来。
 }
 
 /// <summary>系统能力检测服务（HDR / ACM / ICC / 硬件编码器）。</summary>

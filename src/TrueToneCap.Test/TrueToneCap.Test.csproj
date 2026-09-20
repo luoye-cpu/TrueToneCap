@@ -1,17 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <!-- 公共属性见 ../../Directory.Build.props -->
     <OutputType>Exe</OutputType>
-    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
-    <LangVersion>14</LangVersion><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
-    <NoWarn>$(NoWarn);MSB3884</NoWarn>
-    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>TrueToneCap.Test</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\TrueToneCap.Core\TrueToneCap.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="System.Drawing.Common" Version="10.0.11" />
+    <!-- 版本由 ../../Directory.Packages.props 管理 -->
+    <PackageReference Include="System.Drawing.Common" />
   </ItemGroup>
 </Project>

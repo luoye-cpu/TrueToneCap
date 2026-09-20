@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/LocaleManager.cs
 // 双语本地化管理（中文/English），无需 .resx 依赖
 
@@ -48,6 +50,20 @@ public static class LocaleManager
     public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "输出兼容 JPEG 的 HDR 照片。SDR 查看器显示基础图，HDR 查看器自动还原完整动态范围。" : "Outputs HDR photos compatible with JPEG. SDR viewers see base image, HDR viewers recover full dynamic range.";
     public static string GainMapModeLabel => s_lang == AppLanguage.Chinese ? "增益图模式" : "Gain Map Mode";
 
+    // ═══ 2026-09-19：WebP 的「色度采样」下拉已撤掉，改为一句静态说明 ═══
+    //   撤掉而非"修好接线"的原因是实测接不上：同一样张只改色度，420 与 444 产物字节完全相同、
+    //   ffprobe 恒 yuv420p —— NativeWebPEncoder 没有色度形参，而有损 WebP 的格式定义就是 4:2:0
+    //   （无损为 RGB）。所以这条文案说的是"为什么没有选项"，不是选项标签。
+    public static string WebPChromaNote => s_lang == AppLanguage.Chinese
+        ? "有损 WebP 恒 4:2:0（格式定义）；无损为 RGB。本格式无色度可选，也没有对应设置项。"
+        : "Lossy WebP is always 4:2:0 (by format definition); lossless WebP is RGB. This format offers no chroma setting.";
+
+    // ═══ 2026-09-19：PNG / TIFF / JPEG XL 三张位深卡片共用的实话（§4.3 双路径策略）═══
+    //   编码行为按既定决策不改（下拉是真生效的），但"升位深不产生信息"必须出现在界面上。
+    public static string BitDepthSourceNote => s_lang == AppLanguage.Chinese
+        ? "8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。"
+        : "An 8-bit screenshot source is never given more bit depth (upscaling adds no information); high bit depth is only meaningful for Float16/HDR sources.";
+
     // ── 色彩页 ──
     public static string PageColor => s_lang == AppLanguage.Chinese ? "色彩设置" : "Color Settings";
     public static string HdrOutput => s_lang == AppLanguage.Chinese ? "HDR 输出" : "HDR Output";
@@ -87,6 +103,15 @@ public static class LocaleManager
     public static string Behavior => s_lang == AppLanguage.Chinese ? "行为" : "Behavior";
     public static string AutoStart => s_lang == AppLanguage.Chinese ? "开机自动启动" : "Start with Windows";
     public static string MinimizeTray => s_lang == AppLanguage.Chinese ? "关闭时最小化到托盘" : "Minimize to tray on close";
+
+    // ── 日志详细度（Core.LogDetail 三档；档位决定 Debug/Trace 进不进日志文件）──
+    public static string LogVerbosity => s_lang == AppLanguage.Chinese ? "日志详细度" : "Log verbosity";
+    public static string LogVerbosityBrief => s_lang == AppLanguage.Chinese ? "简（默认：操作与降级）" : "Basic (actions & fallbacks)";
+    public static string LogVerbosityDiagnose => s_lang == AppLanguage.Chinese ? "诊断（加每拍快照/回退原因/耗时）" : "Diagnostic (snapshots, fallback reasons, timings)";
+    public static string LogVerbosityFull => s_lang == AppLanguage.Chinese ? "全（逐帧逐子进程，仅排障时用）" : "Full (per-frame, per-subprocess; debugging only)";
+    public static string LogVerbosityHint => s_lang == AppLanguage.Chinese
+        ? "日志写在应用目录 log/ 下按日轮转；换档只影响之后写入的行。诊断档以上量很大，排查完建议调回『简』。任何档位都不会记录截图里的文字内容、图像字节或 API 密钥。"
+        : "Logs rotate daily under <app dir>/log/. A level change only affects lines written afterwards; diagnostic and above get verbose, so switch back to Basic when you are done. No level ever records recognized text, image bytes or API keys.";
 
     // ── Toast 通知 ──
     public static string ToastTitle => s_lang == AppLanguage.Chinese ? "通知" : "Notifications";
@@ -157,13 +182,23 @@ public static class LocaleManager
     public static string AvifNvenc => "NVIDIA NVENC";
 
     // ── AVIF 色度 ──
-    public static string AvifChroma444 => s_lang == AppLanguage.Chinese ? "4:4:4 ✓ 截图推荐" : "4:4:4 ✓ Best for screenshots";
-    public static string AvifChroma422 => "4:2:2";
-    public static string AvifChroma420 => s_lang == AppLanguage.Chinese ? "4:2:0 (体积最小)" : "4:2:0 (Smallest file)";
+    // 2026-09-19（用户决定：默认色度 420 + Auto 按色度过滤）：文案要说出"哪一项能走硬件、
+    // 哪一项只有软件编码器支持"，且必须与 MainWindow.xaml 里 AvifChromaCbo 的同 Tag 文本同义
+    // —— 运行时这条会覆盖那条，两处口径不一致时用户看到的是这里。
+    public static string AvifChroma444 => s_lang == AppLanguage.Chinese ? "4:4:4（色度不压缩 · 仅软件编码器，较慢）" : "4:4:4 (full chroma · software only, slower)";
+    public static string AvifChroma422 => s_lang == AppLanguage.Chinese ? "4:2:2（仅软件编码器）" : "4:2:2 (software encoders only)";
+    public static string AvifChroma420 => s_lang == AppLanguage.Chinese ? "4:2:0（默认 · Auto 可走硬件加速）" : "4:2:0 (default · Auto can use hardware)";
 
     // ── GainMap 模式 ──
     public static string GmRgb => s_lang == AppLanguage.Chinese ? "RGB 增益（色彩准确，体积较大）" : "RGB Gain (color accurate, larger)";
     public static string GmGray => s_lang == AppLanguage.Chinese ? "灰度增益（体积最优，亮度还原）" : "Gray Gain (smallest, luma only)";
+
+    // ── GainMap 色度（2026-09-19 用户决定：默认 4:2:0，最高允许手动选 4:4:4）──
+    // 这套文案与 AVIF 的色度文案【不能共用】：AVIF 那三条讲的是"哪档能走硬件加速"，
+    // GainMap 讲的是"base JPEG 的兼容性与体积"，两者对用户的取舍完全不同。
+    public static string GainMapChroma420 => s_lang == AppLanguage.Chinese ? "4:2:0（默认 · 兼容性最好）" : "4:2:0 (default · best compatibility)";
+    public static string GainMapChroma422 => "4:2:2";
+    public static string GainMapChroma444 => s_lang == AppLanguage.Chinese ? "4:4:4（色度不压缩，体积更大）" : "4:4:4 (full chroma, larger files)";
 
     // ── 色域映射 ──
     public static string GamutMapTitle => s_lang == AppLanguage.Chinese ? "色域映射" : "Gamut Mapping";

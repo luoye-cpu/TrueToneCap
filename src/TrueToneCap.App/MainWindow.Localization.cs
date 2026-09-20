@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/MainWindow.Localization.cs
 // MainWindow 的「本地化 / 字体」职责（partial class 拆分）
 //
@@ -33,11 +35,23 @@ public sealed partial class MainWindow : Window
         PageOutputTitle.Text = LocaleManager.CurrentLanguage == AppLanguage.English ? "Output & Color" : "输出与色彩";
         BasicOutputTitle.Text = LocaleManager.BasicOutput;
         AvifOptionsTitle.Text = LocaleManager.AvifOptions;
+        // ═══ 2026-09-18：「硬件编码」复选框已移除（与编码器下拉语义重复），本地化条目删除 ═══
+        bool en = LocaleManager.CurrentLanguage == AppLanguage.English;
+        if (AvifCodecLabelTxt is not null)
+            AvifCodecLabelTxt.Text = en ? "AVIF encoder" : "AVIF 编码器";
         GainMapOptionsTitle.Text = LocaleManager.GainMapOptions;
         GainMapOptionsDesc.Text = LocaleManager.GainMapDesc;
         GainMapModeLabelTxt.Text = LocaleManager.GainMapModeLabel;
         AvifPngSuffixChk.Content = LocaleManager.AvifPngSuffix;
         JxlPngSuffixChk.Content = LocaleManager.JxlPngSuffix;
+
+        // ═══ 2026-09-19：WebP 色度下拉已撤掉，改为一句随语言刷新的静态说明 ═══
+        // XAML 里的中文只是设计器兜底，运行时以这里为准 —— 否则切到英文界面仍是中文。
+        if (WebPChromaNoteTxt is not null) WebPChromaNoteTxt.Text = LocaleManager.WebPChromaNote;
+        // PNG / TIFF / JPEG XL 三张位深卡片共用同一句（§4.3 双路径策略：不改行为，只把事实写进界面）
+        if (BdPngNoteTxt is not null) BdPngNoteTxt.Text = LocaleManager.BitDepthSourceNote;
+        if (BdTiffNoteTxt is not null) BdTiffNoteTxt.Text = LocaleManager.BitDepthSourceNote;
+        if (BdJpegXlNoteTxt is not null) BdJpegXlNoteTxt.Text = LocaleManager.BitDepthSourceNote;
 
         ColorSpaceLabel.Text = LocaleManager.ColorSpace;
         GamutMapTitle.Text = LocaleManager.GamutMapTitle;
@@ -63,6 +77,30 @@ public sealed partial class MainWindow : Window
         BehaviorTitle.Text = LocaleManager.Behavior;
         AutoStartChk.Content = LocaleManager.AutoStart;
         MinimizeTrayChk.Content = LocaleManager.MinimizeTray;
+
+        // ── 日志详细度：Tag 才是档位语义，这里只换显示文案 ──
+        if (LogVerbosityLabel is not null) LogVerbosityLabel.Text = LocaleManager.LogVerbosity;
+        if (LogVerbosityHint is not null) LogVerbosityHint.Text = LocaleManager.LogVerbosityHint;
+        if (LogVerbosityCbo is not null)
+        {
+            foreach (var obj in LogVerbosityCbo.Items)
+            {
+                if (obj is not ComboBoxItem item) continue;
+                item.Content = (item.Tag as string) switch
+                {
+                    "Diagnose" => LocaleManager.LogVerbosityDiagnose,
+                    "Trace" => LocaleManager.LogVerbosityFull,
+                    _ => LocaleManager.LogVerbosityBrief,
+                };
+            }
+        }
+
+        // ── 第三方许可入口 ──
+        // 文案的单一事实源在 ThirdPartyNoticesWindow（同一句中英在这里和窗口里不会分叉）：
+        // LocaleManager 不在本次改动范围内，故不往里加条目，改由窗口侧暴露同组属性。
+        if (LicensesTitle is not null) LicensesTitle.Text = ThirdPartyNoticesWindow.CardTitleText;
+        if (LicensesDescTxt is not null) LicensesDescTxt.Text = ThirdPartyNoticesWindow.CardDescText;
+        if (OpenLicensesBtn is not null) OpenLicensesBtn.Content = ThirdPartyNoticesWindow.CardButtonText;
 
         // ── Toast 通知本地化 ──
         ToastTitle.Text = LocaleManager.ToastTitle;
@@ -92,12 +130,15 @@ public sealed partial class MainWindow : Window
         FormatCbo.SelectedIndex = Math.Clamp(fmtIdx, 0, fmtLabels.Length - 1);
 
         // ── 硬编码 ComboBox Items：按 Tag 匹配更新 Content ──
-        SetComboItemText(AvifBackendCbo, "Auto", LocaleManager.AvifAuto);
-        SetComboItemText(AvifBackendCbo, "LibAom", LocaleManager.AvifLibAom);
-        SetComboItemText(AvifBackendCbo, "Qsv", LocaleManager.AvifQsv);
-        SetComboItemText(AvifBackendCbo, "Nvenc", LocaleManager.AvifNvenc);
+        // ═══ 2026-09-16 重构：单一「AVIF 编码器」下拉（原"编码后端"下拉已删除）═══
+        // 各项 Content 由 UpdateAvifEncoderLabels() 依据能力表动态生成（含可用性与色度/位深）。
 
         SetComboItemText(AvifChromaCbo, "444", LocaleManager.AvifChroma444);
+        // GainMap 色度（2026-09-19 起为真设置）：标签 + 三档文案都要跟着语言走
+        if (GainMapChromaLabelTxt is not null) GainMapChromaLabelTxt.Text = LocaleManager.ChromaSampling;
+        SetComboItemText(GainMapChromaCbo, "420", LocaleManager.GainMapChroma420);
+        SetComboItemText(GainMapChromaCbo, "422", LocaleManager.GainMapChroma422);
+        SetComboItemText(GainMapChromaCbo, "444", LocaleManager.GainMapChroma444);
         SetComboItemText(AvifChromaCbo, "422", LocaleManager.AvifChroma422);
         SetComboItemText(AvifChromaCbo, "420", LocaleManager.AvifChroma420);
 
@@ -134,10 +175,14 @@ public sealed partial class MainWindow : Window
         SetComboItemText(LanguageCbo, "zh", LocaleManager.LangChinese);
         SetComboItemText(LanguageCbo, "en", LocaleManager.LangEnglish);
 
-        SetComboItemText(OcrEngineCbo, "Auto", LocaleManager.OcrAuto);
-        SetComboItemText(OcrEngineCbo, "Gpu", LocaleManager.OcrGpu);
-        SetComboItemText(OcrEngineCbo, "Windows", LocaleManager.OcrWindows);
-        SetComboItemText(OcrEngineCbo, "Cpu", LocaleManager.OcrCpu);
+        // ═══ 2026-09-15 修复：Tag 必须与 XAML 中的实际取值一致 ═══
+        // 原先写 "Auto"/"Gpu"/"Windows"/"Cpu"，而 MainWindow.xaml:325-327 的
+        // ComboBoxItem Tag 实为 "OnnxGpu"/"OnnxCpu"/"WindowsOcr" ⇒ 一条都匹配不到，
+        // SetComboItemText 静默 no-op ⇒ 切到英文后这三个选项仍显示中文硬编码文本。
+        // 另："Auto" 在 XAML 中本就不存在（下拉只有三项），故移除。
+        SetComboItemText(OcrEngineCbo, "OnnxGpu", LocaleManager.OcrGpu);
+        SetComboItemText(OcrEngineCbo, "OnnxCpu", LocaleManager.OcrCpu);
+        SetComboItemText(OcrEngineCbo, "WindowsOcr", LocaleManager.OcrWindows);
 
         SetComboItemText(LlmModelCbo, "gpt-4o-mini", LocaleManager.LlmGpt4oMini);
         SetComboItemText(LlmModelCbo, "deepseek-chat", LocaleManager.LlmDeepSeek);

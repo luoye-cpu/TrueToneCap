@@ -1,0 +1,482 @@
+{
+  "$comment": [
+    "TrueToneCap 第三方许可全文清单（machine-readable）。UTF-8 / LF。",
+    "字段含义：file = licenses/ 下的文件名；shippedIn = 该许可对应的发布包内产物；",
+    "sourceKind = local-tree(本机源码构建树) | nuget-cache(本机 NuGet 缓存) | downloaded(从上游 tag/commit 拉取) | not-located(未取得全文)；",
+    "sha256 = licenses/ 下这份落盘文件的哈希（不是上游源文件的哈希）。",
+    "本文件只登记已核实到全文的条目；任何版本/来源存疑的地方写在 version 与 obligationNote 里，不另开工作日志。"
+  ],
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-09-20",
+  "licenses": [
+    {
+      "file": "libavif-BSD-2-Clause.txt",
+      "project": "libavif",
+      "version": "1.4.2",
+      "spdx": "BSD-2-Clause",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\LICENSE",
+      "sha256": "6aaa88e4054f8bf2c4fa926cacc3a97fa3e0ec72d2ffc2e4cdaca6bb0eb16ec1",
+      "obligationNote": "BSD-2 第 2 条：二进制再分发必须在文档中复制版权声明与该免责声明；该文件同时内含 avifenc 编入的 third_party/iccjpeg 之 IJG 段（要求文档声明 “this software is based in part on the work of the Independent JPEG Group”）与 src/obu.c 的 dav1d 段。"
+    },
+    {
+      "file": "libaom-BSD-2-Clause.txt",
+      "project": "libaom (AV1 codec)",
+      "version": "3.14.1",
+      "spdx": "BSD-2-Clause",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\libaom-src\\LICENSE",
+      "sha256": "bf4a52612302050351bb2712f997bb0e2b1dc48c62d68bef64126a8c8249fb4e",
+      "obligationNote": "BSD-2 第 2 条：二进制形式再分发须随文档提供 Copyright (c) 2016, Alliance for Open Media 的声明与免责声明。"
+    },
+    {
+      "file": "libaom-LicenseRef-AOM-Patent-License-1.0.txt",
+      "project": "libaom (AV1 codec)",
+      "version": "3.14.1",
+      "spdx": "LicenseRef-AOM-Standard-Patent-License-1.0",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\libaom-src\\PATENTS",
+      "sha256": "3ce8b2cc54e6c2245bfbf607ba1cc1fd9ce0d7c03e8d559da3b64c3d37068c8a",
+      "obligationNote": "AOM 专利许可 1.0 第 1.2.1 条：分发任何 Implementation 时必须随件复制本许可全文（binary 分发需在文档/随附材料中放出），且一旦对被许可专利提起诉讼即终止专利授权。"
+    },
+    {
+      "file": "svt-av1-BSD-3-Clause-Clear.txt",
+      "project": "SVT-AV1",
+      "version": "4.1.0",
+      "spdx": "BSD-3-Clause-Clear",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\svt-src\\LICENSE.md",
+      "sha256": "cd194fd72a4ba0378a843457879c6a5299c9934e049a697ec51f6d43a241fc43",
+      "obligationNote": "BSD-3-Clear 第 2/3 条：二进制再分发须复制版权声明并禁止用 Alliance for Open Media 名义背书；原文明文 “NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY THIS LICENSE.” —— 专利授权只能来自同目录 PATENTS.md。"
+    },
+    {
+      "file": "svt-av1-BSD-2-Clause.txt",
+      "project": "SVT-AV1",
+      "version": "4.1.0",
+      "spdx": "BSD-2-Clause",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\svt-src\\LICENSE-BSD2.md",
+      "sha256": "e952a50cacb241d49502b74b68e05f3a7fb9ba2f11ef41b74090abb50d19df7d",
+      "obligationNote": "SVT-AV1 树内一部分文件按 BSD-2 发布（与上方 BSD-3-Clear 并存），二进制再分发同样须复制版权声明与免责声明。"
+    },
+    {
+      "file": "svt-av1-LicenseRef-AOM-Patent-License-1.0.txt",
+      "project": "SVT-AV1",
+      "version": "4.1.0",
+      "spdx": "LicenseRef-AOM-Standard-Patent-License-1.0",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\svt-src\\PATENTS.md",
+      "sha256": "e0ceb644e386248cb12d3e757637cc27aa2df1c0a7e6ecd218377daf16ca16e4",
+      "obligationNote": "AOM 专利许可 1.0：分发 SVT-AV1 实现须随件复制该专利许可文本，且授的是必要专利权利要求、带诉讼终止条款。"
+    },
+    {
+      "file": "zlib-Zlib.txt",
+      "project": "zlib",
+      "version": "1.3.2",
+      "spdx": "Zlib",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\zlib-src\\LICENSE",
+      "sha256": "439c75ab12b340c5362b9d4b08ff05ec3a4d0eb7667a6fff49a9b16d8795c78e",
+      "obligationNote": "zlib 第 2 条：改动过的版本必须明确标注为改动版；第 3 条：本声明不得从任何再分发中删除或改动；第 1 条在产品文档中致谢是“appreciated but not required”。"
+    },
+    {
+      "file": "libpng-libpng-2.0.txt",
+      "project": "libpng",
+      "version": "1.6.58",
+      "spdx": "libpng-2.0",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\libpng-src\\LICENSE",
+      "sha256": "452390433ba0f88aa3e2b122c647741b72a0c117cd6ed7a329b49785aecb5511",
+      "obligationNote": "libpng License v2（非 GPL）：不得 misrepresented 作者归属、改动版须标注、且 “This Copyright notice may not be removed or altered from any source or altered source distribution”；用作产品组件时致谢非强制但被鼓励。"
+    },
+    {
+      "file": "libjpeg-turbo-BSD-3-Clause.txt",
+      "project": "libjpeg-turbo",
+      "version": "3.1.4.1 (libavif 的 pin, AVIF_JPEG=LOCAL)",
+      "spdx": "BSD-3-Clause",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\libjpeg\\src\\libjpeg\\LICENSE.md",
+      "sha256": "69022c68d90f6eba65c07be2fd13d0479de9ed3edcf8acbd805389f378c9f675",
+      "obligationNote": "libjpeg-turbo 许可 roll-up（IJG + BSD-3 + zlib）：其第 2.1 条要求二进制/静态链接发行的产品文档写明 “This software is based in part on the work of the Independent JPEG Group”，第 2.2 条要求随附 Modified BSD 全文。"
+    },
+    {
+      "file": "libjpeg-turbo-IJG.txt",
+      "project": "libjpeg-turbo (IJG 基础代码)",
+      "version": "3.1.4.1",
+      "spdx": "IJG",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\libjpeg\\src\\libjpeg\\README.ijg",
+      "sha256": "db16a04128171879c60708d171b88d97345a2dd20f9bfc173680a4497c73f704",
+      "obligationNote": "IJG 第 2 条：只分发可执行代码时，随附文档必须注明 “this software is based in part on the work of the Independent JPEG Group”；第 1 条：分发源码须原样附带本 README。"
+    },
+    {
+      "file": "libargparse-MIT.txt",
+      "project": "libargparse (kmurray/libargparse)",
+      "version": "commit ee74d1b53bd680748af14e737378de57e2a0a954 (libavif 1.4.2 的 FetchContent pin)",
+      "spdx": "MIT",
+      "shippedIn": ["avifenc.exe"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\svt-avifenc-build\\libavif\\build\\_deps\\libargparse-src\\LICENSE.md",
+      "sha256": "e536a7838fc83dcbf314e532d0e6dbc2e7515f267ff24504a8c28f12302fc40b",
+      "obligationNote": "MIT：拷贝或实质性使用须同时保留版权声明与许可声明；avifenc.exe 静态链入了这个命令行解析库。"
+    },
+    {
+      "file": "libjxl-BSD-3-Clause.txt",
+      "project": "libjxl (JPEG XL)",
+      "version": "0.11.2",
+      "spdx": "BSD-3-Clause",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/libjxl/libjxl/contents/LICENSE?ref=v0.11.2",
+      "sha256": "8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede",
+      "obligationNote": "BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。"
+    },
+    {
+      "file": "libjxl-LicenseRef-Google-Patent-Grant.txt",
+      "project": "libjxl (JPEG XL)",
+      "version": "0.11.2",
+      "spdx": "LicenseRef-Google-BSD-plus-Patents",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/libjxl/libjxl/contents/PATENTS?ref=v0.11.2",
+      "sha256": "91915f8ae056a68a3c5bdf05d9f6f78bb6903e27a8ca3a8434c9e4ac87300575",
+      "obligationNote": "Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。"
+    },
+    {
+      "file": "brotli-MIT.txt",
+      "project": "brotli (libjxl 编入的容器压缩)",
+      "version": "libjxl v0.11.2 的 submodule gitlink 36533a866ed1ca4b75cf049f4521e4ec5fe24727（未解析成 tag）",
+      "spdx": "MIT",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/google/brotli/contents/LICENSE?ref=36533a866ed1ca4b75cf049f4521e4ec5fe24727",
+      "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94",
+      "obligationNote": "MIT：随拷贝保留版权声明与许可声明；cjxl/cjpegli 里有 BrotliEncoder* 符号，确认静态链入。"
+    },
+    {
+      "file": "highway-Apache-2.0.txt",
+      "project": "Google Highway (hwy, libjxl SIMD 抽象层)",
+      "version": "libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag）",
+      "spdx": "Apache-2.0",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/google/highway/contents/LICENSE?ref=457c891775a7397bdb0376bb1031e6e027af1c48",
+      "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1",
+      "obligationNote": "Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。"
+    },
+    {
+      "file": "skcms-BSD-3-Clause.txt",
+      "project": "skcms (libjxl 的 ICC 色彩变换)",
+      "version": "libjxl v0.11.2 的 submodule gitlink b2e692629c1fb19342517d7fb61f1cf83d075492",
+      "spdx": "BSD-3-Clause",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/google/skcms/contents/LICENSE?ref=b2e692629c1fb19342517d7fb61f1cf83d075492",
+      "sha256": "e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36",
+      "obligationNote": "BSD-3：二进制再分发须复制 “Copyright (c) 2018 Google Inc.” 声明与免责；⚠️ 上游 remote 是 skia.googlesource.com（本环境不可达），全文取自 GitHub 上的 google/skcms 同一 commit 镜像。"
+    },
+    {
+      "file": "zlib-libjxl-pin-Zlib.txt",
+      "project": "zlib (libjxl 编入)",
+      "version": "libjxl v0.11.2 的 submodule gitlink 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf；文本内版权年份为 1995-2022，未解析成 tag",
+      "spdx": "Zlib",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/madler/zlib/contents/LICENSE?ref=51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+      "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243",
+      "obligationNote": "zlib 第 2/3 条同 avifenc 那份；注意 libjxl 里的 revision 与 libavif 的 v1.3.2 版权年份不同，所以两份文本分开落盘、不互相顶替。"
+    },
+    {
+      "file": "libpng-libjxl-pin-libpng-2.0.txt",
+      "project": "libpng (libjxl 编入，PNG 输入)",
+      "version": "libjxl v0.11.2 的 submodule gitlink 872555f4ba910252783af1507f9e7fe1653be252（glennrp/libpng）；文本内版权年份 1995-2025，未解析成 tag",
+      "spdx": "libpng-2.0",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/glennrp/libpng/contents/LICENSE?ref=872555f4ba910252783af1507f9e7fe1653be252",
+      "sha256": "16d9daaafbf63a31a5bdc91d4600972548fef5aaa1244202393288dbd079c49a",
+      "obligationNote": "libpng License v2 第 3 条：版权声明不得从再分发中移除或改动；二进制内有 png_write_info 符号，确认链入。"
+    },
+    {
+      "file": "libjpeg-turbo-libjxl-pin-BSD-3-Clause.txt",
+      "project": "libjpeg-turbo (libjxl 编入)",
+      "version": "libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1（未解析成 tag）",
+      "spdx": "BSD-3-Clause",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/libjpeg-turbo/libjpeg-turbo/contents/LICENSE.md?ref=8ecba3647edb6dd940463fedf38ca33a8e2a73d1",
+      "sha256": "60c756742db3ad1913304e8b13f0e86e22e51adb50cc0b3333c163f7e45ceec1",
+      "obligationNote": "同 avifenc 那份的 roll-up 义务：静态链接发行时文档须写 “This software is based in part on the work of the Independent JPEG Group” 并附 Modified BSD 全文。"
+    },
+    {
+      "file": "libjpeg-turbo-libjxl-pin-IJG.txt",
+      "project": "libjpeg-turbo / IJG 基础代码 (libjxl 编入)",
+      "version": "libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1",
+      "spdx": "IJG",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/libjpeg-turbo/libjpeg-turbo/contents/README.ijg?ref=8ecba3647edb6dd940463fedf38ca33a8e2a73d1",
+      "sha256": "4b7b9f8c03bb8d60270dfd12684e70ab21e4abfd27e73905cd1a7c4cae6f5cdb",
+      "obligationNote": "IJG 第 2 条（只分发可执行代码时须在文档声明基于 IJG 工作）；与 libavif 的 3.1.4.1 版本分属不同 revision，故各留一份。"
+    },
+    {
+      "file": "sjpeg-Apache-2.0.txt",
+      "project": "sjpeg (libjxl 编入的 JPEG 编码器)",
+      "version": "libjxl v0.11.2 的 submodule gitlink 94e0df6d0f8b44228de5be0ff35efb9f946a13c9（未解析成 tag）",
+      "spdx": "Apache-2.0",
+      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/webmproject/sjpeg/contents/COPYING?ref=94e0df6d0f8b44228de5be0ff35efb9f946a13c9",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "obligationNote": "Apache-2.0 第 4 条：再分发须附许可副本、保留 NOTICE 与源文件里的版权头、改动须标注；⚠️ 该仓 COPYING 是未填年份的 Apache 模板（无项目专属 Copyright 行），真正的版权头在 src/*.h 里，署名时不能只引这份文件。"
+    },
+    {
+      "file": "libwebp-BSD-3-Clause.txt",
+      "project": "libwebp + libsharpyuv",
+      "version": "1.5.0（libsharpyuv 0.4.1 同仓同 tag；v1.5.0 的 sharpyuv/ 目录内无独立 LICENSE，受仓根 COPYING 覆盖）",
+      "spdx": "BSD-3-Clause",
+      "shippedIn": ["cwebp.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/webmproject/libwebp/contents/COPYING?ref=v1.5.0",
+      "sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf",
+      "obligationNote": "BSD-3 第 2 条：二进制再分发（官方 libwebp-tools Windows release）须复制 “Copyright (c) 2010, Google Inc.” 声明与免责声明，且不得用 Google/贡献者名义背书。"
+    },
+    {
+      "file": "libwebp-LicenseRef-Google-WebM-Patent-Grant.txt",
+      "project": "libwebp",
+      "version": "1.5.0",
+      "spdx": "LicenseRef-Google-WebM-Patent-Grant",
+      "shippedIn": ["cwebp.exe"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/webmproject/libwebp/contents/PATENTS?ref=v1.5.0",
+      "sha256": "cc3273e0694ea5896145e0677699b53471b03ea43021ddc50e7923fbb9f5023c",
+      "obligationNote": "Google 就 WebM/VP8/WebP 实现给出附终止条件的免费专利授权，属于 LICENSE 之外的额外授予，分发二进制时应一并放出。"
+    },
+    {
+      "file": "paddleocr-Apache-2.0.txt",
+      "project": "PaddleOCR (PP-OCRv6_medium det/rec 权重来源)",
+      "version": "权重为 PP-OCRv6 medium；LICENSE 取自 PaddleOCR tag v3.3.0（v3.2.0 与 v3.3.0 的 LICENSE 字节一致，但未确认发模型的确切 release）",
+      "spdx": "Apache-2.0",
+      "shippedIn": ["models"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/PaddlePaddle/PaddleOCR/contents/LICENSE?ref=v3.3.0",
+      "sha256": "3840c5c0c61c294264d2dd77b8777be6ddd90121ef4e0e64abcd22edea581d6e",
+      "obligationNote": "Apache-2.0 第 4 条：再分发 ONNX 权重须附带许可副本、保留来源的 NOTICE/版权头、改动文件（FP16/FP32 导出）须加显著标注；data/Models/ 三个件（PP-OCRv6_medium_det.onnx、_rec.onnx、ppocrv6_dict.txt 词表）同受此条约束；下载记录见 download_models.ps1（huggingface.co/RapidAI/RapidOCR，两模型已在脚本内固化 SHA256），HF 侧的 license 元数据本环境连不上、未能核对。"
+    },
+    {
+      "file": "dotnet-runtime-MIT.txt",
+      "project": ".NET Runtime / Microsoft.NETCore.App 11 (self-contained)",
+      "version": "11.0.0-rc.1.26425.128",
+      "spdx": "MIT",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.netcore.app.runtime.win-x64\\11.0.0-rc.1.26425.128\\LICENSE.TXT",
+      "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b",
+      "obligationNote": "MIT：随包再分发 165 个 System.*.dll 与 coreclr/hostfxr 等原生件时须保留许可副本；具体到每个原生组件的署名义务在 dotnet-runtime-third-party-notices.txt。"
+    },
+    {
+      "file": "dotnet-runtime-third-party-notices.txt",
+      "project": ".NET Runtime / Microsoft.NETCore.App 11 (self-contained)",
+      "version": "11.0.0-rc.1.26425.128",
+      "spdx": "NOASSERTION",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.netcore.app.runtime.win-x64\\11.0.0-rc.1.26425.128\\THIRD-PARTY-NOTICES.TXT",
+      "sha256": "e3a241a6cf35167d82bf7e081de9641c59d10d2dbd8824409817bed31980d407",
+      "obligationNote": "这是 .NET 运行时内所有第三方原生件（zlib、libicu、liblz4、Mono、Go…）的许可与署名汇总，运行时再分发必须整份放出，摘要替代不了。"
+    },
+    {
+      "file": "dotnet-windowsdesktop-runtime-MIT.txt",
+      "project": "Microsoft.WindowsDesktop.App 11 运行时",
+      "version": "11.0.0-rc.1.26425.128",
+      "spdx": "MIT",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.windowsdesktop.app.runtime.win-x64\\11.0.0-rc.1.26425.128\\LICENSE",
+      "sha256": "a89886665765362eb77e0f8e26602c924520041d1711b2eedc136434fe4d01ab",
+      "obligationNote": "MIT：WindowsBase.dll 等 WinForms/WPF 子集随包分发时须保留许可副本；该 LICENSE 与 netcore 那份措辞略有差异，故单独一份。"
+    },
+    {
+      "file": "microsoft-extensions-third-party-notices.txt",
+      "project": "Microsoft.Extensions.* (DependencyInjection 10.0.12 及其传递依赖)",
+      "version": "10.0.12（nuspec: license expression MIT）",
+      "spdx": "NOASSERTION",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.extensions.dependencyinjection\\10.0.12\\THIRD-PARTY-NOTICES.TXT",
+      "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+      "obligationNote": "该包内没有 LICENSE.TXT、只有这份 TPN，其 MIT 全文与 dotnet-runtime-MIT.txt 同源；再分发的 10 个 Microsoft.Extensions.*.dll 需 MIT 副本 + 本 TPN 里的第三方署名。"
+    },
+    {
+      "file": "onnxruntime-MIT.txt",
+      "project": "ONNX Runtime (Microsoft.ML.OnnxRuntime.DirectML / .Managed)",
+      "version": "1.24.4",
+      "spdx": "MIT",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.ml.onnxruntime.directml\\1.24.4\\LICENSE",
+      "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674",
+      "obligationNote": "MIT：onnxruntime.dll / onnxruntime_providers_shared.dll / Microsoft.ML.OnnxRuntime.dll 随包再分发须保留声明。"
+    },
+    {
+      "file": "onnxruntime-third-party-notices.txt",
+      "project": "ONNX Runtime (含 Microsoft.WindowsAppSDK.ML 2.1.74 内的同一份副本)",
+      "version": "1.24.4（与 windowsappsdk.ml 的 ThirdPartyNotices.txt 字节完全相同，只落一份）",
+      "spdx": "NOASSERTION",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.ml.onnxruntime.directml\\1.24.4\\ThirdPartyNotices.txt",
+      "sha256": "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866",
+      "obligationNote": "onnxruntime.dll 静态链入 protobuf/abseil/nsync/re2 等众多组件，各自署名义务只在这份 331 KB 汇总里，必须整份放出。"
+    },
+    {
+      "file": "directml-LicenseRef-Microsoft-EULA.txt",
+      "project": "Microsoft DirectML (microsoft.ai.directml)",
+      "version": "1.15.4",
+      "spdx": "LicenseRef-Microsoft-Software-License-Terms",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.ai.directml\\1.15.4\\LICENSE.txt",
+      "sha256": "a05138e3a085ff60a44881eedfa58dccb03ecc1d7b1f6ae888418e8c2fec4b8d",
+      "obligationNote": "这不是开源许可而是微软 EULA：§1(a) 只允许把 DirectML.dll 随“你开发的应用”一起复制/分发，且第 1(c) 条要求第三方组件按其各自的 ThirdPartyNotices 条款处理——不能改授、不能剥掉本 EULA。"
+    },
+    {
+      "file": "directml-MIT.txt",
+      "project": "Microsoft DirectML (代码样例部分 LICENSE-CODE)",
+      "version": "1.15.4",
+      "spdx": "MIT",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.ai.directml\\1.15.4\\LICENSE-CODE.txt",
+      "sha256": "903df5512f7d02609fed0c780a9b704f5a3eeb6e4d84ebe42a29845c81899a3c",
+      "obligationNote": "MIT 只覆盖仓库中的代码样例，不覆盖 DirectML.dll 二进制本身——别拿这份去给二进制做许可依据。"
+    },
+    {
+      "file": "directml-third-party-notices.txt",
+      "project": "Microsoft DirectML",
+      "version": "1.15.4",
+      "spdx": "NOASSERTION",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.ai.directml\\1.15.4\\ThirdPartyNotices.txt",
+      "sha256": "2c95795c13ff48a58b6ed916f37901c23d964b5d9d601af422f17ad2172e7950",
+      "obligationNote": "DirectML.dll 内第三方组件（GSL 等）的署名汇总，EULA 第 1(c) 条要求随件保留。"
+    },
+    {
+      "file": "microsoft-windowsappsdk-LicenseRef-Microsoft-EULA.txt",
+      "project": "Microsoft Windows App SDK (WinUI 3) 全家桶",
+      "version": "WindowsAppSDK 2.4.0 / Runtime 2.4.0 / WinUI 2.3.6 / Base 2.0.4 / Foundation 2.3.9 / DWrite 2.1.0 / InteractiveExperiences 2.1.6 / AI 2.4.4 / Search 2.4.4 / Widgets 2.0.5（实测这 10 个包的 license.txt 字节完全相同，只落一份；WindowsAppSDK.ML 2.1.74 是例外，见 microsoft-windowsappsdk-ml-LicenseRef-Microsoft-EULA.txt）",
+      "spdx": "LicenseRef-Microsoft-Software-License-Terms",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.windowsappsdk\\2.4.0\\license.txt",
+      "sha256": "5b11e6347756e40fe0274bc08c97f89201b94f0d50181a09a00f1f4740840501",
+      "obligationNote": "微软 EULA：允许把运行时 DLL 随自研应用再分发（含 MSIX/免安装），但要求保留版权声明、不得逆向、且不得把微软的授权转授给别人；包内还约束了随附的“其他 Microsoft 应用”。"
+    },
+    {
+      "file": "microsoft-windowsappsdk-ml-LicenseRef-Microsoft-EULA.txt",
+      "project": "Microsoft Windows App SDK – Windows Machine Learning (ML)",
+      "version": "Microsoft.WindowsAppSDK.ML 2.1.74（license.txt 14033 B，与其它 WindowsAppSDK 卫星包的 12637 B 版本不同，故单列）",
+      "spdx": "LicenseRef-Microsoft-Software-License-Terms",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.windowsappsdk.ml\\2.1.74\\license.txt",
+      "sha256": "656aab74c15aa9f9964bcdcc993eb2755cbdb4822d5e0e3bc61d2e281897f758",
+      "obligationNote": "微软为 Windows ML 单独出的 EULA（标题即 “WINDOWS MACHINE LEARNING (ML)”），Microsoft.Windows.AI.MachineLearning.dll 等随包件受它管，不能拿通用 WindowsAppSDK EULA 顶替。"
+    },
+    {
+      "file": "microsoft-windowsappsdk-third-party-notices.txt",
+      "project": "Microsoft Windows App SDK",
+      "version": "2.4.0（与 windowsappsdk.runtime 2.4.0 的 NOTICE.txt 字节相同）",
+      "spdx": "NOASSERTION",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.windowsappsdk\\2.4.0\\NOTICE.txt",
+      "sha256": "572b43d41dea717dae7dc5de69acb20a74df025e8f5a3c0aa6f7bca02615e23c",
+      "obligationNote": "WindowsAppSDK 原生件（Microsoft.ui.xaml.dll、MRM.dll、DWriteCore.dll、CoreMessagingXP.dll 等）内含 Newtonsoft.Json、eigen、fonttools 等大量开源组件，其署名与 LGPL 逆向条款只写在这份 341 KB NOTICE 里，必须整份随包。"
+    },
+    {
+      "file": "microsoft-winui-third-party-notices.txt",
+      "project": "Microsoft.WindowsAppSDK.WinUI (WinUI 框架)",
+      "version": "2.3.6",
+      "spdx": "NOASSERTION",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.windowsappsdk.winui\\2.3.6\\NOTICE.txt",
+      "sha256": "e25393c0d340a1821827b093fa4dbbfcccd8feb7bf769e7fa773e3955cd5314b",
+      "obligationNote": "WinUI 投影集自带的第三方声明，与上一份是不同文件（内容是其子集），Microsoft.UI.Xaml*.dll / Microsoft.WinUI.dll 再分发时一并放出。"
+    },
+    {
+      "file": "webview2-BSD-3-Clause.txt",
+      "project": "Microsoft.Web.WebView2 SDK",
+      "version": "1.0.3719.77",
+      "spdx": "BSD-3-Clause",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.web.webview2\\1.0.3719.77\\LICENSE.txt",
+      "sha256": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55",
+      "obligationNote": "BSD-3：WebView2Loader.dll / Microsoft.Web.WebView2.Core.dll 随包再分发须复制 “Copyright (C) Microsoft Corporation.” 声明与免责；注意真正的 WebView2 运行时引擎在机器上/可再分发版里，另受独立的 Microsoft WebView2 Runtime 许可约束。"
+    },
+    {
+      "file": "webview2-notice.txt",
+      "project": "Microsoft.Web.WebView2 SDK",
+      "version": "1.0.3719.77",
+      "spdx": "NOASSERTION",
+      "shippedIn": ["runtime"],
+      "sourceKind": "nuget-cache",
+      "sourcePathOrUrl": "C:\\Users\\20210\\.nuget\\packages\\microsoft.web.webview2\\1.0.3719.77\\NOTICE.txt",
+      "sha256": "106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90",
+      "obligationNote": "SDK 自带 THIRD-PARTY-NOTICES（Antlr、ICU 等），再分发时须一并保留。"
+    },
+    {
+      "file": "win2d-MIT.txt",
+      "project": "Microsoft Graphics - Win2D",
+      "version": "包 1.4.0（package 内 Win2d.githash.txt = 57e06e2c24703526f500035129251d063881a44d）；⚠️ 全文取自 microsoft/Win2D 默认分支，该 commit 在 GitHub API 中查不到",
+      "spdx": "MIT",
+      "shippedIn": ["runtime"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/microsoft/Win2D/contents/LICENSE.txt",
+      "sha256": "c3ba493105fa52657c4c60d9b1680da7c01b188a8665d7a823c2a187fd259808",
+      "obligationNote": "MIT：Microsoft.Graphics.Canvas.dll / .Interop.dll 再分发须保留声明；⚠️ 包内根本没有许可文件，nuspec 的 licenseUrl 指向一个微软 Win2D EULA 网页（requireLicenseAcceptance=true），与仓库的 MIT 并存冲突，需人工裁定以哪个为准。"
+    },
+    {
+      "file": "vortice-MIT.txt",
+      "project": "Vortice.Windows (DXGI / Direct3D11 / DirectX / Mathematics)",
+      "version": "Vortice.DXGI 3.8.3、Vortice.Direct3D11 3.8.3、Vortice.DirectX 3.8.3（commit 9e609cb9439c9872aa1b339f177e40ec96f77239）；Vortice.Mathematics 2.1.0 同仓不同 tag，未单独取 LICENSE",
+      "spdx": "MIT",
+      "shippedIn": ["runtime"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/amerkoleci/Vortice.Windows/contents/LICENSE?ref=9e609cb9439c9872aa1b339f177e40ec96f77239",
+      "sha256": "82bd4e84d144bebbb519ed05899f0ceaeaf2e0f95160ac32fd8cc388710c76d0",
+      "obligationNote": "MIT：Vortice.*.dll 确实随包分发（不是纯编译期依赖），须保留声明；包内无许可文件，全文取自 nuspec repository 记录的 commit。"
+    },
+    {
+      "file": "sharpgen-MIT.txt",
+      "project": "SharpGen.Runtime / SharpGen.Runtime.COM (SharpGenTools)",
+      "version": "2.4.2-beta（nuspec repository commit 6990bcafe124a4c22515ad19cee5a081da8db67b）",
+      "spdx": "MIT",
+      "shippedIn": ["runtime"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://api.github.com/repos/SharpGenTools/SharpGenTools/contents/LICENSE.txt?ref=6990bcafe124a4c22515ad19cee5a081da8db67b",
+      "sha256": "1cc7abd1e97575838535484bef6e4ab14e81681ddf7837672acede5fca1d4e30",
+      "obligationNote": "MIT：SharpGen.Runtime(.COM).dll 随包分发须保留声明；版权头是 “Alexandre Mutel, 2017 Jeremy Koritzinsky”。"
+    }
+  ],
+  "notLocated": [
+    {
+      "project": "Microsoft.Windows.SDK.NET.Ref / CsWinRT 投影",
+      "shippedIn": ["runtime"],
+      "detail": "包根的 WinRT.Runtime.dll 与 Microsoft.Windows.SDK.NET.dll 能在缓存里定位到 microsoft.windows.sdk.net.ref（10.0.17763.87 与 10.0.26100.87 两份），但包内无任何许可文件，nuspec 只有 licenseUrl=https://aka.ms/WinSDKLicenseURL（Windows SDK 条款网页，本环境取不到）。"
+    }
+  ]
+}

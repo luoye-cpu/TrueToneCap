@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Tools/IccCheck.cs
 // 标准 ICC 空间嵌入实测验证 (--icc-check)
 // 验证: 生成的 P3/BT.2020/AdobeRGB 标准 ICC 的 primaries 矩阵 + TRC
@@ -62,6 +64,45 @@ public static class IccCheck
         }
 
         Console.WriteLine("══════════════ 验证完成 ══════════════");
+
+        // ═══ §31.3-9：真机 / 现网 profile 过不过新的结构判据 ═══
+        // 这条必须看：烘焙通路拿的是 WCS 关联给显示器的 ICC，若它不合格，广色域烘焙会【静默停摆】
+        // （判据变严却没有报警的那种回归）。
+        Console.WriteLine("\n══════════ 现网显示器 ICC × 结构判据 ═══════════\n");
+        foreach (var d in TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplays())
+        {
+            // ⚠ 必须走 Async：GetDisplayIccProfile 是"只读缓存、未命中立即返回 null"的设计
+            //   （不让 WCS 的秒级同步调用卡住截图），在工具里同步调只会恒得 null —— 我第一版
+            //   就把这个"缓存空"读成了"这台面板没有 ICC"。
+            var icc = ColorProfileProvider.GetDisplayIccProfileAsync(d.MonitorHandle)
+                .GetAwaiter().GetResult();
+            if (icc is null) { Console.WriteLine($"  {d.Name}: WCS 无关联 ICC"); continue; }
+            Report(d.Name, icc);
+        }
+
+        // 系统颜色目录里每一份 profile 都问一遍新判据 —— 这才是"会不会误杀真 profile"的直接证据
+        Console.WriteLine("\n══════════ Windows 颜色目录 × 结构判据 ══════════\n");
+        var colorDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32", "spool", "drivers", "color");
+        if (!Directory.Exists(colorDir)) { Console.WriteLine($"  （目录不存在：{colorDir}）"); return; }
+        foreach (var f in Directory.EnumerateFiles(colorDir)
+                     .Where(f => f.EndsWith(".icc", StringComparison.OrdinalIgnoreCase)
+                              || f.EndsWith(".icm", StringComparison.OrdinalIgnoreCase))
+                     .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            try { Report(Path.GetFileName(f), File.ReadAllBytes(f)); }
+            catch (Exception ex) { Console.WriteLine($"  {Path.GetFileName(f)}: 读不到 {ex.GetType().Name}"); }
+        }
+    }
+
+    /// <summary>把同一份 profile 同时过一遍新判据与旧长度阈值，两边结论并排打出来。</summary>
+    static void Report(string what, byte[] icc)
+    {
+        bool ok = TrueToneCap.Core.Encoding.FormatHelper.IsEmbeddableIcc(icc);
+        var cs = System.Text.Encoding.ASCII.GetString(icc, 16, 4);
+        Console.WriteLine($"  {what,-46} {icc.Length,7} B  色彩空间='{cs}'  " +
+            $"结构判据={(ok ? "✅ 收" : "❌ 拒")}  旧阈值>400={((icc.Length > 400) ? "收" : "拒")}");
     }
 
     /// <summary>解析 ICC 的 rXYZ/gXYZ/bXYZ → 3×3 RGB→XYZ 矩阵 (列主序: 每列一个 primary)。</summary>
@@ -173,10 +214,12 @@ public static class IccCheck
         }
         else
         {
-            // ═══ 2026-08-10: PrepareFloat16WithIcc 恒输出 sRGB 色域 (无矩阵转换) ═══
-            // SDR 8-bit 容器语义 = sRGB (与 GainMap Base 一致)。BT2020 只通过 HDR 直通 (PQ)。
-            // 像素 sRGB + 嵌目标色域 ICC 不再发生 — SDR 路径不嵌 ICC。
-            Console.WriteLine("✅ SDR 输出恒为 sRGB 色域 (与 GainMap Base 一致), 不嵌目标 ICC");
+            // ═══ 2026-09-19 更新：SDR 广色域目标【做】矩阵变换并带 ICC（旧口径已废）═══
+            // 原注释写的是"PrepareFloat16WithIcc 恒输出 sRGB、不嵌 ICC"（2026-08-10 口径）。
+            // §28/§29 之后：目标为 P3/BT2020/AdobeRGB 时像素走 GetMatrix 变换、tag 保留、
+            // 并按目标色域嵌 ICC（AdobeRGB 无 H.273 码点 ⇒ 只写 iCCP 不写 cICP）。
+            // 仅 sRGB/System 目标仍覆写为 sRGB 且不嵌 ICC。
+            Console.WriteLine("⚠ 期望：目标为广色域时像素已矩阵变换 + 带目标 ICC（见交接 §29）");
         }
     }
 }

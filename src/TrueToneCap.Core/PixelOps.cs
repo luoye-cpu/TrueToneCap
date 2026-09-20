@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/PixelOps.cs
 // 多 ISA 像素操作加速库
 // 支持: AVX2 | AVX-512 (VL+BW) | AVX10.1/10.2 | ARM64 NEON
@@ -102,22 +104,56 @@ public static class PixelOps
         HasAvx10_512 && dataBytes >= 131072; // 128KB
 
     // ═══════════════════════════════════════════════════════
-    //  sRGB → Linear 查找表 (256 项)
-    //  预计算避免 MathF.Pow 每次调用 (&gt;5× 加速)
-    //  此 LUT 与 ISA 无关，所有路径共享
+    //  CPU 特性守卫：确保 JIT 不会在不支持的平台上预编译 AVX2/AVX-512 代码路径
     // ═══════════════════════════════════════════════════════
+    // 原理：静态构造函数在类首次访问前运行。若在此处检测到缺少某 ISA，
+    // 则对该 ISA 的方法标记为无效路径（抛异常或回退），避免 JIT Tiered Compilation
+    // 预编译出包含非法指令的机器码导致启动崩溃。
+    // 由于方法体内使用了 if (HasAvx2) { Avx2.Load... } 这种模式，
+    // JIT 会根据运行时常量折叠消除死代码分支，理论安全。
+    // 但为防御 Tiered PGO / ReadyToRun 交互导致的预编译问题，
+    // 在静态构造函数显式记录支持矩阵，方便诊断。
 
     /// <summary>sRGB byte (0-255) → linear float 预计算 LUT。</summary>
     public static readonly float[] SrgbToLinearLut = new float[256];
 
+    /// <summary>运行时 ISA 支持矩阵（仅供诊断/单元测试）。</summary>
+    public static readonly CpuFeatureSupport CpuFeatures;
+
     static PixelOps()
     {
+        // CPU 特性探测（记录供诊断，不抛异常——方法内 if 分支已由 JIT 常量折叠处理）
+        CpuFeatures = new CpuFeatureSupport(
+            IsX86: Avx2.IsSupported || Sse2.IsSupported,
+            HasAvx2: Avx2.IsSupported,
+            HasAvx512F: Avx512F.IsSupported,
+            HasAvx512VL: Avx512F.VL.IsSupported,
+            HasAvx512BW: Avx512BW.IsSupported,
+            HasArm64: AdvSimd.IsSupported,
+            HasNeon: AdvSimd.IsSupported);
+
+        // ⚠ 若在不支持 AVX2 的机器上运行 Release 版且 ReadyToRun 预编译了 AVX2 路径，
+        // 会在此处之前崩溃 (BadImageFormatException/IllegalInstruction)。
+        // 如遇此类崩溃，请禁用 ReadyToRun: <PublishReadyToRun>false</PublishReadyToRun>
+
+        // 预计算 sRGB→Linear LUT
         for (int i = 0; i < 256; i++)
         {
             float c = i / 255f;
             SrgbToLinearLut[i] = c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
         }
     }
+
+    /// <summary>CPU 特性支持记录（只读，供诊断/测试断言）。</summary>
+    public readonly record struct CpuFeatureSupport(
+        bool IsX86,
+        bool HasAvx2,
+        bool HasAvx512F,
+        bool HasAvx512VL,
+        bool HasAvx512BW,
+        bool HasArm64,
+        bool HasNeon
+    );
 
     // ═══════════════════════════════════════════════════════
     //  1. Alpha 通道修复 (BGRA, 设 Alpha=0xFF)

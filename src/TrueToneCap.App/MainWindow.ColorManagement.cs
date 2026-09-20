@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/MainWindow.ColorManagement.cs
 // MainWindow 的「色彩管理 UI」职责（partial class 拆分）
 //
@@ -131,7 +133,9 @@ public sealed partial class MainWindow : Window
         else if (targetIsWide)
         {
             // HDR 关闭 + 广色域目标 → WGC Float16 捕获 → 色域转换 → 色调映射到 SDR
-            bool canUseFloat16 = sourceIsWide || sourceIsAcm || _settings.IccBakeEnabled;
+            // 第三个"|| 烘焙开关"已随开关一起删除（2026-09-22）：那条原本表达"用户允许在 8-bit 源上做映射"，
+            // 现在映射不可关，能不能走浮点链就只剩屏本身的能力这一个条件。
+            bool canUseFloat16 = sourceIsWide || sourceIsAcm;
             if (canUseFloat16)
             {
                 MappingArrow.Text = "→ Float16 广色域捕获 → 色域映射";

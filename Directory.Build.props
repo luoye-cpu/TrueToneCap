@@ -1,0 +1,120 @@
+<!-- TrueToneCap/Directory.Build.props
+     全仓库共享的 MSBuild 属性 — 单一事实源。
+     各 csproj 只保留项目特有配置，不再重复声明公共属性。
+
+     注意: 调整 LangVersion / TargetFramework 时只需改这里一处。 -->
+<Project>
+
+  <PropertyGroup>
+    <!-- ── 语言与框架 ── -->
+    <LangVersion>14</LangVersion>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+
+    <!-- ── 编译器行为 ── -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- 警告即错误：2026-09-14 启用。
+         启用时机是刻意挑选的 —— 当时全仓库 Release/Debug 双配置均为 0 警告 0 错误，
+         故开启成本为零；此后新增的任何警告都会在构建阶段被拦下，不会无声累积。
+         若某个警告确需抑制，请在具体位置用 #pragma 或 NoWarn 局部处理，
+         【不要】整体关掉这个开关。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- ── 平台 ──
+         全部项目均为 x64 原生互操作 (D3D11 / ONNX Runtime / NVENC)，
+         故统一 PlatformTarget=x64（仅影响编译器目标，不改变输出路径）。
+
+         <Platform> 与 <Platforms> 刻意【不在此处设置】：
+         <Platform> 会把 "<Platform>/" 插入输出路径
+         （bin/<Cfg>/<TFM>/ → bin/<Platform>/<Cfg>/<TFM>/），
+         原仓库中仅 App 与 LogViewer 声明了它，Core/Test/Tools 未声明。
+         全局化会改变后三者的输出路径、并与既有 bin 产物不兼容，故仍由项目自行声明。 -->
+    <PlatformTarget Condition="'$(PlatformTarget)' == ''">x64</PlatformTarget>
+
+    <!-- ── 构建产物 ──
+         RuntimeIdentifier / SelfContained 刻意【不在此处全局设置】：
+         原仓库中仅 App 与 LogViewer 声明了二者（自包含发布需要），
+         Core / Test / Tools 未声明。若全局化，会改变后三者的输出路径形状
+         （bin/<Cfg>/<TFM>/ → bin/<Cfg>/<TFM>/win-x64/）并放大其 bin 体积。
+         为保持与改动前完全一致的行为，仍由各项目自行声明。 -->
+
+    <!-- ── 代码分析 ──
+         原 5 个 csproj 中的 <CodeAnalysisRuleSet></CodeAnalysisRuleSet> 均为空值，
+         声明的 MSB3884 是 RuleSet 相关的空引用警告，由空值本身引发。
+         此处统一移除空值声明并静态压制该警告，等价于原行为但不再误导。 -->
+    <NoWarn>$(NoWarn);MSB3884</NoWarn>
+    <!-- ── 版本 (由 Publish.ps1 / CI 通过 -p:Version= 覆盖) ── -->
+    <Version Condition="'$(Version)' == ''">0.3.4-beta</Version>
+    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">0.3.4.0</AssemblyVersion>
+    <FileVersion Condition="'$(FileVersion)' == ''">0.3.4.0</FileVersion>
+
+    <!-- ── 包元数据 (合规补齐 2026-09-20) ──
+         PackageLicenseExpression 用 SPDX 标识而非 PackageLicenseFile: 仓库根 LICENSE 全文
+         就是 Apache-2.0 标准文本，用表达式即可让 NuGet /gallery 正确识别，也避免与
+         PackageLicenseFile 同时设置触发 NU 错误（全仓库此前没有任何 License 相关声明，无冲突）。
+         第三方组件的许可不走这里，走随包分发的 THIRD-PARTY-NOTICES.md + licenses/。
+
+         RepositoryUrl 取自 `git remote -v` 的实际输出（origin 的 fetch/push 同址），
+         刻意带上 .git 后缀以与 git 报告的地址逐字一致。
+         本机实测命令与结果:
+           $ git remote -v
+           origin	https://github.com/luoye-cpu/TrueToneCap.git (fetch)
+           origin	https://github.com/luoye-cpu/TrueToneCap.git (push)
+         ⚠️ 若日后改远端地址，这里必须同步 —— 宁可删掉这一行也不要留一个错的 URL。
+
+         Copyright / Authors 用项目级署名 "TrueToneCap contributors"，与 LICENSE 末尾的
+         版权声明、以及自产 ICC 的 cprt 标签（ColorProfileProvider.GeneratedIccCopyright）
+         三处同一口径。要换成个人法定姓名时三处一起改，别只改一处。 -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/luoye-cpu/TrueToneCap.git</RepositoryUrl>
+    <Copyright>Copyright 2026 TrueToneCap contributors - Apache-2.0</Copyright>
+    <Authors>TrueToneCap contributors</Authors>
+
+    <!-- ── 依赖管理 ──
+         版本号集中声明于 Directory.Packages.props (Central Package Management)。
+         此处启用锁定文件: 还原时生成 packages.lock.json 并锁死完整传递依赖图，
+         使 CI 与本地还原结果可复现（防止传递依赖补丁版本静默漂移）。
+         ⚠️ packages.lock.json 必须提交到版本控制，否则失去意义。
+         依赖升级后请重新还原以刷新锁定文件（详见 docs/ 依赖管理说明）。
+         提示: XML 注释内不能出现连续两个短横线，故此处不写该命令行示例。 -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <!-- ── 漏洞审计 ──
+         NuGetAudit 默认只审 direct 依赖：SharpGen.Runtime / Microsoft.AI.DirectML /
+         System.Numerics.Tensors 这类【传递依赖】有 CVE 时不会报，等于审计留了个大洞。
+         改为 all 覆盖完整依赖图（锁文件既然已固定传递版本，审计才真正有意义）。
+         ⚠️ TreatWarningsAsErrors=true 会把 NU19xx 升级为【错误】——
+            上游一旦发布新 CVE 公告，构建会毫无征兆地崩掉。
+            故对 NU19xx 显式降级为「警告但不阻断」：既能在输出里看见，
+            又不会让外部公告决定我们能否出包。 -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <WarningsNotAsErrors>NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+
+    <!-- ── 确定性构建 ──
+         使相同输入产出相同二进制，便于校验和比对与可复现构建。 -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <!-- ── 原生编码工具在源码树运行时的可见性 ──
+         avifenc / cjxl / cwebp / cjpegli 放在 src/TrueToneCap.Core/Resources/ 下，但 Core 既没有
+         把它们设为 EmbeddedResource，也没有任何复制规则 —— NativeLibraryResolver 的"嵌入资源提取"
+         分支因此从未命中，只有发布包里的 <安装目录>/PLAN/tools/ 能兜住生产路径。
+         后果：从源码树第一次跑 Tools / Test 的诊断（avif-caps、sdr16-bench、编码套件）时 avifenc
+         提取不到，"实测能力"整列报不可用；此前看起来正常是因为 bin/*/native/ 里存着某次手工留下的
+         陈旧副本 —— 换了 Resources/ 下的 exe 也不会生效（典型的假绿来源）。
+         这里把 exe 复制到消费项目输出目录的 Resources/ 下，正是 resolver 的第 1 条兜底路径。
+         ⚠ TrueToneCap.App 只在 Release 下排除：None 项会随 ProjectReference 传递进引用方输出，
+           而 Publish.ps1 就是 Release 构建 —— 不排除等于在发布包里多存一份 16MB avifenc
+           （发布包由 Publish.ps1 自己放 PLAN/tools/ 与 native/）。但 App 的 Debug 输出是本机实机
+           验证的入口，缺了这些 exe 软件 AVIF / JXL / WebP 路径会整体不可用，故 Debug 必须复制。 -->
+  <ItemGroup Condition="('$(MSBuildProjectName)' != 'TrueToneCap.App' or '$(Configuration)' == 'Debug') and '$(MSBuildProjectName)' != 'TrueToneCap.Core'">
+    <None Include="$(MSBuildThisFileDirectory)src\TrueToneCap.Core\Resources\*.exe"
+          Link="Resources\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/HdrPreviewWindow.cs
 // HDR 预览窗口 — 完整 D3D11 渲染管线实现
 // 使用 Win32 原生窗口 + DXGI 交换链，在 HDR 显示器上直接呈现 scRGB 线性帧
@@ -6,6 +8,7 @@
 using System.Runtime.InteropServices;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
+using TrueToneCap.Core.Logging;   // LogCategory
 
 namespace TrueToneCap.App.Services;
 
@@ -178,7 +181,7 @@ public sealed partial class HdrPreviewWindow : IDisposable
             using var factory = adapter.GetParent<IDXGIFactory7>();
             try { _vrrSupported = factory.PresentAllowTearing; }
             catch { _vrrSupported = false; }
-            System.Diagnostics.Debug.WriteLine($"[HdrPreview] VRR 支持: {_vrrSupported}");
+            LogService.Info("HdrPreview", $"VRR 支持: {_vrrSupported}", LogCategory.Capture);
 
             // ═══ 2026-08-16 增强: MPO/硬件合成检测 (诊断, 与 HdrCaptureWindow 一致) ═══
             try
@@ -190,12 +193,12 @@ public sealed partial class HdrPreviewWindow : IDisposable
                     var mpo = output6.CheckHardwareCompositionSupport();
                     _mpoWindowed = mpo.HasFlag(HardwareCompositionSupportFlags.Windowed);
                     _mpoFullscreen = mpo.HasFlag(HardwareCompositionSupportFlags.Fullscreen);
-                    System.Diagnostics.Debug.WriteLine($"[HdrPreview] MPO: 窗口化={_mpoWindowed} 全屏={_mpoFullscreen}");
+                    LogService.Info("HdrPreview", $"MPO: 窗口化={_mpoWindowed} 全屏={_mpoFullscreen}", LogCategory.Capture);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[HdrPreview] MPO 检测失败: {ex.Message}");
+                LogService.Warn("HdrPreview", $"MPO 检测失败: {ex.Message}", LogCategory.Capture);
             }
 
             var desc = new SwapChainDescription1
@@ -226,14 +229,14 @@ public sealed partial class HdrPreviewWindow : IDisposable
             SetFocus(_hwnd);
 
             IsInitialized = true;
-            System.Diagnostics.Debug.WriteLine(
-                $"[HdrPreview] 初始化完成: {width}x{height} @({x},{y}) HWND=0x{_hwnd:X}");
+            LogService.Info("HdrPreview",
+                $"初始化完成: {width}x{height} @({x},{y}) HWND=0x{_hwnd:X}", LogCategory.Capture);
             return true;
         }
         catch (Exception ex)
         {
             LastError = ex.ToString();
-            System.Diagnostics.Debug.WriteLine($"[HdrPreview] 初始化失败: {ex}");
+            LogService.Error("HdrPreview", "初始化失败", ex, LogCategory.Capture);
             Cleanup();
             return false;
         }
@@ -267,7 +270,7 @@ public sealed partial class HdrPreviewWindow : IDisposable
             {
                 if (!Monitor.TryEnter(_gpuLock, 500))
                 {
-                    System.Diagnostics.Debug.WriteLine("[HdrPreview] GPU 锁超时 (500ms)，跳过本帧呈现");
+                    LogService.Warn("HdrPreview", "GPU 锁超时 (500ms)，跳过本帧呈现", LogCategory.Capture);
                     return;
                 }
                 try { PresentFrameCore(pixels, width, height); }
@@ -277,7 +280,7 @@ public sealed partial class HdrPreviewWindow : IDisposable
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[HdrPreview] PresentFrame 异常: {ex.Message}");
+            LogService.Warn("HdrPreview", $"PresentFrame 异常: {ex.Message}", LogCategory.Capture);
         }
     }
 
@@ -289,8 +292,8 @@ public sealed partial class HdrPreviewWindow : IDisposable
         // ⚠ 长度校验：下方按 width*height*4 索引 pixels，尺寸不符会越界读写托管堆
         if (pixels is null || width <= 0 || height <= 0 || (long)width * height * 4 > pixels.Length)
         {
-            System.Diagnostics.Debug.WriteLine(
-                $"[HdrPreview] PresentFrameCore 参数无效: len={pixels?.Length ?? -1} 需要={width}x{height}x4");
+            LogService.Warn("HdrPreview",
+                $"PresentFrameCore 参数无效: len={pixels?.Length ?? -1} 需要={width}x{height}x4", LogCategory.Capture);
             return;
         }
 
@@ -349,7 +352,7 @@ public sealed partial class HdrPreviewWindow : IDisposable
             catch (Exception ex)
             {
                 _vrrTearFailed = true;
-                System.Diagnostics.Debug.WriteLine($"[HdrPreview] VRR Tear 失败, 回退: {ex.Message}");
+                LogService.Warn("HdrPreview", $"VRR Tear 失败, 回退: {ex.Message}", LogCategory.Capture);
             }
         }
         _swapChain.Present(0, PresentFlags.None);
@@ -488,7 +491,7 @@ public sealed partial class HdrPreviewWindow : IDisposable
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[HdrPreview] 测试图案失败: {ex.Message}");
+            LogService.Warn("HdrPreview", $"测试图案失败: {ex.Message}", LogCategory.Capture);
         }
     }
 

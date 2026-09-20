@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Detection/RegionDetector.cs
 // A+B 混合区域检测引擎
 //   A: Windows UIA 窗口枚举 (EnumWindows + GetWindowRect)

@@ -1,5 +1,13 @@
 # TrueToneCap 依赖与组件版本审查报告 (2026-08-25)
 
+> ⚠️ **本报告含事实性错误，已被 `dependency-inventory-2026-09-14.md` 取代。**
+>
+> 主要错误：本报告声称 `Microsoft.ML.OnnxRuntime.DirectML` 最新版为 `1.29.0`，
+> 经核实该版本在 NuGet.org 上**不存在**（最新稳定版为 `1.24.4`）。
+> 因此第 7.2、8（步骤一）、9 节中关于"ORT 1.29.0 升级收益 20-30%"的结论**全部作废**。
+> 另有 `Microsoft.WindowsAppSDK`（实际已 2.4.0）、`System.Drawing.Common`（实际已 10.0.11）
+> 等版本信息过时。请以 2026-09-14 报告为准。
+
 > 本报告覆盖 TTC 全部依赖项（NuGet 原生 + 传递、.NET SDK、原生工具链、OCR 模型）的当前版本与可用更新。
 
 ---

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/CapturePipelineService.cs
 // 截图编码管线服务 — 从 MainWindow 提取
 // 负责: ICC 烘焙 + 编码调度 + 输出路径构建
@@ -17,38 +19,71 @@ public sealed class CapturePipelineService
 {
     private readonly SettingsService _settings;
 
+    // 审查 P2-6：降级 Toast 去重 —— 同一降级组合只弹一次（跨线程读写，volatile 与文件内既有模式一致）
+    private static volatile string? s_lastDegradedToast;
+
     public CapturePipelineService(SettingsService settings)
     {
         _settings = settings;
     }
 
     /// <summary>ICC 色彩管理准备（后台线程安全，不访问 UI 控件）。</summary>
-    public static (byte[] pixels, byte[]? iccProfile) PreparePixelsWithIcc(
-        byte[] bgra, int w, int h, bool iccBakeEnabled, string colorSpaceTag,
-        bool? acmEnabled = null, nint? monitorHandle = null)
+    /// <param name="decision">本次截图的<b>唯一色彩决定</b>（Core 的 <c>ColorDecision</c>）。
+    /// 本函数【不再自己解析用户下拉】—— 那是 2026-09-22 审查轮（交接 §41）要消灭的形态：
+    /// 像素路与声明路过去各自解析一次、各问一次光标屏、各用一套原生色域阈值，
+    /// 于是同一块窄色域副屏能同时"被判成窄色域"与"被按 P3 搬色"。
+    /// <see cref="ColorDecision.SourceTag"/> 就是这里的源，<see cref="ColorDecision.TargetTag"/>
+    /// 就是这里的目标，声明侧写的也是同一个值。</param>
+    /// <returns>三元组：<c>pixels</c> 可能被搬运到目标色域；<c>iccProfile</c> 是与之配套的声明；
+    /// <paramref name="degradedToTag"/> 非 null 表示<b>目标色域没能达成</b>（无显示器 ICC / 矩阵解析失败 /
+    /// 标准 profile 取不到），像素仍留在该标签所述色域 ⇒ 调用方必须把声明改到它上面，不能继续按请求声明。
+    /// <para>2026-09-19 缺陷 D-1：此前"未转换"与"转换成功"都返回"目标 ICC"，二者在返回值上不可分辨，
+    /// 于是产物出现"sRGB 像素 + P3 的 ICC/cICP"这种自相矛盾的声明，且 Release 下完全无声。</para></returns>
+    public static (byte[] pixels, byte[]? iccProfile, string? degradedToTag) PreparePixelsWithIcc(
+        byte[] bgra, int w, int h, ColorDecision decision)
     {
-        if (!iccBakeEnabled)
-            return (bgra, null);
-
-        // acmEnabled 默认为系统当前 ACM 状态 (从 AppServices 读取)
-        bool acm = acmEnabled ?? ReadSystemAcm();
-
-        // 将 "System" 解析为实际色域（ACM 感知）
-        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acm, monitorHandle);
+        // 2026-09-22 用户拍板：色彩管理不再有开关 —— 默认就把像素映射进标准色域（sRGB / BT.2020），
+        // 于是"声明与像素不符"这一整族缺陷（含"烘焙关 ⇒ 像素不动、标签照请求写"）从入口上消失。
+        // 需要搬色与否由决定自己说（<see cref="ColorDecision.NeedsMapping"/>），不由 UI 布尔说。
+        bool acm = decision.SystemAcm;
+        var resolvedTag = decision.TargetTag;
         var targetCs = ColorProfileProvider.MapColorSpaceTag(resolvedTag);
         bool isSRgbTarget = resolvedTag is "sRGB";
+        // 决定里的源标签已经过 EDID ΔG 闸门：确证不宽的面板这里就是 "sRGB"，
+        // 不会再出现"三档判窄色域、这里按 P3 解矩阵"的分叉（§41.1 的错位 B）。
+        // ⚠ 后面那个 `isSRgbTarget ? "sRGB" : null` 是【照抄旧语义】的默认值，不是可有可无的：
+        //   旧实现在"ACM 开着 + EDID 探测失败 + 目标本来就是 sRGB"时把源当 sRGB 直接原样返回，
+        //   不去碰显示器 ICC。若这里一律给 null，就会掉进下方的"传统烘焙"分支、
+        //   拿用户校准 ICC 多做一次矩阵 —— 那是我这轮差点引进的行为变化。
+        string? nativeGamutTag = !acm ? null
+            : decision.NativeGamutKnown ? decision.SourceTag
+            : (isSRgbTarget ? "sRGB" : null);
 
-        // ACM 下检测显示器原生色域 (SDR 捕获像素所在色域)
-        string? nativeGamutTag = null;
-        if (acm)
+        // ═══ 降级出口（2026-09-19 D-1）：转换没做成时，声明必须退回"像素真实所在色域" ═══
+        // 依据换成决定里那份源标签（同源），不再在这里第二次探测原生色域。
+        // 目标 ICC 一律不带回来 —— 带回来就是谎（调用方据此会嵌 iCCP）。
+        (byte[], byte[]?, string?) NotConverted(byte[] px)
         {
-            try
+            string actual = acm && nativeGamutTag is not null and not "sRGB" ? nativeGamutTag : "sRGB";
+            if (actual == resolvedTag)
+                return (px, null, null);   // 像素本就在目标色域 ⇒ 无需降级、也无需 ICC（sRGB）或配套 ICC
+            if (actual != "sRGB")
             {
-                var hmon = monitorHandle ?? DisplayEnumerator.GetMonitorUnderCursor();
-                nativeGamutTag = ColorProfileProvider.GetDisplayNativeGamutTag(hmon);
+                var nativeIcc = ColorProfileProvider.GetStandardIccProfile(actual);
+                if (FormatHelper.IsEmbeddableIcc(nativeIcc))
+                    return (px, nativeIcc, actual);
             }
-            catch { }
-            nativeGamutTag ??= (isSRgbTarget ? "sRGB" : null);
+            return (px, null, actual);
+        }
+
+        void NoteDegraded(string? degradedToTag, string why)
+        {
+            if (degradedToTag is null) return;
+            // 两条通道都要留：日志给排查用，Notifier 经 NotifyEncoderFallbackIfAny 变 Toast 给用户
+            LogService.Warn("Pipeline",
+                $"ICC 色彩转换未完成（目标={resolvedTag}，{why}）⇒ 本张按像素实际色域 {degradedToTag} 声明，未做色域搬运");
+            EncoderFallbackNotifier.LastReason =
+                $"ICC 色彩转换未完成（目标={resolvedTag}，{why}）⇒ 本张按 {degradedToTag} 声明，未做色域搬运";
         }
 
         // ═══ ACM 模式 (2026-08-09 方案A): 系统已接管显示器色彩管理 ═══
@@ -58,11 +93,11 @@ public sealed class CapturePipelineService
         //   色域的标准 ICC (或 sRGB 不嵌) 即可 → 无双重转换, 色彩准确
         // - 目标 ≠ 显示器原生色域: 像素在显示器色域但用户要输出目标色域, 必须烘焙
         //   (从显示器色域转换到目标), 跳过烘焙会产生像素/ICC 矛盾
-        if (acm)
+        if (acm && nativeGamutTag is not null)
         {
             // 目标色域 = 显示器原生色域(或 sRGB) → 跳过烘焙, 嵌对应标准 ICC
             if (isSRgbTarget || targetCs == nativeGamutTag)
-                return (bgra, isSRgbTarget ? null : ColorProfileProvider.GetStandardIccProfile(targetCs));
+                return (bgra, isSRgbTarget ? null : ColorProfileProvider.GetStandardIccProfile(targetCs), null);
 
             // ═══ 2026-08-09 修复: 目标 ≠ 显示器色域 → 用标准原生色域 ICC 作源烘焙 ═══
             // ACM 下 GetDisplayIccProfile 可能返回 null 或已被 ACM 修改的 ICC (非原生色域),
@@ -72,49 +107,58 @@ public sealed class CapturePipelineService
             if (nativeGamutTag is not null)
             {
                 var nativeIcc = ColorProfileProvider.GetStandardIccProfile(nativeGamutTag);
-                if (nativeIcc is { Length: > 128 })
+                if (FormatHelper.IsEmbeddableIcc(nativeIcc))
                 {
                     var (baked, targetIcc) = ColorProfileProvider.BakeIccToTarget(bgra, w, h, nativeIcc, targetCs);
-                    if (baked is not null)
+                    // 广色域目标必须拿到配套 ICC 才算真转换成了（矩阵解析失败时 ICC 为 null）
+                    if (baked is not null && (isSRgbTarget || FormatHelper.IsEmbeddableIcc(targetIcc)))
                     {
                         if (isSRgbTarget)
-                            return (baked, null);
-                        return (baked, targetIcc);
+                            return (baked, null, null);
+                        return (baked, targetIcc, null);
                     }
+                    var (px0, icc0, deg0) = NotConverted(baked ?? bgra);
+                    NoteDegraded(deg0, "原生→目标矩阵不可解析");
+                    return (px0, icc0, deg0);
                 }
             }
             // 原生色域未知 → fallthrough 到下方传统烘焙 (可能失败, 兜底)
         }
 
-        // ── 非 ACM 模式: 传统烘焙 (显示器 ICC → 目标色域) ──
+        // ── 非 ACM 模式（或 ACM 开着但这块屏的 EDID 读不到）: 传统烘焙 (显示器 ICC → 目标色域) ──
         byte[]? displayIcc = null;
         try
         {
-            var cursorMonitor = DisplayEnumerator.GetMonitorUnderCursor();
-            displayIcc = ColorProfileProvider.GetDisplayIccProfile(cursorMonitor);
+            // 问的是【被截那块屏】；决定里没有源屏时才退回光标屏（旧行为，且只在无源屏信息时发生）。
+            var srcMonitor = decision.Source?.MonitorHandle ?? DisplayEnumerator.GetMonitorUnderCursor();
+            displayIcc = ColorProfileProvider.GetDisplayIccProfile(srcMonitor);
         }
         catch { }
 
         // 有显示器 ICC → 烘焙到目标色域 (广色域 SDR)
-        if (displayIcc is not null && displayIcc.Length > 500)
+        // 「这份显示器 ICC 值不值得拿去烘焙」也只问同一个结构判据
+        // （原先这里另立一个字面量 500，与 Core 的 400 / 128 三套并存 —— 就是 §31.3-9）
+        if (FormatHelper.IsEmbeddableIcc(displayIcc))
         {
             var (baked, targetIcc) = ColorProfileProvider.BakeIccToTarget(bgra, w, h, displayIcc, targetCs);
-            if (baked is not null)
+            if (baked is not null && (isSRgbTarget || FormatHelper.IsEmbeddableIcc(targetIcc)))
             {
                 if (isSRgbTarget)
-                    return (baked, null);
-                return (baked, targetIcc);
+                    return (baked, null, null);
+                return (baked, targetIcc, null);
             }
+            var (px0, icc0, deg0) = NotConverted(baked ?? bgra);
+            NoteDegraded(deg0, "显示器 ICC→目标矩阵不可解析");
+            return (px0, icc0, deg0);
         }
 
-        // 无显示器 ICC / 烘焙失败
-        if (!isSRgbTarget)
-        {
-            var targetIcc = ColorProfileProvider.GetStandardIccProfile(targetCs);
-            return (bgra, targetIcc);
-        }
-
-        return (bgra, null);
+        // ═══ 2026-09-19 缺陷 D-1 的第二处同形：无显示器 ICC ⇒ 连源色域都无从解析 ═══
+        // 旧写法在这里 `return (bgra, GetStandardIccProfile(目标))` —— 一步转换都没做，却把目标广色域
+        // 的 ICC 发了出去（与 ColorProfileProvider.BakeIccToTarget 修掉的那处是同一个形状）。
+        // 现在退回"像素真实所在色域"的声明，并走 NoteDegraded 留痕。
+        var (px, icc, degraded) = NotConverted(bgra);
+        NoteDegraded(degraded, "本机无可用显示器 ICC");
+        return (px, icc, degraded);
     }
 
     /// <summary>读取系统当前 ACM 状态 (供 static 方法默认值)。</summary>
@@ -125,91 +169,77 @@ public sealed class CapturePipelineService
     }
 
     /// <summary>
-    /// 从 Float16 广色域像素转换为 SDR BGRA8 + 嵌入 ICC 元数据。
-    /// 用于 HDR 关闭 + 广色域目标场景：
-    /// WGC Float16 包含完整广色域数据 → 色调映射 → sRGB gamma → BGRA8
+    /// 构建编码设置。
+    /// <para><paramref name="settingsSnapshot"/> 必须是 UI 线程在按下截图时取的
+    /// <see cref="AppSettingsData.Snapshot"/>：本方法【可能运行在后台编码线程】，
+    /// 而下面的位深/色度/AVIF 编码器选择/每格式质量等十余项都要从设置里读 ——
+    /// 直接读活对象 <c>_settings.Current</c> 会与 UI 事件争写（JXL / libaom AVIF 编码 0.5–2s，
+    /// 足够用户改一次下拉），产物就可能与"按下那一刻"的选择无关（§11.3 快照纪律的由来）。
+    /// 所以快照是必传参数：本方法不再留"没传就读活对象"的静默旁路。</para>
     /// </summary>
-    public static (byte[] pixels, byte[]? iccProfile) PrepareFloat16WithIcc(
-        float[] hdrPixels, int w, int h,
-        bool iccBakeEnabled, string colorSpaceTag,
-        TrueToneCap.Core.Processing.ToneMappingParams toneParams,
-        bool? acmEnabled = null, nint? monitorHandle = null)
-    {
-        bool acm = acmEnabled ?? ReadSystemAcm();
-
-        // 将 "System" 解析为实际色域（ACM 感知）
-        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag, false, acm, monitorHandle);
-        bool isSRgbTarget = resolvedTag is "sRGB";
-
-        // ═══ 2026-08-10 修复(2): SDR 输出恒为 sRGB 色域 ═══
-        // 教训: 2026-08-09 误改为"转换到目标色域 (BT2020)"→ 影响 GainMap SDR 回退
-        // 和 JPEG LI 的 HDR→SDR 路径:
-        //   - 像素被矩阵转换到 BT2020, 但 gamma 编码是 sRGB 的
-        //   - 再嵌 BT2020 ICC → 查看器按 BT2020 TRC 解码 → gamma 不匹配 → 颜色错误
-        // GainMap 的正确映射 (ReinhardToSdr): scRGB 直接色调映射, 不做色域矩阵,
-        // Base 恒 sRGB + sRGB ICC (2026-08-06 设计决策: Base 与增益图同处 scRGB 空间)。
-        // SDR 8-bit 容器语义 = sRGB; BT2020 色域只应通过 HDR 直通 (PQ) 实现。
-        // 因此: 恒输出 sRGB 色域像素 (scRGB BT.709 原色 + sRGB gamma), 与 GainMap 一致。
-
-        // 1. 色调映射到 BGRA8 (scRGB → sRGB gamma, 不转换色域矩阵)
-        var bgra = ColorSpaceConverter.ConvertFloat16ToSdrBgra(
-            hdrPixels, w, h, "sRGB", toneParams);
-
-        // 2. ICC 色彩管理: SDR 输出恒为 sRGB → 不嵌 ICC (查看器默认 sRGB)
-        return (bgra, null);
-    }
-
-    /// <summary>构建编码设置。</summary>
     public EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta,
-        string? colorSpaceTag = null, bool? acmEnabled = null)
+        AppSettingsData settingsSnapshot, string? colorSpaceTag = null, bool? acmEnabled = null,
+        ColorDecision? decisionOrNull = null)
     {
-        var s = _settings.Current;
-        bool acm = acmEnabled ?? s.AcmeDetected;
-        var avifBackend = s.AvifBackendIndex switch
-        {
-            1 => AvifEncoderBackend.LibAom,
-            2 => AvifEncoderBackend.Qsv,
-            3 => AvifEncoderBackend.Nvenc,
-            _ => AvifEncoderBackend.Auto
-        };
+        var s = settingsSnapshot;
+        bool acm = acmEnabled ?? ReadSystemAcm();
+        var avifKind = AvifEncoderCapabilities.Parse(s.AvifEncoder);
+        // 记录用户是否【显式】选了某个编码器。Auto 是产品默认值，其解析结果（含"硬件不适用
+        // ⇒ 改走软件"）属于自动协商的正常结果，不应以 Warning Toast 形式惊扰用户 ——
+        // 只有用户亲手选了硬件编码器却用不了，才需要明确告知。
+        bool avifAutoResolved = avifKind == AvifEncoderKind.Auto;
+        if (format == OutputFormat.AVIF && avifKind == AvifEncoderKind.Auto)
+            avifKind = AvifEncoderSelector.PickAvailableKind(s.ChromaAvif, s.BitDepthAvif);
 
         // 每格式参数映射（与 MainWindow.BuildEncodingSettings 保持一致）
+        // ═══ 2026-09-19：WebP / TIFF 的色度改为常量（字段已按实测删除）═══
+        // 判据：同一样张只改色度，产物【字节完全相同】；再用 ffprobe 读回佐证（详见交接 §27）。
+        //   · WebP：NativeWebPEncoder 没有色度形参 ⇒ 有损恒 4:2:0（格式定义）、无损为 RGB。
+        //     这里给 420 只为与真实码流一致（写 444 会与新加的界面说明自相矛盾）。
+        //   · TIFF：ManagedTiffEncoder 写死 Photometric=RGB / SamplesPerPixel=4 的无损 RGBA ⇒ 无色度概念。
+        // GainMap 一度也被写成常量 420（当时主路径硬编码 444、只有旁路读设置 ⇒ 那是假配置）。
+        // 用户 2026-09-19 定为"默认 420、可手动 444"后，JpegGainMapEncoder 的主路径与两条旁路
+        // 全部改读 settings.ChromaSubsampling ⇒ 本行恢复读字段，走哪条路都是同一个色度。
         var (bitDepth, chroma) = format switch
         {
             OutputFormat.PNG => (s.BitDepthPng, "444"),
             OutputFormat.JPEG_LI => (s.BitDepthJpegLi, s.ChromaJpegLi),
             OutputFormat.JPEG_XL => (s.BitDepthJpegXl, s.ChromaJpegXl),
             OutputFormat.AVIF => (s.BitDepthAvif, s.ChromaAvif),
-            OutputFormat.WebP => (s.BitDepthWebP, s.ChromaWebP),
-            OutputFormat.TIFF => (s.BitDepthTiff, s.ChromaTiff),
+            OutputFormat.WebP => (s.BitDepthWebP, "420"),
+            OutputFormat.TIFF => (s.BitDepthTiff, "444"),
             OutputFormat.JPEG_GAINMAP => (s.BitDepthGainMap, s.ChromaGainMap),
-            _ => (s.OutputBitDepth, s.AvifChroma),
+            _ => (s.OutputBitDepth, s.ChromaAvif),
         };
+
+        // ⚠️ AVIF 的能力协商【不在这里】—— 必须等 settings.HdrOutput 最终确定之后再做，
+        //    原因见下方「AVIF 能力协商」处（:264 起）。此处若提前协商会用错场景（HDR/SDR）。
 
         var settings = new EncodingSettings
         {
             Format = format,
             Quality = (float)GetPerFormatQuality(s, format),
             HdrOutput = hdrOutput,
-            AvifBackend = avifBackend,
+            AvifEncoderKind = avifKind,
             AvifPngSuffix = s.AvifPngSuffix,
             JxlPngSuffix = s.JxlPngSuffix,
-            AvifChroma = chroma,
             ChromaSubsampling = chroma,
             OutputBitDepth = bitDepth,
-            DisplayBitDepth = s.DisplayBitDepth,
             GainMapMode = s.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
             Metadata = meta,
-            PreferGpuEncode = true,
             // ── SDR 白点: 系统检测值优先 (DISPLAYCONFIG_SDR_WHITE_LEVEL), 用户手动设置回退 ──
             // 关键: GainMap 的 SDR 直通阈值必须与系统实际 SdrWhiteLevel 一致,
             // 否则 Base 亮度错误 (SDR 发暗/过曝)。系统值 > 0 时优先。
             // ── HDR 峰值: 系统检测值优先 (DXGI MaxLuminance), 用户设置回退 ──
             // 关键: GainMap headroom (XMP/ISO GainMapMax) 依赖此值,
             // 错误值会导致解码端 weight_factor 偏差 → HDR 还原过亮/过暗。
-            // ── 色调映射模式: 分段 Reinhard (GainMap 同款) ──
-            // 2026-08-08: 所有格式 HDR→SDR 统一使用 GainMap 的分段 Reinhard 曲线
-            // (y≤SDR白点直通 + smoothstep 过渡 + 高光 Reinhard 压缩), 保证各格式输出一致。
+            // ── 色调映射模式: 分段映射 (与 GainMap 同一条曲线) ──
+            // 2026-08-08: 所有格式 HDR→SDR 统一走同一条曲线，保证各格式输出一致。
+            // ⚠ 2026-09-19 勘误：本注释长期写作"smoothstep 过渡 + 高光 Reinhard 压缩"，而
+            //   ToneMapper.SegmentedReinhardMap 早已改成 **y>1 恒饱和 1.0**（headroom/eps 有意不参与，
+            //   推导见其 XML 备注：旧曲线在 y=1 处从 1.0 骤降到 ~0.52 再缓慢回升 ⇒ 非单调 ⇒ 高光暗环）。
+            //   直接后果：DisplayMaxNits【不】参与 SDR 曲线，它只喂 GainMap 的 headroom、JXL 的
+            //   intensity_target、AVIF 的 --clli。别照这段旧描述去"恢复压缩段"。
             ToneMappingParams = new ToneMappingParams
             {
                 Mode = ToneMapMode.SegmentedReinhard,
@@ -218,22 +248,163 @@ public sealed class CapturePipelineService
             },
         };
 
-        // 解析 "System" 为实际色域（ACM 感知），确保编码器能正确判断 ICC/CICP 策略
-        var resolvedTag = ColorProfileProvider.ResolveColorSpaceTag(colorSpaceTag ?? "System", hdrOutput, acm, GetMonitorHandle());
-        settings.ColorSpaceTag = resolvedTag;
+        // ═══ 系统 nits 覆盖用户设置时必须留痕（2026-09-19 审查 P2）═══
+        // 上面用 SystemSdrWhiteLevel / SystemMaxNits 优先于用户的 PaperWhiteNits / DisplayMaxNits，
+        // 方向是对的（HDR 显示器实测值比手填值可靠），但原先【完全静默】：
+        // 用户改了 nits 却看不到效果、也无从判断"到底用了哪个值"。日志是这条链路上唯一的可查证据。
+        if (s.SystemSdrWhiteLevel > 0 || s.SystemMaxNits > 0)
+            LogService.Info("Pipeline",
+                $"色调映射 nits: 纸白 {s.PaperWhiteNits}→{settings.ToneMappingParams.PaperWhiteNits}" +
+                $"，峰值 {s.DisplayMaxNits}→{settings.ToneMappingParams.DisplayMaxNits}（系统检测值优先）");
+
+        // ═══ 2026-09-22（审查轮 §41 收口）：输出形态取 ColorDecision 的【同一份】目标 ═══
+        // 三档策略（用户口径）：sRGB 屏 ⇒ 8-bit SDR；广色域 SDR 屏 ⇒ BT.2020 + SDR；HDR 屏 ⇒ BT.2020 + HDR。
+        // 解析 + 两项钳制现在都在 Core 的 ColorDecision.Build 里做【一次】，像素路（PreparePixelsWithIcc）
+        // 与这里消费同一个实例 ⇒ 不可能再出现"像素搬到 A、容器写 B"。
+        // ⚠ 本函数不许再调 ResolveColorSpaceTag，也不许在这里补钳制：那正是旧实现长出的两个洞 ——
+        //   ①钳制写在解析之前且显式放过 "System" ⇒ 默认档"跟随显示器"完全不经钳制（§41.2）；
+        //   ②像素路拿的是未钳制的 ui.ColorSpaceTag ⇒ 窄屏上按 P3 搬色却声明 sRGB（§41.3 的错位 A）。
+        // 调用方没给决定时按"无源屏信息"构造（分类 ⇒ Unknown ⇒ 不授权声明、也不施加钳制），
+        // 不再退回去猜光标屏。
+        var decision = decisionOrNull ?? ColorDecision.Build(
+            null, colorSpaceTag, hdrOutput, acm);
+        hdrOutput = decision.HdrOutput;
+        settings.HdrOutput = hdrOutput;
+        if (decision.HdrClamped)
+            LogService.Info("Pipeline",
+                $"不给 HDR 声称，本次按 SDR 色调映射编码（HDR 开关仍按你的设置保留，只是容器不会写 PQ）⇒ {decision.Evidence}");
+        if (decision.GamutClamped)
+            LogService.Info("Pipeline",
+                $"色域声明由 {ColorProfileProvider.CollapseSelectableTag(colorSpaceTag)} 收口为 sRGB ⇒ {decision.Evidence}");
 
         // 关键修复: HDR 开启 + sRGB 目标 → 色调映射到 SDR 输出
         // 用户显式选择 sRGB 意味着需要 SDR 兼容输出，而非 HDR PQ 编码
         // 此时 HdrOutput 设为 false，触发色调映射降级路径
+        var resolvedTag = decision.TargetTag;
+        settings.ColorSpaceTag = resolvedTag;
+        // GainMap 要区分"用户手动选 2020"与"跟随显示器在 P3 屏上解析出 2020"⇒ 这个标记只能在这里传，
+        // 编码器自己看不到下拉（也绝不该去猜）。
+        settings.ExplicitWideTarget = decision.ExplicitWideTarget;
         if (hdrOutput && resolvedTag == "sRGB")
         {
             settings.HdrOutput = false;
+            hdrOutput = false;
             LogService.Info("Pipeline", $"HDR 开启 + sRGB 目标 → 自动降级为 SDR 色调映射输出");
         }
         // HDR 开启 + 广色域目标 (P3/AdobeRGB/BT.2020) → 保留 HDR 直通编码
         // 用户选择广色域目标意味着要保留 HDR 动态范围
 
-        LogService.Info("Pipeline", $"编码设置: {format} HDR={settings.HdrOutput} 质量={settings.Quality:F1} 位深={bitDepth} 色度={chroma} AVIF后端={avifBackend} 色域={resolvedTag}");
+        // ═══ 2026-09-17 修复：AVIF 能力协商必须在 HdrOutput【最终确定之后】，并分 SDR / HDR 场景 ═══
+        // 旧实现把协商放在 HdrOutput 被改写之前，且只看 format==AVIF、不看 HDR，导致两处失真：
+        //  ① HDR 场景：HDR 路径根本不走 SelectByKind —— AvifEncoder.EncodeAsync 的 HdrOutput 分支
+        //     直接 HdrToPq16(…, 10) + 16-bit PNG 中转 + avifenc（--depth 10 硬编码，不带 --yuv）。
+        //     于是"协商出的 420/8-bit"完全不生效，用户却照样收到降级 Toast（假警报）。
+        //  ② SDR 场景：能力表给软件编码器声明 12/10-bit，硬件（NVENC）2026-09-17 实测亦可达
+        //     10-bit（outputBitDepth 控制，8-bit 输入硬件内部升位深；QSV 未验证，仍声明 8）。
+        //     旧实现不区分编码器、一律按"恒 8"钳制，于是软件侧请求 10-bit 时协商前后相等，
+        //     连降级提示都不触发，日志却打"位深=10"（真正的静默改参数）。
+        //     现统一按 SdrBitDepthFor 分场景钳制（avifenc --depth 已对 PNG 输入生效）。
+        // 又：HdrOutput 可能刚被上面改写（HDR 开启 + sRGB 目标 → 降级 SDR），
+        // 所以这里必须用 settings.HdrOutput 判定场景，不能用入参 hdrOutput。
+        if (format == OutputFormat.AVIF)
+        {
+            var want = (bitDepth, chroma);
+
+            if (settings.HdrOutput)
+            {
+                // HDR：位深恒 10（PQ，avifenc --depth 10 硬编码），不参与协商。
+                bitDepth = AvifEncoderCapabilities.HdrBitDepth;
+
+                // ═══ 2026-09-18：HDR 硬件支持已扩至 NVENC（真 10-bit PQ 输入 + colr PQ 声明）═══
+                // 仍不支持的只剩 QSV（NV12 8-bit 输入）⇒ 管线层改写为 avifenc 并告知。
+                if (!AvifEncoderCapabilities.SupportsHdrPath(avifKind))
+                {
+                    // 先取名再改写：改写后 Caps(avifKind) 就变成 avifenc 了
+                    string hwName = AvifEncoderCapabilities.Caps(avifKind).DisplayName;
+                    avifKind = AvifEncoderKind.Avifenc;
+
+                    // ═══ 2026-09-17 修复：Auto 解析到硬件 ≠ 用户显式选择了硬件 ═══
+                    // 旧实现不区分二者，一律弹 Warning Toast。而 Auto 是产品默认值，
+                    // 于是"默认设置 + HDR"第一次截图必然弹出"NVENC 不支持 HDR"的警告 ——
+                    // 用户从未选过 NVENC，这条提示既不可操作也让人困惑（假警报）。
+                    // 现在：Auto 的自动回落只记 Info 日志；只有用户亲手选了硬件才提示。
+                    if (avifAutoResolved)
+                    {
+                        LogService.Info("Pipeline",
+                            $"AVIF HDR：Auto 解析到 {hwName}，硬件编码器不支持 HDR 输出，改用 avifenc 软件编码");
+                    }
+                    else
+                    {
+                        string hdrHwMsg =
+                            $"{hwName} 不支持 HDR 输出"
+                            + "（容器层不写 PQ / BT.2020 元数据，HDR 会被误判为 SDR）"
+                            + "，已改用 avifenc 软件编码";
+                        LogService.Warn("Pipeline", $"AVIF HDR 编码器回落: {hdrHwMsg}");
+                        if (s_lastDegradedToast != hdrHwMsg)
+                        {
+                            s_lastDegradedToast = hdrHwMsg;
+                            ToastService.ShowToast("AVIF HDR 编码器提示", hdrHwMsg, ToastTone.Warning);
+                        }
+                    }
+                }
+
+                // 色度：2026-09-17 起 HDR 路径会真实传递 --yuv（EncodeFile 新增 chroma 形参）
+                // ⇒ 设置生效。这里仍走一遍协商以保持契约诚实：将来若某条 HDR 路径引入
+                // 能力受限的编码器，会立刻降级并提示，而不是"改了设置没反应"。
+                chroma = AvifEncoderCapabilities.NegotiateChroma(avifKind, chroma);
+                if (want.Item2 != chroma)
+                {
+                    string avifDegraded =
+                        $"{AvifEncoderCapabilities.Caps(avifKind).DisplayName} 能力限制："
+                        + $"色度从 {want.Item2} 降级为 {chroma}";
+                    LogService.Warn("Pipeline", $"AVIF HDR 参数降级: {avifDegraded}");
+                    if (s_lastDegradedToast != avifDegraded)
+                    {
+                        s_lastDegradedToast = avifDegraded;
+                        ToastService.ShowToast("AVIF 编码器能力提示", avifDegraded, ToastTone.Warning);
+                    }
+                }
+                // 注意：未降级时【不要】清空 s_lastDegradedToast。
+                // 旧实现这么做，于是"降级→提示 → 下次未降级→清空 → 再下次降级→又提示"，
+                // 同一组合会被反复弹出，去重形同虚设。去重键就是提示文本本身：
+                // 编码器或参数一变，文本自然不同，会自动重新提示，无需靠清空来"重置"。
+
+                settings.AvifEncoderKind = avifKind;
+                settings.ChromaSubsampling = chroma;
+                settings.OutputBitDepth = bitDepth;
+                LogService.Info("Pipeline",
+                    "AVIF HDR 输出：位深恒 10-bit（PQ）；NVENC 支持 HDR 硬件直通，QSV 将回落 avifenc");
+            }
+            else
+            {
+                // SDR：按所选编码器能力表协商色度，位深按 SDR 真实上限钳制；降级必须告知用户
+                bitDepth = AvifEncoderCapabilities.NegotiateBitDepth(avifKind, bitDepth, hdr: false);
+                chroma = AvifEncoderCapabilities.NegotiateChroma(avifKind, chroma);
+                if (want != (bitDepth, chroma))
+                {
+                    string avifDegraded =
+                        $"{AvifEncoderCapabilities.Caps(avifKind).DisplayName} 能力限制："
+                        + $"参数从 {want.Item2} / {want.Item1}-bit 降级为 {chroma} / {bitDepth}-bit";
+                    LogService.Warn("Pipeline", $"AVIF 参数降级: {avifDegraded}");
+                    // 同一降级组合只提示一次（去重）；参数已匹配则重置，便于切换编码器后再次提示
+                    if (s_lastDegradedToast != avifDegraded)
+                    {
+                        s_lastDegradedToast = avifDegraded;
+                        ToastService.ShowToast("AVIF 编码器能力提示", avifDegraded, ToastTone.Warning);
+                    }
+                }
+                // 注意：未降级时【不要】清空 s_lastDegradedToast。
+                // 旧实现这么做，于是"降级→提示 → 下次未降级→清空 → 再下次降级→又提示"，
+                // 同一组合会被反复弹出，去重形同虚设。去重键就是提示文本本身：
+                // 编码器或参数一变，文本自然不同，会自动重新提示，无需靠清空来"重置"。
+
+                settings.AvifEncoderKind = avifKind;
+                settings.ChromaSubsampling = chroma;
+                settings.OutputBitDepth = bitDepth;
+            }
+        }
+
+        LogService.Info("Pipeline", $"编码设置: {format} HDR={settings.HdrOutput} 质量={settings.Quality:F1} 位深={settings.OutputBitDepth} 色度={settings.ChromaSubsampling} AVIF编码器={settings.AvifEncoderKind} 色域={resolvedTag}");
         return settings;
     }
 
@@ -250,15 +421,13 @@ public sealed class CapturePipelineService
         _ => s.Quality,
     };
 
-    /// <summary>获取当前鼠标所在显示器句柄。</summary>
-    private static nint? GetMonitorHandle()
-    {
-        try { return DisplayEnumerator.GetMonitorUnderCursor(); }
-        catch { return null; }
-    }
-
     /// <summary>构建输出文件路径。</summary>
-    public string BuildOutputPath(OutputFormat format, string outDir)
+    /// <remarks>
+    /// ".png 后缀"两个开关取自传入的 <paramref name="settings"/>（UI 线程快照的产物），
+    /// 不再读活的 <c>_settings.Current</c>：编码器拿到的后缀是快照值、文件名后缀却是另一时刻
+    /// 的活值，二者会分叉（静默截图路径里快照与这里之间隔着一次 WGC 采集）。
+    /// </remarks>
+    public string BuildOutputPath(OutputFormat format, string outDir, EncodingSettings settings)
     {
         var s = _settings.Current;
         var ext = format switch
@@ -271,8 +440,8 @@ public sealed class CapturePipelineService
             OutputFormat.TIFF => ".tiff",
             _ => ".png"
         };
-        if (format == OutputFormat.AVIF && s.AvifPngSuffix) ext += ".png";
-        else if (format == OutputFormat.JPEG_XL && s.JxlPngSuffix) ext += ".png";
+        if (format == OutputFormat.AVIF && settings.AvifPngSuffix) ext += ".png";
+        else if (format == OutputFormat.JPEG_XL && settings.JxlPngSuffix) ext += ".png";
         return Path.Combine(outDir, $"{s.FileNamePrefix}{DateTime.Now:yyyyMMdd_HHmmssfff}{ext}");
     }
 
@@ -303,52 +472,12 @@ public sealed class CapturePipelineService
         return full;
     }
 
-    /// <summary>编码并保存 SDR 像素到文件（同步编码，在后台线程执行）。</summary>
-    /// <remarks>
-    /// ═══ 重要: 此方法始终走 SDR 编码路径 ═══
-    /// 输入为 byte[] BGRA8 像素，即使 hdrOutput=true，也绝不转为 HDR PQ 路径。
-    /// 因为 byte[] 输入不包含 HDR 浮点数据，强行转为 HDR 会导致色域错误。
-    /// 
-    /// 如需 HDR 编码，请使用 EncodeHdrFrameAsync()（接收 HdrFrameData float 像素）。
-    /// 
-    /// hdrOutput 参数仅用于 BuildEncodingSettings 的色域解析逻辑
-    /// （例如 HDR 开启时 "System" 解析为 BT.2020），不改变编码路径。
-    /// </remarks>
-    public async Task<string> EncodeAndSaveAsync(
-        byte[] bgra, int w, int h, OutputFormat format,
-        bool hdrOutput, bool iccBakeEnabled, string colorSpaceTag,
-        CancellationToken ct = default, ID3D11Texture2D? gpuTexture = null)
-    {
-        var encoder = EncoderFactory.Create(format);
-        var settings = BuildEncodingSettings(format, hdrOutput, null, colorSpaceTag);
-        if (gpuTexture is not null)
-            settings.GpuTexture = gpuTexture;
-        var outDir = GetEffectiveOutputDir();
-        var path = BuildOutputPath(format, outDir);
-
-        LogService.Info("Pipeline", $"SDR 编码启动: {format} {w}x{h} HDR={hdrOutput} → {Path.GetFileName(path)}");
-
-        PowerManager.PreventSleep();
-        try
-        {
-        await Task.Run(async () =>
-        {
-            ct.ThrowIfCancellationRequested();
-            var (pixels, iccProfile) = PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
-            if (iccProfile is not null)
-                settings.IccProfile = iccProfile;
-
-            // 始终走 SDR 路径：byte[] 输入是 SDR BGRA8 像素，不应转为 HDR float16 编码
-            // 如需 HDR 编码，使用 EncodeHdrFrameAsync 传入 HdrFrameData
-            await encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct);
-        }, ct);
-        }
-        finally { PowerManager.AllowSleep(); }
-
-        var fileSize = File.Exists(path) ? new FileInfo(path).Length : 0;
-        LogService.Info("Pipeline", $"SDR 编码完成: {Path.GetFileName(path)} ({fileSize / 1024.0:F1} KB)");
-        return path;
-    }
+    // ═══ 2026-09-19 修复（§26.4 P1）：删除"内部自建设置"的 EncodeAndSaveAsync 重载 ═══
+    // 原重载在【后台编码线程】调用 BuildEncodingSettings 且不给快照 ⇒ 读的是活的
+    // _settings.Current，绕过 §11.3 快照纪律：JXL / libaom AVIF 编码 0.5–2s 足够用户改一次
+    // 下拉，产物就可能与"按下截图那一刻"的选择无关。
+    // MainWindow 的全部 5 个调用点一直走下面的 EncodingSettings 重载（设置已在 UI 线程
+    // 从快照构建），本重载无任何调用者 ⇒ 直接删除，而不是留一条静默的旁路。
 
     // ═══ 2026-08-30 修复: 移除 EncodeSync / EncodeSyncSdr 两个同步包装 ═══
     // 原实现用 encoder.EncodeXxxAsync(...).GetAwaiter().GetResult() 在 Task.Run 内阻塞等待，
@@ -363,15 +492,33 @@ public sealed class CapturePipelineService
     /// </remarks>
     public async Task<string> EncodeAndSaveAsync(
         byte[] bgra, int w, int h, EncodingSettings settings,
-        bool iccBakeEnabled, string colorSpaceTag,
+        ColorDecision decision,
         CancellationToken ct = default, ID3D11Texture2D? gpuTexture = null,
         string? outputDir = null)
     {
         var encoder = EncoderFactory.Create(settings.Format);
-        if (gpuTexture is not null)
+        // ═══ 2026-09-17 双路径策略：本入口源恒为 8-bit BGRA ⇒ 恒 8-bit 输出 ═══
+        // 源只有 8-bit，升位深不产生信息、只徒增体积 ⇒ 无论用户设置什么位深都钳到 8
+        // （诚实做法，交接 §4.3 Case B）。scRGB Float16 源走 EncodeHdrFrameAsync，那边才有真 10-bit 通路。
+        if (settings.OutputBitDepth > 8)
+        {
+            LogService.Info("Pipeline",
+                $"双路径策略: 8-bit 源不升位深，输出位深 {settings.OutputBitDepth} → 8（源只有 8-bit，升位深不产生信息）");
+            settings.OutputBitDepth = 8;
+        }
+        // GPU 纹理直通会【绕开】下面那次 CPU 矩阵 ⇒ 只有"这次根本不需要搬色"时才许直通。
+        // 判据放在管线里而不是各调用点：调用点传不传纹理是性能选择，"搬色必须过 CPU"是正确性约束，
+        // 后者不该被调用方各自决定。（NVENC 下发的 H.273 matrixCoefficients 是 YUV↔RGB 系数，
+        // 不是色域转换 —— 见 NvEncoderNative.cs:96 与 §32.7，所以硬件路补不了这一刀。）
+        if (gpuTexture is not null && decision.NeedsMapping)
+        {
+            LogService.Info("Pipeline",
+                $"本次需要色域搬运（{decision.SourceTag} → {decision.TargetTag}）⇒ 弃用 GPU 纹理直通，走 CPU 矩阵");
+        }
+        else if (gpuTexture is not null)
             settings.GpuTexture = gpuTexture;
         var outDir = outputDir ?? GetEffectiveOutputDir();
-        var path = BuildOutputPath(settings.Format, outDir);
+        var path = BuildOutputPath(settings.Format, outDir, settings);
 
         LogService.Info("Pipeline", $"开始编码: {settings.Format} {w}x{h} → {Path.GetFileName(path)}");
 
@@ -381,9 +528,19 @@ public sealed class CapturePipelineService
         await Task.Run(async () =>
         {
             ct.ThrowIfCancellationRequested();
-            var (pixels, iccProfile) = PreparePixelsWithIcc(bgra, w, h, iccBakeEnabled, colorSpaceTag);
+            var (pixels, iccProfile, degradedToTag) = PreparePixelsWithIcc(bgra, w, h, decision);
             if (iccProfile is not null)
                 settings.IccProfile = iccProfile;
+            // ═══ 2026-09-19 缺陷 D-1：烘焙没做成 ⇒ 声明跟着像素走，不跟着请求走 ═══
+            // tag 与 ICC 必须【一起】改：只清 ICC 会留下 cICP=目标色域（PNG/AVIF 的码点直接取自 tag），
+            // 那和刚被清掉的 ICC 是同一个谎。反之只改 tag 而留着目标 ICC 也是谎。
+            // settings.IccProfile 在这里无条件覆盖，是因为 MainWindow 可能已塞进捕获 ICC
+            // （`settings.IccProfile ??= captureResult.IccProfile`）—— 降级时它必须一起走。
+            if (degradedToTag is not null)
+            {
+                settings.ColorSpaceTag = degradedToTag;
+                settings.IccProfile = iccProfile;
+            }
 
             ct.ThrowIfCancellationRequested();
             // 始终走 SDR 路径
@@ -392,9 +549,12 @@ public sealed class CapturePipelineService
         }
         finally { PowerManager.AllowSleep(); }
 
-        var fileSize = File.Exists(path) ? new FileInfo(path).Length : 0;
-        LogService.Info("Pipeline", $"编码完成: {Path.GetFileName(path)} ({fileSize / 1024.0:F1} KB)");
-        return path;
+        // 同上：校正末端保底（如 AVIF → PNG）后的真实落盘路径
+        var actualPath = FormatHelper.ResolveActualPath(path);
+        var fileSize = File.Exists(actualPath) ? new FileInfo(actualPath).Length : 0;
+        LogService.Info("Pipeline", $"编码完成: {Path.GetFileName(actualPath)} ({fileSize / 1024.0:F1} KB)");
+        NotifyEncoderFallbackIfAny();
+        return actualPath;
     }
 
     /// <summary>编码并保存 HDR 帧数据（WGC 直接捕获的 scRGB float 像素）。</summary>
@@ -404,9 +564,31 @@ public sealed class CapturePipelineService
     {
         var encoder = EncoderFactory.Create(settings.Format);
         var outDir = GetEffectiveOutputDir();
-        var path = BuildOutputPath(settings.Format, outDir);
+        var path = BuildOutputPath(settings.Format, outDir, settings);
 
-        LogService.Info("Pipeline", $"HDR 编码启动: {settings.Format} {hdrFrame.Width}x{hdrFrame.Height} HDR={settings.HdrOutput} 色域={settings.ColorSpaceTag} → {Path.GetFileName(path)}");
+        // ═══ 2026-09-16：分段计时 ═══
+        // 实测 avifenc 编码 4K 10-bit 444 只要约 1.3s，而整条 HDR AVIF 链路要 24s
+        // ⇒ 绝大部分耗时在**编码之前**（scRGB→PQ / 位深转换 / PNG 中转）。
+        // 这里把"编码调用"单独计时，与总耗时对比即可定位瓶颈在哪一段。
+        var swTotal = System.Diagnostics.Stopwatch.StartNew();
+
+        // ═══ 内存留痕（2026-09-20）：一条 4K HDR 链路会造出多份 132MB 级的 float[]/byte[] ═══
+        // 实测连拍 4 张后私有字节从 1.5GB 爬到 3.3GB、静置 40s 不回落。但 WorkingSet/PrivateMemory
+        // 分不出"对象还被活着引用"和"GC 已回收却没把段还给 OS"（发布包的 runtimeconfig 里没有任何
+        // GC 设置 ⇒ 默认工作站 GC，会保留已提交段）。所以两个数一起打：
+        //   托管堆 ≈ 私有字节 ⇒ 真持有，该去查谁还引用着帧缓冲；
+        //   托管堆 ≪ 私有字节 ⇒ 只是没归还，属 GC 策略而非泄漏。
+        // GetTotalMemory(forceFullCollection: false) 不触发收集，不影响时延。
+        static string MemText()
+        {
+            long heap = System.GC.GetTotalMemory(forceFullCollection: false) / (1024 * 1024);
+            using var self = System.Diagnostics.Process.GetCurrentProcess();
+            return $"托管堆={heap}MB 私有={self.PrivateMemorySize64 / (1024 * 1024)}MB "
+                 + $"工作集={self.WorkingSet64 / (1024 * 1024)}MB";
+        }
+
+        LogService.Info("Pipeline",
+            $"HDR 编码启动: {settings.Format} {hdrFrame.Width}x{hdrFrame.Height} HDR={settings.HdrOutput} 色域={settings.ColorSpaceTag} → {Path.GetFileName(path)} | 内存(起) {MemText()}");
 
         PowerManager.PreventSleep();
         try
@@ -420,15 +602,18 @@ public sealed class CapturePipelineService
             //       或编码器不支持 HDR 的降级
             if (!settings.HdrOutput)
             {
-                LogService.Info("Pipeline", $"HDR 帧降级到 SDR 色调映射: {settings.Format}");
-                var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
-                // ═══ 2026-08-16 P1-2 修复: 派生像素 (色调映射后) 禁止带 GPU 纹理 ═══
-                // 纹理是原始捕获帧的内容, 与色调映射后的像素不一致 → NVENC 会编码
-                // 原始桌面帧而非映射结果 → 色彩/亮度错误。统一规则: 派生像素不带纹理。
-                settings.GpuTexture = null;
-                // 色调映射后像素为 sRGB 色域
-                settings.ColorSpaceTag = "sRGB";
-                await encoder.EncodeSdrAsync(sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
+                // ═══ 2026-09-19 解耦：删掉"Float16 源 ⇒ 把 OutputBitDepth 强提到 16"（2026-09-18 指令的副作用）═══
+                // 那条改写让【用户请求的 8-bit 永远不可达】：位深下拉同时决定了"输出容器位深"和
+                // "内部走不走高精度链"，于是想要 8-bit 也得吃 16-bit 产物的体积。
+                // 现在的分工（与 FormatEncoders 的 FormatHelper.IsHighPrecisionSource 对接）：
+                //   · 源精度 = 本入口的事实：HdrFrameData.Pixels 是 WGC Float16 scRGB（Windows 给得出 >8-bit）
+                //     ⇒ 编码器内部恒走"色域矩阵 → 色调映射 → gamma → 量化一次"的高精度浮点链；
+                //   · 容器位深 = 用户请求的 OutputBitDepth，不再被改写（8 就真出 8-bit 容器）。
+                // 8-bit BGRA 源（EncodeAndSaveAsync）那条"钳 8"保留 —— 那是源精度的诚实陈述，与此无关。
+                LogService.Info("Pipeline",
+                    $"scRGB(Float16) 源 ⇒ 内部走高精度浮点链；输出容器位深按用户请求 = {settings.OutputBitDepth}-bit"
+                    + $"，委托 {settings.Format} 编码器 SDR 分派（矩阵/色调映射/gamma 不因 8-bit 请求跳过）");
+                await encoder.EncodeAsync(hdrFrame, settings, path, ct);
                 return;
             }
 
@@ -463,7 +648,10 @@ public sealed class CapturePipelineService
                 var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
                 // ═══ 2026-08-16 P1-2 修复: 派生像素禁止带 GPU 纹理 (同上) ═══
                 settings.GpuTexture = null;
-                settings.ColorSpaceTag = "sRGB";
+                // ⚠ 2026-09-19：这里不再无条件把 ColorSpaceTag 覆写成 "sRGB"。
+                //   ToSdr 现在与高位深通路共用同一条浮点链（含色域矩阵），标签/ICC 记账已在其中完成：
+                //   广色域时像素已被搬到目标色域 ⇒ 必须保留 tag 让容器同色域声明，
+                //   再覆写成 sRGB 就成了"声明与像素矛盾"（查看器按 sRGB 解释广色域像素 → 偏色）。
                 settings.HdrOutput = false;
                 await encoder.EncodeSdrAsync(sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
             }
@@ -471,8 +659,45 @@ public sealed class CapturePipelineService
         }
         finally { PowerManager.AllowSleep(); }
 
-        var fileSize = File.Exists(path) ? new FileInfo(path).Length : 0;
-        LogService.Info("Pipeline", $"HDR 编码完成: {Path.GetFileName(path)} ({fileSize / 1024.0:F1} KB)");
-        return path;
+        // 同上：校正末端保底（如 AVIF → PNG）后的真实落盘路径
+        var actualPath = FormatHelper.ResolveActualPath(path);
+        var fileSize = File.Exists(actualPath) ? new FileInfo(actualPath).Length : 0;
+        LogService.Info("Pipeline",
+            $"HDR 编码完成: {Path.GetFileName(actualPath)} ({fileSize / 1024.0:F1} KB) 总耗时={swTotal.ElapsedMilliseconds}ms | 内存(终) {MemText()}");
+        NotifyEncoderFallbackIfAny();
+        return actualPath;
+    }
+
+    private static bool s_hwFallbackNotified;
+
+    /// <summary>
+    /// 若本次编码发生过<b>任何形式的后端降级</b>（硬件→软件、cwebp 缺失→PNG 保底、
+    /// avifenc 拒位深→按 8-bit 重试），给出一次性提示。
+    /// <para>4K AVIF：硬件约 0.12s vs 软件约 22s（约 180 倍）。原实现全程只有 Debug.WriteLine，
+    /// Release 下完全无声 —— 用户只会觉得"软件变慢了"，既不知道原因，也不知道能否恢复。
+    /// 这里复用已有的 ShowCaptureDegraded 通道（原本用于捕获降级）。</para>
+    /// 每会话只提示一次：连续截图时反复弹窗是干扰，不是帮助。
+    /// </summary>
+    private static void NotifyEncoderFallbackIfAny()
+    {
+        // ═══ 2026-09-19（全编码器审计）：两条通道都要读，且读一次即清空 ═══
+        //   · NvencAvifBackend.LastFallbackReason —— NVENC 专用（硬件→软件）
+        //   · EncoderFallbackNotifier.LastReason  —— Core 侧通用：MFT→libaom、cwebp 缺失→PNG 保底、
+        //     avifenc 拒位深→按 8-bit 重试。这三处原先只有 Debug.WriteLine，Release 下完全无声。
+        // 不清空会把上一次的原因报到下一次截图上；两条都有原因时，被展示的那条之外
+        // 另一条仍要进日志，否则只剩一个原因可见。
+        var hw = NvencAvifBackend.LastFallbackReason;
+        NvencAvifBackend.LastFallbackReason = null;
+        var gen = EncoderFallbackNotifier.LastReason;
+        EncoderFallbackNotifier.LastReason = null;
+        if (hw is { Length: > 0 } && gen is { Length: > 0 })
+            LogService.Warn("Pipeline", gen);
+        var reason = string.IsNullOrEmpty(hw) ? gen : hw;
+        if (string.IsNullOrEmpty(reason)) return;
+
+        LogService.Warn("Pipeline", reason);          // UI 日志面板可见
+        if (s_hwFallbackNotified) return;
+        s_hwFallbackNotified = true;
+        ToastService.ShowCaptureDegraded(reason);
     }
 }

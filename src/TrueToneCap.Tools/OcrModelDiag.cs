@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrModelDiag.cs — OCR 模型诊断：dump det/rec 输入输出签名 + det 输出统计
 // 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-diag <modelDir>
 using Microsoft.ML.OnnxRuntime;

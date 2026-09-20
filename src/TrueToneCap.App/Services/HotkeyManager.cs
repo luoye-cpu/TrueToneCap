@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/HotkeyManager.cs
 // 全局热键管理（基于 Win32 RegisterHotKey + 冲突检测 + 回退）
 // 支持多热键注册（截图/录制/无感截图）
