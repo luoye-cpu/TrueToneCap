@@ -1,0 +1,58 @@
+#!/bin/sh
+# TrueToneCap pre-commit —— 只做快速构建校验（约 27s）
+#
+# 为什么这里只构建、不跑测试:
+#   全量门禁 7 个套件约 110s。把它压在每次 commit 上，实际后果是人人都加 --no-verify，
+#   于是钩子整体失效 —— 比没有钩子更糟（还多了一层"以为有保护"的错觉）。
+#   所以：commit 只挡"编译不过"，测试移到 pre-push。
+#
+# 绕过: git commit --no-verify（紧急时可用，但请随后补跑 scripts/verify.ps1）
+#
+# 调试: TTC_HOOK_DRYRUN=1 sh scripts/git-hooks/pre-commit
+#       只打印将要执行的命令行并退出 0，不启动任何子进程 ——
+#       用于在没有外部进程权限 / 只想确认接线的环境里自查。
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$repo_root" ]; then
+    # 2026-09-15 修正：原为「静默跳过 exit 0」。静默跳过 = 门禁无声失效，
+    # 比没有钩子更危险（多一层"以为有保护"的错觉）。环境异常应显式阻断。
+    echo "[pre-commit] ❌ 无法定位仓库根 —— 拒绝放行。" >&2
+    echo "             确需跳过请用 git commit --no-verify，并随后补跑 scripts/verify.ps1" >&2
+    exit 1
+fi
+
+verify="$repo_root/scripts/verify.ps1"
+if [ ! -f "$verify" ]; then
+    echo "[pre-commit] ❌ 未找到 $verify —— 拒绝放行（门禁脚本缺失）。" >&2
+    echo "             请确认仓库完整；确需跳过用 git commit --no-verify" >&2
+    exit 1
+fi
+
+# 选一个可用的宿主：Windows PowerShell 优先，其次 pwsh
+if command -v powershell.exe >/dev/null 2>&1; then
+    ps_exe="powershell.exe"
+elif command -v pwsh.exe >/dev/null 2>&1; then
+    ps_exe="pwsh.exe"
+else
+    echo "[pre-commit] ❌ 未找到 powershell.exe / pwsh.exe —— 拒绝放行。" >&2
+    echo "             Git Bash 下若 PATH 未含 PowerShell，请把其安装目录加入 PATH；" >&2
+    echo "             确需跳过用 git commit --no-verify，并随后补跑 scripts/verify.ps1" >&2
+    exit 1
+fi
+
+if [ -n "$TTC_HOOK_DRYRUN" ]; then
+    echo "[pre-commit][dry-run] repo_root=$repo_root"
+    echo "[pre-commit][dry-run] $ps_exe -NoProfile -ExecutionPolicy Bypass -File \"$verify\" -BuildOnly"
+    exit 0
+fi
+
+echo "[pre-commit] 构建校验中（只构建，不跑测试；测试在 pre-push）..."
+if "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$verify" -BuildOnly; then
+    exit 0
+fi
+
+echo "" >&2
+echo "[pre-commit] ❌ 构建未通过，已阻止本次提交。" >&2
+echo "             修复后重新 git commit；确需跳过用 git commit --no-verify，" >&2
+echo "             但请随后补跑: $ps_exe -File scripts/verify.ps1" >&2
+exit 1

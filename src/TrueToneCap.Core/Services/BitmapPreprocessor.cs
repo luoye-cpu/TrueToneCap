@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/BitmapPreprocessor.cs
 // OCR 图像预处理管线：提升 Windows OCR 对小字/低对比度文字的识别率
 

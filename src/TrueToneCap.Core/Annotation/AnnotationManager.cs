@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Annotation/AnnotationManager.cs
 // 标注管理器 — 图层操作、撤销/重做栈
 

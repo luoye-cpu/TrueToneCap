@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/HdrCaptureWindow.cs
 // 全 D3D11 HDR 截图预览窗口
 // 桌面帧: D3D11 全屏纹理渲染 (scRGB Float16)
@@ -11,6 +13,8 @@ using Vortice.Direct3D11;
 using Vortice.DXGI;
 using TrueToneCap.Core.Detection;
 using TrueToneCap.Core.Annotation;
+using TrueToneCap.Core.Processing;   // D3DDeviceLost（设备丢失判定）
+using TrueToneCap.Core.Logging;   // LogLevel / LogCategory（定义已移到 Core，Core 也要能写日志）
 
 namespace TrueToneCap.App.Services;
 
@@ -22,13 +26,26 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private int _winX, _winY, _winW, _winH;
     private volatile bool _disposed;
     private volatile bool _closing; // ═══ 2026-08-16 P1-2: Close 后渲染循环感知退出 ═══
-    private readonly ID3D11Device _device;
-    private readonly ID3D11DeviceContext _ctx;
+    // ═══ 2026-09-15: 设备丢失后可重建，故不再 readonly ═══
+    // 原为 readonly ⇒ 设备丢失后无法替换，只能整个窗口重建（用户可见闪烁 + 丢失选区）。
+    private ID3D11Device _device;
+    private ID3D11DeviceContext _ctx;
+
+    // ── D3D 设备丢失恢复 (2026-09-15) ──
+    private volatile bool _deviceLost;            // 已检测到丢失（防止每帧重复处理/刷屏）
+    private int _deviceLostRecoveryAttempts;      // 已尝试重建次数
+    private const int MaxDeviceLostRecovery = 2;  // 上限：连续失败说明驱动层面有问题，不再自愈
+    private int _renderFrameSeq;                  // 渲染帧序号（用于周期性设备探测）
+    private volatile bool _renderThreadStuck;     // 渲染线程未能在超时内退出（卡在 D3D 调用中）
     private IDXGISwapChain? _swapChain;
     private ID3D11Texture2D? _backBuffer;
     private ID3D11RenderTargetView? _rtv;
     private ID3D11VertexShader? _vs;
-    private ID3D11PixelShader? _ps;
+    // ═══ 2026-09-16：_ps 字段已删除 ═══
+    // 原 _ps（ToneMapping PS）是死代码：创建后从未 PSSetShader ——
+    // 本文件唯一的 PSSetShader（RenderGpuComposite）绑的是 _overlayPs。
+    // 保留它只会误导后来者以为存在一条"GPU 直通拷贝/色调映射"路径。
+    // （真正承担色调映射的是 Core 的 ToneMapper，走 CPU。）
 
     // ═══ 2026-08-16 方案A: GSYNC/FreeSync (VRR) 支持 ═══
     // 检测到允许撕裂时交换链加 AllowTearing + Present(Tear), 让 DWM 在 VRR 面板
@@ -71,20 +88,22 @@ public sealed partial class HdrCaptureWindow : IDisposable
     // 打包为单个不可变对象后通过 Volatile.Write/Read 发布/读取，杜绝撕裂。
     private FrameData? _frame;     // 原始帧（不可修改）+ 其真实尺寸
     private float[]? _compPixels; // 合成缓冲（按窗口尺寸分配，见 CompositeUI）
-    private int _dragHandle = -1; // 当前拖拽的手柄 (0=TL, 1=TR, 2=BL, 3=BR, -1=无)
-    private int _handleSize = 8; // 手柄尺寸（物理像素，随 DPI 缩放）
-    private int _handleHit = 12; // 手柄命中区域（物理像素，随 DPI 缩放）
-    private double _uiScale = 1.0; // DPI 缩放系数（GetDpiForWindow / 96）
-    private bool _selComplete;
-    private int _sx1, _sy1, _sx2, _sy2, _mx, _my;
-    private bool _down, _moved;
+    // ── 跨线程可见性：UI 线程写、渲染线程读，加 volatile 保证内存屏障 ──
+    private volatile int _dragHandle = -1; // 当前拖拽的手柄 (0=TL, 1=TR, 2=BL, 3=BR, -1=无)
+    private volatile int _handleSize = 8; // 手柄尺寸（物理像素，随 DPI 缩放）
+    private volatile int _handleHit = 12; // 手柄命中区域（物理像素，随 DPI 缩放）
+    private double _uiScale = 1.0; // DPI 缩放系数（GetDpiForWindow / 96）——仅 Initialize 写，渲染前已发布，无需 volatile
+    private volatile bool _selComplete;
+    private volatile int _sx1, _sy1, _sx2, _sy2, _mx, _my;
+    private volatile bool _down, _moved;
 
     // ── 标注模式 (2026-08-11 A方案: GPU 内联标注) ──
-    private bool _annoMode;                      // 是否处于标注模式
-    private string _annoTool = "Rect";           // 当前标注工具
-    private bool _annoDown;                      // 标注拖拽中
+    private volatile bool _annoMode;                      // 是否处于标注模式
+    private volatile string _annoTool = "Rect";           // 当前标注工具
+    private volatile bool _annoDown;                      // 标注拖拽中
     private System.Numerics.Vector2 _annoDragStart; // 标注拖拽起点 (选区图像坐标)
     private readonly List<System.Numerics.Vector2> _penPoints = []; // 画笔轨迹
+    private readonly object _penPointsLock = new(); // 保护 _penPoints 跨线程访问 (UI 写/渲染线程读)
     private readonly AnnotationManager _annoManager = new();       // 标注图层管理 (撤销/重做)
     private nint _editHwnd;                      // 文字输入 EDIT 子窗口
     private System.Numerics.Vector2 _textInsertPos; // 文字插入位置 (选区图像坐标)
@@ -332,10 +351,13 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 File.Exists(Path.Combine(dir, name)) ? Path.Combine(dir, name) : null;
             string? vsp = FindCso(sd, "FullscreenVS.hlsl.cso") ?? FindCso(sdAlt, "FullscreenVS.hlsl.cso");
             if (vsp is not null) _vs = _device.CreateVertexShader(File.ReadAllBytes(vsp), null);
-            // 使用 CopyTexture.hlsl（直通拷贝，不做色调映射）
-            string? psp = FindCso(sd, "CopyTexture.hlsl.cso") ?? FindCso(sdAlt, "CopyTexture.hlsl.cso")
-                ?? FindCso(sd, "ToneMapping.hlsl.cso") ?? FindCso(sdAlt, "ToneMapping.hlsl.cso"); // 回退
-            if (psp is not null) _ps = _device.CreatePixelShader(File.ReadAllBytes(psp));
+            // ═══ 2026-09-16：删除 ToneMapping PS（即原 _ps）的创建 ═══
+            // 原代码在这里创建 _ps，但它从未被 PSSetShader 绑定过：
+            // 本文件唯一的 PSSetShader（RenderGpuComposite）绑的是 _overlayPs。
+            // 也就是说这个着色器白白创建、又白白释放，还让后来者误以为存在
+            // 一条"GPU 直通拷贝 / GPU 色调映射"的路径。
+            // 真正承担色调映射的是 Core 的 ToneMapper（CPU 路径）。
+            // 同步删除：字段声明、本处创建、重建路径中的创建、以及各 Dispose 处的释放。
 
             // ── Phase 2 (2026-08-11): GPU 合成着色器 + 常量缓冲（失败自动回退 CPU CompositeUI）──
             try
@@ -378,7 +400,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[HC] GPU 合成初始化失败，回退 CPU: {ex.Message}");
+                LogService.Warn("HdrCapture", $"GPU 合成初始化失败，回退 CPU: {ex.Message}", LogCategory.Capture);
                 _overlayPs?.Dispose(); _overlayPs = null;
                 _uiCb?.Dispose(); _uiCb = null;
                 _useGpuCompositor = false;
@@ -410,7 +432,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[HC] 预创建纹理失败 (首帧将惰性创建): {ex.Message}");
+                LogService.Warn("HdrCapture", $"预创建纹理失败 (首帧将惰性创建): {ex.Message}", LogCategory.Capture);
             }
 
             // ── DPI 缩放：全屏 CPU 渲染的 UI（工具栏/手柄/文字）按物理像素绘制，
@@ -440,14 +462,13 @@ public sealed partial class HdrCaptureWindow : IDisposable
             _hardTimer = new System.Threading.Timer(_ =>
             {
                 if (_actionFired || _hwnd == 0 || _disposed) return; // 已正常处理
-                System.Diagnostics.Debug.WriteLine("[HC] 硬看门狗触发: 3 分钟强制退出");
+                LogService.Warn("HdrCapture", "硬看门狗触发: 3 分钟强制退出", LogCategory.Capture);
                 // 先投递超时消息尝试优雅关闭（UI 活着时正常走 FireAction(Cancel)+Close）
                 try { if (_hwnd != 0) PostMessageW(_hwnd, WM_APP_TIMEOUT, 0, 0); } catch { }
                 // 给 UI 线程 5 秒处理时间；仍未响应说明 UI 卡死 → 强制退出进程
                 Thread.Sleep(5000);
                 if (!_actionFired && _hwnd != 0)
                 {
-                    System.Diagnostics.Debug.WriteLine("[HC] UI 无响应，强制退出进程");
                     try { LogService.Error("HdrCapture", "硬看门狗: UI 无响应，强制退出"); } catch { }
                     Environment.Exit(0);
                 }
@@ -535,6 +556,17 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private void RenderCore()
     {
         if (_disposed || !IsInitialized || _swapChain is null) return;
+
+        // ═══ 2026-09-15: 周期性主动探测设备状态 ═══
+        // 某些驱动下 Present 会【静默失败】（不抛异常、画面不更新），
+        // 只有 DeviceRemovedReason 能暴露问题。每 30 帧（约 0.5s）查一次，开销可忽略。
+        if (_deviceLost) return;   // 已判定丢失，等恢复流程结束
+        if ((++_renderFrameSeq % 30) == 0 && D3DDeviceLost.IsDeviceRemoved(_device))
+        {
+            HandleDeviceLost(null);
+            return;
+        }
+
         try
         {
             // 2026-08-11 修复: FlipSequential 交换链 Present 后后台缓冲翻转,
@@ -587,7 +619,193 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // Present(0)：不等待 vsync，避免渲染线程被垂直同步阻塞
             PresentFrame();
         }
-        catch (Exception ex) { LogService.Error("HdrCapture", $"RenderCore 异常: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            // ═══ 2026-09-15: D3D 设备丢失判定 ═══
+            // 此前这里只记一行日志。设备丢失（驱动 TDR / 显卡切换 / 远程桌面变更）后，
+            // 每一帧都会在同一个已死的设备上重复失败：日志刷屏、画面永久黑屏，
+            // 而用户拿不到任何提示，只能杀进程重开。
+            if (D3DDeviceLost.ShouldRebuild(_device, ex))
+            {
+                HandleDeviceLost(ex);
+                return;
+            }
+            LogService.Error("HdrCapture", $"RenderCore 异常: {ex.Message}");
+        }
+    }
+
+    // ═══════════════════════════════════════
+    //  D3D 设备丢失恢复 (2026-09-15)
+    // ═══════════════════════════════════════
+
+    /// <summary>
+    /// 处理设备丢失：去重 → 记录诊断 → 尝试原地重建 → 超限时放弃自愈。
+    /// </summary>
+    /// <remarks>
+    /// 判据来自 <see cref="D3DDeviceLost"/>（异常 HRESULT + 设备 DeviceRemovedReason 双通道）。
+    /// 原地重建而非重建窗口：窗口句柄、帧数据、选区状态全部保留，用户不会看到窗口闪烁。
+    /// </remarks>
+    private void HandleDeviceLost(Exception? ex)
+    {
+        if (_deviceLost) return;   // 已在恢复流程中，避免每帧重复触发
+        _deviceLost = true;
+
+        LogService.Error("HdrCapture",
+            $"检测到 D3D 设备丢失: {D3DDeviceLost.Describe(_device, ex)}", LogCategory.Capture);
+
+        if (_deviceLostRecoveryAttempts >= MaxDeviceLostRecovery)
+        {
+            LogService.Error("HdrCapture",
+                $"已重建 {MaxDeviceLostRecovery} 次仍再次丢失，停止自动恢复（通常是显卡驱动问题，建议更新驱动或重启程序）",
+                LogCategory.Capture);
+            return;
+        }
+
+        _deviceLostRecoveryAttempts++;
+        if (!TryRebuildDeviceResources())
+        {
+            LogService.Error("HdrCapture",
+                "设备丢失后重建失败 —— HDR 覆盖层不可用；建议改用选区模式或重启程序",
+                LogCategory.Capture);
+        }
+    }
+
+    /// <summary>
+    /// 释放所有 D3D 资源（重建前调用）。逐项 try：设备已失效时 Dispose 本身可能抛异常。
+    /// </summary>
+    private void ReleaseDeviceResources()
+    {
+        void Safe(System.IDisposable? d) { try { d?.Dispose(); } catch { } }
+        Safe(_desktopSrv); Safe(_desktopTex); Safe(_pooledStaging);
+        Safe(_textAtlasSrv); Safe(_textAtlas);
+        Safe(_samp); Safe(_rsNoCull); Safe(_uiCb);
+        Safe(_overlayPs); Safe(_vs);   // _ps 已删除（死代码，见文件头说明）
+        Safe(_rtv); Safe(_backBuffer); Safe(_swapChain);
+        // 注意：先释放子资源再释放设备/上下文
+        Safe(_ctx); Safe(_device);
+
+        _desktopSrv = null; _desktopTex = null; _pooledStaging = null;
+        _textAtlasSrv = null; _textAtlas = null;
+        _samp = null; _rsNoCull = null; _uiCb = null;
+        _overlayPs = null; _vs = null;
+        _rtv = null; _backBuffer = null; _swapChain = null;
+        _ctx = null!;
+    }
+
+    /// <summary>
+    /// 设备丢失后原地重建 D3D 资源。成功后帧会自动重传（<c>_hasFrame=false</c>）。
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ 本方法的创建参数必须与 <see cref="Initialize"/> 中的创建逻辑保持一致
+    /// （交换链格式/缓冲数/常量缓冲大小等）。修改任一处时请同步另一处 ——
+    /// 设备丢失是罕见路径，自动化测试难以覆盖，不同步只会在真机 TDR 时才暴露。
+    /// </remarks>
+    private bool TryRebuildDeviceResources()
+    {
+        try
+        {
+            LogService.Info("HdrCapture",
+                $"尝试重建 D3D 资源（第 {_deviceLostRecoveryAttempts} 次）", LogCategory.Capture);
+
+            // ① 释放旧资源
+            ReleaseDeviceResources();
+
+            // ② 重建设备（与构造函数一致：独占设备，不与其他组件共享）
+            _device = D3D11.D3D11CreateDevice(Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+            _ctx = _device.ImmediateContext;
+
+            // ③ 重建交换链 + 后台缓冲 + RTV（参数与 Initialize 一致）
+            using (var dxgiD = _device.QueryInterface<IDXGIDevice>())
+            using (var adapter = dxgiD.GetAdapter())
+            using (var factory = adapter.GetParent<IDXGIFactory7>())
+            {
+                var desc = new SwapChainDescription1
+                {
+                    Width = (uint)_winW, Height = (uint)_winH,
+                    Format = Format.R16G16B16A16_Float,
+                    SampleDescription = new SampleDescription(1, 0),
+                    BufferUsage = Usage.RenderTargetOutput,
+                    BufferCount = 2,
+                    Scaling = Scaling.Stretch,
+                    SwapEffect = SwapEffect.FlipSequential,
+                    AlphaMode = AlphaMode.Ignore,
+                    Flags = SwapChainFlags.None
+                };
+                _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, desc);
+                factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);
+                using var sc3 = _swapChain.QueryInterface<IDXGISwapChain3>();
+                sc3.SetColorSpace1(ColorSpaceType.RgbFullG10NoneP709);
+            }
+            _backBuffer = _swapChain!.GetBuffer<ID3D11Texture2D>(0);
+            _rtv = _device.CreateRenderTargetView(_backBuffer);
+
+            // ④ 重建着色器 / 常量缓冲 / 采样器（与 Initialize 同样的双路径 cso 查找）
+            string sd = Path.Combine(AppContext.BaseDirectory, "data", "Shaders");
+            string sdAlt = Path.Combine(AppContext.BaseDirectory, "Shaders");
+            static string? FindCso(string dir, string name) =>
+                File.Exists(Path.Combine(dir, name)) ? Path.Combine(dir, name) : null;
+
+            string? vsp = FindCso(sd, "FullscreenVS.hlsl.cso") ?? FindCso(sdAlt, "FullscreenVS.hlsl.cso");
+            if (vsp is not null) _vs = _device.CreateVertexShader(File.ReadAllBytes(vsp), null);
+            // 注：原实现在此重建 _ps（ToneMapping PS），但它是死代码（从未绑定），已一并删除。
+
+            try
+            {
+                string? osp = FindCso(sd, "OverlayComposite.hlsl.cso") ?? FindCso(sdAlt, "OverlayComposite.hlsl.cso");
+                if (osp is not null && _vs is not null)
+                {
+                    _overlayPs = _device.CreatePixelShader(File.ReadAllBytes(osp));
+                    // 必须与 Initialize 中的 UiCbByteWidth 一致（HLSL cbuffer 声明大小）
+                    const uint UiCbByteWidth = 5584;
+                    _uiCb = _device.CreateBuffer(new BufferDescription
+                    {
+                        ByteWidth = UiCbByteWidth,
+                        Usage = ResourceUsage.Dynamic,
+                        BindFlags = BindFlags.ConstantBuffer,
+                        CPUAccessFlags = CpuAccessFlags.Write
+                    });
+                    _useGpuCompositor = Environment.GetEnvironmentVariable("TTC_GPU_COMPOSITE") != "0";
+                    _rsNoCull = _device.CreateRasterizerState(new RasterizerDescription
+                    {
+                        FillMode = FillMode.Solid,
+                        CullMode = CullMode.None
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn("HdrCapture", $"重建 GPU 合成资源失败，回退 CPU: {ex.Message}", LogCategory.Capture);
+                _overlayPs?.Dispose(); _overlayPs = null;
+                _uiCb?.Dispose(); _uiCb = null;
+                _useGpuCompositor = false;
+            }
+
+            _samp = _device.CreateSamplerState(new SamplerDescription
+            {
+                Filter = Filter.MinMagMipLinear,
+                AddressU = TextureAddressMode.Clamp,
+                AddressV = TextureAddressMode.Clamp,
+                AddressW = TextureAddressMode.Clamp,
+                ComparisonFunc = ComparisonFunction.Never,
+                MinLOD = 0,
+                MaxLOD = float.MaxValue
+            });
+
+            // ⑤ 纹理交给惰性重建：_frame 仍保留，RenderCore 会因 _hasFrame=false
+            //    自动重新 UploadFrame（UploadFrame 内部按需创建 _desktopTex / _pooledStaging）。
+            _hasFrame = false;
+            _atlasScale = 0;   // 文字图集也需按新设备重建
+
+            _deviceLost = false;
+            LogService.Info("HdrCapture", "D3D 资源重建成功，帧将自动重传", LogCategory.Capture);
+            RequestRedraw();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("HdrCapture", $"D3D 资源重建失败: {ex.Message}", LogCategory.Capture);
+            return false;
+        }
     }
 
     /// <summary>统一帧呈接入口 (2026-08-26 修复: VRR 路径彻底禁用)。
@@ -690,7 +908,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
             float fontSize = 11f * (float)_uiScale;
             var atlasBytes = new byte[atlasW * atlasH * 4];
             var subs = new System.Numerics.Vector4[40];
-            using (var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice())
+            // 共享设备：不 Dispose（见 AnnotationRasterizer.SharedCanvasDevice 的说明）
+            var device = AnnotationRasterizer.SharedCanvasDevice;
             {
                 // 行 0: 主工具栏 7 项 (槽 0-6)
                 int cursorX = 0;
@@ -1021,7 +1240,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         SetV4(cb.AnnoLayers, o + 3, new System.Numerics.Vector4(type == 3 ? 12f : (type == 6 ? 10f : 0f), 0, 0, 0));
         if (type == 4)
         {
-            var pts = SimplifyPolyline(_penPoints, 13);
+            List<System.Numerics.Vector2> pts;
+            lock (_penPointsLock) { pts = SimplifyPolyline(_penPoints, 13); }
             for (int k = 0; k < 12; k++)
                 SetV4(cb.AnnoLayers, o + 4 + k, k + 1 < pts.Count
                     ? new System.Numerics.Vector4(pts[k].X, pts[k].Y, pts[k + 1].X, pts[k + 1].Y)
@@ -1423,8 +1643,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
     {
         try
         {
-            // 1. Win2D 共享设备预热（首次调用慢，后续 GetSharedDevice 零成本）
-            using var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
+            // 1. Win2D 共享设备预热（首次调用慢，后续零成本）
+            var device = AnnotationRasterizer.SharedCanvasDevice;   // 共享设备：不 Dispose
 
             // 2. 工具栏按钮文字（内容固定，与 CompositeUI 中的 items 一致）
             var items = new (string icon, string text, string hint)[]
@@ -1463,11 +1683,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
                     }
                 }
             }
-            System.Diagnostics.Debug.WriteLine($"[HC] 启动预热完成: {s_textCache.Count} 个文字位图");
+            LogService.Info("HdrCapture", $"启动预热完成: {s_textCache.Count} 个文字位图", LogCategory.UI);
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[HC] 启动预热失败（非致命）: {ex.Message}");
+            LogService.Warn("HdrCapture", $"启动预热失败（非致命）: {ex.Message}", LogCategory.UI);
         }
     }
 
@@ -1504,7 +1724,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // 缓存命中直接复用位图（文字内容/尺寸相同即可，颜色在合成时着色）
             if (!s_textCache.TryGetValue((text, tw, th), out var pixels))
             {
-                using var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
+                var device = AnnotationRasterizer.SharedCanvasDevice;   // 共享设备：不 Dispose
                 pixels = RenderTextBitmap(device, text, tw, th, 11f * (float)_uiScale);
                 if (pixels is null) return;
                 s_textCache[(text, tw, th)] = pixels;
@@ -1531,9 +1751,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            System.Diagnostics.Debug.WriteLine($"[HC] DrawTextWin2D 失败: {ex.Message}");
         }
     }
 
@@ -1720,8 +1939,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 _down = false; // 标注绘制不使用选区拖拽标志（shader 遮罩由选区外条件控制）
                 _annoDown = true;
                 _annoDragStart = ScreenToAnno(x, y);
-                _penPoints.Clear();
-                _penPoints.Add(_annoDragStart);
+                lock (_penPointsLock)
+                {
+                    _penPoints.Clear();
+                    _penPoints.Add(_annoDragStart);
+                }
                 SetCapture(_hwnd);
                 RequestRedraw();
                 return;
@@ -1794,8 +2016,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
             if (_annoTool == "Pen")
             {
                 var ap = ScreenToAnno(x, y);
-                var last = _penPoints[^1];
-                if ((ap - last).Length() > 0.5f) _penPoints.Add(ap);
+                lock (_penPointsLock)
+                {
+                    var last = _penPoints[^1];
+                    if ((ap - last).Length() > 0.5f) _penPoints.Add(ap);
+                }
             }
             RequestRedraw();
             return;
@@ -1845,12 +2070,15 @@ public sealed partial class HdrCaptureWindow : IDisposable
             var end = ScreenToAnno(x, y);
             if (_annoTool == "Pen")
             {
-                if (_penPoints.Count >= 2)
+                lock (_penPointsLock)
                 {
-                    _penPoints.Add(end);
-                    _annoManager.AddLayer(new FreehandLayer { Points = [.. _penPoints] });
+                    if (_penPoints.Count >= 2)
+                    {
+                        _penPoints.Add(end);
+                        _annoManager.AddLayer(new FreehandLayer { Points = [.. _penPoints] });
+                    }
+                    _penPoints.Clear();
                 }
-                _penPoints.Clear();
             }
             else
             {
@@ -1946,7 +2174,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         if (!_annoMode) return;
         _annoMode = false;
         _annoDown = false;
-        _penPoints.Clear();
+        lock (_penPointsLock) { _penPoints.Clear(); }
         DestroyEdit();
         LogService.Info("HdrCapture", "退出标注模式", LogCategory.UI);
         RequestRedraw();
@@ -2024,12 +2252,18 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _editHwnd = CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VIS | WS_BORDER | ES_AUTOHSCROLL,
             ex, ey, ew, eh, _hwnd, (nint)1001, GetModuleHandleW(null), 0);
         if (_editHwnd == 0) return;
-        if (s_editOrigProc == 0)
-        {
-            s_editProc = EditWndProc;
-            s_editOrigProc = GetWindowLongPtrW(_editHwnd, GWLP_WNDPROC);
-            SetWindowLongPtrW(_editHwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(s_editProc));
-        }
+
+        // ═══ 2026-09-15 修复：文字标注第二次起失效 ═══
+        // 原实现 `if (s_editOrigProc == 0)` 只在【首次】做子类化，且 s_editOrigProc 是 static、
+        // DestroyEdit 又不还原 ⇒ 第二次及以后新建的 EDIT 完全没有自定义 WndProc：
+        // Enter/Esc 无响应 → 文字无法提交，输入框也不销毁、一直挡在截图上。
+        // 该变量是 static 意味着跨 HDR 会话同样只在首次生效。
+        // 现改为每次创建都记录并子类化；DestroyEdit 中还原并清零。
+        // （同一时刻最多存在一个文字输入框，static 保存"当前"值是安全的。
+        //   s_editProc 必须用 static 字段持有委托引用，否则委托被 GC 后原生回调会崩。）
+        s_editProc = EditWndProc;
+        s_editOrigProc = GetWindowLongPtrW(_editHwnd, GWLP_WNDPROC);
+        SetWindowLongPtrW(_editHwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(s_editProc));
         SetFocus(_editHwnd);
     }
 
@@ -2057,10 +2291,28 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     private void DestroyEdit()
     {
-        if (_editHwnd != 0) { DestroyWindow(_editHwnd); _editHwnd = 0; }
+        if (_editHwnd != 0)
+        {
+            // 销毁前还原原始 WndProc 并清零（配合 CreateEdit 中"每次都子类化"的修复）
+            if (s_editOrigProc != 0)
+            {
+                SetWindowLongPtrW(_editHwnd, GWLP_WNDPROC, s_editOrigProc);
+                s_editOrigProc = 0;
+            }
+            DestroyWindow(_editHwnd);
+            _editHwnd = 0;
+        }
     }
 
-    private void TouchIdle() { _idleWatch.Restart(); }
+    private void TouchIdle()
+    {
+        _idleWatch.Restart();
+        // ═══ 2026-09-15 修复：硬看门狗必须随用户活跃一起重置 ═══
+        // 同 SelectionOverlay.TouchIdle：原实现只在启动时挂一次 3 分钟定时器，
+        // 之后无论用户是否在标注，到点一律强制退出（甚至 Environment.Exit(0) 杀进程）。
+        // 用户精心标注到第 3 分钟会全部丢失。正确语义是"最后一次交互后 3 分钟"。
+        _hardTimer?.Change(HardExitMs, Timeout.Infinite);
+    }
 
     // ═══════════════════════════════════════
     //  窗口检测（QQ截图式, 定时刷新）
@@ -2131,7 +2383,23 @@ public sealed partial class HdrCaptureWindow : IDisposable
     {
         _renderSignal.Set(); // 唤醒渲染线程退出
         if (_renderThread is { IsAlive: true } && _renderThread != Thread.CurrentThread)
-            _renderThread.Join(2000);
+        {
+            // ═══ 2026-09-15 修复：Join 超时后【绝不能】继续释放 D3D 资源 ═══
+            // Join 失败 = 渲染线程仍卡在某个 D3D 调用里。典型场景正是**设备丢失**：
+            // Present / Map 在已移除的设备上挂起。原实现对此毫无处理 ——
+            // Cleanup() 随后照常 Dispose 交换链、纹理、设备，于是该线程的下一步操作
+            // 就是 use-after-free ⇒ AccessViolationException。
+            // 而 .NET 上 AV 属 Corrupted State Exception，**try/catch 拦不住，进程直接死**
+            // （本项目在 OCR 的 AsTensor 生命周期上已经踩过完全相同的坑）。
+            // 取舍：宁可泄漏这几个 D3D 对象（随进程退出回收），也不能让整个进程崩溃。
+            if (!_renderThread.Join(2000))
+            {
+                _renderThreadStuck = true;
+                LogService.Error("HdrCapture",
+                    "渲染线程 2s 内未退出（可能卡在 D3D 调用，典型如设备丢失）— 跳过资源释放以避免进程崩溃",
+                    LogCategory.Capture);
+            }
+        }
         _renderThread = null;
     }
 
@@ -2150,6 +2418,16 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _regionRefreshTimer?.Dispose(); _regionRefreshTimer = null;
         _closing = true; // ═══ 2026-08-16 P1-2: 清理前让渲染循环退出 ═══
         StopRenderThread();
+
+        // 渲染线程卡住（详见 StopRenderThread）：只清理与 D3D 无关的资源，
+        // 避免该线程访问已被释放的 COM 对象导致进程崩溃。
+        if (_renderThreadStuck)
+        {
+            LogService.Error("HdrCapture", "渲染线程仍在运行，跳过 D3D 资源释放（将随进程退出回收）", LogCategory.Capture);
+            if (_hwnd != 0) { s_windows.TryRemove(_hwnd, out _); DestroyWindow(_hwnd); _hwnd = 0; }
+            return;
+        }
+
         _overlayPs?.Dispose(); _overlayPs = null;
         _uiCb?.Dispose(); _uiCb = null;
         _rsNoCull?.Dispose(); _rsNoCull = null;
@@ -2162,7 +2440,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _backBuffer?.Dispose(); _backBuffer = null;
         _swapChain?.Dispose(); _swapChain = null;
         _vs?.Dispose(); _vs = null;
-        _ps?.Dispose(); _ps = null;
+        // _ps 已删除（死代码）
         _samp?.Dispose(); _samp = null;
         if (_hwnd != 0) { s_windows.TryRemove(_hwnd, out _); DestroyWindow(_hwnd); _hwnd = 0; }
     }
@@ -2176,7 +2454,12 @@ public sealed partial class HdrCaptureWindow : IDisposable
         // HdrCaptureWindow 构造时创建独立设备 (渲染线程独占), 旧实现 Dispose
         // 从不释放 → 每次 HDR 截图泄漏一整套 D3D11 设备/上下文/显存。
         // Cleanup() 已先停渲染线程, 此处安全释放。
+        //
+        // ═══ 2026-09-15: 但若渲染线程卡住（设备丢失时 Present/Map 挂起），
+        //     释放设备会让该线程立刻 use-after-free ⇒ 不可捕获的 AV ⇒ 进程终止。
+        //     这里同样跳过 —— 泄漏优于崩溃。
+        if (_renderThreadStuck) return;
         _ctx?.Dispose();
-        _device.Dispose();
+        _device?.Dispose();
     }
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/AppServices.cs
 // 应用服务容器 — 基于 Microsoft.Extensions.DependencyInjection
 // 所有服务通过 IServiceProvider 管理生命周期，AppServices 提供静态访问门面
@@ -63,7 +65,6 @@ public static class AppServices
         // 之前 wgc 在 GetOrCreateDevice 抛异常时既未注册进容器（容器不会负责释放），
         // 也没有被 Dispose → 其内部的 D3D11 设备与非托管资源泄漏。
         WgcCaptureService? wgc = null;
-        GpuToneMapper? gpuToneMapper = null;
         try
         {
             wgc = new WgcCaptureService();
@@ -71,17 +72,22 @@ public static class AppServices
                 .FirstOrDefault(d => d.IsPrimary)?.MonitorHandle
                 ?? TrueToneCap.Core.Capture.DisplayEnumerator.GetMonitorUnderCursor();
             var d3dDevice = wgc.GetOrCreateDevice(primaryMonitor);
-            gpuToneMapper = new GpuToneMapper(d3dDevice);
+
+            // ═══ 2026-09-16：不再在启动时构造 GpuToneMapper ═══
+            // GpuToneMapper 目前是【死代码】：AppServices.GpuToneMapper 属性全仓没有任何调用者，
+            // 实际的 HDR→SDR 色调映射走的是 Core 的 ToneMapper（CPU 路径）。
+            // 而它构造时会去磁盘读着色器字节码 —— 每次启动都在为一条根本不会执行的路径付费。
+            // 这里停止构造（属性将返回 null）。
+            // ⚠️ HdrCaptureWindow.cs 曾有注释声称"真正承担色调映射的是 GpuToneMapper"，
+            //    与事实相反，已一并修正。若将来要真正接入 GPU 色调映射，在此恢复构造即可。
 
             // 共享 D3D11 设备给 NVENC 后端
             TrueToneCap.Core.Encoding.NvencAvifBackend.SetSharedD3DDevice(d3dDevice);
 
             services.AddSingleton(wgc);
-            services.AddSingleton(gpuToneMapper);
 
             // 已移交容器托管，避免 finally 中重复释放
             wgc = null;
-            gpuToneMapper = null;
 
             LogService.Info("AppServices", "WGC/GPU 管线就绪");
         }
@@ -91,8 +97,7 @@ public static class AppServices
         }
         finally
         {
-            gpuToneMapper?.Dispose();
-            wgc?.Dispose();
+            wgc?.Dispose();   // GpuToneMapper 不再构造，无需在此释放（见上方说明）
         }
 
         // ── Phase 1 (2026-08-11): 启动后台预热预览 UI 缓存（Win2D 设备 + 工具栏文字位图）──

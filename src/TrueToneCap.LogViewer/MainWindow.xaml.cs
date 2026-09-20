@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.LogViewer/MainWindow.xaml.cs
 // 主窗口: 文件列表 + 日志实时查看 (tail) + 过滤/搜索/清理
 

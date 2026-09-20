@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs
 // JPEG Gain Map (Ultra HDR) — ISO 21496-1 + Ultra HDR v1 双元数据兼容实现
 //
@@ -28,6 +30,7 @@
 
 using System.IO;
 using TrueToneCap.Core.ColorManagement;
+using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Processing;
 
 namespace TrueToneCap.Core.Encoding;
@@ -50,17 +53,68 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     public override async Task EncodeAsync(HdrFrameData frame, EncodingSettings settings,
         string outputPath, CancellationToken ct = default)
     {
+        // ═══ 2026-09-17 双路径策略：GainMap 基于 JPEG，容器恒 8-bit ⇒ 诚实降 8 ═══
+        settings.OutputBitDepth = 8;
         if (!settings.HdrOutput)
         {
             // SDR 模式：用与 GainMap 主路径完全相同的分段 Reinhard 生成 Base JPEG（无增益图）。
             // 修复: 原降级路径走 ACES (FormatHelper.ToSdr) 与主路径分段 Reinhard 风格不一致,
             // 切换 HDR 开关时 SDR 查看器看到的基础图会跳变。现共用 ComputeWhitePoint/
             // ReinhardToSdr/LinearToBgra8, 视觉完全一致。
-            System.Diagnostics.Debug.WriteLine("[GainMap] ⚠ HDR 未开启，Gain Map 降级为普通 JPEG（分段 Reinhard Base, 无增益图）");
+            CoreLog.Info("GainMap", "HDR 未开启，Gain Map 降级为普通 JPEG（分段 Reinhard Base, 无增益图）", LogCategory.Encoding);
             await EncodeBaseOnlyAsync(frame, settings, outputPath, ct);
             return;
         }
         await EncodeGainMapAsync(frame, settings, outputPath, ct);
+    }
+
+    /// <summary>
+    /// GainMap 的<b>两种色彩模式</b>的唯一入口（2026-09-22 用户口径）：
+    /// <list type="number">
+    /// <item><b>默认</b>：base layer 与增益图都在 sRGB / BT.709 里，base 嵌 sRGB ICC。
+    /// 这也是 Ultra HDR 的常规形状（<c>use_base_cg=1</c>：增益图在 base 色彩空间计算）。</item>
+    /// <item><b>用户显式选 BT.2020</b>：整张增益图<b>全</b>走 BT.2020 —— 线性像素先做
+    /// scRGB→2020 矩阵，之后色调映射、base、增益比、声明全在同一套原色里，base 嵌 2020 ICC。
+    /// ⚠ 是"搬像素 + 换声明"，不是只改标签（与 §39/§42 那条"搬进而不是只标"同源）。</item>
+    /// </list>
+    /// <para>两条硬约束：</para>
+    /// <list type="bullet">
+    /// <item><b>只有显式选择才升级</b>。"跟随显示器"在一块 P3 屏上也会解析成 BT2020，
+    /// 那不是用户的手 ⇒ 看 <see cref="EncodingSettings.ExplicitWideTarget"/>，不看 tag 本身。</item>
+    /// <item><b>拿不到可嵌的 2020 ICC 就整条退回默认模式</b>。JPEG 没有 cICP 这类码点通道，
+    /// ICC 是它唯一的色彩声明通道；只搬像素而声明不了，产出的就是一张"2020 像素 + sRGB 标签"的错件。</item>
+    /// </list>
+    /// </summary>
+    /// <para>两条路的差别只在"要不要用户亲手选"：<b>带增益图的主路径</b>默认保持 sRGB base
+    /// （Ultra HDR 的常规形状），所以要求 <c>ExplicitWideTarget</c>；
+    /// <b>HDR 关闭的 base-only 路</b>产的就是一张普通 JPEG、没有增益图，格式约定管不到它 ⇒
+    /// 跟解析后的目标走（<paramref name="requireExplicit"/>=false），否则会出现
+    /// "同一个目标色域，8-bit 源搬进 2020、浮点源不搬"这种按源精度分叉的老问题（§41.4-M6）。</para>
+    /// </summary>
+    /// <param name="requireExplicit">true = 只有用户显式选广色域才升级整条增益图；
+    /// false = 解析后的目标是广色域就搬（无增益图的普通 JPEG 路）。</param>
+    /// <returns>要参与后续色调映射的线性 float[]（可能就是一个新数组）+ base JPEG 该嵌的 ICC。</returns>
+    internal static (float[] Linear, byte[] BaseIcc) PrepareGainMapColorSpace(
+        float[] scrgbLinear, int w, int h, EncodingSettings settings, bool requireExplicit = true)
+    {
+        bool wideTarget = settings.ColorSpaceTag == "BT2020";
+        if (wideTarget && (!requireExplicit || settings.ExplicitWideTarget))
+        {
+            var icc2020 = ColorProfileProvider.GetStandardIccProfile("BT2020");
+            if (FormatHelper.IsEmbeddableIcc(icc2020))
+            {
+                var moved = ColorManagement.ColorSpaceConverter.ConvertScrgbToTarget(
+                    scrgbLinear, w, h, ColorManagement.ColorSpaceConverter.GetMatrix("BT2020"));
+                CoreLog.Info("GainMap",
+                    "用户显式选 BT.2020 ⇒ 整张增益图走 2020：base/增益/声明三件同一套原色",
+                    LogCategory.Encoding);
+                return (moved, icc2020!);
+            }
+            CoreLog.Warn("GainMap",
+                "要求 BT.2020 增益图，但取不到可嵌的 2020 ICC ⇒ 整条退回默认 sRGB 模式"
+                + "（JPEG 只有 ICC 一条色彩声明通道，只搬像素不声明会产出错件）", LogCategory.Encoding);
+        }
+        return (scrgbLinear, ColorProfileProvider.GetDefaultSRgbIcc());
     }
 
     /// <summary>仅编码 Base JPEG（无增益图）——HDR 关闭时的降级路径。
@@ -72,12 +126,17 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         {
             ct.ThrowIfCancellationRequested();
             int w = frame.Width, h = frame.Height;
+            // 与主路径共用同一次色彩模式判定 ⇒ 切 HDR 开关时 base 的色彩空间不会跟着跳变。
+            // requireExplicit: false —— 这条路产的是无增益图的普通 JPEG，Ultra HDR 的
+            // "base 恒 sRGB"约定不适用，直接跟解析后的目标色域走（与 8-bit 源那条同向）。
+            var (linear, baseIcc) = PrepareGainMapColorSpace(frame.Pixels, w, h, settings,
+                requireExplicit: false);
             var (_, _, sdrWhiteScrgb, headroom) = ComputeWhitePoint(settings);
-            float[] sdrLinear = ReinhardToSdr(frame.Pixels, w, h, headroom, sdrWhiteScrgb);
+            float[] sdrLinear = ReinhardToSdr(linear, w, h, headroom, sdrWhiteScrgb);
             byte[] sdrBgra = LinearToBgra8(sdrLinear, w, h);
             float distance = Math.Clamp(settings.Quality, 0.5f, 25.0f);
             byte[] jpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, distance,
-                ColorProfileProvider.GetDefaultSRgbIcc());
+                baseIcc, settings.ChromaSubsampling);
             File.WriteAllBytes(outputPath, jpegBytes);
         }, ct);
     }
@@ -111,7 +170,9 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             ct.ThrowIfCancellationRequested();
             int w = frame.Width, h = frame.Height;
             int pixelCount = w * h;
-            float[] hdrPixels = frame.Pixels;
+            // 色彩模式在这一步一次定死（默认 sRGB / 显式 BT.2020 全 2020），后面 base、增益比、
+            // 声明全部消费同一份线性像素与同一个 ICC ⇒ 三者不可能各说各话。
+            var (hdrPixels, baseIcc) = PrepareGainMapColorSpace(frame.Pixels, w, h, settings);
 
             // ── 0. HDR 峰值亮度 + SDR 白点（headroom 计算输入）──
             //     ═══ Windows scRGB 语义 (Microsoft 文档权威确认) ═══
@@ -135,15 +196,16 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             byte[] sdrBgra = LinearToBgra8(sdrLinear, w, h);
             ct.ThrowIfCancellationRequested();
 
-            // ── 3. 编码 Base JPEG (jpegli, Baseline) + 显式 sRGB ICC ──
-            //     Base 像素 = scRGB(BT.709 primaries) → sRGB gamma, 恒为 sRGB 内容。
-            //     显式嵌入 sRGB ICC (规范要求主图声明色彩空间; 无 ICC 时解码器默认 sRGB,
-            //     显式嵌入更规范且与像素一致)。不嵌用户目标色域 ICC — 管线未做色域转换
-            //     (2026-08-06 设计决策: Base 与增益图同处 scRGB 空间), 嵌入 P3/BT.2020
-            //     ICC 会错误标记像素。
+            // ── 3. 编码 Base JPEG (jpegli, Baseline) + 与之配套的 ICC ──
+            //     默认模式：Base 像素 = scRGB(BT.709) → sRGB gamma ⇒ 恒为 sRGB 内容，嵌 sRGB ICC
+            //     （无 ICC 时解码器也默认 sRGB，显式嵌入更规范且与像素一致）。
+            //     显式 BT.2020 模式：像素已在第 0 步搬进 2020 原色 ⇒ 这里必须嵌 2020 ICC，
+            //     base/增益/声明三者同源（见 PrepareGainMapColorSpace）。
+            //     ⚠ 旧注释写的"不嵌用户目标色域 ICC"当年成立，是因为那时管线根本不做转换；
+            //       现在转换真的发生了，所以那句随之作废 —— 别再照它改回去。
             float baseDist = Math.Clamp(settings.Quality, 0.5f, 25.0f);
             byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, baseDist,
-                ColorProfileProvider.GetDefaultSRgbIcc());
+                baseIcc, settings.ChromaSubsampling);
             ct.ThrowIfCancellationRequested();
 
             // ── 4. 增益比计算（统一到 SDR 白点相对线性空间）──
@@ -159,8 +221,8 @@ public sealed class JpegGainMapEncoder : ImageEncoder
                 normHdr[o + 2] = hdrPixels[o + 2] * invSdrWhite;
                 normHdr[o + 3] = hdrPixels[o + 3];
             }
-            // 最大 log2 增益 = log2(headroom)（HDR 峰值相对 SDR 白点）
-            float maxLog2Gain = MathF.Log2(Math.Max(headroom, 1.0f));
+            // 最大 log2 增益：像素量化、XMP、ISO 三处必须用同一个数（见 GainMapMaxLog2）
+            float maxLog2Gain = GainMapMaxLog2(headroom);
             byte[] gainMapPixels = ComputeGainMap(normHdr, sdrLinear, w, h, gainMapMode, maxLog2Gain);
             ct.ThrowIfCancellationRequested();
 
@@ -179,19 +241,24 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             WriteJpegGainMapFile(baseJpegBytes, gainMapJpegBytes, w, h, gmSW, gmSH,
                 gainMapMode, headroom, outputPath);
 
-            System.Diagnostics.Debug.WriteLine(
-                $"[GainMap] 输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({gainMapMode}), " +
+            CoreLog.Debug("GainMap",
+                $"输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({gainMapMode}), " +
                 $"Base={baseJpegBytes.Length / 1024}KB, GainMap={gainMapJpegBytes.Length / 1024}KB, " +
-                $"headroom={headroom:F1}");
+                $"headroom={headroom:F1}", LogCategory.Encoding);
         }, ct);
     }
 
     /// <summary>
-    /// 分段 Reinhard 色调映射: HDR scRGB → SDR 线性 (0..1.0, 1.0=SDR 白点)。
+    /// HDR scRGB → SDR 线性 (0..1.0, 1.0=SDR 白点) 的分段映射。
     /// 委托共享核心 ToneMapper.SegmentedReinhardMap (2026-08-08 起 GainMap 与其他格式同款):
     ///   - y ≤ 1.0 直通 (SDR 内容保真, 增益恒 1x)
-    ///   - 1.0~1.25 smoothstep 过渡 (修复 SDR 白点亮度跳变)
-    ///   - ≥ 1.25 Reinhard 压缩 (libultrahdr ReinhardMap 公式, R(headroom)=1.0)
+    ///   - y &gt; 1.0 **恒饱和 1.0**
+    /// ⚠ 2026-09-19 勘误：本注释此前描述的是"1.0~1.25 smoothstep 过渡 + ≥1.25 Reinhard 压缩
+    ///   (libultrahdr ReinhardMap 公式)"，那段曲线**已被刻意删掉**，不是待补的缺失：
+    ///   R(y)=(1+y/h²)/(1+y)·y 在 y=1 处 R≈0.52 而左分支返回 1.0 ⇒ 函数非单调 ⇒ 高光边缘出现暗环
+    ///   （推导与证据见 ToneMapper.SegmentedReinhardMap 的 XML 备注）。
+    /// 因此 headroom 参数在本曲线里不参与运算；超白点的能量全部由增益图承载
+    /// （gain=log2(y/f(y))=log2(y)），纯 SDR 查看器则表现为高光削平。
     /// 输出: [0, 1.0] 相对 SDR 白点 (解码器理解的 Base 亮度)
     /// </summary>
     private static float[] ReinhardToSdr(float[] hdrPixels, int w, int h, float headroom,
@@ -235,6 +302,19 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         float hdrPeakNits = settings.ToneMappingParams.DisplayMaxNits > 0
             ? settings.ToneMappingParams.DisplayMaxNits
             : 1000f;
+        // ═══ 2026-09-19 记录：纸白地板与 ToneMapper 不一致，本次不改数值（会改变 Ultra HDR 产物）═══
+        // 同一个 PaperWhiteNits，两条路的地板不同：
+        //   · 这里（GainMap 基础图）= max(PaperWhiteNits, 80)
+        //   · ToneMapper.cs:181 / :329（其余所有格式的 HDR→SDR）= max(PaperWhiteNits, 1)
+        // 后果只在 PaperWhiteNits < 80 时显现（默认 200，正常配置不触发）：
+        //   · 本路径把纸白抬回 80 ⇒ sdrWhiteScrgb = 1 ⇒ ReinhardToSdr 不做任何提亮 ⇒
+        //     同一帧在这里比别处【更暗】，且 headroom = 峰值/80 偏小 ⇒ 写进增益元数据的 headroom 也偏小；
+        //   · ToneMapper 路径按 scale = 80/pw 放大 ⇒ pw 越小放大越狠（pw=1 时是 80 倍）⇒
+        //     【更亮甚至整体冲白】，这里的 80 地板实际上是在挡这种爆亮。
+        // 也就是说：两边不是"谁对谁错"，而是一边偏保守（暗）、一边不设防（可能冲白）；
+        // 统一成任何一个数都会改变 Ultra HDR 基础图的亮度，属于产品决定 —— 待用户拍板。
+        // 注：ReinhardToSdr 里还有第二道 max(sdrWhiteScrgb, 1)，所以此处的地板对基础图亮度
+        // 的影响集中在 headroom/增益元数据上，而 ToneMapper 那边是直接作用在像素上。
         float sdrWhiteNits = Math.Max(settings.ToneMappingParams.PaperWhiteNits, 80f);
         // scRGB 中 SDR 白点的位置: PaperWhiteNits / 80 (如 200/80 = 2.5)
         float sdrWhiteScrgb = sdrWhiteNits / 80f;
@@ -267,11 +347,18 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     //  JPEG 编码（崩溃隔离 + 回退）
     // ═══════════════════════════════════════
 
-    private static byte[] EncodeToJpegBytesSafe(byte[] bgra, int w, int h, float distance, byte[]? icc)
+    /// <summary>
+    /// Base JPEG 编码（cjpegli，Baseline）。
+    /// <para><b>色度由设置决定，不再硬编码 444</b>（2026-09-19，用户决定）：Ultra HDR 的 base 必须
+    /// 能被普通查看器当普通 JPEG 读，4:2:0 是既兼容又最省的默认档，4:4:4 留给手动选择。
+    /// 原实现写死 "444"，而 <c>ChromaGainMap</c> 只在两条降级旁路被读 ⇒ 同一格式因走哪条路而色度不同
+    /// （交接 §27 未修清单第 1 条）。现在主路径与旁路同源。</para>
+    /// </summary>
+    private static byte[] EncodeToJpegBytesSafe(byte[] bgra, int w, int h, float distance, byte[]? icc, string chroma)
     {
         var result = NativeEncoderGuard.TryEncode("GainMap_BaseJPEG", () =>
         {
-            return JpegLiNative.Encode(bgra, w, h, distance, "444", icc, forceBaseline: true);
+            return JpegLiNative.Encode(bgra, w, h, distance, chroma, icc, forceBaseline: true);
         });
         if (result.Success) return result.Value!;
         throw new InvalidOperationException($"[GainMap] Base JPEG 编码失败: {result.Error?.Message}");
@@ -374,10 +461,37 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         return gain;
     }
 
+    /// <summary>
+    /// 增益图的 log2 量程 —— <b>像素量化与两份元数据共用的唯一取值点</b>。
+    /// <para>为什么必须兜到 1.0 而不是让它是 0（2026-09-20，交接 §31.3-3）：headroom ≤ 1
+    /// （整幅画面都不超过 SDR 白点）时 <c>log2(headroom) = 0</c>，于是
+    ///   ① 解码端 <c>log_boost = min + (max − min)·recovery</c> 恒为 0 ⇒ 增益层整层作废；
+    ///   ② 更糟的是 <c>HDRCapacityMin == HDRCapacityMax == 0</c>（也即 ISO 的
+    ///      <c>baseHdrHeadroom == alternateHdrHeadroom</c>），违反"capacity_max 必须严格大于
+    ///      capacity_min"，libavif / libultrahdr 的权重公式在此处除零。</para>
+    /// <para>而 1.0 不是随手挑的数：像素侧 <see cref="LogGainToByte"/> 历史上就是把 0 兜到 1.0
+    /// 来量化的。<b>元数据必须写像素实际用的那一个值</b>，所以这里返回同一个 1.0 ——
+    /// 内容本身仍是"无增益"（增益图全 0 ⇒ 解码回 log_boost=0 ⇒ HDR==SDR），
+    /// 语义正确、且不比用户请求的精度低。任何一处再各自算一次 log2 都是第二个事实源。</para>
+    /// </summary>
+    internal static float GainMapMaxLog2(float headroom)
+    {
+        float v = MathF.Log2(Math.Max(headroom, 1.0f));
+        return v > 0f ? v : 1.0f;
+    }
+
+    /// <summary>量程取整到百分位后的<b>唯一整数源</b>：XMP 打印它、ISO 写它的分子。</summary>
+    /// <remarks>原先两处各算一次 <c>log2(headroom)</c> 再用不同方式取整（XMP 走
+    /// <c>ToString("0.00")</c>，ISO 走 <c>MathF.Round(x*100)</c> 的默认 banker's 取偶）⇒
+    /// 恰在中点时两份元数据可以差 0.01，属"同源不同式"的漂移。现在两边都从这一个整数格式化，
+    /// 不可能再不一致；取整方向显式写成 AwayFromZero，与 XMP 的显示口径相同。</remarks>
+    internal static int GainMapMaxCentibels(float headroom)
+        => (int)MathF.Round(GainMapMaxLog2(headroom) * 100f, MidpointRounding.AwayFromZero);
+
     /// <summary>log2(gain) → 8-bit：映射 [0, maxLog2Gain] → [0, 255]（Reinhard 保证增益 ≥ 1）。</summary>
     private static byte LogGainToByte(float logGain, float maxLog2Gain)
     {
-        if (maxLog2Gain <= 0f) maxLog2Gain = 1f;
+        // 量程由 GainMapMaxLog2 单点保证 > 0（本函数直接除以它）—— 不要在这里再加第二处兜底
         float clamped = Math.Clamp(logGain, 0f, maxLog2Gain);
         return (byte)(clamped / maxLog2Gain * 255f);
     }
@@ -452,7 +566,12 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         int sosIndex = FindSosIndex(baseJpeg);
         if (sosIndex < 0)
         {
-            // 找不到 SOS（异常），回退旧逻辑：仅写入 Base JPEG
+            // ═══ 2026-09-19 可追溯性：这一步把"Ultra HDR"变成了"纯 SDR JPEG"，必须留痕 ═══
+            // 找不到 SOS ⇒ 只能退回"仅写 Base JPEG"。用户选的格式没变、文件扩展名没变，
+            // 差别只在里面没有增益图（HDR 还原不出来）。这种"换了语义不换名字"的降级
+            // 与 WebP→PNG 同族，走同一条 EncoderFallbackNotifier 通道（Toast + 日志）。
+            EncoderFallbackNotifier.LastReason =
+                "增益图封装失败（base JPEG 中找不到 SOS 标记）⇒ 本张只存了 SDR base，无 HDR 增益图";
             File.WriteAllBytes(outputPath, baseJpeg);
             return;
         }
@@ -534,7 +653,15 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     {
         // 增益图必须以 SOI 开头
         if (gainMapJpeg.Length < 2 || gainMapJpeg[0] != 0xFF || gainMapJpeg[1] != 0xD8)
+        {
+            // ═══ 2026-09-19 可追溯性：不插 ISO 段，但 XMP/MPF 仍会声称"有增益图" ═══
+            // 结果是结构自相矛盾的文件（容器说有、ISO 21496-1 没有），部分查看器会还原不出 HDR。
+            // 静默返回等于把这个矛盾藏起来，所以必须过一条对外通道。
+            EncoderFallbackNotifier.LastReason =
+                "增益图不是合法 JPEG ⇒ 未插入 ISO 21496-1 段（XMP 仍声明有增益图，"
+                + "部分查看器可能无法还原 HDR）";
             return gainMapJpeg;
+        }
 
         // APP2 段 payload = 命名空间(含 null 终止符) + 二进制元数据
         byte[] ns = System.Text.Encoding.ASCII.GetBytes(IsoNamespace);
@@ -703,15 +830,17 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     public static byte[] BuildXmpMetadata(int baseW, int baseH, int gmW, int gmH, GainMapMode mode,
         float headroom = 12.5f, long gainMapLength = 0)
     {
-        // log2 增益映射范围（与 ComputeGainMap/LogGainToByte 一致）
+        // log2 增益映射范围：与像素量化、ISO 元数据同出一个整数源（见 GainMapMaxCentibels）
         const float gainMinLog2 = 0.0f;
-        float gainMaxLog2 = MathF.Log2(Math.Max(headroom, 1.0f)); // log2(HDR峰值/SDR白点)
+        int gainMaxCentibels = GainMapMaxCentibels(headroom);   // 百分位整数；下面按 0.00 打印
         const float offset = 0.015625f; // 1/64，规范推荐值
         const float gamma = 1.0f;
 
         // ═══ 2026-08-10 修复: GainMap item 添加 Item:Length ═══
         // 对齐 libultrahdr generateXmpForPrimaryImage (Item:Length = 增益图完整大小)
         var inv = System.Globalization.CultureInfo.InvariantCulture;
+        // 从同一个百分位整数打印，ISO 那侧写的就是这个整数的分子 ⇒ 两份元数据不可能再差 0.01
+        string gainMaxText = (gainMaxCentibels / 100m).ToString("0.00", inv);
         string gainMapItem = gainMapLength > 0
             ? $"<Container:Item Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\" Item:Length=\"{gainMapLength}\"/>"
             : "<Container:Item Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\"/>";
@@ -733,12 +862,12 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             "</rdf:Seq>" +
             "</Container:Directory>" +
             "<hdrgm:GainMapMin>" + gainMinLog2.ToString("0.0", inv) + "</hdrgm:GainMapMin>" +
-            "<hdrgm:GainMapMax>" + gainMaxLog2.ToString("0.00", inv) + "</hdrgm:GainMapMax>" +
+            "<hdrgm:GainMapMax>" + gainMaxText + "</hdrgm:GainMapMax>" +
             "<hdrgm:Gamma>" + gamma.ToString("0.0", inv) + "</hdrgm:Gamma>" +
             "<hdrgm:OffsetSDR>" + offset.ToString("0.000000", inv) + "</hdrgm:OffsetSDR>" +
             "<hdrgm:OffsetHDR>" + offset.ToString("0.000000", inv) + "</hdrgm:OffsetHDR>" +
             "<hdrgm:HDRCapacityMin>0</hdrgm:HDRCapacityMin>" +
-            "<hdrgm:HDRCapacityMax>" + gainMaxLog2.ToString("0.00", inv) + "</hdrgm:HDRCapacityMax>" +
+            "<hdrgm:HDRCapacityMax>" + gainMaxText + "</hdrgm:HDRCapacityMax>" +
             "<hdrgm:BaseRenditionIsHDR>False</hdrgm:BaseRenditionIsHDR>" +
             "</rdf:Description></rdf:RDF></x:xmpmeta>" +
             "<?xpacket end=\"w\"?>";
@@ -768,8 +897,11 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         //   ISO 必须用相同值, 否则解码器解释像素偏大 → 过亮
         //   用头分子/分母精确表示: log2(headroom) × 100 / 100
         const int gainMapMinLog2 = 0;    // log2(1.0) — Reinhard 保证增益 ≥ 1
-        int gainMapMaxLog2N = (int)MathF.Round(MathF.Log2(Math.Max(headroom, 1.0f)) * 100f); // 如 332
-        const int gainMapMaxLog2D = 100; // 分母 100 → 3.32
+        // 量程不再在这里第二次算 log2：与像素量化、XMP 同出一个整数源（GainMapMaxCentibels）。
+        // headroom ≤ 1 时它兜到 100（=1.00 log2）而不是 0 —— 写 0 会让 capacity_min == capacity_max，
+        // 而 libavif / libultrahdr 的权重公式在该处除零（见 GainMapMaxLog2 的说明）。
+        int gainMapMaxLog2N = GainMapMaxCentibels(headroom);   // 如 364 ⇒ 3.64
+        const int gainMapMaxLog2D = 100; // 分母 100 → 3.64
         const int gammaN = 1;            // gamma = 1.0
         const int gammaD = 1;            // gamma 分母 = 1 (必须! 不能用公共 64)
         const int offsetN = 1;           // offset = 1/64

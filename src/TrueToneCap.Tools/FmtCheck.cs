@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Tools/FmtCheck.cs
 // 格式映射实测验证 (--fmt-check)
 // 验证: UI 格式列表 (_formats) 索引 → OutputFormat 枚举 → 编码器 → 输出魔数 全链路

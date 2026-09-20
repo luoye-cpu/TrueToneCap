@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Annotation/AnnotationLayer.cs
 // 矢量标注图层系统 — 支持形状、文字、马赛克等
 
@@ -99,10 +101,19 @@ public abstract class AnnotationLayer
         Style = new BrushStyle { IsFillEnabled = false, IsStrokeEnabled = false }
     };
 
-    public static AnnotationLayer CreateMosaic(float x, float y, float w, float h, int blockSize = 8) => new RectangleLayer
+    /// <summary>创建马赛克图层。</summary>
+    /// <remarks>
+    /// ═══ 2026-09-15 修复：必须返回 MosaicLayer，不能返回 RectangleLayer ═══
+    /// 原实现返回 `RectangleLayer` 并把 Type 改成 Mosaic —— 但光栅化
+    /// （AnnotationRasterizer.RenderLayer）是按 **CLR 类型** 分派的：
+    /// RectangleLayer 会走 RenderRectOutline，而这里的 Style 把 IsStrokeEnabled 设为 false，
+    /// 于是直接 return ⇒ **马赛克在最终图像里完全不可见**，只剩一个空图层。
+    /// 返回正确的 MosaicLayer 才会进入 RenderMosaic 分支。
+    /// （当前该方法仅被测试调用，生产路径尚未触达，属提前排雷。）
+    /// </remarks>
+    public static AnnotationLayer CreateMosaic(float x, float y, float w, float h, int blockSize = 8) => new MosaicLayer
     {
-        X = x, Y = y, Width = w, Height = h, Type = ShapeType.Mosaic,
-        Style = new BrushStyle { IsFillEnabled = false, IsStrokeEnabled = false }
+        X = x, Y = y, Width = w, Height = h, BlockSize = blockSize
     };
 
     public static AnnotationLayer CreateFreehand((float x, float y)[] points, string color, float strokeWidth = 3f) => new FreehandLayer

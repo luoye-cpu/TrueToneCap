@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/NativeLibraryResolver.cs
 // 原生工具链（avifenc.exe / cwebp.exe）嵌入资源提取器
 // 内嵌在 Resources/ 下的 exe 在首次运行时提取到 native/ 目录
 
 using System.Reflection;
 using System.IO.Compression;
+using TrueToneCap.Core.Logging;
 
 namespace TrueToneCap.Core.Services;
 
@@ -15,6 +18,30 @@ public static class NativeLibraryResolver
 {
     private static readonly string NativeDir;
     private static volatile bool _initialized;
+
+    /// <summary>
+    /// 最后一次初始化失败的原因（成功则为 null）。
+    /// <para>⚠️ 提取失败原本只写 <c>Debug.WriteLine</c> —— Release 下完全不可见。
+    /// 而 native 工具（avifenc / cjxl / cwebp / cjpegli）提取失败会让
+    /// AVIF / JPEG XL / WebP / JPEG LI 四种格式**全部静默失效**。
+    /// 上层应查询本属性并给出用户可见的提示与修复指引。</para>
+    /// </summary>
+    public static string? LastError { get; private set; }
+
+    /// <summary>
+    /// 重置初始化状态，下次调用将重新尝试提取。
+    /// <para>原实现一旦失败就 `_initialized = true` 且永不复位 ——
+    /// 若失败是瞬时的（杀软正在扫描、文件被占用、权限尚未生效），
+    /// 用户即使解决了问题也必须重启程序。提供本方法作为恢复入口。</para>
+    /// </summary>
+    public static void Reset()
+    {
+        lock (typeof(NativeLibraryResolver))
+        {
+            _initialized = false;
+            LastError = null;
+        }
+    }
 
     /// <summary>需要提取的原生可执行文件清单。</summary>
     private static readonly string[] EmbeddedExeNames = ["avifenc.exe", "cwebp.exe", "cjpegli.exe", "cjxl.exe"];
@@ -47,7 +74,7 @@ public static class NativeLibraryResolver
                     if (File.Exists(targetPath))
                     {
                         // 已存在则跳过
-                        System.Diagnostics.Debug.WriteLine($"[NativeResolver] ✅ {exeName} 已就绪: {targetPath}");
+                        CoreLog.Info("NativeResolver", $"✅ {exeName} 已就绪: {targetPath}", LogCategory.System);
                         continue;
                     }
 
@@ -72,11 +99,11 @@ public static class NativeLibraryResolver
                         if (File.Exists(srcPath))
                         {
                             File.Copy(srcPath, targetPath, overwrite: true);
-                            System.Diagnostics.Debug.WriteLine($"[NativeResolver] ✅ {exeName} 从文件系统拷贝: {srcPath} → {targetPath}");
+                            CoreLog.Warn("NativeResolver", $"✅ {exeName} 从文件系统拷贝（嵌入资源缺失，回退到文件系统）: {srcPath} → {targetPath}", LogCategory.System);
                             continue;
                         }
 
-                        System.Diagnostics.Debug.WriteLine($"[NativeResolver] ⚠️ {exeName} 未找到 (嵌入资源或文件系统均无)");
+                        CoreLog.Warn("NativeResolver", $"⚠️ {exeName} 未找到 (嵌入资源或文件系统均无)", LogCategory.System);
                         continue;
                     }
 
@@ -98,12 +125,15 @@ public static class NativeLibraryResolver
                         stream.CopyTo(fs);
                     }
 
-                    System.Diagnostics.Debug.WriteLine($"[NativeResolver] ✅ {exeName} 已提取: {targetPath}");
+                    CoreLog.Info("NativeResolver", $"✅ {exeName} 已提取: {targetPath}", LogCategory.System);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[NativeResolver] ❌ 初始化失败: {ex.Message}");
+                // 记录到 LastError：Release 下 Debug.WriteLine 不可见，
+                // 而本机工具提取失败会让 AVIF/JPEG XL/WebP/JPEG LI 全部静默失效。
+                LastError = ex.Message;
+                CoreLog.Warn("NativeResolver", "❌ 初始化失败", ex, LogCategory.System);
             }
 
             _initialized = true;

@@ -1,24 +1,47 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
-    <LangVersion>14</LangVersion>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- 允许捕获 P/Invoke CSE (AccessViolationException/SEHException)，防止原生编码器崩溃终止进程 -->
-    <LegacyCorruptedStateExceptionsPolicy>true</LegacyCorruptedStateExceptionsPolicy>
+    <!-- 公共属性 (TargetFramework / LangVersion / Nullable / ImplicitUsings /
+         AllowUnsafeBlocks / PlatformTarget / Version) 统一在 ../../Directory.Build.props 声明；
+         依赖版本统一在 ../../Directory.Packages.props 声明 -->
     <RootNamespace>TrueToneCap.Core</RootNamespace>
     <AssemblyName>TrueToneCap.Core</AssemblyName>
-    <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
-    <NoWarn>$(NoWarn);MSB3884</NoWarn>
-    <InternalsVisibleTo>TrueToneCap.Test</InternalsVisibleTo>
+    <!-- ⛔ 2026-09-15 移除：<LegacyCorruptedStateExceptionsPolicy>true</>
+         该属性【实测无效】，留着只会制造"崩溃已被防护"的虚假安全感。
+         实测依据（tests/manual/cse-probe，.NET 11.0.0-preview.7）：
+           ① 经 P/Invoke 触发真实 0xC0000005 → 进程直接终止，退出码 -1073741819，
+              catch(AccessViolationException) 与 finally 均未执行；
+           ② 加 -p:LegacyCorruptedStateExceptionsPolicy=true 后行为完全相同，
+              且两份 runtimeconfig.json 内容【逐字节一致】，均不含该开关 ——
+              即该属性在当前 SDK 上已不再写入 runtimeconfig；
+           ③ 编译器 SYSLIB0032 明载：
+              "Recovery from corrupted process state exceptions is not supported;
+               HandleProcessCorruptedStateExceptionsAttribute is ignored."
+         ⇒ 结论：CSE 在 .NET (Core/5+/11) 上【进程内不可捕获】。
+           真正的隔离只能靠【子进程】（avifenc / cjxl / cwebp 已是子进程，天然安全），
+           MFT / NVENC / QSV 的进程内 P/Invoke 崩溃目前无法拦截，改造方案见
+           docs/pipeline-review-2026-09-15.md 的 P0-4。 -->
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="JxlNet" Version="0.11.2.2" />
-    <PackageReference Include="MozJpegSharp.Core" Version="3.0.8" />
-    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
-    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
-    <PackageReference Include="libwebp" Version="1.0.0" />
+    <!-- ⚠️ 2026-09-15 修正：InternalsVisibleTo 是 **Item** 而不是 Property。
+         原先写成 <InternalsVisibleTo>TrueToneCap.Test</InternalsVisibleTo> 放在
+         PropertyGroup 里 —— 那不会产生任何程序集特性，等于【从未生效】，
+         于是测试访问 Core 的 internal 成员会报 CS0117「未包含…的定义」
+         （注意不是 CS0122 不可访问，很有迷惑性）。
+         证据：WgcAvifBackendTests.cs 里留有"Core 未设 InternalsVisibleTo"的注释。
+         正确写法是 ItemGroup 下的 <InternalsVisibleTo Include="..." />。 -->
+    <InternalsVisibleTo Include="TrueToneCap.Test" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- 版本统一由 ../../Directory.Packages.props 管理（PackageVersion） -->
+    <!-- JxlNet 已移除 (代码零引用, JPEG XL 全部走 NativeJxlEncoder/cjxl 进程) -->
+    <!-- libwebp 已移除 (零资产空壳包: assets.json 的 compile/runtime/native 全为空;
+         WebP 编码实际走 NativeWebPEncoder → cwebp.exe 子进程, 无 DllImport) -->
+    <!-- MozJpegSharp 已移除 (2026-09-21 许可合规轮, 同 JxlNet/libwebp 一类的死重量:
+         全仓 0 处 .cs 引用, 却随包再分发 MozJpegSharp.dll (28KB) 并背一份 MIT 义务;
+         且包内【没有】任何 mozjpeg 原生库 —— 真去调用即 DllNotFoundException。
+         JPEG 编码实际走 JpegLiNative → cjpegli.exe 子进程, 与 mozjpeg 无关。) -->
+    <PackageReference Include="Vortice.Direct3D11" />
+    <PackageReference Include="Vortice.DXGI" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
   </ItemGroup>
 </Project>

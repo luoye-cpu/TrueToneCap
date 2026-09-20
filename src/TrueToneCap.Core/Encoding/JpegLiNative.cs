@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/JpegLiNative.cs
 // Google jpegli 编码器 — 通过 cjpegli 命令行工具编码
 // 内嵌在 Resources/cjpegli.exe，运行时自动提取到 native/ 目录
 // 与现有 avifenc.exe/cwebp.exe 相同的嵌入式工具链模式
 
+using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Services;
 
 namespace TrueToneCap.Core.Encoding;
@@ -37,11 +40,10 @@ public static class JpegLiNative
                 };
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) { _available = false; return false; }
-                proc.StandardOutput.ReadToEnd();
-                proc.StandardError.ReadToEnd();
-                proc.WaitForExit(5000);
-                // cjpegli -h 返回 exit code 1，但我们只关心能否启动
-                _available = true;
+                bool probed = NativeProcess.DrainProbe(proc, NativeProcess.ProbeTimeoutMs,
+                    out _, out _, out _);
+                // cjpegli -h 返回 exit code 1，但我们只关心能否启动（启动即须自行退出）
+                _available = probed;
             }
             catch { _available = false; }
             return _available.Value;
@@ -52,9 +54,9 @@ public static class JpegLiNative
     public static void Initialize()
     {
         if (IsAvailable)
-            System.Diagnostics.Debug.WriteLine("[JpegLiNative] cjpegli 就绪");
+            CoreLog.Info("JpegLiNative", "cjpegli 就绪", LogCategory.Encoding);
         else
-            System.Diagnostics.Debug.WriteLine("[JpegLiNative] ❌ cjpegli 不可用，JPEG 编码将失败");
+            CoreLog.Warn("JpegLiNative", "cjpegli 不可用，JPEG 编码将失败", LogCategory.Encoding);
     }
 
     private static string GetExePath()
@@ -73,13 +75,9 @@ public static class JpegLiNative
                     CreateNoWindow = true
                 };
                 using var proc = System.Diagnostics.Process.Start(psi);
-                if (proc is not null)
-                {
-                    proc.StandardOutput.ReadToEnd();
-                    proc.StandardError.ReadToEnd();
-                    proc.WaitForExit(5000);
-                    if (proc.ExitCode == 0) return "cjpegli.exe";
-                }
+                if (proc is not null
+                    && NativeProcess.DrainProbe(proc, NativeProcess.ProbeTimeoutMs, out int ec, out _, out _)
+                    && ec == 0) return "cjpegli.exe";
             }
             catch { }
             throw new DllNotFoundException("[jpegli] cjpegli.exe 未找到。请将 cjpegli.exe 放入 native/ 目录或系统 PATH。");
@@ -122,8 +120,8 @@ public static class JpegLiNative
             };
 
             // 注意: 此版本 cjpegli 不支持 --icc_profile 参数
-            // ICC 通过后处理注入: 编码后读回 JPEG 字节流，插入 APP1 marker
-            bool hasNonSrgbIcc = iccProfile is { Length: > 128 };
+            // ICC 通过后处理注入: 编码后读回 JPEG 字节流，插入 APP2 段（见 InjectIccIntoJpeg）
+            bool hasNonSrgbIcc = FormatHelper.IsEmbeddableIcc(iccProfile);
             if (hasNonSrgbIcc)
             {
                 tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
@@ -147,21 +145,19 @@ public static class JpegLiNative
             // 2026-08-10 诊断代码（无条件写 %TEMP%\ttc_encoder_cmd.log）已移除：
             // 该日志在 Release 下也会持续写入并最终无限增长，且命令行只在排查时才有意义。
             // 需要排查参数传递时用 Debug 输出即可。
-            System.Diagnostics.Debug.WriteLine($"[JPEGLI] {psi.FileName} {psi.Arguments}");
+            CoreLog.Debug("JPEGLI", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
 
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");
-            var stderr = proc.StandardError.ReadToEnd();
-            var stdout = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(30_000);
+            var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 30_000, "cjpegli");
 
             string outPath = tmpPpm + ".jpg";
-            if (proc.ExitCode != 0 || !File.Exists(outPath))
-                throw new InvalidOperationException($"[jpegli] cjpegli 失败 (exit={proc.ExitCode}) {stderr.Trim()}");
+            if (exitCode != 0 || !File.Exists(outPath))
+                throw new InvalidOperationException($"[jpegli] cjpegli 失败 (exit={exitCode}) {stderr.Trim()}");
 
             var jpegBytes = File.ReadAllBytes(outPath);
 
-            // 后处理注入 ICC: 在 SOI 后插入 APP1 segment
+            // 后处理注入 ICC: 插在 APP0(JFIF) 之后，形态是 APP2 + 分块字段（见 InjectIccIntoJpeg）
             // cjpegli 不支持 --icc_profile，需要手动注入
             if (hasNonSrgbIcc && tmpIcc is not null)
             {
@@ -178,32 +174,67 @@ public static class JpegLiNative
         }
     }
 
-    /// <summary>在 JPEG SOI 后注入 ICC Profile 作为 APP1 段。</summary>
-    private static byte[] InjectIccIntoJpeg(byte[] jpeg, byte[] iccProfile)
+    /// <summary>
+    /// 把 ICC 以 <b>APP2 + 分块字段</b> 注入 JPEG —— 即 ICC.1（ISO 12233）规定的 JPEG 存放方式。
+    /// </summary>
+    /// <remarks>
+    /// <para>每段布局：<c>FF E2</c> | <c>len(2B，含自身)</c> | <c>"ICC_PROFILE\0"(12B)</c> |
+    /// <c>seq_no(1 基)</c> | <c>chunk_cnt</c> | 该块 profile 数据。</para>
+    /// <para>权威依据：libjpeg-turbo <c>src/jcicc.c</c>（<c>ICC_MARKER = JPEG_APP0+2</c>，
+    /// 标识符后依次写 seq 与 num_markers）与 <c>src/jdicc.c</c>（<c>data[12]=seq_no</c>、
+    /// <c>data[13]=num_markers</c>）；Pillow <c>JpegImagePlugin</c> 同口径读 APP2。</para>
+    /// <para>⚠ 为什么这次必须动它（2026-09-20，交接 §31.3-8）：本函数此前写 <b>APP1</b> 且<b>缺</b>
+    /// 那两个分块字节，而 libjpeg-turbo / ImageMagick / Chromium-Skia / Pillow 只扫 APP2
+    /// 并校验分块字段 ⇒ 实测这四家读我们产出的广色域 JPEG 一律得到"无 ICC"，
+    /// 色域声明在最主流的读取链上<b>静默丢失</b>（不是"不合规但能看"）。</para>
+    /// <para>分块不是假想需求：段长字段是 16-bit ⇒ 单段载荷上限 65519 B，而带 LUT 的显示器
+    /// profile 可以超过 64KB ⇒ 超过就必须切成多段，每段的 cnt 等于总段数、seq 从 1 递增。</para>
+    /// <para>插入位置在 APP0(JFIF) 之后：JFIF 要求 APP0 紧跟 SOI，ICC 惯例排在 APP0 后面，
+    /// 旧实现直接插在 SOI 之后会把 cjpegli 自带的 APP0 挤到 ICC 之后。</para>
+    /// </remarks>
+    internal static byte[] InjectIccIntoJpeg(byte[] jpeg, byte[] iccProfile)
     {
         if (jpeg.Length < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8)
             return jpeg;
 
-        // 构建 APP1 marker + ICC 数据
-        // APP1 marker: FF E1
-        // Segment length: 2 + 2 + ICC_ID(12) + ICC data
-        string iccId = "ICC_PROFILE\0";
-        int iccIdLen = 12;
-        int segLen = 2 + iccIdLen + iccProfile.Length;
-        using var ms = new MemoryStream(jpeg.Length + segLen + 2);
-        ms.Write(jpeg, 0, 2); // SOI
-        // APP1 marker
-        ms.WriteByte(0xFF);
-        ms.WriteByte(0xE1);
-        ms.WriteByte((byte)(segLen >> 8));
-        ms.WriteByte((byte)(segLen & 0xFF));
-        // ICC identifier
-        ms.Write(System.Text.Encoding.ASCII.GetBytes(iccId));
-        // ICC data
-        ms.Write(iccProfile);
-        // Rest of JPEG
-        ms.Write(jpeg, 2, jpeg.Length - 2);
+        const int iccIdLen = 12;                                    // "ICC_PROFILE\0"
+        const int maxChunk = 65535 - 2 - iccIdLen - 2;              // 65519 B 载荷/段
+        int chunkCnt = Math.Max(1, (iccProfile.Length + maxChunk - 1) / maxChunk);
+
+        using var ms = new MemoryStream(jpeg.Length + iccProfile.Length + 16 * chunkCnt);
+        int at = WriteSoiAndApp0(jpeg, ms);
+
+        for (int i = 0; i < chunkCnt; i++)
+        {
+            int off = i * maxChunk;
+            int len = Math.Min(maxChunk, iccProfile.Length - off);
+            int segLen = 2 + iccIdLen + 2 + len;
+            ms.WriteByte(0xFF);
+            ms.WriteByte(0xE2);                        // APP2 = ICC 标记（不是 APP1）
+            ms.WriteByte((byte)(segLen >> 8));
+            ms.WriteByte((byte)(segLen & 0xFF));
+            ms.Write(System.Text.Encoding.ASCII.GetBytes("ICC_PROFILE\0"));
+            ms.WriteByte((byte)(i + 1));               // seq_no：1 基
+            ms.WriteByte((byte)chunkCnt);              // chunk_cnt
+            ms.Write(iccProfile, off, len);
+        }
+        ms.Write(jpeg, at, jpeg.Length - at);
         return ms.ToArray();
+    }
+
+    /// <summary>原样写出 SOI（以及紧随其后的 APP0/JFIF 段），返回 JPEG 中尚未写出的起始位置。</summary>
+    private static int WriteSoiAndApp0(byte[] jpeg, Stream outStream)
+    {
+        outStream.Write(jpeg, 0, 2);
+        int at = 2;
+        // 只越过 APP0；其余段（含 cjpegli 可能自带的段）保持原顺序跟在 ICC 之后
+        if (at + 4 <= jpeg.Length && jpeg[at] == 0xFF && jpeg[at + 1] == 0xE0)
+        {
+            int seg = (jpeg[at + 2] << 8) | jpeg[at + 3];
+            if (seg >= 2 && at + 2 + seg <= jpeg.Length) at += 2 + seg;
+        }
+        outStream.Write(jpeg, 2, at - 2);
+        return at;
     }
 
     /// <summary>将 BGRA8 像素写入 PPM 文件（彩色 P6 格式）。</summary>
@@ -260,17 +291,15 @@ public static class JpegLiNative
                 CreateNoWindow = true
             };
 
-            System.Diagnostics.Debug.WriteLine($"[JPEGLI_GRAY] {psi.FileName} {psi.Arguments}");
+            CoreLog.Debug("JPEGLI_GRAY", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
 
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");
-            var stderr = proc.StandardError.ReadToEnd();
-            var stdout = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(30_000);
+            var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 30_000, "cjpegli(gray)");
 
             string outPath = tmpPpm + ".jpg";
-            if (proc.ExitCode != 0 || !File.Exists(outPath))
-                throw new InvalidOperationException($"[jpegli] 灰度编码失败 (exit={proc.ExitCode}) {stderr.Trim()}");
+            if (exitCode != 0 || !File.Exists(outPath))
+                throw new InvalidOperationException($"[jpegli] 灰度编码失败 (exit={exitCode}) {stderr.Trim()}");
 
             return File.ReadAllBytes(outPath);
         }

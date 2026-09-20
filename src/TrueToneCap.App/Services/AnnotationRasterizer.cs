@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/AnnotationRasterizer.cs
 // 标注图层像素光栅化 — 与 XAML 预览共用同一形状语义，保证"预览所见 = 最终输出"
 // 修复: 原实现 Arrow/Pen/Text 预览不可见、合成时画成矩形边框的错位
@@ -131,10 +133,19 @@ internal static class AnnotationRasterizer
         if (lx >= w || ly >= h || rx < 0 || ry < 0) return;
         int block = Math.Max(2, (int)MathF.Round(m.BlockSize));
 
-        // 块间互不重叠，按行并行安全
-        Parallel.For(ly, ry + 1, y =>
+        // ═══ 2026-09-15 修复：并行粒度错误导致数据竞争 ═══
+        // 原实现 Parallel.For(ly, ry+1, ...) —— 并行单位是【每个 y】，
+        // 而 blockY = y/block*block 会让连续 block 个 y 映射到【同一个块行】，
+        // 于是多个线程并发处理同一批像素：每个线程先"读整块求均值"再"写整块"，
+        // 读写是两个独立循环，一个线程完全可能读到另一线程【部分写入】的块
+        // ⇒ 求出的均值是脏数据，且结果随线程调度变化、不可复现。
+        // 原注释"块间互不重叠，按行并行安全"是错的：块【行】在 y 方向是重叠的。
+        // 现改为按【块行】并行：每个块行恰好由一个线程处理，块行之间互不重叠。
+        int firstBlockY = ly / block * block;
+        int blockRows = (ry - firstBlockY) / block + 1;
+        Parallel.For(0, blockRows, k =>
         {
-            int blockY = y / block * block;
+            int blockY = firstBlockY + k * block;
             for (int x = lx; x <= rx; x += block)
             {
                 int bx2 = Math.Min(x + block - 1, rx);
@@ -255,6 +266,28 @@ internal static class AnnotationRasterizer
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string Text, float Size, string Family), (byte[] Bgra, int W, int H)> s_textCache = new();
 
+    /// <summary>进程级共享的 Win2D 设备（懒加载，永不释放）。</summary>
+    /// <remarks>
+    /// ═══ 2026-09-15 修复：共享设备不能被 Dispose ═══
+    /// <para><c>CanvasDevice.GetSharedDevice()</c> 返回的是【进程级共享】设备，
+    /// 其生命周期由 Win2D 自行管理 —— 所有权不属于调用方。原实现写成
+    /// <c>using var device = GetSharedDevice()</c>，在方法结束时释放了这个不属于自己的对象；
+    /// 后续调用便可能命中已释放的设备（异常被上层 catch 吞掉，
+    /// 表现为"文字图层只剩背景框、没有字"）。</para>
+    /// 采用懒加载而非静态字段直接初始化：保持与原先一致的"首次用到才创建"时机，
+    /// 且创建失败时由调用方的 try/catch 处理，不会升级成 TypeInitializationException。
+    /// </remarks>
+    private static Microsoft.Graphics.Canvas.CanvasDevice? s_sharedDevice;
+    private static readonly object s_sharedDeviceLock = new();
+    internal static Microsoft.Graphics.Canvas.CanvasDevice SharedCanvasDevice
+    {
+        get
+        {
+            lock (s_sharedDeviceLock)
+                return s_sharedDevice ??= Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
+        }
+    }
+
     /// <summary>用 Win2D 光栅化文字为 BGRA8 位图（白字, alpha=覆盖率, 合成时着色）。线程安全（共享设备）。</summary>
     public static (byte[] Bgra, int W, int H)? RasterizeText(string text, float fontSize, string fontFamily)
     {
@@ -264,7 +297,7 @@ internal static class AnnotationRasterizer
 
         try
         {
-            using var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
+            var device = SharedCanvasDevice;   // 共享设备：不 Dispose（见属性说明）
             // 尺寸估算：中文全角字符 ≈ 1em 宽，行高 ≈ 1.6em
             int w = Math.Max(8, (int)MathF.Ceiling(text.Length * fontSize * 1.05f));
             int h = Math.Max(8, (int)MathF.Ceiling(fontSize * 1.7f));

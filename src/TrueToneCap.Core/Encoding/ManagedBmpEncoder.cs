@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/ManagedBmpEncoder.cs
 // 托管 BMP 编码器 — 零依赖，BITMAPINFOHEADER V4 (支持 alpha)
 

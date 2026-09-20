@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/AnimationRecorder.cs
 // 动图录制引擎 — 基于 WGC + ffmpeg (动图编码)
 // P0 修复: 有界帧缓冲防 OOM + 共享 WgcCaptureService 单例 + PeriodicTimer 精确帧定时
@@ -20,8 +22,7 @@ public sealed class RecordingConfig
     public string OutputPath { get; set; } = "";
     public int DisplayIndex { get; set; }
 
-    // ═══ ICC 色彩管理（动图录制时每个帧先经过 ICC 烘焙再编码）═══
-    public bool IccBakeEnabled { get; set; }
+    // ═══ ICC 色彩管理：自 2026-09-22 起不可关（默认映射进标准色域），所以这里不再有开关字段 ═══
     public string ColorSpaceTag { get; set; } = "System";
 }
 
@@ -48,6 +49,18 @@ public sealed class AnimationRecorder : IDisposable
     private readonly Channel<(byte[] Pixels, int W, int H)> _frameChannel;
     private readonly List<(byte[] Pixels, int W, int H)> _encodedFrames = [];
 
+    /// <summary>本次录制的<b>色彩决定</b>，在 RecordLoop 拿到目标显示器时构造一次，逐帧复用。
+    /// 与静默截图同一份形状（Core 的 <c>ColorDecision</c>）⇒ 不许在帧循环里再各自解析色域。
+    /// null 只可能出现在 RecordLoop 之前（那种情况下也不会有帧可存）。
+    /// ⚠ 已知未收口的缺口（交接 §41.4）：动图中间帧走 <c>ManagedPngEncoder.Encode(…,8)</c>，
+    /// 那条签名既不写 cICP 也不带 iCCP ⇒ 这里的决定只作用于像素，产物本身零声明。</summary>
+    private ColorDecision? _colorDecision;
+
+    /// <summary>取本次录制的色彩决定；理论上到不了 null（存帧前 RecordLoop 必然已赋值），
+    /// 兜一份"无源屏信息"的决定，比在帧循环里再解析一次下拉好。</summary>
+    private ColorDecision Decision() => _colorDecision
+        ?? ColorDecision.Build(null, _config.ColorSpaceTag, false, AppServices.Settings.Current.AcmeDetected);
+
     private readonly CancellationTokenSource _cts = new();
     private volatile RecordingState _state = RecordingState.Idle;
     private int _framesCaptured;
@@ -58,15 +71,22 @@ public sealed class AnimationRecorder : IDisposable
     public event EventHandler<RecordingProgressEventArgs>? ProgressChanged;
     public RecordingState State => _state;
 
+    /// <summary>获取丢帧计数（供 UI 显示录制质量）。</summary>
+    public int FramesDropped => _framesDropped;
+
     /// <summary>创建录制器。必须传入共享的 WgcCaptureService 实例（避免重复创建 D3D11 设备）。</summary>
     public AnimationRecorder(RecordingConfig config, WgcCaptureService wgcService)
     {
         _config = config;
         _wgcService = wgcService;
-        _frameChannel = Channel.CreateBounded<(byte[], int, int)>(
+        // ═══ P3 改进: DropOldest → Wait(1s) + 丢帧统计 ═══
+        // DropOldest 会静默丢弃旧帧导致时间戳不连续、录制时长变短。
+        // 改为 Wait(1s)：编码端稍慢时短暂背压而非丢帧；若 1s 仍写不进去（编码端严重慢），
+        // 才放弃该帧并计数，让 UI 可见丢帧率。
+        _frameChannel = Channel.CreateBounded<(byte[] Pixels, int W, int H)>(
             new BoundedChannelOptions(MaxBufferedFrames)
             {
-                FullMode = BoundedChannelFullMode.DropOldest, // 缓冲满时丢弃最旧帧
+                FullMode = BoundedChannelFullMode.Wait, // 背压而非静默丢帧
                 SingleReader = true,
                 SingleWriter = true
             });
@@ -110,6 +130,10 @@ public sealed class AnimationRecorder : IDisposable
                 ? (nint)_config.DisplayIndex
                 : DisplayEnumerator.GetMonitorUnderCursor());
 
+        // 色彩决定整次录制算一次（源屏 = 被录那块屏），逐帧复用；帧循环里不再各自解析下拉。
+        _colorDecision = ColorDecision.Build(displayInfo, _config.ColorSpaceTag, false,
+            AppServices.Settings.Current.AcmeDetected);
+
         if (displayInfo is null)
         {
             LogService.Error("AnimationRecorder", "找不到目标显示器");
@@ -138,9 +162,26 @@ public sealed class AnimationRecorder : IDisposable
                     var pixels = result.SdrPixels;
                     if (HasChange(pixels, last, _config.ChangeThreshold))
                     {
-                        // 有界写入：缓冲满时 DropOldest 自动丢弃最旧帧
-                        if (!_frameChannel.Writer.TryWrite((pixels, result.Width, result.Height)))
+                        // ═══ P3: Wait(1s) 背压策略 — 编码端稍慢时短暂等待而非丢帧 ═══
+                        // 若 1s 内缓冲仍满（编码端严重慢于捕获率），放弃该帧并计数
+                        bool written = false;
+                        try
                         {
+                            written = await _frameChannel.Writer.WaitToWriteAsync(ct).AsTask()
+                                .WaitAsync(TimeSpan.FromSeconds(1));
+                        }
+                        catch (TimeoutException)
+                        {
+                            // 缓冲持续满 1s → 主动丢帧
+                            written = false;
+                        }
+                        if (written)
+                        {
+                            _frameChannel.Writer.TryWrite((pixels, result.Width, result.Height));
+                        }
+                        else
+                        {
+                            // 缓冲持续满 → 主动丢帧并计数（UI 可见）
                             Interlocked.Increment(ref _framesDropped);
                         }
                         Interlocked.Increment(ref _framesCaptured);
@@ -159,7 +200,7 @@ public sealed class AnimationRecorder : IDisposable
         catch (OperationCanceledException) { /* 正常停止 */ }
 
         _frameChannel.Writer.TryComplete();
-        LogService.Info("AnimationRecorder", $"录制循环结束: 捕获 {_framesCaptured} 帧");
+        LogService.Info("AnimationRecorder", $"录制循环结束: 捕获 {_framesCaptured} 帧, 丢帧 {_framesDropped}");
         Report();
     }
 
@@ -209,8 +250,8 @@ public sealed class AnimationRecorder : IDisposable
                 var framePath = Path.Combine(tmpDir, $"frame_{i:D5}.png");
 
                 // ═══ ICC 色彩管理：烘焙到目标色域 ═══
-                var (bakedPixels, _) = CapturePipelineService.PreparePixelsWithIcc(
-                    px, w, h, _config.IccBakeEnabled, _config.ColorSpaceTag);
+                var (bakedPixels, _, _) = CapturePipelineService.PreparePixelsWithIcc(
+                    px, w, h, Decision());
                 TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(bakedPixels, w, h, framePath, 8);
                     encoded++;
                     Report();
@@ -271,8 +312,8 @@ public sealed class AnimationRecorder : IDisposable
                     // ffmpeg 不可用时回退：保存第一帧为 PNG（带 ICC 色彩管理）
                     var fallbackPath = Path.ChangeExtension(path, ".png");
                     var (px0, w0, h0) = _encodedFrames[0];
-                    var (bakedPixels, _) = CapturePipelineService.PreparePixelsWithIcc(
-                        px0, w0, h0, _config.IccBakeEnabled, _config.ColorSpaceTag);
+                    var (bakedPixels, _, _) = CapturePipelineService.PreparePixelsWithIcc(
+                        px0, w0, h0, Decision());
                     TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 8);
                     path = fallbackPath;
                     LogService.Warn("AnimationRecorder", "ffmpeg 不可用，回退为单帧 PNG");

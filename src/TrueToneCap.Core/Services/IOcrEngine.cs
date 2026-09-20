@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/IOcrEngine.cs
 // OCR 引擎抽象接口 — 手动选择，无自动降级
 

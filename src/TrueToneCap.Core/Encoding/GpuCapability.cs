@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/GpuCapability.cs
 // GPU 硬件编码器检测 — 原生 SDK (非 FFmpeg)
 
@@ -37,7 +39,13 @@ public static class GpuCapability
             info.Available = info.Type switch
             {
                 GpuEncoderType.NVENC => NvEncoderNative.IsAvailable,
-                GpuEncoderType.QSV => MftEncoderNative.IsIntelGpuAvailable,
+                // ═══ 2026-09-19（交接 §27）：与后端判定同源 ═══
+                // QsvAvifBackend.IsAvailable 用的是"系统里有没有 AV1 编码 MFT"（运行时 CoCreateInstance），
+                // 这里原先只问"是不是 Intel 显卡" ⇒ Auto 会在一块没有 AV1 MFT 的 Intel 卡上选中 QSV，
+                // 之后必然失败回退 libaom（白跑一次硬件尝试；现在回退至少会留痕）。
+                // 保留 IsIntelGpuAvailable 这一层是因为 GpuEncoderInfo 是按适配器枚举的，
+                // "哪个适配器"仍要有归属，只是"可用"必须同时满足系统真有 AV1 MFT。
+                GpuEncoderType.QSV => MftEncoderNative.IsIntelGpuAvailable && MftEncoderNative.IsAv1MftAvailable,
                 _ => false
             };
             _cached.Add(info);

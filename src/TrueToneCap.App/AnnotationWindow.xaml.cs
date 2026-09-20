@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/AnnotationWindow.xaml.cs
 // 全窗口截图预览与标注编辑器 (接受原始 BGRA 像素, 零编码延迟)
 
@@ -479,7 +481,11 @@ public sealed partial class AnnotationWindow : Window
         // 图层面板联动
         if (LayersPanel.Visibility == Visibility.Visible)
             RefreshLayersPanel();
-        foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible))
+        // ═══ 2026-09-15 修复：按 ZOrder 排序 ═══
+        // 原实现直接遍历 Layers 的列表顺序，而"上移/下移"只交换 ZOrder 属性
+        // ⇒ 调整顺序后预览与输出都毫无变化，按钮形同虚设。
+        // OrderBy 是稳定排序：ZOrder 相同（默认值 0）时保持原有顺序，不影响既有行为。
+        foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible).OrderBy(l => l.ZOrder))
         {
             var isText = layer is TextLayer;
             var isFreehand = layer is FreehandLayer;
@@ -743,7 +749,8 @@ public sealed partial class AnnotationWindow : Window
         var result = new byte[_rawPixels.Length];
         Buffer.BlockCopy(_rawPixels, 0, result, 0, _rawPixels.Length);
 
-        foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible))
+        // 同上：最终输出也必须按 ZOrder 排序，否则与预览不一致
+        foreach (var layer in _annotationManager.Layers.Where(l => l.IsVisible).OrderBy(l => l.ZOrder))
             AnnotationRasterizer.RenderLayer(result, _imgW, _imgH, layer);
         return result;
     }

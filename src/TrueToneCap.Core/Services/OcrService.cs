@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/OcrService.cs
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
@@ -13,6 +15,8 @@ public static class OcrService
     public static async Task<OcrResult> ExtractTextAsync(byte[] bgraPixels, int width, int height,
         string? languageTag = null, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+
         // ── Pass 1: 原始图像 ──
         var result1 = await RunOcrAsync(bgraPixels, width, height, languageTag, ct);
 
@@ -78,10 +82,18 @@ public static class OcrService
                 engine ??= OcrEngine.TryCreateFromUserProfileLanguages();
             }
 
+            // 把请求的标签印进错文，否则"请安装语言包"无法区分"标签形态不对"与"包真没装"。
             if (engine is null)
-                return new OcrResult { Text = "", Error = "无法创建 OCR 引擎（请安装语言包）" };
+                return new OcrResult
+                {
+                    Text = "",
+                    Error = "无法创建 OCR 引擎（语言 " +
+                            $"{(string.IsNullOrWhiteSpace(languageTag) ? "用户配置文件语言" : languageTag)} 未安装语言包）"
+                };
 
-            var result = await engine.RecognizeAsync(bitmap);
+            // ⚠ 必须把 ct 递进去：AsTask(ct) 原先缺失，调用方取消后这里仍会跑到引擎返回为止
+            // （实测 300ms 取消 ⇒ 实际 307ms 完成并返回全文，取消形同不存在）。
+            var result = await engine.RecognizeAsync(bitmap).AsTask(ct);
 
             return new OcrResult
             {

@@ -1,0 +1,55 @@
+# TrueToneCap/.gitattributes
+#
+# 2026-09-14 建立。当前只做两件安全的事:
+#   1) 把二进制文件显式标记为 binary —— 防止 git 把它们当文本做 diff/merge，
+#      也防止任何自动换行符转换损坏它们（.onnx/.cso/.exe 被改一个字节就废了）。
+#   2) 给源码加 diff 驱动提示（diff=csharp 让 git diff 显示所属函数名）。
+#
+# ⚠️ 刻意【未】设置 `* text=auto`:
+#    那会触发全仓库换行符重归一化 —— 已入库文件若以 CRLF 存储，下一次 git add
+#    会全部显示为已修改，把真正的功能改动淹没在几万行噪声里。
+#    等工作区干净、且能接受一次性 `git add --renormalize .` 提交时再补这一行。
+
+# ── 源码：仅加 diff 驱动，不改换行行为 ──
+*.cs       diff=csharp
+*.csproj   text
+*.props    text
+*.targets  text
+*.xaml     text
+*.json     text
+*.md       text
+*.ps1      text
+*.hlsl     text
+*.py       text
+*.xml      text
+*.config   text
+*.gitignore text
+*.gitattributes text
+
+# ── git 钩子：无扩展名的 POSIX shell 脚本，必须锁死 LF ──
+#    被 core.autocrlf 转成 CRLF 后 shebang 会变成 `#!/bin/sh^M`，
+#    sh 报 "bad interpreter" —— 表现是钩子【静默不执行】，极难察觉。
+scripts/git-hooks/* text eol=lf
+*.sh       text eol=lf
+
+# ── 二进制：禁止 diff、禁止换行转换、禁止 eol 归一化 ──
+*.onnx     binary
+*.cso      binary
+*.exe      binary
+*.dll      binary
+*.pdb      binary
+*.lib      binary
+*.snk      binary
+*.pfx      binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.webp     binary
+*.avif     binary
+*.jxl      binary
+*.tiff     binary
+*.ico      binary
+*.zip      binary
+*.7z       binary
+*.tar      binary
+*.gz       binary

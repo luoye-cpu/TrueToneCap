@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/OcrEngineType.cs
 // OCR 引擎类型枚举 — 手动选择，无自动降级
 

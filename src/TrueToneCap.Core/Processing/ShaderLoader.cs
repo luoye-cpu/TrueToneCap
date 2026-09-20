@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Processing/ShaderLoader.cs
 // 着色器字节码加载器 — 文件系统优先，嵌入资源回退
 // 消除 GpuToneMapper 和 GpuEffectProcessor 中的重复加载代码

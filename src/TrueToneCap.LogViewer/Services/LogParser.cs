@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.LogViewer/Services/LogParser.cs
 // 日志行解析器 — 完整解析 TrueToneCap 日志格式:
 //   HH:mm:ss.fff [Level   ] [分类/Tag] Message 文件.cs:行号

@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Test/OcrServiceTests.cs
-// OCR 预处理 + 翻译服务测试 — 覆盖 BitmapPreprocessor (纯 CPU) 和 LlmProviders (纯数据)
+// OCR 预处理 + LLM 清单测试 — 覆盖 BitmapPreprocessor (纯 CPU) 与三处 LLM 提供商/模型活表的闭合性
 // 注: OnnxOcrEngine 核心推理依赖模型/GPU, 不在单元测试范围 (由 OcrAccBench 工具实测)
 
 using TrueToneCap.Core.Services;
@@ -28,14 +30,12 @@ public static class OcrServiceTests
         Preprocess_AutoPreprocess_SmallUpscale();
         Preprocess_AutoPreprocess_HighContrast_NoOp();
 
-        // ── LlmProviders ──
-        Console.WriteLine("\n── LlmProviders ──");
-        LlmProviders_NonEmpty();
-        LlmProviders_UniqueModels();
-        LlmProviders_Endpoints();
+        // ── LLM 提供商/模型清单 ──
+        Console.WriteLine("\n── LLM 提供商/模型清单 ──");
+        LlmProviderTables_AreClosed();
 
         Console.WriteLine($"\n══════════════════════════════════════");
-        Console.WriteLine($"  结果: {_passed} 通过, {_failed} 失败");
+        TestSummary.Report("--ocr-tests", _passed, _failed);
         Console.WriteLine($"══════════════════════════════════════\n");
         return _failed > 0 ? 1 : 0;
     }
@@ -155,36 +155,114 @@ public static class OcrServiceTests
     }
 
     // ═══════════════════════════════════════
-    //  LlmProviders
+    //  LLM 提供商/模型清单（三处活表必须闭合）
     // ═══════════════════════════════════════
 
-    static void LlmProviders_NonEmpty()
+    /// <summary>
+    /// 生效的清单只有三处：XAML 的 LlmProviderCbo、XAML 的 LlmModelCbo、
+    /// OnLlmProviderChanged 里那张 tag→(endpoint, 默认模型) 的映射。
+    /// <para>原先这一节测的是 Core 里的 <c>LlmProviders.All/Models</c>（11 提供方 / 27 模型），
+    /// 而那张表全仓唯一的消费者就是这三条断言本身 ⇒ 门禁绿的是一个用户碰不到的表，
+    /// 三处真表之间的漂移反而没人看（例：Gemini 在 XAML 是 gemini-2.0-flash、
+    /// 在 LlmProviders 是 gemini-3.5-flash）。Core 那张表已删，判据搬到活表上。
+    /// Test 工程只引用 Core，枚举不了 WinUI 控件 ⇒ 只能读源文件文本，与仓库既有判据同法。</para>
+    /// </summary>
+    static void LlmProviderTables_AreClosed()
     {
-        Assert($"LlmProviders: 提供方非空 ({LlmProviders.All.Length})", LlmProviders.All.Length > 0);
-    }
-
-    static void LlmProviders_UniqueModels()
-    {
-        // 模型 tag 应唯一 (供 UI 下拉选择)
-        var tags = LlmProviders.Models.Select(m => m.Tag).ToList();
-        bool unique = tags.Count == tags.Distinct().Count();
-        Assert($"LlmProviders: 模型 tag 唯一 ({tags.Count})", unique);
-    }
-
-    static void LlmProviders_Endpoints()
-    {
-        // 非自定义提供方应有非空 endpoint 和默认模型
-        bool allValid = true;
-        foreach (var p in LlmProviders.All)
+        var xaml = ReadRepoFile("src", "TrueToneCap.App", "MainWindow.xaml");
+        var handler = ReadRepoFile("src", "TrueToneCap.App", "MainWindow.OcrSettings.cs");
+        if (xaml is null || handler is null)
         {
-            if (p.Name == "自定义") continue;
-            if (string.IsNullOrEmpty(p.Endpoint) || string.IsNullOrEmpty(p.DefaultModel))
-            { allValid = false; break; }
+            Assert("LLM 清单判据：源文件在位（不在则说明文件被移动，判据当红不当绿）", false);
+            return;
         }
-        Assert("LlmProviders: 提供方 endpoint/模型有效", allValid);
+
+        var providers = TagsOf(xaml, "LlmProviderCbo");
+        var models = TagsOf(xaml, "LlmModelCbo");
+        var map = HandlerMap(handler);
+
+        Assert($"下拉里的每个提供方都在 handler 里有映射（提供方 {providers.Length} 项）",
+            providers.Length >= 5
+            && providers.Where(p => p != "Custom")
+                .All(p => map.Any(m => m.tag == p)),
+            string.Join(",", providers.Where(p => p != "Custom" && !map.Any(m => m.tag == p))));
+
+        Assert("handler 里没有下拉已删掉的僵尸 case",
+            map.All(m => providers.Contains(m.tag)),
+            string.Join(",", map.Select(m => m.tag).Except(providers)));
+
+        Assert("handler 注入的默认模型必须是模型下拉里存在的 Tag",
+            map.All(m => m.model.Length == 0 || models.Contains(m.model)),
+            string.Join(",", map.Where(m => m.model.Length > 0 && !models.Contains(m.model))
+                                .Select(m => m.tag + "->" + m.model)));
+
+        Assert($"模型下拉的 Tag 唯一（{models.Length} 项）",
+            models.Length == models.Distinct().Count(),
+            string.Join(",", models.GroupBy(m => m).Where(g => g.Count() > 1).Select(g => g.Key)));
+
+        Assert("非自定义提供方的 endpoint 必须是 https 且非空",
+            map.Where(m => m.tag != "Custom").All(m => m.endpoint.StartsWith("https://")),
+            string.Join(",", map.Where(m => m.tag != "Custom" && !m.endpoint.StartsWith("https://"))
+                                .Select(m => m.tag + "=" + m.endpoint)));
     }
 
-    static void Assert(string name, bool condition)
+    static readonly string Qc = ((char)34).ToString();
+
+    /// <summary>取某个 ComboBox 块内全部 ComboBoxItem 的 Tag。</summary>
+    static string[] TagsOf(string xaml, string comboName)
+    {
+        int start = xaml.IndexOf("x:Name=" + Qc + comboName + Qc, StringComparison.Ordinal);
+        if (start < 0) return [];
+        int end = xaml.IndexOf("</ComboBox>", start, StringComparison.Ordinal);
+        if (end < 0) return [];
+        var list = new List<string>();
+        foreach (var line in xaml[start..end].Split('\n'))
+        {
+            int i = line.IndexOf("Tag=" + Qc, StringComparison.Ordinal);
+            if (i < 0) continue;
+            int j = line.IndexOf(Qc, i + 5, StringComparison.Ordinal);
+            if (j < 0) continue;
+            list.Add(line.Substring(i + 5, j - i - 5));
+        }
+        return list.ToArray();
+    }
+
+    /// <summary>取 OnLlmProviderChanged 里 "tag" =&gt; ("endpoint", "model") 形态的映射行。</summary>
+    static (string tag, string endpoint, string model)[] HandlerMap(string code)
+    {
+        var list = new List<(string, string, string)>();
+        foreach (var raw in code.Split('\n'))
+        {
+            var line = raw.Trim();
+            int arrow = line.IndexOf("=> (", StringComparison.Ordinal);
+            if (arrow <= 0 || !line.StartsWith(Qc)) continue;
+            int tagEnd = line.IndexOf(Qc, 1, StringComparison.Ordinal);
+            if (tagEnd < 0) continue;
+            string tag = line.Substring(1, tagEnd - 1);
+            int q1 = line.IndexOf(Qc, arrow + 1, StringComparison.Ordinal);
+            int q2 = q1 < 0 ? -1 : line.IndexOf(Qc, q1 + 1, StringComparison.Ordinal);
+            int q3 = q2 < 0 ? -1 : line.IndexOf(Qc, q2 + 1, StringComparison.Ordinal);
+            int q4 = q3 < 0 ? -1 : line.IndexOf(Qc, q3 + 1, StringComparison.Ordinal);
+            if (q4 < 0) continue;
+            list.Add((tag, line.Substring(q1 + 1, q2 - q1 - 1), line.Substring(q3 + 1, q4 - q3 - 1)));
+        }
+        return list.ToArray();
+    }
+
+    /// <summary>从测试运行目录向上找仓库内文件。</summary>
+    static string? ReadRepoFile(params string[] parts)
+    {
+        var rel = Path.Combine(parts);
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
+        {
+            var cand = Path.Combine(dir.FullName, rel);
+            if (File.Exists(cand)) return File.ReadAllText(cand);
+        }
+        return null;
+    }
+
+    static void Assert(string name, bool condition, string? detail = null)
     {
         if (condition) { _passed++; Console.WriteLine($"  ✅ {name}"); }
         else { _failed++; Console.WriteLine($"  ❌ {name}"); }

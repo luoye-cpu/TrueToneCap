@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/PowerManager.cs
 // 电源管理 — 在捕获/编码期间阻止系统睡眠/屏幕关闭
 

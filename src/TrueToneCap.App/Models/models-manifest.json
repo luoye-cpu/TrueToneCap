@@ -1,0 +1,22 @@
+{
+  "_comment": "OCR 模型完整性清单 —— 与 src/TrueToneCap.Core/Resources/tools-manifest.json 对称。模型是外网获取的可执行二进制（ONNX 由 OnnxRuntime 直接加载），只查『文件存在』挡不住被替换或下载被截断。sha256 与 download_models.ps1 内的 $expectedSha256 保持一致。",
+  "_generated": "2026-09-15 由当前源码树内的模型计算并固化（与 download_models.ps1 登记值逐位一致）",
+  "_upgrade": "升级模型时：确认新来源可信 → 下载 → 更新本文件与 download_models.ps1 的 $expectedSha256 → 再发布。不要让校验长期失效。",
+  "_whyNoDict": "⚠️ 本清单【刻意不包含 ppocrv6_dict.txt】。它是文本文件，受 git 的 eol 规范化影响：HEAD blob 存的是 LF 版本，工作区按 core.autocrlf 检出可能是 CRLF 版本 —— 同一个文件两种哈希（实测 LF=b5f2bfe... / CRLF=769e7fa...）。若把它写进清单，发布校验就会因开发者本地 eol 设置不同而随机失败。字典本身已在版本控制中，完整性由 git 自身保证，无需在此重复校验。",
+  "models": [
+    {
+      "name": "PP-OCRv6_medium_det.onnx",
+      "sha256": "f59aa6c475b5a42907fe282d10bc07031511bebcf8476794351a8c06af9958f5",
+      "size": 31146237,
+      "note": "ONNX 文字检测模型",
+      "_eolSafe": "二进制文件，不受 eol 规范化影响，哈希在不同环境稳定"
+    },
+    {
+      "name": "PP-OCRv6_medium_rec.onnx",
+      "sha256": "63560d7b64bbdfc3c82cf3f329a6ab5df8f322eb9a7dd8039519abdb1eb4ac92",
+      "size": 38399862,
+      "note": "ONNX 文字识别模型",
+      "_eolSafe": "二进制文件，不受 eol 规范化影响，哈希在不同环境稳定"
+    }
+  ]
+}

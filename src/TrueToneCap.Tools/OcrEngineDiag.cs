@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrEngineDiag.cs — 引擎级诊断：完全复现 RunDetection 路径，对比独立推理
 // 用法: dotnet run --project src/TrueToneCap.Tools -- --ocr-eng <modelDir>
 using Microsoft.ML.OnnxRuntime;

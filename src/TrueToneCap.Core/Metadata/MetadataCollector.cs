@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Metadata/MetadataCollector.cs
 // 自动收集截图时的系统/窗口/显示器元数据
 

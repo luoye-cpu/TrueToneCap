@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // FullscreenVS.hlsl
 // 全屏三角形顶点着色器 — 使用 SV_VertexID 程序化生成顶点
 // 无需顶点缓冲区，Draw(3, 0) 即可覆盖整个视口

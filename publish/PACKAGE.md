@@ -1,6 +1,14 @@
 # TrueToneCap 分发打包说明 / Distribution Packaging Guide
 
 > v0.3.1 Beta · 2026-08-10
+>
+> ⚠ **本文整体已过时（2026-09-20 整洁审计，`docs-staleness-audit-2026-09-14.md:20` 早判 🔴 未修）**：
+> 版本停在 v0.3.1-beta，而现行版本是 0.3.4-beta（也未打 tag）；下面引用的四个分发件名
+> （`TrueToneCap-v0.3.1-beta/`、`-lite/`、`-win-x64.zip`、`-win-x64-lite.zip`）**都已不存在**——
+> 现行打包链路是 `Publish.ps1`（本地测试包另有 `scripts/publish-with-prebuilt.ps1`），产物为目录 + `.7z`
+> + `SHA256SUMS.txt` + `build-info.json`，`publish/` 整体被 .gitignore 覆盖（仓库里只剩本文与该目录）。
+> 要发布/复现请读 `Publish.ps1` 的参数与本仓 `CHANGELOG.md` 的发布小节，别照本文的手工步骤做。
+
 
 ---
 
@@ -32,8 +40,8 @@ TrueToneCap-v0.3.1-beta-win-x64/
 │   ├── Shaders/                 # HLSL 着色器 (.cso)
 │   └── TrueToneCap.Core.pdb     # 调试符号
 │
-├── native/                     # 原生工具链（从 PLAN/tools/ 预提取，详见 §六）
-│   ├── avifenc.exe             # AVIF 编码器 (~12 MB)
+├── native/                     # 原生工具链（Publish.ps1 [3/6] 从 Core/Resources/ 复制，详见 §六）
+│   ├── avifenc.exe             # AVIF 编码器 (~16 MB；自编译的 libavif 1.4.2，含 aom + SVT-AV1，配方见 scripts/build-avifenc.py)
 │   ├── cjpegli.exe             # JPEG LI 编码器 (~5 MB)
 │   └── cwebp.exe               # WebP 编码器 (~0.7 MB)
 │
@@ -91,7 +99,7 @@ TrueToneCap-v0.3.1-beta-win-x64/
 ### 制作方法
 
 ```powershell
-# 1. 运行发布脚本（自动编译 + 从 PLAN/ 复制依赖）
+# 1. 运行发布脚本（自动编译 + 从单一事实源复制工具链与模型）
 .\Publish.ps1 -Configuration Release -Runtime win-x64
 
 # 2. 制作精简版（不含 data/Models/）
@@ -148,55 +156,76 @@ TrueToneCap 默认使用 **微软雅黑** 作为 UI 字体。可在系统设置 
 
 | 文件 | 大小 | 用途 |
 |------|------|------|
-| `PP-OCRv6_medium_det.onnx` | ~59 MB | 文字检测（FP16 中型） |
-| `PP-OCRv6_medium_rec.onnx` | ~73 MB | 文字识别（FP16 中型） |
-| `ppocrv6_dict.txt` | ~26 KB | 中英文字典 (6625 字符) |
+| `PP-OCRv6_medium_det.onnx` | **29.7 MB** | 文字检测（FP16 中型） |
+| `PP-OCRv6_medium_rec.onnx` | **36.6 MB** | 文字识别（FP16 中型） |
+| `ppocrv6_dict.txt` | **73 KB** (74947 B) | 中英文字典 |
+
+> **2026-09-14 更正**：此前标注的 ~59 MB / ~73 MB 是 **FP32 原始模型**的体积
+> （现存放于 `official_models/onnx_fp32/`，已被 `.gitignore` 排除、不入库）。
+> 仓库中实际打包的是经 `scripts/onnx_fp16_quantize.py` 量化后的 **FP16** 版本。
 
 ### 模型来源
 
 基于 PaddleOCR PP-OCRv6 导出为 ONNX 格式（FP16 中型），支持中文 + 英文混合识别。
+FP16 模型由 `scripts/onnx_fp16_quantize.py` 从官方 FP32 模型转换而来；
+如需重新获取，可用 `download_models.ps1`（输出到 `src/TrueToneCap.App/Models/`）。
 
 ### 模型加载优先级
 
-1. 首先查找 `<应用目录>\data\Models\` （发布包自带，由 `Publish.ps1` 从 `PLAN/models/` 复制）
+1. 首先查找 `<应用目录>\data\Models\` （发布包自带，由 `Publish.ps1` **[4/6] 步骤**从
+   **`src/TrueToneCap.App/Models/`** 复制 —— 该目录是模型单一事实源）
 2. 回退到 `%LOCALAPPDATA%\TrueToneCap\onnx_models\` （用户自行下载）
 3. 如果 ONNX 模型不可用，降级使用 Windows 内置 OCR
 
+### 设置文件位置
+
+- **软件同目录**的 `TrueToneCap.settings.json`（默认）—— 设置随程序走，
+  便于整目录拷贝的绿色 / 便携用法
+- 若同目录**不可写**（例如安装到 `Program Files`、放在只读介质、以无权限账户运行），
+  自动改用 `%LOCALAPPDATA%\TrueToneCap\TrueToneCap.settings.json`
+- 从旧版本升级时：若同目录尚无配置文件，会自动把旧位置的配置搬过来，**旧文件保留**以便回退
+- **恢复默认设置**：删除上述 `TrueToneCap.settings.json` 后重启即可
+
+> 崩溃哨兵文件（`encoder-crash.sentinel`）始终位于
+> `%LOCALAPPDATA%\TrueToneCap\`，不随程序目录 —— 程序目录可能只读，
+> 而哨兵必须"进程被杀死后仍然留下"，放在只读位置会让它彻底失效。
+
 ---
 
-## 六、依赖仓库 / Dependency Repository
+## 六、依赖来源 / Dependency Sources
 
-所有非核心运行时组件统一存放在 `publish/PLAN/` 目录下，打包时由 `Publish.ps1` 自动收集。
+> ⚠️ **2026-09-14 重要变更：本节描述的旧流程已废弃。**
+>
+> 早期版本把非核心运行时组件统一放在 `publish/PLAN/` 下，并要求
+> `PLAN/tools/` 与 `src/TrueToneCap.Core/Resources/` **人工保持同步** —— 这带来了
+> 双份人工维护的漂移隐患（见 `docs/repo-hygiene-review.md`）。
+>
+> **现已改为单一事实源**，`publish/PLAN/` 下的工具与模型副本**均已从版本控制移除**，
+> `Publish.ps1` 不再读取该目录。
 
-### 目录结构
+### 单一事实源（当前）
 
-```
-publish/PLAN/
-├── tools/       # 原生工具链 → 预提取到发布包 native/
-├── models/      # OCR ONNX 模型 → 复制到发布包 data/Models/
-├── fonts/       # [可选] 用户字体放置目录
-└── README.md    # 依赖仓库说明
-```
+| 内容 | 单一事实源 | 发布包目标 | Publish.ps1 步骤 |
+|------|-----------|-----------|:---:|
+| 原生工具链 | `src/TrueToneCap.Core/Resources/` | `native/` | **[3/6]** |
+| OCR ONNX 模型 | `src/TrueToneCap.App/Models/` | `data/Models/` | **[4/6]** |
+| 用户字体 | `publish/PLAN/fonts/`（可选） | — | — |
 
-### 保持同步
-
-| 仓库位置 | 发布包目标 | 同步方式 |
-|---------|----------|---------|
-| `PLAN/tools/` | `native/` | `Publish.ps1` 步骤 5.1 复制 |
-| `PLAN/models/` | `data/Models/` | `Publish.ps1` 步骤 5.2 复制 |
-| `src/Core/Resources/` | 嵌入 DLL 运行时提取到 `native/` | 手动同步（与 `PLAN/tools/` 一致） |
-
-> **注意**：`src/TrueToneCap.Core/Resources/` 中的 exe 嵌入 DLL 供运行时自动提取，
-> `PLAN/tools/` 中的 exe 供打包时预提取。两个目录必须保持文件一致。
+> `src/TrueToneCap.Core/Resources/` 中的 exe 既嵌入 DLL 供运行时自动提取，
+> **也**由 `Publish.ps1` [3/6] 直接复制进发布包 `native/` —— 两者同源，无需同步。
 
 ---
 
 ## 七、更新检查清单 / Release Checklist
 
-- [ ] `csproj` 版本号更新（Version / AssemblyVersion / FileVersion）
+- [ ] `Directory.Build.props` 版本号更新（Version / AssemblyVersion / FileVersion）
+      —— 全仓库版本唯一事实源，各 csproj 不再单独声明
 - [ ] `Publish.ps1` 输出目录更新
 - [ ] `README.md` 版本号和更新日志更新
-- [ ] `PLAN/tools/` 与 `Core/Resources/` 工具版本一致
+- [ ] `src/TrueToneCap.Core/Resources/` 与 `src/TrueToneCap.App/Models/` 内容齐全
+      （`Publish.ps1` [0/6] 会校验并阻断缺失）
+- [ ] 依赖变更后的 `packages.lock.json` 已重新生成并提交
+      （`Publish.ps1` [0/6] 会校验锁定文件齐全性）
 - [ ] 编译通过 `dotnet build -c Release -r win-x64`
 - [ ] 运行 `.\Publish.ps1` 生成发布包（自动验证 PLAN 完整性）
 - [ ] 检查 `native/` 包含 3 个工具（avifenc.exe, cjpegli.exe, cwebp.exe）

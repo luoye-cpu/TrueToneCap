@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Processing/GpuToneMapper.cs
 // GPU 加速色调映射 — 使用预编译 HLSL 着色器 + D3D11 渲染管线
 // 需要先运行 shaders/CompileShaders.ps1 生成 ToneMapping.hlsl.cso + FullscreenVS.hlsl.cso
@@ -6,6 +8,7 @@ using System.Runtime.InteropServices;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
+using TrueToneCap.Core.Logging;
 
 namespace TrueToneCap.Core.Processing;
 
@@ -49,7 +52,7 @@ public sealed class GpuToneMapper : IDisposable
             var (psBytes, vsBytes) = LoadShaderBytecode();
             if (psBytes is null || vsBytes is null)
             {
-                System.Diagnostics.Debug.WriteLine("[GpuToneMapper] 着色器字节码未找到，GPU 路径不可用（使用 CPU 回退）");
+                CoreLog.Warn("GpuToneMapper", "着色器字节码未找到，GPU 路径不可用（使用 CPU 回退）", LogCategory.Encoding);
                 return;
             }
 
@@ -79,11 +82,11 @@ public sealed class GpuToneMapper : IDisposable
             };
             _constantBuffer = _device.CreateBuffer(cbDesc);
 
-            System.Diagnostics.Debug.WriteLine("[GpuToneMapper] GPU 着色器初始化成功");
+            CoreLog.Info("GpuToneMapper", "GPU 着色器初始化成功", LogCategory.Encoding);
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] 初始化失败: {ex.Message}，使用 CPU 回退");
+            CoreLog.Warn("GpuToneMapper", "初始化失败，使用 CPU 回退", ex, LogCategory.Encoding);
             _pixelShader = null;
             _vertexShader = null;
         }
@@ -103,13 +106,13 @@ public sealed class GpuToneMapper : IDisposable
                 s_cachedVertexShader ??= ShaderLoader.Load("FullscreenVS.hlsl.cso");
 
                 if (s_cachedPixelShader is not null && s_cachedVertexShader is not null)
-                    System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] 加载着色器成功: PS={s_cachedPixelShader.Length}B VS={s_cachedVertexShader.Length}B");
+                    CoreLog.Info("GpuToneMapper", $"加载着色器成功: PS={s_cachedPixelShader.Length}B VS={s_cachedVertexShader.Length}B", LogCategory.Encoding);
                 else
-                    System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] 着色器缺失: PS={(s_cachedPixelShader is not null ? "✓" : "✗")} VS={(s_cachedVertexShader is not null ? "✓" : "✗")}");
+                    CoreLog.Debug("GpuToneMapper", $"着色器缺失: PS={(s_cachedPixelShader is not null ? "✓" : "✗")} VS={(s_cachedVertexShader is not null ? "✓" : "✗")}", LogCategory.Encoding);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] 加载着色器失败: {ex.Message}");
+                CoreLog.Warn("GpuToneMapper", "加载着色器失败", ex, LogCategory.Encoding);
             }
 
             return (s_cachedPixelShader, s_cachedVertexShader);
@@ -140,7 +143,7 @@ public sealed class GpuToneMapper : IDisposable
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] GPU 失败，CPU 回退: {ex.Message}");
+                CoreLog.Warn("GpuToneMapper", "GPU 失败，CPU 回退", ex, LogCategory.Encoding);
                 return ToneMapper.FloatToSRgbBytes(hdrPixels, width, height, p, colorSpaceTag);
             }
         });
@@ -197,7 +200,7 @@ public sealed class GpuToneMapper : IDisposable
 
             _pooledW = w;
             _pooledH = h;
-            System.Diagnostics.Debug.WriteLine($"[GpuToneMapper] 纹理池重建: {w}x{h}");
+            CoreLog.Trace("GpuToneMapper", () => $"纹理池重建: {w}x{h}", LogCategory.Encoding);
         }
     }
 
@@ -210,25 +213,34 @@ public sealed class GpuToneMapper : IDisposable
         var ctx = _device.ImmediateContext;
 
         // ═══ 上传像素（Float32 → Float16，使用 PixelOps SIMD 加速）═══
+        // ⚠️ Map/Unmap 必须成对，且用 try/finally 保护：
+        //    整段在 lock(_poolLock) 内，一旦中途抛异常（设备移除 / 驱动重置 / OOM）而漏掉 Unmap，
+        //    后续所有截图都会永久阻塞在 _poolLock 上 —— 表现为界面假死且无法自愈。
         var mapped = ctx.Map(_pooledInputTex!, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
-        unsafe
+        try
         {
-            byte* dstBase = (byte*)mapped.DataPointer.ToPointer();
-            int dstRowPitch = (int)mapped.RowPitch;
-            int halfsPerRow = width * 4;
-
-            fixed (float* src = hdrPixels)
+            unsafe
             {
-                for (int row = 0; row < height; row++)
+                byte* dstBase = (byte*)mapped.DataPointer.ToPointer();
+                int dstRowPitch = (int)mapped.RowPitch;
+                int halfsPerRow = width * 4;
+
+                fixed (float* src = hdrPixels)
                 {
-                    byte* dstRow = dstBase + row * dstRowPitch;
-                    float* srcRow = src + row * halfsPerRow;
-                    // 使用 PixelOps 批量转换（JIT 自动向量化 → F16C VCVTPS2PH）
-                    TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(srcRow, (ushort*)dstRow, halfsPerRow);
+                    for (int row = 0; row < height; row++)
+                    {
+                        byte* dstRow = dstBase + row * dstRowPitch;
+                        float* srcRow = src + row * halfsPerRow;
+                        // 使用 PixelOps 批量转换（JIT 自动向量化 → F16C VCVTPS2PH）
+                        TrueToneCap.Core.PixelOps.ConvertFloatToHalfRow(srcRow, (ushort*)dstRow, halfsPerRow);
+                    }
                 }
             }
         }
-        ctx.Unmap(_pooledInputTex!, 0);
+        finally
+        {
+            ctx.Unmap(_pooledInputTex!, 0);
+        }
 
         // ═══ 渲染 ═══
         ctx.OMSetRenderTargets(_pooledOutputRtv!);
@@ -250,8 +262,14 @@ public sealed class GpuToneMapper : IDisposable
             DisplayMaxNits = p.DisplayMaxNits
         };
         var mappedCb = ctx.Map(_constantBuffer!, 0, Vortice.Direct3D11.MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
-        unsafe { Buffer.MemoryCopy(&cbData, mappedCb.DataPointer.ToPointer(), 16, 16); }
-        ctx.Unmap(_constantBuffer!, 0);
+        try
+        {
+            unsafe { Buffer.MemoryCopy(&cbData, mappedCb.DataPointer.ToPointer(), 16, 16); }
+        }
+        finally
+        {
+            ctx.Unmap(_constantBuffer!, 0);
+        }
         ctx.PSSetConstantBuffer(0, _constantBuffer!);
 
         // 绘制全屏三角形（SV_VertexID 生成 3 顶点，无需 VB）
@@ -263,18 +281,24 @@ public sealed class GpuToneMapper : IDisposable
 
         var mappedOut = ctx.Map(_pooledStagingTex!, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         var result = new byte[width * height * 4];
-        unsafe
+        try
         {
-            byte* srcBase = (byte*)mappedOut.DataPointer.ToPointer();
-            int srcRowPitch = (int)mappedOut.RowPitch;
-            int dstStride = width * 4;
-            fixed (byte* dst = result)
+            unsafe
             {
-                for (int row = 0; row < height; row++)
-                    Buffer.MemoryCopy(srcBase + row * srcRowPitch, dst + row * dstStride, dstStride, dstStride);
+                byte* srcBase = (byte*)mappedOut.DataPointer.ToPointer();
+                int srcRowPitch = (int)mappedOut.RowPitch;
+                int dstStride = width * 4;
+                fixed (byte* dst = result)
+                {
+                    for (int row = 0; row < height; row++)
+                        Buffer.MemoryCopy(srcBase + row * srcRowPitch, dst + row * dstStride, dstStride, dstStride);
+                }
             }
         }
-        ctx.Unmap(_pooledStagingTex!, 0);
+        finally
+        {
+            ctx.Unmap(_pooledStagingTex!, 0);
+        }
 
         return result;
         } // end lock (_poolLock)

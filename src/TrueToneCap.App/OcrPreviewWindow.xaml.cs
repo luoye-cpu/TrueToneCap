@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/OcrPreviewWindow.xaml.cs
 // OCR / 翻译独立预览窗口：快速渲染截图 PNG，识别/翻译文字按原图坐标点对点覆盖在图上。
 // 原文模式 = 半透明高亮命中块（透出原字）；译文模式 = 实色块 + 译文覆盖（点对点替换）。
@@ -14,6 +16,7 @@ using Windows.Graphics.Imaging;
 using WinRT.Interop;
 using TrueToneCap.Core.Services;
 using TrueToneCap.App.Services;
+using TrueToneCap.Core.Logging;   // LogCategory
 
 namespace TrueToneCap.App;
 
@@ -34,6 +37,15 @@ public sealed partial class OcrPreviewWindow : Window
         get => _saveHandler;
         set => _saveHandler = value;
     }
+
+    /// <summary>
+    /// 这一拍截图的日志关联 ID（由 MainWindow 建窗时传进来）。
+    /// <para>本窗口的复制/翻译/保存都是**独立的 UI 事件根**，热键那次 <c>BeginOp</c> 的
+    /// <c>AsyncLocal</c> 不会流到这儿 ⇒ 每个入口 <c>ContinueOp(CaptureOpId)</c> 续上，
+    /// 报障时"同一次截图 → OCR → 翻译"才挂在同一个 <c>#opId</c> 下。null 时退化成开一个新 ID，
+    /// 宁可断开也不把两拍混成一条时间线（见 <c>CoreLog.ContinueOp</c>）。</para>
+    /// </summary>
+    public string? CaptureOpId { get; set; }
 
     public OcrPreviewWindow(byte[] bgraPixels, int width, int height, OcrResult ocr,
         LlmConfig translationConfig, bool autoTranslate = false,
@@ -128,7 +140,7 @@ public sealed partial class OcrPreviewWindow : Window
             try { SyncOverlayAndRender(); }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[OcrPreview] SyncOverlay 异常: {ex.Message}");
+                LogService.Warn("OcrPreview", $"SyncOverlay 异常: {ex.Message}", LogCategory.UI);
             }
         });
     }
@@ -301,6 +313,7 @@ public sealed partial class OcrPreviewWindow : Window
 
     private async void OnCopyAllClick(object sender, RoutedEventArgs e)
     {
+        using var _op = CoreLog.ContinueOp(CaptureOpId);
         string text = CurrentFullText();
         if (string.IsNullOrWhiteSpace(text)) { InfoTxt.Text = "⚠ 无文字可复制"; return; }
         await ShowTextDialogAsync(text);
@@ -377,8 +390,22 @@ public sealed partial class OcrPreviewWindow : Window
 
     private async void OnTranslateClick(object sender, RoutedEventArgs e) => await TranslateAndShowAsync();
 
+    /// <summary>
+    /// 把当前截图编成 8-bit PNG 到内存，供视觉路一次性上传（不落盘、不留临时文件）。
+    /// <para>固定 8-bit：视觉模型读不出位深差异，而 16-bit PNG 会让 base64 体积翻倍
+    /// 去撞端点的请求体上限。</para>
+    /// </summary>
+    private byte[] EncodePngForVision()
+    {
+        using var ms = new MemoryStream();
+        TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(_rawPixels, _imgW, _imgH, ms, bitDepth: 8);
+        return ms.ToArray();
+    }
+
     private async Task TranslateAndShowAsync()
     {
+        // 翻译是另一个 UI 根（自动翻译走 Loaded，点按钮走 Click）⇒ 两种入口都在这条链上，续一次就够
+        using var _op = CoreLog.ContinueOp(CaptureOpId);
         if (_translating) return;
         if (_ocr.Lines is null || _ocr.Lines.Count == 0)
         {
@@ -393,15 +420,53 @@ public sealed partial class OcrPreviewWindow : Window
             InfoTxt.Text = "🌐 翻译中...";
         });
 
+        // ═══ 先问一句"到底配了后端没有"（2026-09-21 告知整改）═══
+        // 扇出 N 行之前不先判断，N 行各自注定失败，而下面的行级容错会把原因全吞掉 ——
+        // 用户看到的就是"⚠ 翻译完成（N/N 行失败，已保留原文）"：既没原因，也没出路。
+        if (!TranslationService.AnyBackendAvailable(_translationConfig))
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                TranslateBtn.IsEnabled = true;
+                InfoTxt.Text = "⚠ " + TranslationService.DescribeBackends(_translationConfig);
+            });
+            return;
+        }
+
         try
         {
+            var translator = new TranslationService(_translationConfig);
+            var lines = _ocr.Lines;
+            string? firstError = null;      // 行级容错不许吞掉原因，留一份给状态栏
+            int? definiteFailed = null;     // 非 null = 这条路自己知道失败了几行，不必靠"译文==原文"猜
+
+            if (TranslationService.VisionConfigured(_translationConfig))
+            {
+                // ═══ 视觉路：整图像素直传，一次请求出全部行 ═══
+                // 刻意不把 OCR 文本塞进 prompt —— 那样模型会照着文本翻而不是读图，
+                // 这条链路就退化成下面的文本路了。
+                // 行数对不上时 TranslateImageWithVisionAsync 自己抛 TranslationException，
+                // 由本方法的 catch 如实显示；绝不按顺序硬套，错位覆盖比失败更难被发现。
+                byte[] png;
+                try { png = EncodePngForVision(); }
+                catch (Exception ex)
+                {
+                    throw new TranslationException($"截图编码 PNG 失败，无法走视觉路：{ex.Message}");
+                }
+                _translatedLines = (await translator.TranslateImageWithVisionAsync(
+                    png, _translationConfig.TargetLanguage, lines.Count)).ToList();
+                // 视觉路要么整批交出 N 行、要么抛异常（见 TranslateImageWithVisionAsync），
+                // 所以这里不存在"某行失败"。不显式记这一笔的话，下面那句按
+                // "译文 == 原文"数失败的兜底统计会把专有名词/同语言的正常行算成失败。
+                definiteFailed = 0;
+            }
+            else
+            {
             // ═══ P-4/R-5 修复: 并发限制 + 行级容错 ═══
             // 旧实现 Task.WhenAll 无并发限制 → 免费通道 (有道/Google) 可能限流/封 IP;
             // 且任一行异常导致 WhenAll 快速失败 → 全部译文丢失。
             // 新实现: SemaphoreSlim(4) 限并发 + 逐行 try/catch (失败行回填原文, 不影响其他行)。
-            var translator = new TranslationService(_translationConfig);
             using var sem = new System.Threading.SemaphoreSlim(4);
-            var lines = _ocr.Lines;
             var tasks = new Task<string>[lines.Count];
             for (int i = 0; i < lines.Count; i++)
             {
@@ -410,12 +475,18 @@ public sealed partial class OcrPreviewWindow : Window
                 {
                     await sem.WaitAsync();
                     try { return await translator.TranslateAsync(lineText, _translationConfig.TargetLanguage); }
-                    catch { return lineText; } // 行级容错: 失败行显示原文
+                    // 行级容错保留（P-4/R-5：一行失败不许带走全部译文），但原因要记下来
+                    catch (Exception ex)
+                    {
+                        System.Threading.Interlocked.CompareExchange(ref firstError, ex.Message, null);
+                        return lineText;
+                    }
                     finally { sem.Release(); }
                 });
             }
             await Task.WhenAll(tasks);
             _translatedLines = tasks.Select(t => t.Result).ToList();
+            }
 
 DispatcherQueue.TryEnqueue(() =>
             {
@@ -423,20 +494,31 @@ DispatcherQueue.TryEnqueue(() =>
                 ModeToggle.IsChecked = true;
                 ModeToggle.Content = "显示原文";
                 RenderOverlay();
-                int failed = _translatedLines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
-                InfoTxt.Text = failed > 0
-                    ? $"⚠ 翻译完成（{failed}/{_translatedLines.Count} 行失败，已保留原文），点击文字块可复制"
-                    : $"✅ 翻译完成（{_translatedLines.Count} 行），点击文字块可复制译文";
+                int total = _translatedLines.Count;
+                // "译文 == 原文"只是文本路的近似判据：同语言或专有名词会被算成失败。
+                // 视觉路自己知道结果（整批成功或整批抛异常），走 definiteFailed。
+                int failed = definiteFailed ??
+                    _translatedLines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
+                string why = firstError is null ? "" : $"（原因示例：{firstError}）";
+                InfoTxt.Text = failed switch
+                {
+                    0 => $"✅ 翻译完成（{total} 行），点击文字块可复制译文",
+                    // 全行皆败不叫"完成"——原先这里仍打 ✅ 语气的"翻译完成"，是把故障说成成功
+                    _ when failed == total => $"❌ 翻译失败：{total}/{total} 行都没出译文 {why}",
+                    _ => $"⚠ 翻译完成（{failed}/{total} 行失败，已保留原文）{why}，点击文字块可复制",
+                };
             });
         }
         catch (Exception ex)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
-                // 翻译失败：检查是否因为 LLM 不可用但未配置免费后端
-                string msg = ex.Message;
-                if (msg.Contains("网络") || msg.Contains("timeout") || msg.Contains("连接"))
-                    msg = "翻译服务暂时不可用，建议检查网络连接。\n也可在设置中配置 LLM API 获得更稳定的翻译。";
+                // 不再靠关键词猜测去改写原因：TranslationException 的正文本身就是"缺什么 / 为什么失败"
+                // （见 TranslationService.DescribeBackends）。原先这段会把我们刚给出的说明
+                // 覆盖成一句更模糊的"建议检查网络连接"——等于把告知又盖回去。
+                string msg = ex is TranslationException
+                    ? ex.Message
+                    : $"翻译服务暂时不可用：{ex.Message}\n可在 设置 → 翻译 配置有道官方凭据或自定义 LLM。";
                 InfoTxt.Text = $"❌ {msg}";
             });
         }
@@ -449,6 +531,7 @@ DispatcherQueue.TryEnqueue(() =>
 
     private async void OnSaveClick(object sender, RoutedEventArgs e)
     {
+        using var _op = CoreLog.ContinueOp(CaptureOpId);
         if (_saveHandler is null)
         {
             InfoTxt.Text = "⚠ 保存功能未配置";

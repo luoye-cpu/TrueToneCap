@@ -1,0 +1,127 @@
+# TrueToneCap CI
+#
+# ⚠️ 本文件【未经端到端验证】—— 编写环境没有 GitHub Actions 运行器，
+#    只做了步骤级推演与脚本一致性检查（被调用的脚本本身都已在本机实测过）。
+#    首次启用请以 workflow_dispatch 手动跑一次，观察 preflight 步骤是否报缺件。
+#
+# 为什么默认用 self-hosted 而不是 windows-latest:
+#   1. global.json 固定 SDK 为 11.0.100-preview.7.26381.103 —— 托管镜像不含该预览版，
+#      `dotnet build` 会在第一步就因找不到 SDK 而失败（可加 setup-dotnet 装，但 preview
+#      版本在 setup-dotnet 里未必可用，需改用 dotnet-install 脚本）;
+#   2. 目标框架 net11.0-windows10.0.26100.0 要求 Windows SDK 10.0.26100 的头文件/库;
+#   3. 构建期要调用 fxc.exe 编译 HLSL（Shaders/CompileShaders.ps1），托管镜像的
+#      Windows SDK 版本与是否带 fxc 均不保证（本机实测只有 10.0.26100.0 与 10.0.28000.0
+#      带 fxc，10.0.22621.0 并不存在 —— 这条正是此前硬编码踩过的坑）。
+#   满足以上条件的 Windows 机器用 self-hosted 最省事；若坚持用托管镜像，
+#   请看文件末尾「托管镜像改造提示」。
+#
+# 与本地脚本的分工（避免重复实现）:
+#   · 构建与门禁一律走 scripts/verify.ps1 —— CI 不复制它的逻辑，只负责调用与上报退出码。
+#     CI 里自己写一遍 `dotnet run --project ... -- <suite>` 是重复实现，两边会漂移。
+#   · 本工作流【不】跑 --wgc-avif-tests：它需要真实交互桌面会话 + GPU，
+#     在无头运行器上必然失败。需要时在本地手动 `scripts/verify.ps1 -IncludeDesktop`。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与 scripts/verify.ps1 的默认值保持一致；改这里也要改那里
+  CONFIGURATION: Release
+
+jobs:
+  build-and-test:
+    name: 构建 + 门禁
+    runs-on: [self-hosted, Windows, X64]
+    # self-hosted 运行器没有平台侧的超时保护：构建或某个套件卡住会一直挂着占住 runner。
+    # 全量门禁本机实测约 110s，给 30 分钟已是极宽松的上限。
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build-info.json 需要 commit sha（SourceLink），浅克隆会拿到空值
+
+      # ─────────────────────────────────────────────────────────────
+      # 前置检查：把"环境缺件"变成一条可读的报错，而不是一堆莫名其妙的编译错误
+      # （本机经验：fxc 找不到 / SDK 版本不符 / 锁定文件缺失，报错都指向错误的方向）
+      # ─────────────────────────────────────────────────────────────
+      - name: 前置检查
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $problems = @()
+
+          # 1) pinned SDK 是否真的装了
+          $pinned = (Get-Content global.json -Raw | ConvertFrom-Json).sdk.version
+          $installed = & dotnet --list-sdks | ForEach-Object { ($_ -split '\s+')[0] }
+          if ($installed -notcontains $pinned) {
+            $problems += "SDK 不匹配: global.json 要求 $pinned，本机只有: $($installed -join ', ')"
+          } else {
+            Write-Host "  ✅ SDK $pinned 已安装"
+          }
+
+          # 2) fxc（HLSL 编译必需）—— 枚举取最高版本，不硬编码
+          $pfx86 = ${env:ProgramFiles(x86)}
+          if (-not $pfx86) { $pfx86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86) }
+          $fxc = Get-ChildItem (Join-Path $pfx86 'Windows Kits\10\bin') -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
+                   Sort-Object { [version]$_.Name } -Descending |
+                   ForEach-Object { Join-Path $_.FullName 'x64\fxc.exe' } |
+                   Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $fxc) { $problems += '未找到 fxc.exe（需 Windows SDK，用于编译 HLSL）' }
+          else           { Write-Host "  ✅ fxc: $fxc" }
+
+          # 3) 锁定文件齐全（缺一个 --locked-mode 就会失败，且报错不直观）
+          $lockFiles = @('TrueToneCap.App','TrueToneCap.Core','TrueToneCap.LogViewer','TrueToneCap.Test','TrueToneCap.Tools') |
+                       ForEach-Object { "src/$_/packages.lock.json" }
+          foreach ($f in $lockFiles) {
+            if (-not (Test-Path $f)) { $problems += "缺少锁定文件: $f" }
+          }
+          if ($problems.Count -eq 0) { Write-Host "  ✅ 5 个锁定文件齐全" }
+
+          if ($problems.Count -gt 0) {
+            Write-Host '' ; Write-Host '❌ 前置检查未通过：' -ForegroundColor Red
+            $problems | ForEach-Object { Write-Host "   · $_" -ForegroundColor Red }
+            exit 1
+          }
+          Write-Host '✅ 前置检查通过'
+
+      - name: 还原（锁定模式）
+        shell: pwsh
+        run: dotnet restore TrueToneCap.slnx --locked-mode
+
+      - name: 构建 + 门禁（scripts/verify.ps1）
+        shell: pwsh
+        run: |
+          pwsh ./scripts/verify.ps1 -Configuration $env:CONFIGURATION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ─────────────────────────────────────────────────────────────
+      # 说明：这里【不】跑发布打包。
+      #   Publish.ps1 要求工作区干净（CI 检出本来就是干净的，可满足），
+      #   但它会写 publish/ 目录、算 SHA256、可能创建本地 tag，语义偏"发版"而非"验证"。
+      #   打包与出包冒烟请走发布流程，或单独建一个手动触发的 release workflow。
+      # ─────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+# 托管镜像（windows-latest）改造提示 —— 未验证，仅记录思路：
+#   1. 用 actions/setup-dotnet 装 pinned 版；若 preview 不可用，改用官方
+#      dotnet-install 脚本 + global.json 的 rollForward 放松；
+#   2. Windows SDK 版本需在镜像里确认含 10.0.26100，否则 csproj 的 TargetPlatformVersion
+#      要下调（会牵动 net11.0-windows10.0.26100.0 这个 TFM）；
+#   3. fxc 是否存在需在镜像里实测（见前置检查第 2 步的枚举逻辑，可直接复用）。
+# ─────────────────────────────────────────────────────────────────

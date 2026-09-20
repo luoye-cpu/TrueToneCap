@@ -1,13 +1,34 @@
 """
 ONNX FP32 → FP16 量化脚本 v3
 手动转换初始器权重为 FP16，不插入 Cast 节点，防止 LayerNorm 融合问题。
+
+用法:
+    python scripts/onnx_fp16_quantize.py [--models-dir DIR] [--output-dir DIR]
+
+默认路径以本脚本位置推导仓库根目录，不依赖任何机器相关的绝对路径。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 
 import onnx
 from onnx import helper, TensorProto, numpy_helper
 import numpy as np
 import sys
 import os
+import argparse
+
+
+def find_repo_root(start_dir):
+    """从脚本所在目录向上查找仓库根（以 Directory.Build.props 为标志）。"""
+    cur = os.path.abspath(start_dir)
+    while True:
+        if os.path.isfile(os.path.join(cur, "Directory.Build.props")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            # 未找到标志文件，退回脚本目录的上一级
+            return os.path.abspath(os.path.join(start_dir, os.pardir))
+        cur = parent
 
 def manual_convert_to_fp16(input_path, output_path, model_name):
     """
@@ -100,26 +121,53 @@ def verify_onnxruntime(input_path, model_name):
 
 
 if __name__ == "__main__":
-    base_dir = "C:/PLAN/TrueToneCap"
-    models_dir = f"{base_dir}/publish/PLAN/models"
-    output_dir = f"{base_dir}/publish/PLAN/models_fp16"
+    parser = argparse.ArgumentParser(description="ONNX FP32 → FP16 权重量化")
+    parser.add_argument(
+        "--models-dir",
+        default=None,
+        help="FP32 源模型目录（默认: <repo>/src/TrueToneCap.App/Models）",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="FP16 输出目录（默认: <repo>/publish/PLAN/models_fp16）",
+    )
+    args = parser.parse_args()
+
+    repo_root = find_repo_root(os.path.dirname(os.path.abspath(__file__)))
+    models_dir = args.models_dir or os.path.join(repo_root, "src", "TrueToneCap.App", "Models")
+    output_dir = args.output_dir or os.path.join(repo_root, "publish", "PLAN", "models_fp16")
+
+    print(f"仓库根目录: {repo_root}")
+    print(f"源模型目录: {models_dir}")
+    print(f"输出目录:   {output_dir}")
+
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # 源模型缺失时明确报错，而非在 onnx.load 深处抛出难懂的异常
+    required = ["PP-OCRv6_medium_det.onnx", "PP-OCRv6_medium_rec.onnx"]
+    missing = [m for m in required if not os.path.isfile(os.path.join(models_dir, m))]
+    if missing:
+        print(f"❌ 缺少源模型: {', '.join(missing)}")
+        print(f"   目录: {models_dir}")
+        print("   提示: 可先运行 .\\download_models.ps1 获取模型。")
+        sys.exit(1)
+
     # 转换检测模型
     manual_convert_to_fp16(
-        f"{models_dir}/PP-OCRv6_medium_det.onnx",
-        f"{output_dir}/PP-OCRv6_medium_det.onnx",
+        os.path.join(models_dir, "PP-OCRv6_medium_det.onnx"),
+        os.path.join(output_dir, "PP-OCRv6_medium_det.onnx"),
         "PP-OCRv6_medium_det"
     )
     verify_onnxruntime(
-        f"{output_dir}/PP-OCRv6_medium_det.onnx",
+        os.path.join(output_dir, "PP-OCRv6_medium_det.onnx"),
         "PP-OCRv6_medium_det"
     )
     
     # 转换识别模型
     manual_convert_to_fp16(
-        f"{models_dir}/PP-OCRv6_medium_rec.onnx",
-        f"{output_dir}/PP-OCRv6_medium_rec.onnx",
+        os.path.join(models_dir, "PP-OCRv6_medium_rec.onnx"),
+        os.path.join(output_dir, "PP-OCRv6_medium_rec.onnx"),
         "PP-OCRv6_medium_rec"
     )
     verify_onnxruntime(

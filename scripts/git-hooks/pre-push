@@ -1,0 +1,57 @@
+#!/bin/sh
+# TrueToneCap pre-push —— 全量门禁（构建 + 7 个 headless 套件，约 110s）
+#
+# 与 pre-commit 的分工:
+#   pre-commit  只构建（快）     —— 挡住"编译不过"
+#   pre-push    构建 + 全部测试   —— 挡住"测不过"，发生在代码离开本机之前
+#
+# 关于 --wgc-avif-tests:
+#   默认【不】跑。它需要真实交互桌面会话 + GPU，在 CI / SSH / 锁屏环境必然失败，
+#   放进来等于给 push 加一个随机红。需要时临时执行:
+#     scripts/verify.ps1 -IncludeDesktop
+#
+# 绕过: git push --no-verify
+#
+# 调试: TTC_HOOK_DRYRUN=1 sh scripts/git-hooks/pre-push
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$repo_root" ]; then
+    # 2026-09-15 修正：原为「静默跳过 exit 0」，等于门禁无声失效。改为显式阻断。
+    echo "[pre-push] ❌ 无法定位仓库根 —— 拒绝放行。" >&2
+    echo "           确需跳过请用 git push --no-verify" >&2
+    exit 1
+fi
+
+verify="$repo_root/scripts/verify.ps1"
+if [ ! -f "$verify" ]; then
+    echo "[pre-push] ❌ 未找到 $verify —— 拒绝放行（门禁脚本缺失）。" >&2
+    echo "           请确认仓库完整；确需跳过用 git push --no-verify" >&2
+    exit 1
+fi
+
+if command -v powershell.exe >/dev/null 2>&1; then
+    ps_exe="powershell.exe"
+elif command -v pwsh.exe >/dev/null 2>&1; then
+    ps_exe="pwsh.exe"
+else
+    echo "[pre-push] ❌ 未找到 powershell.exe / pwsh.exe —— 拒绝放行。" >&2
+    echo "           Git Bash 下若 PATH 未含 PowerShell，请把其安装目录加入 PATH；" >&2
+    echo "           确需跳过用 git push --no-verify" >&2
+    exit 1
+fi
+
+if [ -n "$TTC_HOOK_DRYRUN" ]; then
+    echo "[pre-push][dry-run] repo_root=$repo_root"
+    echo "[pre-push][dry-run] $ps_exe -NoProfile -ExecutionPolicy Bypass -File \"$verify\""
+    exit 0
+fi
+
+echo "[pre-push] 全量门禁（构建 + 7 套件，约 110s）..."
+if "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$verify"; then
+    exit 0
+fi
+
+echo "" >&2
+echo "[pre-push] ❌ 门禁未通过，已阻止本次推送。" >&2
+echo "           修复后重新 git push；确需跳过用 git push --no-verify。" >&2
+exit 1

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/NativeWebPEncoder.cs
 // WebP 编码器 — 通过 cwebp.exe 命令行工具编码 (内嵌在 Resources/cwebp.exe)
 // 支持: 有损/无损, 8-bit, ICC 嵌入 (通过 cwebp 的 -metadata icc)
@@ -34,11 +36,9 @@ public static class NativeWebPEncoder
                 };
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) { _available = false; return false; }
-                // 必须读取 stdout/stderr，否则管道缓冲区满会导致进程挂起
-                proc.StandardOutput.ReadToEnd();
-                proc.StandardError.ReadToEnd();
-                proc.WaitForExit(5000);
-                _available = proc.ExitCode == 0;
+                // 排空两条管道与等超时并行（旧写法先同步 ReadToEnd，子进程不退出时永远走不到 5s 判据）
+                _available = NativeProcess.DrainProbe(proc, NativeProcess.ProbeTimeoutMs,
+                    out int ec, out _, out _) && ec == 0;
             }
             catch { _available = false; }
             return _available.Value;
@@ -65,7 +65,7 @@ public static class NativeWebPEncoder
 
             var exePath = NativeLibraryResolver.GetExePath("cwebp.exe");
             var qualityArg = lossless ? "-lossless" : $"-q {(int)quality}";
-            var iccArg = iccProfile is { Length: > 0 } ? "-metadata icc" : "";
+            var iccArg = FormatHelper.IsEmbeddableIcc(iccProfile) ? "-metadata icc" : "";
             var args = $"{qualityArg} {iccArg} -mt \"{tmpPng}\" -o \"{path}\"";
 
             var psi = new System.Diagnostics.ProcessStartInfo
@@ -82,17 +82,10 @@ public static class NativeWebPEncoder
             {
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) throw new InvalidOperationException("无法启动 cwebp");
-                var stderrTask = proc.StandardError.ReadToEndAsync();
-                proc.StandardOutput.ReadToEnd();
-                if (!proc.WaitForExit(30_000))
-                {
-                    proc.Kill();
-                    throw new InvalidOperationException("[WebP] cwebp 超时 (30s)");
-                }
-                stderrTask.GetAwaiter().GetResult();
+                var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 30_000, "cwebp");
 
-                if (proc.ExitCode != 0 || !File.Exists(path))
-                    throw new InvalidOperationException($"[WebP] cwebp 失败 (exit={proc.ExitCode})");
+                if (exitCode != 0 || !File.Exists(path))
+                    throw new InvalidOperationException($"[WebP] cwebp 失败 (exit={exitCode}) {stderr.Trim()}");
                 return File.ReadAllBytes(path);
             });
             if (!result.Success)

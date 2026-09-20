@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/FontLoader.cs
 // 字体工具 — 系统字体枚举 + 默认回退链 + 用户字体选择支持
 

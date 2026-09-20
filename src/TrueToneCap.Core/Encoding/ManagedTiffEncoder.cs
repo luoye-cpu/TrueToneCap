@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/ManagedTiffEncoder.cs
 // 托管 TIFF 编码器 — 零依赖，支持 8-bit 和 16-bit BGRA
 
@@ -13,8 +15,10 @@ public static class ManagedTiffEncoder
     public static void Encode(byte[] bgra, int w, int h, string path, int bitDepth = 8,
         byte[]? iccProfile = null, int? inputBitDepth = null)
     {
-        using var fs = File.Create(path);
-        Encode(bgra, w, h, fs, bitDepth, iccProfile, inputBitDepth);
+        // 2026-09-19：原先的 File.Create(path) 直写，在 Stream 重载抛 ArgumentException 时（参数无效 /
+        // 像素长度不足都发生在写第一个字节之前）会在最终路径留下一个【0 字节但 File.Exists 为真】的
+        // .tiff，上层照样把那个路径当作已产出的文件报告出去。现走同目录临时文件 + 成功后替换。
+        AtomicFileWriter.Write(path, fs => Encode(bgra, w, h, fs, bitDepth, iccProfile, inputBitDepth));
     }
 
     /// <summary>把 BGRA 像素编码为 TIFF 写入流。</summary>
@@ -22,7 +26,10 @@ public static class ManagedTiffEncoder
     /// <param name="w">图像宽度。</param>
     /// <param name="h">图像高度。</param>
     /// <param name="output">目标流。</param>
-    /// <param name="bitDepth">输出位深（8 或 16）。</param>
+    /// <param name="bitDepth">
+    /// 请求的输出位深。TIFF 的 <c>BitsPerSample</c> 只有 8 与 16 合法，
+    /// 故 &gt; 8 的请求一律落到 16（见方法内的钳制说明）。
+    /// </param>
     /// <param name="iccProfile">可选 ICC 配置文件（长度需 &gt; 128 才会写入）。</param>
     /// <param name="inputBitDepth">
     /// 输入像素位深（8 或 16）。传 null 时按数组长度推断（兼容旧调用方）。
@@ -34,6 +41,15 @@ public static class ManagedTiffEncoder
     public static void Encode(byte[] bgra, int w, int h, Stream output, int bitDepth = 8,
         byte[]? iccProfile = null, int? inputBitDepth = null)
     {
+        // ═══ 2026-09-17 修复（审查 P2-7）：BPS 只有 8/16 合法，必须先钳制 ═══
+        // 设置层曾对全部格式放行 10/12-bit，而本编码器以 bitDepth > 8 为界
+        // 一律按【每通道 2 字节】写采样数据，却把 BitsPerSample 原样写成 10/12。
+        // 结果：解码器按 12-bit 打包去读一片 16-bit 未打包的数据 → 图像错位、
+        // 多数查看器直接报"文件损坏"。且不抛异常、无日志，是最难察觉的一类静默破坏。
+        // 故在入口就地钳到 8/16 —— 请求更高精度一律落到 16（保精度优先于省体积）。
+        // 放在这里而不是只改调用方，是为了让任何调用方都不可能写出非法 TIFF。
+        if (bitDepth > 8) bitDepth = 16;
+
         long pixelCount = (long)w * h;
         if (bgra is null || w <= 0 || h <= 0)
             throw new ArgumentException($"TIFF 参数无效: w={w} h={h}");
@@ -60,19 +76,23 @@ public static class ManagedTiffEncoder
         // 旧实现把 pixelDataStart 直接取为"写完 BitsPerSample 之后的位置"，
         // 而 StripOffsets/StripByteCounts/XRes/YRes 的值区都排在其后 →
         // 回填时用 Seek 覆盖了压缩数据前 24 字节 → 输出的 TIFF 解压后前若干像素损坏。
-        bool hasIcc = iccProfile is { Length: > 128 };
+        bool hasIcc = FormatHelper.IsEmbeddableIcc(iccProfile);
         // ⚠ 必须与下方实际写入的条目数严格一致：256/257/258/259/262/273/277/278/279/282/283/296 = 12 个。
         // 之前写死 10，少算 2 个条目 = 24 字节 → 解析器只读前 10 条，随后把第 11 条
         // 的前 4 字节当作 next-IFD 偏移，且值区起点整体前移 24 字节 → 标签值与像素数据全部错位。
         const int baseTagCount = 12;
         int tagCount = baseTagCount + (hasIcc ? 1 : 0);
         long valueAreaStart = 8 + 2 + tagCount * 12 + 4;   // IFD 结束后即值区起点
+        // ═══ 值区只放"4 字节放不下"的值（TIFF 6.0 §2：值 ≤ 4 字节必须【直接】写在条目里）═══
+        // StripOffsets(273) / StripByteCounts(279) 都是 LONG count=1 = 恰好 4 字节 ⇒ 必须内联。
+        // 旧实现把它们也当"值区指针"写 → 读者把指针值（166）当成 strip 偏移、把下一个指针（170）
+        // 当成字节数 → 读到的是 IFD 值区自己，解压失败、整幅图渲染为【全黑】（2026-09-19 实测：
+        // libtiff/ffmpeg 解我们的 TIFF 得到 0,0,0,0）。故此处不再为它们留槽位，
+        // 改为在写条目时记下 value 域的文件位置并原地回填（见 stripValuePos / byteCountValuePos）。
         uint bpsOffset = (uint)valueAreaStart;             // BitsPerSample: 4×SHORT = 8
-        uint stripOffsetOffset = (uint)(valueAreaStart + 8);   // StripOffsets: LONG = 4
-        uint byteCountOffset = stripOffsetOffset + 4;          // StripByteCounts: LONG = 4
-        uint xresOffset = byteCountOffset + 4;                 // XResolution: RATIONAL = 8
-        uint yresOffset = xresOffset + 8;                      // YResolution: RATIONAL = 8
-        long iccOffset = yresOffset + 8;                       // ICCProfile
+        uint xresOffset = (uint)(valueAreaStart + 8);      // XResolution: RATIONAL = 8
+        uint yresOffset = xresOffset + 8;                  // YResolution: RATIONAL = 8
+        long iccOffset = yresOffset + 8;                   // ICCProfile
         long expectedPixelDataStart = hasIcc ? iccOffset + iccProfile!.Length : iccOffset;
 
         // ── IFD entries ──
@@ -97,11 +117,13 @@ public static class ManagedTiffEncoder
         // Tag 262: PhotometricInterpretation (2 = RGB)
         WriteShortEntry(writer, 262, 2);
 
-        // Tag 273: StripOffsets (值存于值区，稍后回填真实像素数据偏移)
+        // Tag 273: StripOffsets —— LONG count=1 = 4 字节 ⇒ 【必须内联在条目里】，不能写值区指针。
+        // 先占位 0，记下 value 域的文件位置，压缩完成后在该位置回填（见下方 byteCountValuePos 同理）。
         // ⚠ BitsPerSample 值区恒为 4×ushort = 8 字节，与 bitDepth 无关。
         // 之前写成 4*bitDepth/8，8-bit 输出时算成 4 → 偏移错误，破坏后续结构。
         writer.Write((ushort)273); writer.Write((ushort)4); writer.Write((uint)1);
-        writer.Write(stripOffsetOffset);
+        long stripOffsetValuePos = writer.BaseStream.Position;
+        writer.Write((uint)0);
 
         // Tag 277: SamplesPerPixel (4 = RGBA)
         WriteShortEntry(writer, 277, 4);
@@ -110,9 +132,10 @@ public static class ManagedTiffEncoder
         writer.Write((ushort)278); writer.Write((ushort)4); writer.Write((uint)1);
         writer.Write((uint)h);
 
-        // Tag 279: StripByteCounts (值存于值区，稍后回填)
+        // Tag 279: StripByteCounts —— 同 273，LONG count=1 ⇒ 内联 + 原位回填
         writer.Write((ushort)279); writer.Write((ushort)4); writer.Write((uint)1);
-        writer.Write(byteCountOffset);
+        long byteCountValuePos = writer.BaseStream.Position;
+        writer.Write((uint)0);
 
         // Tag 282: XResolution (RATIONAL = 8 字节 > 4 → 写偏移)
         writer.Write((ushort)282); writer.Write((ushort)5); writer.Write((uint)1);
@@ -142,9 +165,8 @@ public static class ManagedTiffEncoder
         for (int i = 0; i < 4; i++)
             writer.Write((ushort)bitDepth);
 
-        // 占位（随后 Seek 回填）：StripOffsets / StripByteCounts / XRes / YRes
-        writer.Write((uint)0);                          // StripOffsets
-        writer.Write((uint)0);                          // StripByteCounts
+        // 占位（随后 Seek 回填）：XRes / YRes（RATIONAL 各 8 字节 > 4，允许间接）
+        // ⚠ StripOffsets / StripByteCounts 不在此列 —— 它们是内联值，回填位置见 stripOffsetValuePos。
         writer.Write((uint)0); writer.Write((uint)0);   // XResolution 72/1
         writer.Write((uint)0); writer.Write((uint)0);   // YResolution 72/1
         if (hasIcc) writer.Write(iccProfile!);          // ICCProfile
@@ -157,17 +179,20 @@ public static class ManagedTiffEncoder
 
         var raw = ConvertToRgba(bgra, (int)pixelCount, srcIs16, bitDepth);
 
-        // Deflate compress (SmallestSize 比 Optimal 压缩率高 3-8%，适合截图保存)
+        // ═══ 压缩：Tag 8 = "Adobe Deflate" = 【zlib 封装】的 deflate（RFC1951+RFC1950 头）═══
+        // DeflateStream 写的是【裸】deflate（无 zlib 头），libtiff/ffmpeg 按 tag 8 解时等头 →
+        // "incorrect header check" → 整幅图解不出来。要么换成 tag 32946( raw Deflate )，
+        // 要么换成 ZLibStream 保住 tag 8 的既有含义 —— 取后者：32946 的兼容性更差。
         using var ms = new MemoryStream();
-        using (var ds = new DeflateStream(ms, CompressionLevel.SmallestSize))
-            ds.Write(raw, 0, raw.Length);
+        using (var zs = new ZLibStream(ms, CompressionLevel.SmallestSize))
+            zs.Write(raw, 0, raw.Length);
         var compressed = ms.ToArray();
         writer.Write(compressed);
 
-        // ── 回填 strip offset 与 byte count ──
-        writer.BaseStream.Seek(stripOffsetOffset, SeekOrigin.Begin);
+        // ── 回填内联的 strip offset 与 byte count（写回各自条目的 value 域）──
+        writer.BaseStream.Seek(stripOffsetValuePos, SeekOrigin.Begin);
         writer.Write((uint)pixelDataStart);
-        writer.BaseStream.Seek(byteCountOffset, SeekOrigin.Begin);
+        writer.BaseStream.Seek(byteCountValuePos, SeekOrigin.Begin);
         writer.Write((uint)compressed.Length);
 
         // ── XResolution / YResolution (72 DPI) ──

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Test/EncodingIntegrationTests.cs
 // 编码管线实机集成测试 — 验证所有格式端到端编码
 // 运行: dotnet run --project src/TrueToneCap.Test -- --encoding-tests
@@ -13,11 +15,20 @@ namespace TrueToneCap.Test;
 public static class EncodingIntegrationTests
 {
     private static int _passed, _failed;
+    /// <summary>因环境不满足而【显式跳过】的用例数 —— 既不算通过也不算失败。</summary>
+    private static int _skipped;
     private static readonly string OutDir = Path.Combine(Path.GetTempPath(), "TrueToneCap_EncTest");
+
+    /// <summary>显式跳过一条用例：不计入通过/失败，但必须留下原因（禁止静默通过）。</summary>
+    static void Skip(string name, string reason)
+    {
+        _skipped++;
+        Console.WriteLine($"  ⏭  {name} — 跳过: {reason}");
+    }
 
     public static int RunAll()
     {
-        _passed = 0; _failed = 0;
+        _passed = 0; _failed = 0; _skipped = 0;
         Directory.CreateDirectory(OutDir);
         Console.WriteLine("══════════════════════════════════════");
         Console.WriteLine("  TrueToneCap 编码管线集成测试");
@@ -64,7 +75,7 @@ public static class EncodingIntegrationTests
         Test_SdrEncode(OutputFormat.WebP, GenerateTestPattern(2, 2), 2, 2, 90f);
 
         Console.WriteLine($"\n══════════════════════════════════════");
-        Console.WriteLine($"  结果: {_passed} 通过, {_failed} 失败");
+        TestSummary.Report("--encoding-tests", _passed, _failed, 0, null, _skipped);
         Console.WriteLine($"══════════════════════════════════════");
         return _failed > 0 ? 1 : 0;
     }
@@ -86,7 +97,6 @@ public static class EncodingIntegrationTests
                 HdrOutput = false,
                 ChromaSubsampling = "444",
                 OutputBitDepth = 8,
-                DisplayBitDepth = 8,
             };
 
             string ext = GetExtension(fmt);
@@ -125,7 +135,7 @@ public static class EncodingIntegrationTests
             var encoder = EncoderFactory.Create(fmt);
             if (!encoder.SupportsHdr)
             {
-                Assert(name, true, "跳过 (不支持 HDR)");
+                Skip(name, "编码器不支持 HDR（能力限制）");
                 return;
             }
 
@@ -136,7 +146,6 @@ public static class EncodingIntegrationTests
                 HdrOutput = true,
                 ChromaSubsampling = "444",
                 OutputBitDepth = 10,
-                DisplayBitDepth = 10,
             };
 
             string ext = GetExtension(fmt);
@@ -202,7 +211,8 @@ public static class EncodingIntegrationTests
             bool hasGainMap = soiCount >= 2;
 
             // 验证 XMP 段完整（含 hdrgm:Version）
-            // 注意: Base 可能先有 ICC_PROFILE APP1, 必须遍历所有 APP1 段直到找到 hdrgm XMP
+            // 注意: ICC 走 APP2（2026-09-20 修正，见 UsabilityTests.Jpeg_IccLargeProfile），
+            //       XMP 才是 APP1；这里遍历所有 APP1 段直到找到 hdrgm XMP。
             bool hasXmpFields = false;
             bool hasIsoMetadata = false;
             for (int i = 0; i < Math.Min(bytes.Length - 4, 20000); i++)

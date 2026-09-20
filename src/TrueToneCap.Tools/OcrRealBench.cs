@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // OcrRealBench.cs — OCR 真实语料基准测试
 // 与固定内容的 --ocr-bench 不同, 本测试使用:
 //   1. 大量真实场景文本 (代码/UI标签/文档段落/聊天记录/URL/数字表格...)
@@ -82,19 +84,28 @@ public static class OcrRealBench
         int seed = args.Length >= 2 && int.TryParse(args[1], out var s) ? s : DateTime.Now.Day * 100 + DateTime.Now.Month;
         var rng = new Random(seed);
 
-        string modelDir = Path.Combine(AppContext.BaseDirectory, "data", "Models");
+        string modelDir = args.Length >= 4 && args[3].Length > 0
+            ? args[3]                      // 显式指定（用于 FP32 / FP16 模型对比实验）
+            : Path.Combine(AppContext.BaseDirectory, "data", "Models");
         // 兼容源码树直接调用: 回退到 App 项目 Models 目录
         if (!File.Exists(Path.Combine(modelDir, "PP-OCRv6_medium_det.onnx")))
             modelDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "TrueToneCap.App", "Models");
 
+        // ⚠ 后端可选（默认 CPU）。必须能跑 DirectML —— 生产 MultiOcrService 默认
+        //   选第一个可用引擎即 DirectML，而此前所有基准都只跑 CPU，DML 路径长期未被度量。
+        string provArg = args.Length >= 3 ? args[2].ToLowerInvariant() : "cpu";
+        bool useDml = provArg is "dml" or "directml" or "gpu";
+        var ep = useDml ? OnnxExecutionProvider.DirectML : OnnxExecutionProvider.Cpu;
+
         Console.WriteLine($"════════ OCR 真实语料基准 ════════");
         Console.WriteLine($"模型目录: {modelDir}");
         Console.WriteLine($"随机种子: {seed} (同种子结果可复现)");
+        Console.WriteLine($"执行后端: {(useDml ? "DirectML" : "CPU")}");
         Console.WriteLine($"语料组数: {Corpus.Length} | 每组采样 2 种风格 × 2 种字号\n");
 
-        using var engine = new OnnxOcrEngine(OnnxExecutionProvider.Cpu, modelDir);
-        if (!engine.Info.IsAvailable) { Console.WriteLine("❌ CPU OCR 引擎不可用"); return; }
-        Console.WriteLine($"引擎: PP-OCRv6 (CPU)\n");
+        using var engine = new OnnxOcrEngine(ep, modelDir);
+        if (!engine.Info.IsAvailable) { Console.WriteLine("❌ OCR 引擎不可用"); return; }
+        Console.WriteLine($"引擎: PP-OCRv6 ({(useDml ? "DirectML" : "CPU")})\n");
 
         double totalCC = 0, totalCN = 0;
         int totalLC = 0, totalLN = 0;

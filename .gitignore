@@ -25,7 +25,10 @@ x86/
 *.nuget.props
 *.nuget.targets
 project.assets.json
-NuGet.Config
+# ⚠️ 原此处的 `NuGet.Config` 规则已删除（2026-09-14）：
+#    它会连带屏蔽仓库根「应当提交」的 NuGet.config（用于固定还原源），
+#    与"缺 NuGet.config 导致还原源依赖机器配置"形成死锁。
+#    现在 NuGet.config 由仓库显式跟踪；机器级/用户级配置本来就不在仓库内，无需忽略。
 
 # ── Compiler Output ──
 *.ilk
@@ -44,20 +47,49 @@ NuGet.Config
 *.cso
 *.dxbc
 
-# ── Publish Output (keep PACKAGE.md + PLAN) ──
+# ── Publish Output (keep PACKAGE.md + PLAN/README.md) ──
 publish/*
 !publish/PACKAGE.md
 !publish/PLAN/
-!publish/PLAN/**
+# ⚠️ 原为 `!publish/PLAN/**`（放行 PLAN 下一切），2026-09-14 收窄为只放行 README.md。
+#    过宽的白名单是历史产物误入库的根因：每加一类文件都要补一条排除规则，
+#    而排除规则又必须写在白名单之后才生效 —— 极易漏。收窄后默认不入库，需要再加。
+!publish/PLAN/README.md
+
+# ── 原生工具链副本 (2026-09-14 解除跟踪) ──
+#   单一事实源是 src/TrueToneCap.Core/Resources/（Publish.ps1 的 $toolsSrc 直接取源）。
+#   此处 9 个二进制与源位置逐字节相同，属历史遗留重复跟踪，约 27 MB。
+#   ⚠️ 规则对「已跟踪文件」无效 —— 必须先 git rm --cached 并提交，之后才生效。
+publish/PLAN/tools/
 
 # ── Publish 内的测试数据 (raw 像素数据, 体积大且无上传价值) ──
-# 注意: 必须放在 !publish/PLAN/** 白名单规则之后才能生效
 publish/PLAN/tools/*.raw
 
-# ── 重复模型目录 (2026-08-25 清理: 与 PLAN/models 完全相同且目录名误导,
-#    实际为 FP32 文件; Publish.ps1 仅使用 PLAN/models/) ──
+# ── 重复模型目录 (2026-08-25 清理: 目录名误导, 实际为 FP32 文件) ──
 publish/PLAN/models_fp16/
 publish/PLAN/models_fp32/
+
+# ── 已废弃的模型副本位置 (2026-09-14 去重) ──
+#   单一事实源已统一到 src/TrueToneCap.App/Models/ (由 Publish.ps1 直接取源,
+#   见 Publish.ps1 的 $modelsSrc)。此处的 3 个副本与原位置字节完全相同,
+#   已从版本控制移除。保留忽略规则以防历史副本被重新纳入。
+#   ⚠️ 规则对「已跟踪文件」无效 —— 必须先 git rm --cached 并提交, 之后才生效。
+publish/PLAN/models/
+
+# ── 关于 src/TrueToneCap.App/Models/*.onnx 是否入库 (2026-09-15 结论: 维持入库) ──
+#   曾尝试用 filter-repo 移除以缩小 .git（实测 157MB → 57MB，可行），但随即发现：
+#     download_models.ps1 【无法可靠获取项目实际使用的 medium 模型】——
+#       ① 本机装了 rapidocr 时，它会把 small 版 det(9.47MB) 复制成 PP-OCRv6_det.onnx 顶替，
+#          并覆盖 ppocrv6_dict.txt（实测造成字典哈希与 models-manifest.json 不符）；
+#       ② CI 等干净环境则要从 HuggingFace 拉 69MB，源站与网络都不可控。
+#   即：模型一旦出库，CI 与新克隆都无法稳定获得它 → OCR 与发布校验会直接失败。
+#   故维持入库。若将来要瘦身，前提是先建立可靠的模型分发（如 GitHub Release 资产），
+#   再配合本规则 + CI 下载步骤一起改，不要单独做。
+
+# ── 官方原始模型 (128 MB, 不入库) ──
+#   注意: download_models.ps1 的输出目录是 src/TrueToneCap.App/Models/,
+#   并非此处。本目录仅为官方原始模型的手工留档位置。
+official_models/
 
 # ── 手动测试/调试脚本 (统一管理, 不上传 GitHub) ──
 tests/manual/
@@ -114,6 +146,10 @@ scripts/Check*.ps1
 .vscode/
 *.code-workspace
 
+# ── 工作台数据 (项目记忆/会话数据, 不上传 GitHub) ──
+#   注意: 只忽略跟踪，【不要删除该目录】—— 它存放项目长期记忆。
+.workbuddy-ai/
+
 # ── Temp / Test outputs ──
 TestResults/
 *.tmp
@@ -134,3 +170,12 @@ TrueToneCap.settings.json
 # ── 测试输出图片/临时产物 ──
 *.test.png
 *.test.jpg
+
+# ── 本机 scratch：一次性实验产物与第三方 agent 的本地记忆，不进版本控制 ──
+# （2026-09-19 跟踪审计加的：这两个文件长期躺在未跟踪列表里，会让"未跟踪=漏提交"
+#   这条检查失去信号 —— 见 docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md §27）
+nvoff.exe
+.atomcode/
+
+# ── 外部判据脚本的样张产物（scripts/precision/，每次重新生成，不入库）──
+artifacts/
