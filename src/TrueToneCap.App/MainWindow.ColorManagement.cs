@@ -9,153 +9,109 @@
 // ⚠ partial class 拆分不改变运行时行为：所有成员仍属同一个 MainWindow 类型，
 //   私有字段（_settings / ColorCbo / HdrSwitch 等）跨文件直接可见。
 
-using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TrueToneCap.Core.Capture;
 using TrueToneCap.Core.ColorManagement;
+using TrueToneCap.Core.Encoding;
 
 namespace TrueToneCap.App;
 
 public sealed partial class MainWindow : Window
 {
-    /// <summary>获取当前鼠标所在显示器的原生色域标签（ACM 感知）。</summary>
-    private string GetDisplayNativeGamut()
+    /// <summary>
+    /// 「色彩与 HDR」+「色域映射」两张卡的<b>唯一</b>刷新点：一次 <see cref="ColorDecision"/>，
+    /// 源行 / 目标行 / 映射说明三处都从这一份渲染。
+    /// <para><b>原先的形状</b>（2026-09-26 修）：源那一行问的是【主屏】（ACM 那一支却又单独去问光标屏
+    /// 的 EDID），映射行再把自己刚写下的那行中文文案用 <c>Contains</c> 反推回来当输入。于是
+    /// ①一张卡上两行来自两块屏；②换一套文案，判定就跟着变；③Core 里那三项收口
+    /// （屏幕不授权 / 目标是 sRGB / 格式没有 HDR 通道）在这里<b>一项都看不见</b>，HDR 一开就写"直通"。</para>
+    /// <para>现在这里不做任何色彩判定：判定在 <see cref="ColorDecision.Build"/>，
+    /// 交付形态在 <see cref="FormatColorFacts.Delivery"/>，声明通道在
+    /// <see cref="FormatColorFacts.Declaration"/>，本函数只负责把三者印出来。</para>
+    /// </summary>
+    private void RefreshColorMappingUi()
     {
-        try
-        {
-            var monitor = DisplayEnumerator.GetMonitorUnderCursor();
-            return ColorProfileProvider.GetDisplayNativeGamutTag(monitor);
-        }
-        catch { return "sRGB"; }
+        var ui = CaptureEncodingUiState();
+        // 与编码入口同一条构造路径（光标屏；粘贴/预览这些入口本来就没有"被截那块屏"的概念）。
+        var decision = DecisionForCursorScreen(ui, ui.HdrEnabled);
+        var delivery = FormatColorFacts.Delivery(decision, ui.Format);
+        bool writesPq = delivery == HdrDelivery.PqContainer;
+
+        SourceGamutTxt.Text = DescribeSourceDisplay(decision);
+        TargetGamutTxt.Text = DescribeTargetGamut(decision, ui.Format);
+        MappingArrow.Text = !ui.HdrEnabled
+            ? (decision.NeedsMapping ? "→ 色域映射到" : "→ 直通（同色域）")
+            : delivery switch
+            {
+                HdrDelivery.PqContainer => "→ HDR 直通（容器写 PQ）",
+                HdrDelivery.GainMap => "→ 增益图（SDR 底图 + gain map）",
+                HdrDelivery.BlockedByDisplay => "→ 色调映射为 SDR（屏幕证据不授权 HDR 声称）",
+                HdrDelivery.BlockedBySrgbTarget => "→ 色调映射为 SDR（sRGB 容器装不下 PQ）",
+                _ => "→ 色调映射为 SDR（此格式没有 HDR 通道）",
+            };
+        GamutMapHintTxt.Text = BuildGamutHint(ui.Format, decision, delivery, writesPq);
     }
 
-    /// <summary>检测当前显示器色域并显示在 UI 中（ACM 感知）。</summary>
-    private void DetectAndShowSourceGamut()
+    /// <summary>源那一行：按<b>三档分类</b>印，而不是按"开关组合"拼字符串。</summary>
+    private static string DescribeSourceDisplay(ColorDecision d)
     {
-        try
+        var src = d.Source;
+        if (src is null)
+            return "读不到被截屏的逐屏证据 ⇒ 不授权广色域/HDR 声称（仍放行 Float16 源）";
+
+        string bits = $"{src.BitsPerColor}-bit";
+        string native = src.NativeGamutKnown
+            ? ColorProfileProvider.GetColorSpaceDisplayName(src.NativeGamutTag)
+            : "EDID 未读到原色（不猜）";
+        return d.ScreenClass switch
         {
-            var displays = DisplayEnumerator.EnumerateDisplays();
-            var primary = displays.FirstOrDefault(d => d.IsPrimary) ?? displays.FirstOrDefault();
-            if (primary is not null)
-            {
-                string csName;
-                if (primary.IsHdr)
-                {
-                    csName = $"HDR (BT.2020/PQ, {primary.BitsPerColor}-bit)";
-                }
-                else if (primary.SupportsHdr)
-                {
-                    csName = $"HDR 未开启 (BT.2020 硬件, {primary.BitsPerColor}-bit)";
-                }
-                else if (_settings.AcmeDetected)
-                {
-                    // ACM 启用时检测显示器原生色域
-                    var nativeGamut = GetDisplayNativeGamut();
-                    csName = $"SDR ({nativeGamut}, ACM, {primary.BitsPerColor}bit)";
-                }
-                else
-                {
-                    csName = $"SDR (sRGB, {primary.BitsPerColor}bit)";
-                }
-                SourceGamutTxt.Text = csName;
-            }
-            else
-            {
-                SourceGamutTxt.Text = "sRGB (默认)";
-            }
-        }
-        catch
-        {
-            SourceGamutTxt.Text = "sRGB (默认)";
-        }
-    }
-
-    /// <summary>更新色域映射 UI（HDR 感知 + ACM 感知）。</summary>
-    private void UpdateGamutMappingUI()
-    {
-        var sourceTag = SourceGamutTxt.Text;
-        var targetTag = (ColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "System";
-        bool hdrOn = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
-
-        // 判断源显示器特性
-        bool sourceIsHdr = sourceTag.Contains("HDR (BT.2020/PQ");
-        bool sourceIsHdrCapable = sourceTag.Contains("HDR 未开启");
-        bool sourceIsAcm = sourceTag.Contains("ACM");
-        bool sourceIsWide = sourceIsHdr || sourceIsHdrCapable
-            || sourceTag.Contains("P3") || sourceTag.Contains("BT.2020") || sourceTag.Contains("AdobeRGB");
-
-        // 有效目标色域：HDR 开启时 "System" 解析为 BT.2020
-        string effectiveTarget = targetTag == "System" && hdrOn ? "BT2020" : targetTag;
-        bool targetIsExplicitWide = effectiveTarget is "BT2020" or "DisplayP3" or "DCI_P3" or "AdobeRGB";
-        bool targetIsSystem = effectiveTarget == "System";
-        bool targetIsSystemWide = targetIsSystem && sourceIsAcm && sourceIsWide;
-        bool targetIsWide = targetIsExplicitWide || targetIsSystemWide;
-
-        // 构造目标色域显示名
-        string targetName = targetTag switch
-        {
-            "System" when hdrOn => "BT.2020 (HDR10)",
-            "System" when sourceIsHdr => "sRGB (色调映射)",
-            "System" when sourceIsAcm && sourceIsWide => sourceTag.Replace("SDR (", "").Replace(", ACM", "").Replace(", 8bit)", "").Replace(", 10bit)", ""),
-            "System" => sourceTag.Contains("HDR") ? "sRGB" : sourceTag,
-            "sRGB" => "sRGB",
-            "DisplayP3" => "Display P3",
-            "DCI_P3" => "DCI-P3",
-            "AdobeRGB" => "Adobe RGB",
-            "BT2020" => "BT.2020",
-            _ => "sRGB"
+            DisplayEnumerator.DisplayColorClass.Hdr => $"HDR（{bits}，PQ，面板原生 {native}）",
+            DisplayEnumerator.DisplayColorClass.WideGamutSdr =>
+                $"SDR 广色域（{native}，{bits}，ACM）"
+                + (src.SupportsHdr && !src.IsHdr ? " —— 面板支持 HDR，系统未开启" : ""),
+            DisplayEnumerator.DisplayColorClass.NarrowSdr => $"SDR sRGB（{bits}）",
+            _ => $"逐屏证据不足（{bits}）⇒ 不授权广色域/HDR 声称",
         };
-        TargetGamutTxt.Text = targetName;
-
-        if (hdrOn)
-        {
-            // HDR 开启 → 色域矩阵 → PQ → CICP，保留用户选择的色域
-            string matrixDesc = targetTag switch
-            {
-                "DisplayP3" or "DCI_P3" => "scRGB→P3 矩阵",
-                "AdobeRGB" => "scRGB→AdobeRGB 矩阵",
-                "BT2020" => "scRGB→BT.2020 矩阵",
-                _ => "scRGB→BT.2020 矩阵"
-            };
-            byte cicpP = targetTag switch
-            {
-                "DisplayP3" or "DCI_P3" => 12,
-                "AdobeRGB" => 1,
-                _ => 9  // BT.2020 / System
-            };
-            MappingArrow.Text = $"→ HDR 直通 ({targetName})";
-            GamutMapHintTxt.Text = $"HDR 编码路径：WGC Float16 → {matrixDesc} → PQ ST.2084 → CICP(primaries={cicpP}, transfer=16)。"
-                + (targetTag is "DisplayP3" or "DCI_P3" or "AdobeRGB"
-                    ? "\n⚠ 注意：HDR 输出使用非标准 HDR10 容器色域。部分播放器/显示器可能无法正确解析。"
-                    : "");
-        }
-        else if (targetIsWide)
-        {
-            // HDR 关闭 + 广色域目标 → WGC Float16 捕获 → 色域转换 → 色调映射到 SDR
-            // 第三个"|| 烘焙开关"已随开关一起删除（2026-09-22）：那条原本表达"用户允许在 8-bit 源上做映射"，
-            // 现在映射不可关，能不能走浮点链就只剩屏本身的能力这一个条件。
-            bool canUseFloat16 = sourceIsWide || sourceIsAcm;
-            if (canUseFloat16)
-            {
-                MappingArrow.Text = "→ Float16 广色域捕获 → 色域映射";
-                GamutMapHintTxt.Text = $"WGC Float16 捕获完整广色域 → 3×3 矩阵转换到 {targetName} → 色调映射 (分段 Reinhard) → SDR 输出。";
-            }
-            else
-            {
-                MappingArrow.Text = "→ 分段 Reinhard 缩限到";
-                GamutMapHintTxt.Text = $"SDR 捕获 → ICC 烘焙 → {targetName}。";
-            }
-        }
-        else
-        {
-            bool needsMapping = targetIsWide || (targetTag == "System" && (sourceIsHdr || sourceIsHdrCapable));
-            MappingArrow.Text = needsMapping ? "→ 分段 Reinhard 缩限到" : "→ 直通（同色域）";
-            GamutMapHintTxt.Text = needsMapping
-                ? $"SDR 捕获 → ICC 烘焙 → {targetName}。"
-                : "当前显示器色域与目标一致，无需转换。";
-        }
     }
+
+    /// <summary>目标那一行。增益图形态下这个值管的是<b>底图</b>色域（用户 2026-09-26 口径）。</summary>
+    private static string DescribeTargetGamut(ColorDecision d, OutputFormat format)
+    {
+        string name = d.TargetTag == "BT2020" ? "BT.2020" : "sRGB";
+        return format == OutputFormat.JPEG_GAINMAP ? $"{name}（底图色域）" : name;
+    }
+
+    /// <summary>灰字那一行：管线在干什么 + 这个格式能把声明写成什么 + 有没有被收口。</summary>
+    private static string BuildGamutHint(OutputFormat format, ColorDecision d,
+        HdrDelivery delivery, bool writesPq)
+    {
+        var parts = new System.Collections.Generic.List<string>();
+        parts.Add(delivery switch
+        {
+            HdrDelivery.PqContainer => "WGC Float16 → 色域矩阵 → PQ ST.2084。",
+            HdrDelivery.GainMap =>
+                "WGC Float16 → 分段 Reinhard 出 SDR 底图，另算一张增益图；HDR 在增益图里，不在容器声明里。",
+            HdrDelivery.BlockedByDisplay =>
+                "本次按 SDR 色调映射：HDR 开关仍按你的设置保留，只是这块屏的逐屏证据不足以声明 PQ。",
+            HdrDelivery.BlockedBySrgbTarget =>
+                "本次按 SDR 色调映射：目标被解析/收口成 sRGB，而 PQ 只能与广色域原色一起声明。",
+            HdrDelivery.BlockedByFormat =>
+                "本次按 SDR 色调映射：这个格式的容器没有 HDR 通道（HDR 开关会落空，产物是 8-bit SDR）。",
+            _ => d.NeedsMapping
+                ? (d.ExtendedRangeAuthorized
+                    ? "WGC Float16 捕获完整广色域 → 3×3 矩阵搬到目标 → 分段 Reinhard → SDR 输出。"
+                    : "8-bit 源 → ICC/矩阵搬到目标 → SDR 输出。")
+                : "源与目标同一套原色 ⇒ 矩阵是恒等变换，本次不跑搬色。",
+        });
+        parts.Add(FormatColorFacts.Declaration(format, d.TargetTag, writesPq));
+        if (d.GamutClamped)
+            parts.Add($"⚠ 广色域声明已被逐屏证据收口为 sRGB ⇒ {d.Evidence}");
+        if (d.HdrClamped)
+            parts.Add($"⚠ HDR 声称已被收口 ⇒ {d.Evidence}");
+        return string.Join(" ", parts);
+    }
+
 
     /// <summary>从 ColorCbo 获取当前选择的色彩空间标签。
     /// <para>

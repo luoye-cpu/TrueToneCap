@@ -46,8 +46,11 @@ public static class LocaleManager
     public static string ChromaSampling => s_lang == AppLanguage.Chinese ? "色度采样" : "Chroma";
     public static string AvifPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
     public static string JxlPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
-    public static string GainMapOptions => s_lang == AppLanguage.Chinese ? "JPEG Gain Map (Ultra HDR)" : "JPEG Gain Map (Ultra HDR)";
-    public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "输出兼容 JPEG 的 HDR 照片。SDR 查看器显示基础图，HDR 查看器自动还原完整动态范围。" : "Outputs HDR photos compatible with JPEG. SDR viewers see base image, HDR viewers recover full dynamic range.";
+    // 2026-09-26：GainMap 并入 JPEG LI ⇒ 独立卡片的标题（GainMapOptions）已删，
+    // 开关本身的名字是 GainMapToggle，说明仍是 GainMapDesc（挂在开关下方）。
+    public static string GainMapToggle => s_lang == AppLanguage.Chinese
+        ? "附带增益图（输出 Ultra HDR 照片）" : "Attach gain map (Ultra HDR output)";
+    public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "SDR 查看器显示基础图（底图），HDR 查看器自动还原完整动态范围。上面「目标色域」选的就是这张底图的色彩空间：sRGB ⇒ 底图与增益图同在 BT.709/sRGB 原色；手动选 BT.2020 ⇒ 底图、增益比、色彩声明三件全走 BT.2020（「跟随显示器」即便解析成广色域也不触发，只有亲手选才会）。打开此开关时 HDR 输出锁定为开。" : "SDR viewers see the base image, HDR viewers recover full dynamic range. The 'Target gamut' above selects that base image's colour space: sRGB ⇒ base and gain map both in BT.709/sRGB primaries; explicitly choosing BT.2020 ⇒ base, gain ratio and declaration all move to BT.2020 ('Follow display' does not trigger it even when it resolves to a wide gamut). While this is on, HDR output is locked to on.";
     public static string GainMapModeLabel => s_lang == AppLanguage.Chinese ? "增益图模式" : "Gain Map Mode";
 
     // ═══ 2026-09-19：WebP 的「色度采样」下拉已撤掉，改为一句静态说明 ═══
@@ -69,7 +72,7 @@ public static class LocaleManager
     public static string HdrOutput => s_lang == AppLanguage.Chinese ? "HDR 输出" : "HDR Output";
     public static string IccBaking => s_lang == AppLanguage.Chinese ? "ICC 色彩管理" : "ICC Color Mgmt";
     public static string ColorSpace => s_lang == AppLanguage.Chinese ? "色彩空间" : "Color Space";
-    public static string IccStrategy => s_lang == AppLanguage.Chinese ? "sRGB 目标不嵌入 ICC（通用默认）；非 sRGB 色域自动嵌入标准 ICC。" : "sRGB target: no ICC (universal default); Non-sRGB: auto-embed standard ICC.";
+    public static string IccStrategy => s_lang == AppLanguage.Chinese ? "这里选的是【目标色域】：像素搬去哪儿、容器就声明成什么，是同一个值。对增益图（JPEG LI 卡片里的开关）而言，它选的就是【底图】的色彩空间。至于某个格式靠什么通道把声明交给查看器（ICC / 代码点 / 什么都不写），下面「色域映射」按当前格式说。" : "This selects the TARGET COLOUR SPACE: where pixels are moved to and what the container declares are the same value. For the gain map (the switch inside the JPEG LI card) it selects the BASE image colour space. Which channel each format uses to carry that declaration (ICC / code points / nothing) is shown per format under Gamut Mapping.";
 
     // ── 截图页 ──
     public static string PageCapture => s_lang == AppLanguage.Chinese ? "截图与录制" : "Capture & Record";
@@ -105,13 +108,21 @@ public static class LocaleManager
     public static string MinimizeTray => s_lang == AppLanguage.Chinese ? "关闭时最小化到托盘" : "Minimize to tray on close";
 
     // ── 日志详细度（Core.LogDetail 三档；档位决定 Debug/Trace 进不进日志文件）──
+    // ── 日志详细度（Core.LogDetail 三档；档位决定 Debug/Trace 进不进日志文件）──
+    // 2026-09-25（用户口径）：下拉项只写档位名，解释一律走下面的灰字提示行 ——
+    // 项文字会被选中后长期占着窄下拉，塞说明既截断又与灰字行重复。
     public static string LogVerbosity => s_lang == AppLanguage.Chinese ? "日志详细度" : "Log verbosity";
-    public static string LogVerbosityBrief => s_lang == AppLanguage.Chinese ? "简（默认：操作与降级）" : "Basic (actions & fallbacks)";
-    public static string LogVerbosityDiagnose => s_lang == AppLanguage.Chinese ? "诊断（加每拍快照/回退原因/耗时）" : "Diagnostic (snapshots, fallback reasons, timings)";
-    public static string LogVerbosityFull => s_lang == AppLanguage.Chinese ? "全（逐帧逐子进程，仅排障时用）" : "Full (per-frame, per-subprocess; debugging only)";
+    public static string LogVerbosityBrief => s_lang == AppLanguage.Chinese ? "简" : "Basic";
+    public static string LogVerbosityDiagnose => s_lang == AppLanguage.Chinese ? "诊断" : "Diagnostic";
+    public static string LogVerbosityFull => s_lang == AppLanguage.Chinese ? "全" : "Full";
     public static string LogVerbosityHint => s_lang == AppLanguage.Chinese
-        ? "日志写在应用目录 log/ 下按日轮转；换档只影响之后写入的行。诊断档以上量很大，排查完建议调回『简』。任何档位都不会记录截图里的文字内容、图像字节或 API 密钥。"
-        : "Logs rotate daily under <app dir>/log/. A level change only affects lines written afterwards; diagnostic and above get verbose, so switch back to Basic when you are done. No level ever records recognized text, image bytes or API keys.";
+        ? "简＝只记操作与降级；诊断＝再加每拍快照、回退原因与耗时；全＝逐帧逐子进程，仅排障时用。"
+          + "日志写在应用目录 log/ 下按日轮转；换档只影响之后写入的行，诊断档以上量很大，排查完建议调回『简』。"
+          + "任何档位都不会记录截图里的文字内容、图像字节或 API 密钥。"
+        : "Basic = actions and fallbacks only; Diagnostic = adds per-tick snapshots, fallback reasons and timings; "
+          + "Full = per frame and per subprocess, for debugging only. Logs rotate daily under <app dir>/log/. "
+          + "A level change only affects lines written afterwards; switch back to Basic when you are done. "
+          + "No level ever records recognized text, image bytes or API keys.";
 
     // ── Toast 通知 ──
     public static string ToastTitle => s_lang == AppLanguage.Chinese ? "通知" : "Notifications";
@@ -182,23 +193,19 @@ public static class LocaleManager
     public static string AvifNvenc => "NVIDIA NVENC";
 
     // ── AVIF 色度 ──
-    // 2026-09-19（用户决定：默认色度 420 + Auto 按色度过滤）：文案要说出"哪一项能走硬件、
-    // 哪一项只有软件编码器支持"，且必须与 MainWindow.xaml 里 AvifChromaCbo 的同 Tag 文本同义
-    // —— 运行时这条会覆盖那条，两处口径不一致时用户看到的是这里。
-    public static string AvifChroma444 => s_lang == AppLanguage.Chinese ? "4:4:4（色度不压缩 · 仅软件编码器，较慢）" : "4:4:4 (full chroma · software only, slower)";
-    public static string AvifChroma422 => s_lang == AppLanguage.Chinese ? "4:2:2（仅软件编码器）" : "4:2:2 (software encoders only)";
-    public static string AvifChroma420 => s_lang == AppLanguage.Chinese ? "4:2:0（默认 · Auto 可走硬件加速）" : "4:2:0 (default · Auto can use hardware)";
+    // 2026-09-25（用户口径）：下拉项只留采样名。原先括号里写的"默认 · Auto 可走硬件加速"
+    // "仅软件编码器"这类内容，运行时已由 AvifCodecHintTxt 那行灰字按【当前所选编码器】动态给出
+    // （可用色度 X / 可用位深 Y + 降级真相），写在项上既重复又会在窄下拉里截断。
+    // ⚠ 这三条必须与 MainWindow.xaml 里 AvifChromaCbo 的同 Tag 文本一致，
+    //    一致性由 CorePipelineTests 的"默认色度"用例逐 Tag 对撞（运行时这条会覆盖 XAML）。
+    public static string AvifChroma444 => "4:4:4";
+    public static string AvifChroma422 => "4:2:2";
+    public static string AvifChroma420 => "4:2:0";
 
     // ── GainMap 模式 ──
-    public static string GmRgb => s_lang == AppLanguage.Chinese ? "RGB 增益（色彩准确，体积较大）" : "RGB Gain (color accurate, larger)";
-    public static string GmGray => s_lang == AppLanguage.Chinese ? "灰度增益（体积最优，亮度还原）" : "Gray Gain (smallest, luma only)";
-
-    // ── GainMap 色度（2026-09-19 用户决定：默认 4:2:0，最高允许手动选 4:4:4）──
-    // 这套文案与 AVIF 的色度文案【不能共用】：AVIF 那三条讲的是"哪档能走硬件加速"，
-    // GainMap 讲的是"base JPEG 的兼容性与体积"，两者对用户的取舍完全不同。
-    public static string GainMapChroma420 => s_lang == AppLanguage.Chinese ? "4:2:0（默认 · 兼容性最好）" : "4:2:0 (default · best compatibility)";
-    public static string GainMapChroma422 => "4:2:2";
-    public static string GainMapChroma444 => s_lang == AppLanguage.Chinese ? "4:4:4（色度不压缩，体积更大）" : "4:4:4 (full chroma, larger files)";
+    // 取舍说明（体积 / 亮度还原）在灰字 GainMapHintTxt 里按所选模式动态给，不进项文字。
+    public static string GmRgb => s_lang == AppLanguage.Chinese ? "RGB 增益" : "RGB Gain";
+    public static string GmGray => s_lang == AppLanguage.Chinese ? "灰度增益" : "Gray Gain";
 
     // ── 色域映射 ──
     public static string GamutMapTitle => s_lang == AppLanguage.Chinese ? "色域映射" : "Gamut Mapping";
@@ -207,7 +214,9 @@ public static class LocaleManager
     public static string RenderingIntent => s_lang == AppLanguage.Chinese ? "渲染意图" : "Rendering Intent";
 
     // ── 色彩空间选项 ──
-    public static string CsSystem => s_lang == AppLanguage.Chinese ? "跟随显示器（自动）" : "Follow Display (Auto)";
+    // 项文字只留色域名。"（自动）""（BT.709 原色）"这类括注归灰字 IccStrategyHintTxt；
+    // ⚠ 项序是持久化契约（AppSettingsData.ColorSpaceIndex 存索引），改文字安全，改顺序不安全。
+    public static string CsSystem => s_lang == AppLanguage.Chinese ? "跟随显示器" : "Follow Display";
     public static string CsSRgb => "sRGB";
     public static string CsDisplayP3 => "Display P3";
     public static string CsDciP3 => "DCI-P3";

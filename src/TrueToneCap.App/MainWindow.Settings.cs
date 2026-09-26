@@ -108,7 +108,14 @@ public sealed partial class MainWindow : Window
         // 迁移结果立刻落回设置对象：否则文件里长期留着旧索引（实测本机就是 5），
         // 每次启动都要重算一遍，将来项序再变一次就得再多背一份历史表。
         if (_settings.ColorSpaceIndex != newIdx)
+        {
             _settings.ColorSpaceIndex = newIdx;
+            // 只改对象不改文件，上面这句注释的承诺就是空话 —— 旧索引仍躺在盘上，重算一次都不省。
+            // 这里落盘是安全的：Load()/Normalize() 早已完成，_uiReady 还是 false ⇒ 写进去的就是对象本身。
+            // 实机 A/B（摘掉本行）：值仍会被启动过程中另一次 +7ms 的落盘带进文件 ⇒ 这一行不是"修可见丢失"，
+            // 而是把上面那句注释的承诺变成无条件成立，不再依赖"别的 handler 恰好会存一次"。
+            SaveSettingsQuiet();
+        }
         int maxColorIdx = (ColorCbo.Items.Count > 0) ? ColorCbo.Items.Count - 1 : currentTags.Length - 1;
         ColorCbo.SelectedIndex = Math.Clamp(newIdx, 0, maxColorIdx);
         HotkeyTxt.Text = _settings.Hotkey;
@@ -145,8 +152,9 @@ public sealed partial class MainWindow : Window
         if (BdTiffCbo is not null) SetComboByTag(BdTiffCbo, _settings.BitDepthTiff.ToString());
         if (ChromaJpegXlCbo is not null) SetComboByTag(ChromaJpegXlCbo, _settings.ChromaJpegXl);
         if (ChromaJpegLiCbo is not null) SetComboByTag(ChromaJpegLiCbo, _settings.ChromaJpegLi);
-        // GainMap 色度：2026-09-19 起主路径真的读它 ⇒ 回显必须与管线同源（默认 420）
-        if (GainMapChromaCbo is not null) SetComboByTag(GainMapChromaCbo, _settings.ChromaGainMap);
+        // 2026-09-26：GainMapChromaCbo 已随合并删除 —— 增益图态的色度就是 ChromaJpegLiCbo 那一条，
+        // 管线对 JPEG_GAINMAP 也改读 ChromaJpegLi。ChromaGainMap 只剩历史值，界面不再显示它
+        //（回显一个用户看不见的字段 = 制造"改了没反应"的错觉）。增益图模式的下拉在下方回显。
         // 2026-09-19：原此处回显 ChromaWebPCbo 一并删除 —— WebP 的色度下拉已从界面撤掉
         //   （有损 WebP 恒 4:2:0 是格式定义、无损为 RGB，编码器也没有色度形参，
         //    回显一个不可能生效的值等于继续撒谎）。详见 AppSettingsData 同日期注释。
@@ -174,7 +182,7 @@ public sealed partial class MainWindow : Window
         SetComboByTag(LanguageCbo, _settings.Language);
         // 字体
         RestoreFontSelection();
-        DetectAndShowSourceGamut();
+        RefreshColorMappingUi();
         // 主题已在 App.OnLaunched 中初始化，此处仅恢复 ComboBox 选中项
         // Apply engine mode immediately
         if (Enum.TryParse<OcrEngineType>(_settings.OcrEngineMode, out var engineType))
@@ -226,7 +234,7 @@ public sealed partial class MainWindow : Window
         {
             _settings.FormatIndex = FormatCbo.SelectedIndex;
             _settings.Quality = QualitySld.Value;
-            _settings.SetQuality(FormatCbo.SelectedIndex, QualitySld.Value);
+            _settings.SetQuality(CurrentFormat(), QualitySld.Value);
             _settings.OutputPath = PathTxt.Text;
             _settings.FileNamePrefix = PrefixTxt.Text;
             _settings.HdrEnabled = HdrSwitch.IsOn;
@@ -268,7 +276,9 @@ public sealed partial class MainWindow : Window
             // AVIF 的默认已于 2026-09-19 改回 420（此处原注释还写着"444 视觉无损"，属过期口径）。
             _settings.ChromaAvif = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420";
             _settings.ChromaJpegXl = (ChromaJpegXlCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
-            _settings.ChromaGainMap = (GainMapChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420";
+            // 2026-09-26：不再写 ChromaGainMap —— 控件已随"GainMap 并入 JPEG LI"删除，
+            //   管线对增益图态改读 ChromaJpegLi（上面那一条）。留着这行等于让一个看不见的
+            //   下拉的兜底值每次保存都覆盖盘上的历史值。
             // ═══ 2026-09-19 清理：原这两行硬编码赋值已随字段删除 ═══
             //   ChromaWebP（本轮连同下拉一起撤掉）、ChromaTiff（界面上本就没有下拉，
             //   每次保存却被改回固定值）——写进去也没有任何编码器读它，属"只写不读"，
@@ -304,12 +314,14 @@ public sealed partial class MainWindow : Window
             _settings.OcrLanguage = (OcrLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
 
             // OutputBitDepth 从每格式位深映射（SaveSettings 中的 BitDepth 已更新）
-            _settings.OutputBitDepth = _settings.FormatIndex switch
+            // ⚠ 按【格式枚举】取，不按 FormatIndex 取：索引表 2026-09-26 少了一项（GainMap 并入 JPEG LI），
+            //   而这里原先写的是 `0/3/4/6 =>` —— 换序即错位，且错位后仍然"看起来正常"。
+            _settings.OutputBitDepth = CurrentFormat() switch
             {
-                0 => _settings.BitDepthPng,         // PNG
-                3 => _settings.BitDepthJpegXl,      // JPEG XL
-                4 => _settings.BitDepthAvif,        // AVIF
-                6 => _settings.BitDepthTiff,        // TIFF
+                OutputFormat.PNG => _settings.BitDepthPng,
+                OutputFormat.JPEG_XL => _settings.BitDepthJpegXl,
+                OutputFormat.AVIF => _settings.BitDepthAvif,
+                OutputFormat.TIFF => _settings.BitDepthTiff,
                 _ => 8,                              // 其他格式固定 8-bit
             };
 

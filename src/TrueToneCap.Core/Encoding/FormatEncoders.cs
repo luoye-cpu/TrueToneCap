@@ -306,8 +306,11 @@ public sealed class AvifEncoder : ImageEncoder
                             $"NVENC 的 HDR 直通抛出异常（{ex.GetType().Name}）⇒ 已改由 avifenc 软件编码";
                     }
                 }
-                // AVIF HDR 固定 10-bit 全精度
-                var p16 = FormatHelper.HdrToPq16(f, csTag, 10);
+                // 量化位深 = 上游按编码器能力协商出的结果（HDR 下限 10，libaom 可到 12）。
+                // 2026-09-25 前这里是字面量 10，而能力表给 libaom 声明的是 MaxBitDepth:12 ⇒
+                // "选了 12 也只给 10"，且这个 10 在管线 / 量化 / avifenc 命令行各写了一遍。
+                int hdrDepth = s.OutputBitDepth;
+                var p16 = FormatHelper.HdrToPq16(f, csTag, hdrDepth);
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
                 byte[] cicpHdr = FormatHelper.BuildHdrCicp(csTag); // PQ transfer=16, matrix=identity（AVIF 侧换成 9，见 FormatHelper.AvifMatrixCoefficients）
                 // ═══ 2026-08-09 修复: HDR 不嵌 ICC (同 PNG, CICP 优先声明) ═══
@@ -331,7 +334,8 @@ public sealed class AvifEncoder : ImageEncoder
                     //   中转是兜底路径（cICP 已带 PQ 声明，无"HDR 被当 SDR"问题）。
                     NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr, csTag, peakNits,
                         chroma: s.ChromaSubsampling,
-                        codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind));
+                        codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
+                        bitDepth: hdrDepth);
                 }
                 finally { try { File.Delete(tmpPng); } catch { } }
             }, ct);
@@ -507,6 +511,16 @@ public sealed class TiffEncoder : ImageEncoder
                 // TIFF 无 CICP 机制, 必须嵌 ICC。但标准 ICC 是 sRGB TRC, 与 PQ 像素矛盾。
                 // 用 PQ TRC ICC (GetHdrStandardIccProfile), 否则解码器按 sRGB gamma 解码 PQ 值。
                 byte[]? iccHdr = ColorManagement.ColorProfileProvider.GetHdrStandardIccProfile(csTag);
+                // ═══ 2026-09-24（#22）：这里改掉用户选的位深，就必须留下痕迹 ═══
+                // TIFF 的 BitsPerSample 只有 8/16 两档合法（写 10/12 会产出打不开的文件，见 XAML 那条
+                // 注释），而 8-bit 装不下 PQ ⇒ HDR 只能落 16-bit。方向与 PNG 相反：PNG 遇 8-bit 是
+                // 【降成 SDR】（丢 HDR 意图，#21 已给它加了协商 + 提示），TIFF 是【升到 16-bit】
+                // （保住 HDR，代价是体积翻倍）。两者都属"界面设置与产物不一致"，都不许无声 ——
+                // 不告知的话用户只会发现"我选了 8-bit，文件怎么是 16-bit 的、还大一倍"，无从归因。
+                if (s.OutputBitDepth <= 8)
+                    EncoderFallbackNotifier.LastReason =
+                        "HDR TIFF 的容器位深恒为 16-bit（TIFF 只承认 8/16 两档 BitsPerSample，"
+                        + $"而 8-bit 装不下 PQ）⇒ 本张未按所选的 {s.OutputBitDepth}-bit 输出，而是 16-bit";
                 // 显式声明输入为 16-bit，避免依赖数组长度推断
                 ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, iccHdr, inputBitDepth: 16);
             }, ct);
@@ -968,6 +982,13 @@ public sealed class NvencAvifBackend : IAvifEncoder
              || msg.Contains("no encode capability", StringComparison.OrdinalIgnoreCase)
              || msg.Contains("buffer format", StringComparison.OrdinalIgnoreCase)
              || msg.Contains("input format", StringComparison.OrdinalIgnoreCase)
+             // ═══ 2026-09-24：CRF 0（AV1 的 QP0 = 请求 lossless）实测签名 ═══
+             // 本机 RTX 4060：InitEncoder hr=0x00000008 lastErr="Lossless Coding mode not
+             // supported." ⇒ 这是"这个参数组合硬件给不出"，不是"这张卡的编码器坏了"。
+             // 漏掉它的代价被实测放大过一整轮：一次 CRF 0 失败会把 s_nvencFailed 置位，
+             // 此后【同进程所有】AVIF 都退回软件（顺序实验 --crf 2,0,5,8,15：只有 2 走了硬件），
+             // 只能靠重启恢复 —— 与上面那段"一张小图废掉全部大图"是同一个病。
+             || msg.Contains("Lossless Coding mode not supported", StringComparison.OrdinalIgnoreCase)
              // NV_ENC_ERR_UNSUPPORTED_PARAM (0xC)：实测 RTX 5080 上 AV1+NV16 4:2:2 在
              // EncodePicture 阶段被驱动以此码拒绝（NVENC 的 4:2:2 编码仅 HEVC 支持，
              // AV1 只支持 420）。属"该输入组合不适用"，不应永久禁用 NVENC。

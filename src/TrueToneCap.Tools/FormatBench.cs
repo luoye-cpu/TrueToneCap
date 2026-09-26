@@ -80,6 +80,20 @@ if (args.Length >= 1 && args[0] == "--gainmap-color-product")
     return;
 }
 
+// ═══ GainMap 两模式的观感对比 (--gainmap-look <rgba> <宽> <高> [目录]，交接 §47) ═══
+if (args.Length >= 1 && args[0] == "--gainmap-look")
+{
+    Environment.ExitCode = GainMapColorProductProbe.RunLook(args);
+    return;
+}
+
+// ═══ AVIF 后端 × CRF 实测阶梯 (--avif-ladder <png> [目录] …，交接 §48) ═══
+if (args.Length >= 1 && args[0] == "--avif-ladder")
+{
+    Environment.ExitCode = AvifBackendLadder.Run(args);
+    return;
+}
+
     // ═══ 宽高比/宽度扫描（整行 vs 分块）(--ocr-ar-sweep [modelDir] [fontSize]) ═══
     if (args.Length >= 1 && args[0] == "--ocr-ar-sweep")
     {
@@ -200,6 +214,16 @@ if (args.Length >= 1 && args[0] == "--avif-caps")
 if (args.Length >= 1 && args[0] == "--avif-hdr-test")
 {
     AvifHdrDiag.Run(args);
+    return;
+}
+
+// ═══ HDR AVIF 位深 A/B (--avif-hdr-depth) ═══
+// 2026-09-25：用户要求"libaom + HDR 可选 10/12 追求更高精度"。这条改动的落点横跨四处
+// （协商函数 / 管线 / PQ 量化 / avifenc 命令行），只看 diff 证明不了"产物真的成了 12-bit"
+// ⇒ 判据落在产物上：请求 10 得 p10、请求 12 得 p12、两次字节必须不同、色彩声明不许丢。
+if (args.Length >= 1 && args[0] == "--avif-hdr-depth")
+{
+    AvifHdrDepthProbe.Run();
     return;
 }
 

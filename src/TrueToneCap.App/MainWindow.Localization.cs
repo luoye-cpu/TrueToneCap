@@ -39,7 +39,9 @@ public sealed partial class MainWindow : Window
         bool en = LocaleManager.CurrentLanguage == AppLanguage.English;
         if (AvifCodecLabelTxt is not null)
             AvifCodecLabelTxt.Text = en ? "AVIF encoder" : "AVIF 编码器";
-        GainMapOptionsTitle.Text = LocaleManager.GainMapOptions;
+        // 2026-09-26：GainMapOptionsTitle 已随独立卡片删除（增益图并入 JPEG LI 卡片，
+        // 标题沿用该卡片的「JPEG LI 选项」，说明文字见 GainMapOptionsDesc）。
+        GainMapEnableChk.Content = LocaleManager.GainMapToggle;
         GainMapOptionsDesc.Text = LocaleManager.GainMapDesc;
         GainMapModeLabelTxt.Text = LocaleManager.GainMapModeLabel;
         AvifPngSuffixChk.Content = LocaleManager.AvifPngSuffix;
@@ -134,11 +136,7 @@ public sealed partial class MainWindow : Window
         // 各项 Content 由 UpdateAvifEncoderLabels() 依据能力表动态生成（含可用性与色度/位深）。
 
         SetComboItemText(AvifChromaCbo, "444", LocaleManager.AvifChroma444);
-        // GainMap 色度（2026-09-19 起为真设置）：标签 + 三档文案都要跟着语言走
-        if (GainMapChromaLabelTxt is not null) GainMapChromaLabelTxt.Text = LocaleManager.ChromaSampling;
-        SetComboItemText(GainMapChromaCbo, "420", LocaleManager.GainMapChroma420);
-        SetComboItemText(GainMapChromaCbo, "422", LocaleManager.GainMapChroma422);
-        SetComboItemText(GainMapChromaCbo, "444", LocaleManager.GainMapChroma444);
+        // 2026-09-26：GainMap 色度的标签与三档文案已随控件一并删除（并入 JPEG LI 后共用那一条下拉）。
         SetComboItemText(AvifChromaCbo, "422", LocaleManager.AvifChroma422);
         SetComboItemText(AvifChromaCbo, "420", LocaleManager.AvifChroma420);
 
@@ -206,9 +204,8 @@ public sealed partial class MainWindow : Window
             SetComboItemText(ArchiveModeCbo, "Day", LocaleManager.ArchiveDay);
         }
 
-        // ── 更新色域映射 UI ──
-        DetectAndShowSourceGamut();
-        UpdateGamutMappingUI();
+        // ── 色域映射卡片（含本文件刚写下的 Localization 文案，必须最后刷一次覆盖）──
+        RefreshColorMappingUi();
     }
 
     /// <summary>根据 Tag 查找 ComboBoxItem 并更新其文本内容。</summary>

@@ -105,6 +105,18 @@ public abstract class ImageEncoder
     public abstract Task EncodeSdrAsync(byte[] sdrPixels, int width, int height,
         EncodingSettings settings, string outputPath, CancellationToken ct = default);
     public abstract (float Min, float Max, float Default, string Label) GetQualityRange();
+
+    /// <summary>该格式<b>有没有可调的质量参数</b>（区间退化成一个点 ⇒ 没有）。</summary>
+    /// <remarks>
+    /// PNG / TIFF 是无损格式，<see cref="GetQualityRange"/> 恒返回 <c>(100,100,100)</c>，
+    /// 所以界面那根滑块划不动、那个输入框只能填 100 —— 不是坏了，是【本来就没有这个参数】。
+    /// 判据写成"区间退化"而不是"点名格式"：App 侧旧写法是
+    /// <c>QualitySld.IsEnabled = format != OutputFormat.PNG</c>，只挡住了 PNG，
+    /// 同样是 (100,100) 的 TIFF 仍渲染出一根 enabled 却划不动的滑块 —— 同一条事实被两处
+    /// 各写一遍、其中一处漏了一个格式。UI 与测试现在都问这一个属性。
+    /// </remarks>
+    public bool QualityIsFixed => GetQualityRange() is (var min, var max, _, _) && max <= min;
+
     public virtual string GetQualityDescription(float quality) => quality.ToString("F0");
 }
 

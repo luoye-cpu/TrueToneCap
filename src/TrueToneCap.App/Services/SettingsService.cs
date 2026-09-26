@@ -6,6 +6,7 @@
 // ⚠ 敏感字段（LLM API Key）不进 JSON，改由 SecretStore 加密存储
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using TrueToneCap.App.Models;
 
 namespace TrueToneCap.App.Services;
@@ -14,43 +15,31 @@ namespace TrueToneCap.App.Services;
 public sealed class SettingsService
 {
     /// <summary>
-    /// 设置文件路径。2026-09-15 起为【软件同目录】（便携/绿色用法：设置跟着程序走），
-    /// 不可写时自动降级到 %LOCALAPPDATA%。
+    /// 设置文件路径：<b>只有</b>软件同目录这一个位置（便携/绿色用法：设置跟着程序走）。
+    /// 2026-09-25 起删掉"不可写就降级到 %LOCALAPPDATA%"那条路，理由见 <see cref="CanPersist"/>。
     /// </summary>
     /// <remarks>
-    /// ⚠️ 同目录【不一定可写】：装到 Program Files、放在只读介质、或以无权限账户运行时，
-    ///    写入会失败。若不降级，表现是「用户改了设置 → 重启后回到默认」且毫无线索，
-    ///    属于最难排查的一类问题。故这里做可写性探测 + 降级，并把实际路径写进日志。
-    ///
     /// ⚠️ 本属性是【唯一事实源】：任何其他地方需要读设置文件（如 App 构造期加载主题）
-    ///    都必须引用它，不得各自拼路径 —— 历史上一度出现注释说 BaseDirectory、
+    ///    都必须引用它，且同时问一次 <see cref="CanPersist"/> —— 历史上一度出现注释说 BaseDirectory、
     ///    代码却拼 LocalApplicationData 的不一致。
     /// </remarks>
-    public static string SettingsPath { get; } = ResolveSettingsPath();
+    public static string SettingsPath { get; } = Path.Combine(AppContext.BaseDirectory, SettingsFileName);
 
     private const string SettingsFileName = "TrueToneCap.settings.json";
 
-    private static string ResolveSettingsPath()
-    {
-        string portable = Path.Combine(AppContext.BaseDirectory, SettingsFileName);
-        try
-        {
-            var dir = Path.GetDirectoryName(portable);
-            if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
-            {
-                // 文件尚不存在 → 同目录可用；已存在 → 必须不是只读
-                if (!File.Exists(portable) ||
-                    !File.GetAttributes(portable).HasFlag(FileAttributes.ReadOnly))
-                    return portable;
-            }
-        }
-        catch
-        {
-            // 探测失败按不可用处理，落到下面的降级分支
-        }
-
-        return LegacySettingsPath;
-    }
+    /// <summary>
+    /// 这个位置到底存得下来吗 —— 由 <c>SettingsWriteProbe</c> <b>真写一次</b>测出，不是看属性位。
+    /// <para>false 时的口径：<b>把问题记进日志 + 全程按默认值表运行</b>（不读、不写，也不换位置存）。</para>
+    /// <para>为什么原来那条"降级到 %LOCALAPPDATA%"从未生效：它的探测是"文件不存在 ⇒ 同目录可用"，
+    /// 而真实世界存不下去的主因（装进 Program Files 被 ACL 拒写、只读介质、策略拦写）
+    /// 恰恰是"文件还不存在"的形态 ⇒ 探测一路放行，随后每次 <c>Save()</c> 抛异常，
+    /// 而调用方全走 <c>SaveQuiet()</c>（原先是空的 <c>catch { }</c>，连日志都不记）
+    /// ⇒ 症状恰好就是那段防护声称要防的"用户改了设置 → 重启后回到默认，且毫无线索"。</para>
+    /// <para>为什么降级这条路本身也要拆：设置存在哪一旦有两个答案，同目录那份与 LocalAppData 那份
+    /// 内容可以完全不同，用户与代码各信一个 —— 那比"不保存"更难查。</para>
+    /// </summary>
+    public static bool CanPersist { get; } =
+        TrueToneCap.Core.Settings.SettingsWriteProbe.CanPersistSettings(SettingsPath);
 
     /// <summary>迁移前的旧位置（%LOCALAPPDATA%\TrueToneCap\）。</summary>
     public static string LegacySettingsPath =>
@@ -94,6 +83,14 @@ public sealed class SettingsService
     {
         try
         {
+            if (!CanPersist)
+            {
+                // 存不下来的位置也不值得读：读了就等于把"界面上的值"和"下次启动的值"分成两套。
+                LogPersistBlocked();
+                Current = new();
+                return Current;
+            }
+
             MigrateFromLegacyLocation();
 
             if (File.Exists(SettingsPath))
@@ -108,6 +105,12 @@ public sealed class SettingsService
 
                 // 2026-09-16 重构迁移: 旧版「编码后端 + 软件编码器」两层 → 单一 AvifEncoder
                 migrated |= MigrateLegacyAvifEncoder(json, Current);
+
+                // 结构迁移：GainMap 并入 JPEG LI（与"默认值表版本"各用各的门，见 GainMapMerged）
+                migrated |= MigrateGainMapMerge(Current);
+
+                // 默认值修订号迁移（必须早于 Normalize：先补历史账，再钳越界值）
+                migrated |= MigrateStaleDefaults(Current);
 
                 // 从加密凭据库读取敏感凭据
                 Current.LlmApiKey = SecretStore.Get(SecretStore.LlmApiKeyName) ?? "";
@@ -136,6 +139,8 @@ public sealed class SettingsService
     /// <summary>保存当前设置到磁盘。</summary>
     public void Save()
     {
+        if (!CanPersist) { LogPersistBlocked(); return; }
+
         var dir = Path.GetDirectoryName(SettingsPath);
         if (dir is not null && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);
@@ -145,8 +150,19 @@ public sealed class SettingsService
         SaveSecret(SecretStore.YoudaoAppSecretName, Current.YoudaoAppSecret);
 
         // 使用源生成器序列化（AOT 兼容）
-        // 注意: 源生成器 API 不支持传入 JsonSerializerOptions，输出为紧凑格式
-        var json = JsonSerializer.Serialize(Current, s_jsonContext.AppSettingsData);
+        // ═══ 2026-09-24：只写【与当前默认不同】的键 ═══
+        // 旧版这里直接 Serialize(Current) ⇒ 64 个键每次整份写回，文件里永远不会缺键，
+        // 于是"缺键 → 回落代码默认值"这条兜底形同虚设，改默认值传不到老用户手上。
+        // 改成存差集后：没被用户碰过的键不落盘 ⇒ 默认值改了会自动生效；碰过的键照旧保留。
+        // SettingsRevision 例外，必须永远写（否则新文件读作 0，迁移会反复触发）。
+        // 修订号在【唯一的写盘出口】钉死，而不是靠 AppSettingsData 的属性初值：
+        // 初值必须留 0 才能让缺键的老文件被判定为未迁移（见 AppSettingsData.SettingsRevision 的 ⚠ 注），
+        // 而"本程序写过的文件就是当前默认表"这件事只有在这里说才算说到位 ——
+        // 少了这一行，新装机存盘会得到 SettingsRevision:0，下次启动迁移门就把用户刚挑的质量档清成默认。
+        Current.SettingsRevision = AppSettingsData.CurrentSettingsRevision;
+        // 结构迁移标记同理盖章：本 build 写出的文件必然已是"GainMap 并入 JPEG LI"之后的形态。
+        Current.GainMapMerged = true;
+        var json = SerializeDiffs(Current);
 
         // ═══ 2026-09-15 修复：原子写入（与 SecretStore.cs:121-137 对齐）═══
         // 原实现直接 File.WriteAllText：写入过程中崩溃/断电会留下【截断的 settings.json】，
@@ -170,11 +186,50 @@ public sealed class SettingsService
         LogService.Info("SettingsService", $"设置已保存到 {SettingsPath}");
     }
 
-    /// <summary>静默保存（不抛异常）。</summary>
+    /// <summary>
+    /// 序列化成"只含与默认值不同的键"的 JSON。
+    /// <para>走 <see cref="JsonSerializer.SerializeToNode(object?, JsonSerializerContext)"/> 而不是
+    /// 反射式 options：源生成上下文要保 AOT，且比较必须发生在【同一套命名/转换器】之下，
+    /// 否则"当前值"和"默认值"两份 JSON 会因为格式化差异被判成不同 ⇒ 每个键都照写，等于没改。</para>
+    /// </summary>
+    private static string SerializeDiffs(AppSettingsData s)
+    {
+        var live = JsonSerializer.SerializeToNode(s, s_jsonContext.AppSettingsData)?.AsObject();
+        var defs = JsonSerializer.SerializeToNode(AppSettingsData.CreateDefaults(),
+            s_jsonContext.AppSettingsData)?.AsObject();
+        if (live is null || defs is null) return "{}";
+        // 剪枝算法本体在 Core（SettingsDiffPruner）—— Test 只引用 Core，放那儿才测得到语义而不只是调用点。
+        // SettingsRevision 必须永远写：它若被剪掉，下次读文件得到 0，迁移会反复触发。
+        return TrueToneCap.Core.Settings.SettingsDiffPruner.PruneToJson(
+            live, defs, [nameof(AppSettingsData.SettingsRevision)]);
+    }
+
+    /// <summary>
+    /// 静默保存（不抛异常，但<b>必须留下线索</b>）。
+    /// <para>原先是 <c>catch { }</c> 空吞：设置存不下去时程序一切如常，界面上看不出任何异常，
+    /// 日志里也一个字都没有 —— 而"改了设置没反应"是本项目最难排查的一类症状。
+    /// 现在按【内容】去重记一条 Error（与降级提示同一规则，见 §28/#28）：
+    /// 同一种失败刷屏没有信息量，而不同原因的失败一条都不能被前一条吃掉。</para>
+    /// </summary>
     public void SaveQuiet()
     {
-        try { Save(); } catch { }
+        try { Save(); }
+        catch (Exception ex) { LogOnce($"设置保存失败（改动只在本次运行内有效）：{ex.Message}"); }
     }
+
+    private static string? s_lastLoggedIssue;
+
+    /// <summary>按消息内容去重的错误日志：同一失败只记一次，不同失败各记一次。</summary>
+    private static void LogOnce(string msg)
+    {
+        if (s_lastLoggedIssue == msg) return;
+        s_lastLoggedIssue = msg;
+        LogService.Error("SettingsService", msg);
+    }
+
+    private static void LogPersistBlocked() => LogOnce(
+        $"设置目录不可写 ⇒ 不读取也不保存 {SettingsPath}，本次运行按【默认值表】；"
+        + "要让设置留住，请把程序放在可写目录（或以可写权限运行）");
 
     /// <summary>
     /// 迁移旧版 AVIF「编码后端 + 软件编码器」两层设置到单一的 <c>AvifEncoder</c>。
@@ -257,25 +312,28 @@ public sealed class SettingsService
     private static void Normalize(AppSettingsData s)
     {
         // ── 每格式质量（min, max, default）──
-        // 区间与各编码器的 GetQualityRange() 逐一对齐，Default 也与 AppSettingsData 的
-        // 属性初始化器一致 —— 两处一旦漂移，UI 默认值与编码器默认值就会打架。
+        // 区间与各编码器的 GetQualityRange() 逐一对齐。
+        // ⚠ default 一律从 AppSettingsData.CreateDefaults() 取，【不得再写字面量】：
+        //   2026-09-17 就修过一次"这里写 0.8/18/92、初始化器写 1.0/15/90"的漂移，当时的注释
+        //   已经承认"它构成第二处事实源"——但只是把数字对齐，没有消掉第二处，所以它一定会再漂。
+        //   现在唯一事实源是属性初始化器，本函数只负责区间；越界回填必然回到"当前默认"。
         // PNG / TIFF 为无损格式，编码器固定 (100,100,100)，故这里同样收紧为 100。
-        ClampTo(s.QualityPng,      v => s.QualityPng = v,      100, 100, 100);
-        ClampTo(s.QualityGainMap,  v => s.QualityGainMap = v,  0.5, 3.0, 1.0);
-        ClampTo(s.QualityJpegLi,   v => s.QualityJpegLi = v,   0.5, 3.0, 1.0);
-        // ═══ 2026-09-17 修复：这三个兜底默认值仍停留在"视觉无损"对齐之前的旧值 ═══
-        // 旧的 (0.8 / 18 / 92) 与 AppSettingsData 的属性初始化器 (1.0 / 15 / 90) 已不一致，
-        // 于是"越界 → 回填默认"这条路径会把用户值改成【一个产品上已被废弃的旧默认】，
-        // 且它构成第二处事实源 —— 上面 :258 的注释声称"与 AppSettingsData 一致"，实际并不成立。
-        // 现统一到 1.0 / 15 / 90（与 AppSettingsData 及 GetQualityRange().Default 三方一致）。
-        ClampTo(s.QualityJpegXl,   v => s.QualityJpegXl = v,   0.1, 4.0, 1.0);
-        ClampTo(s.QualityAvif,     v => s.QualityAvif = v,     0,   63,  15);
-        ClampTo(s.QualityWebp,     v => s.QualityWebp = v,     50,  100, 90);
-        ClampTo(s.QualityTiff,     v => s.QualityTiff = v,     100, 100, 100);
-        ClampTo(s.RecordQuality,   v => s.RecordQuality = v,   0,   100, 80);
+        var dft = AppSettingsData.CreateDefaults();
+        ClampTo(s.QualityPng,      v => s.QualityPng = v,      100, 100, dft.QualityPng);
+        ClampTo(s.QualityGainMap,  v => s.QualityGainMap = v,  0.5, 3.0, dft.QualityGainMap);
+        ClampTo(s.QualityJpegLi,   v => s.QualityJpegLi = v,   0.5, 3.0, dft.QualityJpegLi);
+        ClampTo(s.QualityJpegXl,   v => s.QualityJpegXl = v,   0.1, 4.0, dft.QualityJpegXl);
+        ClampTo(s.QualityAvif,     v => s.QualityAvif = v,     0,   63,  dft.QualityAvif);
+        ClampTo(s.QualityWebp,     v => s.QualityWebp = v,     50,  100, dft.QualityWebp);
+        ClampTo(s.QualityTiff,     v => s.QualityTiff = v,     100, 100, dft.QualityTiff);
+        ClampTo(s.RecordQuality,   v => s.RecordQuality = v,   0,   100, dft.RecordQuality);
 
         // ── 索引类：越界会让 ComboBox 选中项静默漂移 ──
-        if (s.FormatIndex     is < 0 or > 6) s.FormatIndex = 2;        // 默认 JPEG LI
+        // 上界取自 Core 的 FormatOrder（顺序就是持久化契约），不写死数字：
+        // 2026-09-26 摘掉 GainMap 那一项后这里若仍写 6，就会放过"索引指向不存在的格式"。
+        // （用显式比较而不是 `is < 0 or > Max` 模式：关系模式要求右侧是编译期常量。）
+        if (s.FormatIndex < 0 || s.FormatIndex > TrueToneCap.Core.Settings.FormatOrder.MaxIndex)
+            s.FormatIndex = TrueToneCap.Core.Settings.FormatOrder.DefaultIndex;
         if (s.ColorSpaceIndex is < 0 or > 5) s.ColorSpaceIndex = 0;    // 默认 System
 
         // ── 枚举型字符串：非法值会让 SetComboByTag 匹配不到 → 控件停留在 XAML 默认项，
@@ -298,7 +356,23 @@ public sealed class SettingsService
         if (!IsOneOf(s.ToastPosition, "TopLeft", "TopRight", "BottomLeft", "BottomRight", "WindowsNotify"))
             s.ToastPosition = "BottomRight";
         // AVIF 编码器（单一选项）。未知值一律回退 Auto。
-        if (!IsOneOf(s.AvifEncoder, "Auto", "Avifenc", "Qsv", "LibAom", "SvtAv1", "Nvenc"))
+        // ═══ 2026-09-24：界面摘掉 "Avifenc" 档，旧值显式迁到 LibAom ═══
+        // "Avifenc" 只是"不传 --codec"，而内嵌这份 avifenc 的默认 codec 就是 aom
+        // （自报 1.4.2 (aom [enc/dec]:3.14.1, svt [enc]:v4.1.0)）⇒ 与 LibAom 同义，且不如它
+        // 确定（LibAom 显式传 --codec aom）。留在界面上只会让人以为存在一个叫 avifenc 的
+        // 编码器 —— 它是工具，不是编码器。
+        // ⚠ 迁移目标必须是 LibAom 而不是 Auto：Auto 优先走硬件，那等于把"用户选了软件
+        //   编码器"翻转成硬件路径 —— 与迁移前行为不同，正是本仓库反复踩的"迁移改变语义"。
+        //   AvifEncoderKind.Avifenc 本身保留：管线层在"硬件不支持 HDR 路径"时仍改写为它
+        //   （见 CapturePipelineService），它只是不再是用户可选项。
+        if (s.AvifEncoder == "Avifenc")
+        {
+            s.AvifEncoder = "LibAom";
+            LogService.Info("SettingsService",
+                "AVIF 编码器设置迁移：Avifenc → LibAom（旧档已从界面移除；二者对内嵌 avifenc 同义，"
+                + "且 LibAom 显式传 --codec aom 更确定。没有落到 Auto，因为 Auto 会优先走硬件）");
+        }
+        if (!IsOneOf(s.AvifEncoder, "Auto", "Qsv", "LibAom", "SvtAv1", "Nvenc"))
             s.AvifEncoder = "Auto";
 
         // ── 色度采样：仅这几个合法值 ──
@@ -306,6 +380,102 @@ public sealed class SettingsService
 
         // ── 位深：按格式钳制（各格式实际支持的集合不同，详见 NormalizeBitDepth）──
         NormalizeBitDepth(s);
+    }
+
+    /// <summary>
+    /// 默认值修订号迁移：把<b>历史上被钉死在文件里的旧默认值</b>交还给当前默认表。
+    /// <para>为什么必须有这一步：旧版 <c>Save()</c> 走全量序列化 ⇒ 文件里 64 个键一个不缺，
+    /// "缺键才回落代码默认"这条兜底从未生效（2026-09-15 删 <c>SettingsVersion</c> 时注释里
+    /// 依赖的正是这条兜底，前提不成立）。于是 <c>Normalize()</c> 的 ClampTo 只在越界时回落，
+    /// 区间内的旧值永久保留 —— 改代码默认值对老用户完全不生效，这就是"默认值修不好"的机制。</para>
+    /// <para>刻意<b>只重置质量与色域</b>两类：色度（<c>ChromaGainMap</c>=420、<c>ChromaAvif</c>=420）
+    /// 是 2026-09-19 明确拍板的产品决定，位深牵涉 HDR 容器策略尚未定，都不该在这里被动。</para>
+    /// <para><c>internal</c> 而非 <c>private</c>：自检必须<b>直接调用这条分支</b>（见
+    /// <c>SelfTest.RunSettingsMigrationCheck</c>）—— 走 <c>Load()</c> 外层入口的话，正常机器上
+    /// 老文件早已被迁移过，测试实际量到的是环境而不是门。</para>
+    /// </summary>
+    internal static bool MigrateStaleDefaults(AppSettingsData s)
+    {
+        if (s.SettingsRevision >= AppSettingsData.CurrentSettingsRevision) return false;
+
+        var d = AppSettingsData.CreateDefaults();
+        var reset = new List<string>();
+        void Take(string name, double from, double to, Action<double> set)
+        {
+            if (from == to) return;
+            set(to);
+            reset.Add($"{name} {from}→{to}");
+        }
+        Take(nameof(s.QualityGainMap), s.QualityGainMap, d.QualityGainMap, v => s.QualityGainMap = v);
+        Take(nameof(s.QualityJpegLi),  s.QualityJpegLi,  d.QualityJpegLi,  v => s.QualityJpegLi = v);
+        Take(nameof(s.QualityJpegXl),  s.QualityJpegXl,  d.QualityJpegXl,  v => s.QualityJpegXl = v);
+        Take(nameof(s.QualityAvif),    s.QualityAvif,    d.QualityAvif,    v => s.QualityAvif = v);
+        Take(nameof(s.QualityWebp),    s.QualityWebp,    d.QualityWebp,    v => s.QualityWebp = v);
+        if (s.ColorSpaceIndex != d.ColorSpaceIndex)
+        {
+            reset.Add($"ColorSpaceIndex {s.ColorSpaceIndex}→{d.ColorSpaceIndex}");
+            s.ColorSpaceIndex = d.ColorSpaceIndex;
+        }
+
+        s.SettingsRevision = AppSettingsData.CurrentSettingsRevision;
+        LogService.Info("SettingsService",
+            $"默认值修订 {AppSettingsData.CurrentSettingsRevision}：旧文件里的值被钉死、代码默认改不动，"
+            + $"本次交还默认表 —— {(reset.Count == 0 ? "无需改动" : string.Join("，", reset))}。"
+            + "若其中有你有意选的档位，请重新设置（此后只有与默认不同的值才会写盘）。");
+        return true;
+    }
+
+    /// <summary>
+    /// 一次性结构迁移：把「JPEG Gain Map」并入「JPEG LI」。
+    /// <para>为什么必须有、且必须<b>不能被跳过</b>：<c>FormatIndex</c> 存的是<b>裸索引</b>，
+    /// 旧表里 1=GainMap、2=JPEG LI，新表里 1=JPEG LI。而全仓对它的唯一防线是越界钳制
+    /// （<c>is &lt; 0 or &gt; 6</c>），删掉一项后旧值 1 与新的默认值都仍在合法区间内 ⇒ 钳制永不触发 ⇒
+    /// GainMap 用户静默变 JPEG LI、JPEG LI 用户静默变 JPEG XL，且界面看不出任何异常。
+    /// 同型缺陷在 <c>ColorSpaceIndex</c> 上已经发生过一次（那次靠 legacyTags 表修）。</para>
+    /// <para>门是 <c>GainMapMerged</c> 而不是 <c>SettingsRevision</c>：后者表达"默认值表版本"，
+    /// 借它触发就会让所有老用户再被 <c>MigrateStaleDefaults</c> 清一次质量档。</para>
+    /// <para>参数并格的规则刻意保守：只有"用户真的调过 GainMap 那侧、而 JPEG LI 那侧仍是默认"才搬过去，
+    /// 两侧都调过时保留 JPEG LI 侧并在日志里说明 —— 合并不能顺手把用户的一个选择变成另一个。</para>
+    /// </summary>
+    internal static bool MigrateGainMapMerge(AppSettingsData s)
+    {
+        if (s.GainMapMerged) return false;
+
+        var legacy = TrueToneCap.Core.Settings.FormatOrder.LegacyUiFormats;
+        int oldIdx = s.FormatIndex;
+        string oldName = oldIdx >= 0 && oldIdx < legacy.Length
+            ? legacy[oldIdx].ToString() : $"越界({oldIdx})";
+
+        var (newIdx, gm) = TrueToneCap.Core.Settings.FormatOrder.RemapLegacy(oldIdx);
+        s.FormatIndex = newIdx;
+        if (gm) s.GainMapEnabled = true;
+
+        var d = AppSettingsData.CreateDefaults();
+        var notes = new List<string>
+        {
+            $"格式 {oldName}→{TrueToneCap.Core.Settings.FormatOrder.FormatAt(newIdx)}"
+            + (gm ? "（增益图开关自动打开）" : ""),
+        };
+
+        void Take(string label, double from, double toCur, double def, System.Action<double> set)
+        {
+            if (from == def) return;                       // 用户没调过 GainMap 侧 ⇒ 没什么可搬
+            if (toCur != def) { notes.Add($"{label}两侧都改过，保留 {toCur}（GainMap 侧 {from} 未采用）"); return; }
+            set(from);
+            notes.Add($"{label} {def}→{from}");
+        }
+        Take("质量", s.QualityGainMap, s.QualityJpegLi, d.QualityJpegLi, v => s.QualityJpegLi = v);
+        if (s.ChromaGainMap != d.ChromaGainMap && s.ChromaJpegLi == d.ChromaJpegLi)
+        {
+            notes.Add($"色度 {s.ChromaJpegLi}→{s.ChromaGainMap}");
+            s.ChromaJpegLi = s.ChromaGainMap;
+        }
+
+        s.GainMapMerged = true;
+        LogService.Info("SettingsService",
+            "GainMap 已并入 JPEG LI（一次性重映射，此前格式列表少一项会让裸索引静默指向别的格式）："
+            + string.Join("，", notes) + "。增益图现在是 JPEG LI 面板里的开关。");
+        return true;
     }
 
     private static void ClampTo(double current, Action<double> set, double min, double max, double def)
