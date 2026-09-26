@@ -360,8 +360,12 @@ public static class NativeAvifEncoder
             byte m = (byte)(cicp[2] == FormatHelper.CicpMatrixIdentity
                 ? FormatHelper.AvifMatrixCoefficients(cicp[0]) : cicp[2]);
             cicpArgs = $"--cicp {cicp[0]}/{cicp[1]}/{m}";
-            if (hdr) // ST.2084 PQ → 10-bit
-                cicpArgs += $" {GetDepthArg(10)}";
+            // PQ 的位深**下限**是 10（8-bit PQ 分层严重），上限按调用方请求（libaom 可到 12）。
+            // 2026-09-25 前这里无条件写死 GetDepthArg(10)，与上游 NegotiateBitDepth 的协商结果无关
+            // ⇒ 会出现"管线算出 12-bit、命令行仍给 10-bit"的静默改参数。
+            // 形参 bitDepth 默认 8 ⇒ Math.Max 兜到 10，不传位深的老调用行为不变（刻意保留的兼容点）。
+            if (hdr)
+                cicpArgs += $" {GetDepthArg(Math.Max(bitDepth, AvifEncoderCapabilities.HdrBitDepth))}";
         }
         else if (!string.IsNullOrEmpty(colorSpaceTag))
         {

@@ -37,10 +37,13 @@ public enum AvifEncoderKind
 /// <param name="Supports420">是否支持 4:2:0。</param>
 /// <param name="Supports422">是否支持 4:2:2。</param>
 /// <param name="Supports444">是否支持 4:4:4。</param>
-/// <param name="MaxBitDepth">该编码器可达的位深上限。SDR 路径再取 min(MaxBitDepth, 12)，
-/// HDR 路径恒 10（avifenc <c>--depth 10</c> 硬编码）。见
-/// <see cref="AvifEncoderCapabilities.SdrBitDepthFor"/> 与
-/// <see cref="AvifEncoderCapabilities.HdrBitDepth"/>。</param>
+/// <param name="MaxBitDepth">该编码器可达的位深上限。SDR 路径取 min(MaxBitDepth, 12)；
+/// HDR 路径以 <see cref="AvifEncoderCapabilities.HdrBitDepth"/> 为**下限**、以本值为上限
+/// （见 <see cref="AvifEncoderCapabilities.HdrBitDepthFor"/>）—— 2026-09-25 前 HDR 被无条件钉在 10，
+/// 于是声明了 12 的软件编码器在 HDR 下永远选不到 12。</param>
+/// <param name="UiNote">只有这个编码器才成立的使用限制，供<b>灰字提示行</b>显示。
+/// 2026-09-25（用户口径）：下拉项文字只留编码器名，"软件/硬件""固定码率"这类说明一律走灰字，
+/// 所以它们必须有个结构化的存放处，而不是塞回 <paramref name="DisplayName"/> 的括号里。</param>
 public sealed record AvifEncoderCaps(
     AvifEncoderKind Kind,
     string DisplayName,
@@ -48,7 +51,8 @@ public sealed record AvifEncoderCaps(
     bool Supports420,
     bool Supports422,
     bool Supports444,
-    int MaxBitDepth);
+    int MaxBitDepth,
+    string UiNote = "");
 
 public static class AvifEncoderCapabilities
 {
@@ -63,7 +67,7 @@ public static class AvifEncoderCapabilities
             //   · HDR：恒 10（avifenc --depth 10 硬编码），与编码器种类无关。
             // 分场景协商见 SdrBitDepthFor / HdrBitDepth。
             [AvifEncoderKind.LibAom] = new(
-                AvifEncoderKind.LibAom, "libaom（软件 · 兼容优先）", IsHardware: false,
+                AvifEncoderKind.LibAom, "libaom", IsHardware: false,
                 Supports420: true, Supports422: true, Supports444: true, MaxBitDepth: 12),
 
             // ═══ SVT-AV1：本机【实测】能力（2026-09-19，内嵌 avifenc 换成自编译的 aom+svt 构建）═══
@@ -86,7 +90,7 @@ public static class AvifEncoderCapabilities
             //   · 本构建以 AVIF_LIBYUV=OFF 编译，libavif 交给 SVT 的输入格式因此受限。
             //   哪个是主因未定论 —— 但"本机产出什么"以实测为准（交接 §3 纪律：以独立实现读回的事实为准）。
             [AvifEncoderKind.SvtAv1] = new(
-                AvifEncoderKind.SvtAv1, "SVT-AV1（软件 · 速度优先）", IsHardware: false,
+                AvifEncoderKind.SvtAv1, "SVT-AV1", IsHardware: false,
                 Supports420: true, Supports422: false, Supports444: false, MaxBitDepth: 10),
 
             // avifenc 通用软件入口：不传 --codec，由 avifenc 自选（本机解析到 aom）
@@ -121,7 +125,7 @@ public static class AvifEncoderCapabilities
             //   本仓库任何位置再出现"ARGB10 无效"一律以 §3 为准。
             // 真 10-bit 输入通路见 NvencAvifBackend.EncodeArgb10Async（SupportsTrue10BitInput）。
             [AvifEncoderKind.Nvenc] = new(
-                AvifEncoderKind.Nvenc, "NVIDIA NVENC（硬件加速）", IsHardware: true,
+                AvifEncoderKind.Nvenc, "NVIDIA NVENC", IsHardware: true,
                 Supports420: true, Supports422: false, Supports444: false, MaxBitDepth: 10),
 
             // QSV / MFT：输入被转成 NV12（8-bit 4:2:0）。改用 P010 即具备 10-bit 能力，
@@ -134,8 +138,9 @@ public static class AvifEncoderCapabilities
             //   正是本仓库反复出现的"参数写了没人读"。先由显示名如实声明（行为未变），
             //   真要接通见 MftEncoderNative 那条"何时该按 crf 推导码率"的注释。
             [AvifEncoderKind.Qsv] = new(
-                AvifEncoderKind.Qsv, "Intel QSV / 系统 MFT（硬件加速 · 固定 10 Mbps 码率，质量滑块不适用）", IsHardware: true,
-                Supports420: true, Supports422: false, Supports444: false, MaxBitDepth: 8),
+                AvifEncoderKind.Qsv, "Intel QSV / 系统 MFT", IsHardware: true,
+                Supports420: true, Supports422: false, Supports444: false, MaxBitDepth: 8,
+                UiNote: "走系统 MFT，码率固定 10 Mbps ⇒ 质量滑块对它不适用。"),
         };
 
     public static AvifEncoderCaps Caps(AvifEncoderKind kind) =>
@@ -187,8 +192,11 @@ public static class AvifEncoderCapabilities
     //     QSV / MFT 仍受 NV12 输入限制 ⇒ 8。
     //     旧代码对软件也按"恒 8"处理，于是请求 10-bit 时协商前后相等、连降级提示都不触发，
     //     日志却打"位深=10" —— 真正的静默改参数。
-    //   · HDR：位深由 avifenc 的 `--depth 10` 硬编码，与编码器种类、用户设置都无关 ⇒ 恒 10。
-    // 故改为按场景协商：SDR 取 SdrBitDepthFor（NVENC 10 / QSV 8 / 软件 10·12），HDR 恒 10。
+    //   · HDR：10-bit 是**下限**（PQ 的分层要求），上限仍由编码器能力决定（libaom 可到 12）。
+    //     2026-09-25 之前这里与实现都写成"恒 10"，与能力表给 libAom 声明的 MaxBitDepth:12 矛盾
+    //     ⇒ 用户想要更高精度时没有任何入口。现统一走 NegotiateBitDepth(hdr: true)。
+    // 故改为按场景协商：SDR 取 SdrBitDepthFor（NVENC 10 / QSV 8 / 软件 10·12），
+    // HDR 钳进 [HdrBitDepth, HdrBitDepthFor(kind)]。
     //
     // ⚠ 历史坑：本段注释曾长期写成"SDR 恒 8-bit"，而实现早已放开软件的 10/12-bit
     // （NativeAvifEncoder.GetDepthArg + SDR 路径拼 --depth）。注释与实现相反比没注释更危险 ——
@@ -197,7 +205,13 @@ public static class AvifEncoderCapabilities
     /// <summary>SDR 路径位深的**全局上限** —— avifenc 的 <c>--depth</c> 只接受 8 / 10 / 12。</summary>
     public const int SdrMaxBitDepth = 12;
 
-    /// <summary>HDR 路径的位深 —— 由 avifenc 的 <c>--depth 10</c> 硬编码（见 NativeAvifEncoder.EncodeFile）。</summary>
+    /// <summary>
+    /// HDR 路径位深的<b>下限</b>（不是恒定值）：PQ 曲线在 8/10-bit 下会明显分层，故 HDR 至少 10-bit。
+    /// <para>2026-09-25 前它被当作"HDR 恒 10"用（<c>NegotiateBitDepth</c> 无条件返回本常数、
+    /// 管线与 avifenc 命令行也各写一个字面量 10），于是<b>软件编码器可达的 12-bit 在 HDR 下根本选不到</b>
+    /// —— 而 12-bit 对 HDR 不是噱头：Float16 采集的有效精度约 11-bit（见 ToneMapper 注释），
+    /// 钉在 10-bit 等于每次截图都把它截掉一截。上限按编码器取，见 <see cref="HdrBitDepthFor"/>。</para>
+    /// </summary>
     public const int HdrBitDepth = 10;
 
     /// <summary>
@@ -212,12 +226,22 @@ public static class AvifEncoderCapabilities
         => Math.Min(Caps(kind).MaxBitDepth, SdrMaxBitDepth);
 
     /// <summary>
+    /// HDR 路径下该编码器可达的位深<b>上限</b>：不低于 <see cref="HdrBitDepth"/>，
+    /// 且不超过该编码器的能力（libaom 12；NVENC / SVT 10；QSV 无 HDR 路，取 10 也无害）。
+    /// <para>刻意复用 <see cref="SdrBitDepthFor"/> 而不是另列一张 HDR 表：HDR 与 SDR 的差别只在
+    /// "有下限 10"，上限都由编码器本身决定 —— 两处各写一份就会漂（本文件上方那段历史即为此）。</para>
+    /// </summary>
+    public static int HdrBitDepthFor(AvifEncoderKind kind) =>
+        Math.Max(HdrBitDepth, SdrBitDepthFor(kind));
+
+    /// <summary>
     /// 按场景把期望位深协商到**实际会产出**的值。
-    /// <para>HDR：恒 <see cref="HdrBitDepth"/>（10），与编码器种类、请求值都无关；
+    /// <para>HDR：钳进 [<see cref="HdrBitDepth"/>, <see cref="HdrBitDepthFor"/>]
+    /// —— 下限是 PQ 的精度要求，上限是该编码器的能力（libaom 可选到 12）；
     /// SDR：不超过 <see cref="SdrBitDepthFor"/>（软件 10/12，硬件 8）。</para>
     /// </summary>
     public static int NegotiateBitDepth(AvifEncoderKind kind, int want, bool hdr) =>
-        hdr ? HdrBitDepth                        // HDR：恒 10，与编码器、设置都无关
+        hdr ? Math.Clamp(want, HdrBitDepth, HdrBitDepthFor(kind))
             : Math.Min(want, SdrBitDepthFor(kind));
 
     /// <summary>
@@ -308,6 +332,32 @@ public static class AvifEncoderCapabilities
     /// </summary>
     public static bool SupportsHdrPath(AvifEncoderKind kind) =>
         kind is not AvifEncoderKind.Qsv;
+
+    /// <summary>该编码器允许的 <b>CRF 下限</b>（软件档 0，硬件档 1）。</summary>
+    /// <remarks>
+    /// <para><b>为什么硬件到不了 0</b>：NVENC 侧把 CRF 直接写进
+    /// <c>NV_ENC_CONFIG.rcParams.constQP</c>（CONSTQP 模式），而 AV1 的 QP0 语义就是
+    /// "请求 lossless"。本机 RTX 4060 实测：<c>InitEncoder hr=0x00000008
+    /// lastErr="Lossless Coding mode not supported"</c> ⇒ 编不出来，只能回退软件。
+    /// <b>这条结论有两个独立来源</b>（2026-09-24，防止有人误判成"产品接线错了"）：
+    /// ① ffmpeg 自己的 <c>av1_nvenc -rc constqp -qp 0</c> 报<b>逐字相同</b>的驱动错误；
+    /// ② 换码控也救不回来 —— <c>av1_nvenc -rc lossless</c>（专门的无损模式，枚举值 4）
+    /// 对 AV1 直接被拒（"Error applying encoder options: Invalid argument"）。
+    /// 另实测：CONSTQP 与 VBR+target-quality 两种接法在本内容上【同样平坦】
+    /// （QP2→30 分块 p1 只从 40.29 掉到 39.94，体积却差 2.5 倍）⇒ 硬件档的 CRF 本质上是
+    /// 体积滑块，这不是偏移量写错，别再去翻 <c>RcConstQp</c> 的地址。
+    /// QSV 走 MFT，同样没有无损档。</para>
+    /// <para><b>为什么这是一张表而不是一句 <c>kind is Nvenc or Qsv</c></b>：这条约束有三个
+    /// 消费点 —— ① UI 抬 <c>QualitySld.Minimum</c>；② <c>NvEncoderNative</c> 写 constQP 前的
+    /// 最后一道兜底（<c>settings.json</c> 里遗留的 0、或 Auto 在设值之后才解析成硬件时，
+    /// 会绕过滑块直达这里）；③ 测试。分三处各写一遍必然出现"界面划不到 0、管线却仍会送 0"
+    /// —— 那正是本仓库反复修过的那类"两处各算一次"。</para>
+    /// <para>⚠ 与"逐位无损"不是一回事：软件档的 CRF 0 目前是 <c>-q 100</c>，因 matrix 恒非
+    /// identity（见 <see cref="FormatHelper.AvifMatrixCoefficients"/>，2026-08-10 为兼容
+    /// Windows 照片而定的口径）实测仍有 ±1 LSB 的往返误差。本函数只管"下限能不能到 0"。</para>
+    /// </remarks>
+    public static int MinCrf(AvifEncoderKind kind) =>
+        kind is AvifEncoderKind.Nvenc or AvifEncoderKind.Qsv ? 1 : 0;
 
     /// <summary>该编码器在给定场景下是否满足需求（供 UI 判断选项是否可用）。</summary>
     /// <param name="hdr">是否为 HDR 路径。位深的合法集合在两个场景下不同，必须显式指定。</param>

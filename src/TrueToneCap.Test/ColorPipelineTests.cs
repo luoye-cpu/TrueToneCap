@@ -69,6 +69,7 @@ public static class ColorPipelineTests
         EncodedPng_CicpChunk_Valid();
         EncodedPng_IccpChunk_Valid();
         EncodedPng_HdrCicp_Bt2020Pq();
+        EncodedPng_HdrCicp_10BitSbit();
         EncodedJpeg_GainMapMarker();
         EncodedAvif_ColorProperties();
 
@@ -600,6 +601,53 @@ public static class ColorPipelineTests
 
         // 16-bit 容器没有截断 ⇒ 按源码规则不应写 sBIT
         Assert("PNG HDR CICP: 16-bit 容器不写 sBIT", FindPngChunk(chunks, "sBIT") is null);
+    }
+
+    /// <summary>
+    /// HDR + <b>10-bit</b> 请求下的 PNG（2026-09-24，§48 #21）。
+    /// <para>为什么单独一条：管线现在把"HDR 开启 + PNG + 位深&lt;10"协商成 10-bit
+    /// （<c>CapturePipelineService</c>，与 AVIF 的 HDR⇒10 同构），于是**默认路径从原来的
+    /// 16-bit 容器换到了 10-bit 量化 + sBIT 声明** —— 而上面那条用例走的是 16，
+    /// 新默认值落进的是这条**原本无人覆盖**的分支。不补它，就等于把默认换成一条没验过的路。</para>
+    /// <para>PNG 的 IHDR 只允许 1/2/4/8/16，所以"10-bit PNG"必然是：16-bit 容器
+    /// + <c>sBIT</c> 声明每通道有效 10 位 + <c>cICP</c> 声明 PQ。三者缺一就不是我们要的东西。</para>
+    /// </summary>
+    static void EncodedPng_HdrCicp_10BitSbit()
+    {
+        var hdr = new float[16 * 16 * 4];
+        for (int i = 0; i < hdr.Length; i++) hdr[i] = 0.5f;
+        string path = Path.Combine(OutDir, "hdr_cicp_d10_test.png");
+        if (File.Exists(path)) File.Delete(path);
+
+        var encoder = EncoderFactory.Create(OutputFormat.PNG);
+        var settings = new EncodingSettings
+        {
+            Format = OutputFormat.PNG, Quality = 100, HdrOutput = true,
+            ColorSpaceTag = "BT2020", OutputBitDepth = 10,
+        };
+        encoder.EncodeAsync(new HdrFrameData { Pixels = hdr, Width = 16, Height = 16 },
+            settings, path).GetAwaiter().GetResult();
+        Assert("PNG HDR 10bit: 文件已创建", File.Exists(path) && new FileInfo(path).Length > 0);
+        if (!File.Exists(path)) return;
+
+        var chunks = ReadPngChunks(path);
+        var ihdr = FindPngChunk(chunks, "IHDR");
+        Assert("PNG HDR 10bit: 容器仍是 16-bit（IHDR 没有 10 这个档），color type=6",
+            ihdr is { Length: >= 13 } && ihdr[8] == 16 && ihdr[9] == 6,
+            ihdr is { Length: >= 13 } ? $"bitDepth={ihdr[8]} colorType={ihdr[9]}" : "IHDR 异常");
+
+        var sbit = FindPngChunk(chunks, "sBIT");
+        Assert("PNG HDR 10bit: 写了 sBIT（不写就等于宣称这是 16-bit 全精度，与请求不符）",
+            sbit is { Length: 4 }, sbit is null ? "无 sBIT 块" : $"长度={sbit.Length}");
+        if (sbit is { Length: 4 })
+            Assert("PNG HDR 10bit: sBIT 每通道都是 10",
+                sbit[0] == 10 && sbit[1] == 10 && sbit[2] == 10 && sbit[3] == 10,
+                $"[{sbit[0]},{sbit[1]},{sbit[2]},{sbit[3]}]");
+
+        var cicp = FindPngChunk(chunks, "cICP");
+        Assert("PNG HDR 10bit: cICP 仍是 BT.2020 + PQ + identity + full",
+            cicp is { Length: 4 } && cicp[0] == 9 && cicp[1] == 16 && cicp[2] == 0 && cicp[3] == 1,
+            cicp is { Length: 4 } ? $"[{cicp[0]},{cicp[1]},{cicp[2]},{cicp[3]}]" : "cICP 缺失/长度异常");
     }
 
     static void EncodedJpeg_GainMapMarker()

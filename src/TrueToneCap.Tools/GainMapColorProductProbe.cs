@@ -173,6 +173,245 @@ public static class GainMapColorProductProbe
     }
 
     /// <summary>
+    /// 观感对比（<c>--gainmap-look &lt;rgba文件&gt; &lt;宽&gt; &lt;高&gt; [输出目录]</c>）。
+    /// <para>判据版跑的是 24x24 合成色块 —— 那足够证"声明与像素同源"，但<strong>看不出观感</strong>：
+    /// 纯色块上 sRGB base 与 BT.2020 base 的差别只是几个通道的均值偏移。这里改用真截图
+    /// （真实内容、真实饱和色），把两种模式的渲染结果各落一张可打开的 PNG，再加一张 8× 放大差值图。</para>
+    /// <para>⚠ 诚实边界：源是 8-bit sRGB 截图，HDR 余量是合成的（纸白抬到 2.5、亮部再拉到 ≈5 倍）
+    /// ⇒ 这张对比看的是"整张增益图换原色之后看起来差多少"，不代表真 HDR 相机母版；
+    /// 而"HDR 显示器上到底亮成什么样"仍然只能看实物，本机证不了。</para>
+    /// </summary>
+    public static int RunLook(string[] args)
+    {
+        if (args.Length < 4)
+        {
+            Console.WriteLine("用法: --gainmap-look <rgba文件> <宽> <高> [输出目录] [--sat <倍数>] [--chroma <420|444>]");
+            Console.WriteLine("  造 rgba: ffmpeg -i 输入.png -vf scale=W:H -pix_fmt rgba -f rawvideo 输出.rgba");
+            Console.WriteLine("  --sat 1.8 把线性饱和度外扩 ⇒ 像素落到 sRGB 之外，两模式的差别才有东西可承载");
+            return 2;
+        }
+        var srcRgba = args[1];
+        if (!int.TryParse(args[2], out int w) || !int.TryParse(args[3], out int h) || !File.Exists(srcRgba))
+        { Console.WriteLine("❌ 参数不合法或源 rgba 不存在"); return 2; }
+        var rgbaIn = File.ReadAllBytes(srcRgba);
+        if (rgbaIn.Length != w * h * 4)
+        { Console.WriteLine($"❌ rgba 长度 {rgbaIn.Length} ≠ {w}x{h}x4"); return 2; }
+        var outDir = args.Length > 4 && !args[4].StartsWith('-') ? args[4] : Path.Combine(Path.GetTempPath(), "ttc_gainmap_look");
+        Directory.CreateDirectory(outDir);
+
+        // ★ 8-bit sRGB 截图本身【一个 out-of-sRGB 像素都没有】。拿它直接比两种模式，结论必然是
+        //   "两张一样"——那只证明 2020 模式没把画面弄坏，不证明它有用。所以给一个饱和外扩开关：
+        //   线性域里 c' = luma + sat·(c - luma)，sat>1 会把高饱和像素推到 sRGB 三角之外（出现负分量），
+        //   sRGB 模式必须钳、BT.2020 模式留得住 ⇒ 这才是两种模式各自的工作面。
+        double sat = 1.0;
+        string chroma = "420";
+        for (int a = 4; a < args.Length - 1; a++)
+        {
+            if (args[a] == "--sat" && double.TryParse(args[a + 1], out double sv)) sat = sv;
+            // 与 v0.3.3 基准对撞时要能把这一维单独按住：0.3.3 的 GainMap 主路径把色度写死 444
+            // （设置项是假配置，0.3.4 才改成真的读字段），所以两侧默认产物必然差在色度上。
+            // 只有把 HEAD 也摆成 444 还残留差异，那才是【色彩管线】的回归。
+            if (args[a] == "--chroma" && args[a + 1] is "420" or "422" or "444") chroma = args[a + 1];
+        }
+
+        // 8-bit sRGB 截图 → scRGB 线性浮点：纸白按 1.0=80nits / SDR 白 200nits 抬到 2.5，
+        // 亮部再叠加到 ≈5 倍 ⇒ 增益图真的有东西可放大（否则整帧落在一档灰里，观感无从对比）
+        var lin = new float[w * h * 4];
+        int outside = 0;
+        for (int i = 0; i < w * h; i++)
+        {
+            var e = new double[3];
+            for (int k = 0; k < 3; k++)
+            {
+                double s = rgbaIn[i * 4 + k] / 255.0;
+                e[k] = s <= 0.04045 ? s / 12.92 : System.Math.Pow((s + 0.055) / 1.055, 2.4);
+            }
+            double luma = 0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2];
+            bool neg = false;
+            for (int k = 0; k < 3; k++)
+            {
+                double v = luma + sat * (e[k] - luma);
+                if (v < -1e-4) neg = true;   // 线性 sRGB 坐标出现负分量 = 落在 sRGB 三角之外
+                double boost = v > 0.35 ? 2.5 * (1 + 3.0 * (v - 0.35) / 0.65) : 2.5;
+                lin[i * 4 + k] = (float)(v * boost);
+            }
+            if (neg) outside++;
+            lin[i * 4 + 3] = 1f;
+        }
+        Console.WriteLine($"源：{w}x{h}，sat 外扩 ×{sat:0.##} ⇒ 线性域出现负分量（sRGB 三角之外）的像素 " +
+                          $"{outside} 个，占 {100.0 * outside / (w * h):F2}%");
+        var frame = new HdrFrameData { Pixels = lin, Width = w, Height = h };
+
+        string Encode(string tag, bool explicit2020)
+        {
+            var path = Path.Combine(outDir, $"look_{tag}{(chroma == "420" ? "" : "_" + chroma)}.jpg");
+            var s = new EncodingSettings
+            {
+                Format = OutputFormat.JPEG_GAINMAP, HdrOutput = true,
+                ColorSpaceTag = tag, ExplicitWideTarget = explicit2020,
+                Quality = 1.0f, ChromaSubsampling = chroma, OutputBitDepth = 8,
+            };
+            s.ToneMappingParams = s.ToneMappingParams with { DisplayMaxNits = 1000, PaperWhiteNits = 200 };
+            new JpegGainMapEncoder().EncodeAsync(frame, s, path, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            return path;
+        }
+
+        var jpgSrgb = Encode("sRGB", false);
+        var jpg2020 = Encode("BT2020", true);
+        Console.WriteLine($"编码完成：{Path.GetFileName(jpgSrgb)} / {Path.GetFileName(jpg2020)}");
+
+        // 与第 4 层同一口径：【存在 ≠ 能用】。仓库内那份 ultrahdr_app 缺依赖 / 不认 -j/-z，
+        // 直接取第一个候选会像刚才那样撞 exit=0xC0000135 ⇒ 逐候选做能力探测，取第一个探得过的。
+        string? exe = null;
+        string probed = "";
+        foreach (var c in ExternalToolLocator.Candidates(
+                     "TTC_ULTRAHDR_APP", System.Array.Empty<string>(), 1, "ultrahdr_app.exe", out probed))
+        {
+            if (!File.Exists(c)) continue;
+            var p = TryDecode(c, jpgSrgb, Path.Combine(outDir, "__cap_probe.raw"), w, h, " -O 3 -o 3");
+            if (p.Ok) { exe = c; break; }
+            Console.WriteLine($"  候选探测失败：{c}\n    ⇒ {p.Why}");
+        }
+        if (exe is null)
+        {
+            Console.WriteLine($"⏭ 没有可用的 ultrahdr_app（找过：{probed}）⇒ 【渲染结果这一层没判】，只给你两枚 GainMap 本体");
+            Console.WriteLine($"   默认模式: {jpgSrgb}");
+            Console.WriteLine($"   全 2020 : {jpg2020}");
+            Console.WriteLine("   补法：设 TTC_ULTRAHDR_APP 指向认 -j/-z 的那版 ultrahdr_app.exe");
+            return 3;
+        }
+        Console.WriteLine($"外部解码：{exe}");
+        // ★ 解码参数不是可选装饰：ultrahdr_app 的默认输出是 rgba1010102 + HLG 传递函数（-O 5 / -o 1）。
+        //   拿那串字节当 8-bit sRGB 写 PNG，看到的是【读法造出来的】色带和偏色，不是观感。
+        //   CLI 自己规定 sRGB 传递必须配 rgba8888 ⇒ 这里显式要 -O 3 -o 3。
+        const string srgb8 = " -O 3 -o 3";
+        var decSrgb = Path.Combine(outDir, "dec_srgb.raw");
+        var dec2020 = Path.Combine(outDir, "dec_2020.raw");
+        var (okA, whyA, _) = TryDecode(exe, jpgSrgb, decSrgb, w, h, srgb8);
+        var (okB, whyB, _) = TryDecode(exe, jpg2020, dec2020, w, h, srgb8);
+        if (!okA || !okB) { Console.WriteLine($"❌ 解码失败：sRGB={whyA} / 2020={whyB}"); return 1; }
+
+        var rawA = File.ReadAllBytes(decSrgb);
+        var rawB = File.ReadAllBytes(dec2020);
+        var pngDefault = Path.Combine(outDir, "渲染_默认sRGB.png");
+        var pngWideRaw = Path.Combine(outDir, "渲染_全BT2020_按存储.png");
+        var pngWideMatch = Path.Combine(outDir, "渲染_全BT2020_折回sRGB.png");
+        var pngDiff = Path.Combine(outDir, "差值_按最大幅度拉伸.png");
+        var wideAsSrgb = Bt2020BytesToSrgb(rawB);
+        ManagedPngEncoder.Encode(rawA, w, h, pngDefault, 8);
+        ManagedPngEncoder.Encode(rawB, w, h, pngWideRaw, 8);
+        ManagedPngEncoder.Encode(wideAsSrgb, w, h, pngWideMatch, 8);
+
+        // 一票区分"解码器有没有顺手把宽色域折进 sRGB"：折过 ⇒ 我再折一次是重复换算，
+        // 折回那张会【更差】；没折 ⇒ 它才是同图对比，差值明显小于按存储直接比。
+        double dStore = MeanAbsDiff(rawA, rawB);
+        double dMatch = MeanAbsDiff(rawA, wideAsSrgb);
+        int over16 = 0, maxd = 0;
+        var diff = new byte[rawA.Length];
+        for (int i = 0; i < rawA.Length; i++)
+            if (System.Math.Abs(rawA[i] - wideAsSrgb[i]) > maxd)
+                maxd = System.Math.Abs(rawA[i] - wideAsSrgb[i]);
+        for (int i = 0; i < rawA.Length; i += 4)
+        {
+            for (int k = 0; k < 3; k++)
+            {
+                int d = System.Math.Abs(rawA[i + k] - wideAsSrgb[i + k]);
+                if (d > 16) over16++;
+                diff[i + k] = (byte)System.Math.Min(255, d * 255 / System.Math.Max(1, maxd));
+            }
+            // 差值图的 alpha 必须钉成不透明：跟着差值走会得到一张【全白】的透明图，
+            // 而差值的均值其实接近 0 —— 那是纯粹的呈现层假象（本轮实机踩到）。
+            diff[i + 3] = 255;
+        }
+        ManagedPngEncoder.Encode(diff, w, h, pngDiff, 8);
+
+        Console.WriteLine($"\n平均绝对差：按存储直接比 {dStore:F2}/255；把 2020 折回 sRGB 再比 {dMatch:F2}/255" +
+                          $"（折回口径下超 16 级的子通道占 {100.0 * over16 / rawA.Length:F2}%，最大 {maxd}/255）");
+        // 全帧均值会被 99% 的近中性像素摊平 —— 上面那对数字方向对、幅度小，不足以定论。
+        // 高色步子集（max-min > 60）才是两种模式唯一会分叉的地方，差值必须在那里见分晓。
+        var (hiStore, hiMatch, hiN) = HighChroma(rawA, rawB, wideAsSrgb);
+        Console.WriteLine($"  只看高色调像素（{hiN} 个）：按存储 {hiStore:F2}/255，折回 sRGB 后 {hiMatch:F2}/255");
+        if ((hiMatch < hiStore) == (dMatch < dStore))
+            Console.WriteLine(hiMatch < hiStore
+                ? "  ⇒ 两种口径同向：解码输出是【各自主色域里的字节】，不折回来就不是同一张图的对比"
+                : "  ⇒ 两种口径同向：解码器已把输出折到 sRGB，按存储那两张才是同口径");
+        else
+            Console.WriteLine("  ⚠ 两种口径反向（全帧被近中性像素摊平）⇒ 以高色调口径为准，但这条判据本轮不算干净");
+        Console.WriteLine("渲染结果（打开看）：");
+        Console.WriteLine($"  {pngDefault}");
+        Console.WriteLine($"  {pngWideMatch}   （与上一张同口径，可直接比观感）");
+        Console.WriteLine($"  {pngWideRaw}   （把 2020 字节当 sRGB 看 = 不做管理的查看器会看到什么）");
+        Console.WriteLine($"  {pngDiff}   （越亮 = 两模式折回同色域后仍差得越多）");
+        Console.WriteLine("两枚 GainMap 本体（丢进 Windows 照片 / 手机相册看真实 HDR 效果）：");
+        Console.WriteLine($"  {jpgSrgb}");
+        Console.WriteLine($"  {jpg2020}");
+        return 0;
+    }
+
+    static double MeanAbsDiff(byte[] a, byte[] b)
+    {
+        double sum = 0;
+        for (int i = 0; i < a.Length; i++) sum += System.Math.Abs(a[i] - b[i]);
+        return sum / a.Length;
+    }
+
+    /// <summary>只在参考图里"看得出颜色"的那些像素上比（max-min 通道跨度 &gt; 60），返回两种口径的均值。</summary>
+    static (double Store, double Match, int N) HighChroma(byte[] a, byte[] b, byte[] bFolded)
+    {
+        double sSum = 0, mSum = 0; int n = 0;
+        for (int i = 0; i < a.Length; i += 4)
+        {
+            int lo = System.Math.Min(a[i], System.Math.Min(a[i + 1], a[i + 2]));
+            int hi = System.Math.Max(a[i], System.Math.Max(a[i + 1], a[i + 2]));
+            if (hi - lo <= 60) continue;
+            n++;
+            for (int k = 0; k < 3; k++)
+            {
+                sSum += System.Math.Abs(a[i + k] - b[i + k]);
+                mSum += System.Math.Abs(a[i + k] - bFolded[i + k]);
+            }
+        }
+        return n == 0 ? (0, 0, 0) : (sSum / (n * 3), mSum / (n * 3), n);
+    }
+
+    /// <summary>
+    /// 把"存成 BT.2020 原色、但字节走 sRGB 传递"的 RGBA 折进 sRGB 原色，好与 sRGB 那张同口径比。
+    /// <para>矩阵不是抄来的：由 (0.708,0.292)(0.170,0.797)(0.131,0.046) 与 D65 白点现推，
+    /// 对已发表的 BT.2020→BT.709 矩阵最大偏差 &lt; 0.002，且三行和恒为 1（中性灰不偏色）。</para>
+    /// </summary>
+    static byte[] Bt2020BytesToSrgb(byte[] src)
+    {
+        const double m00 = 1.660363, m01 = -0.587540, m02 = -0.072823;
+        const double m10 = -0.124564, m11 = 1.132911, m12 = -0.008348;
+        const double m20 = -0.018157, m21 = -0.100602, m22 = 1.118758;
+        var dst = new byte[src.Length];
+        for (int i = 0; i < src.Length; i += 4)
+        {
+            double r = SrgbToLinear(src[i]), g = SrgbToLinear(src[i + 1]), b = SrgbToLinear(src[i + 2]);
+            dst[i] = LinearToSrgb(r * m00 + g * m01 + b * m02);
+            dst[i + 1] = LinearToSrgb(r * m10 + g * m11 + b * m12);
+            dst[i + 2] = LinearToSrgb(r * m20 + g * m21 + b * m22);
+            dst[i + 3] = src[i + 3];
+        }
+        return dst;
+    }
+
+    static double SrgbToLinear(byte v)
+    {
+        double s = v / 255.0;
+        return s <= 0.04045 ? s / 12.92 : System.Math.Pow((s + 0.055) / 1.055, 2.4);
+    }
+
+    static byte LinearToSrgb(double e)
+    {
+        if (e <= 0) return 0;
+        if (e >= 1) return 255;
+        double s = e <= 0.0031308 ? e * 12.92 : 1.055 * System.Math.Pow(e, 1.0 / 2.4) - 0.055;
+        return (byte)System.Math.Round(System.Math.Clamp(s * 255.0, 0, 255));
+    }
+
+    /// <summary>
     /// 用 libultrahdr 的 <c>ultrahdr_app -m 1 -j &lt;in&gt; -z &lt;out&gt;</c> 把三枚产物解回 RGBA，
     /// 然后要求：非显式那枚的重建与默认<strong>逐字节相同</strong>、显式那枚<strong>必须不同</strong>。
     /// <para>
@@ -269,12 +508,13 @@ public static class GainMapColorProductProbe
     /// 字节数等于 W*H*4 —— 三条缺一即"这个二进制在这一层上不可信"。
     /// 每次先删旧输出：否则上一轮留下的 .raw 会让一个根本不干活的旧版解码器"看起来成功"。
     /// </summary>
-    static (bool Ok, string Why, byte[]? Data) TryDecode(string exe, string jpg, string raw)
+    static (bool Ok, string Why, byte[]? Data) TryDecode(
+        string exe, string jpg, string raw, int cw = W, int ch = H, string extra = "")
     {
         try
         {
             if (File.Exists(raw)) File.Delete(raw);
-            var psi = new ProcessStartInfo(exe, $"-m 1 -j \"{jpg}\" -z \"{raw}\"")
+            var psi = new ProcessStartInfo(exe, $"-m 1 -j \"{jpg}\" -z \"{raw}\"{extra}")
             { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false };
             using var proc = Process.Start(psi);
             if (proc is null) return (false, "进程起不来", null);
@@ -290,8 +530,8 @@ public static class GainMapColorProductProbe
             if (!File.Exists(raw))
                 return (false, $"退出码 0 但没出文件 {Tail(stderr.Length > 0 ? stderr : stdout)}", null);
             var data = File.ReadAllBytes(raw);
-            if (data.Length != W * H * 4)
-                return (false, $"输出 {data.Length} B ≠ {W}x{H}x4（24x24 RGBA）", null);
+            if (data.Length != cw * ch * 4)
+                return (false, $"输出 {data.Length} B ≠ {cw}x{ch}x4（{cw}x{ch} RGBA）", null);
             return (true, $"{data.Length} B", data);
         }
         catch (Exception ex)

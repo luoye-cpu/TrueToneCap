@@ -31,6 +31,8 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
+using TrueToneCap.App.Models;
 using TrueToneCap.Core.Encoding;
 using TrueToneCap.Core.Logging;   // LogLevel / LogCategory（定义已移到 Core）
 
@@ -60,7 +62,10 @@ public static class SelfTest
         bool displayAudit = !selfTest && !probeOnly
             && args.Any(a => string.Equals(a, "--display-audit", StringComparison.OrdinalIgnoreCase)
                           || string.Equals(a, "--display-audit-emit", StringComparison.OrdinalIgnoreCase));
-        if (!selfTest && !probeOnly && !displayAudit)
+        // --settings-migration：只跑默认值迁移门自检（毫秒级，随手复验 §49 用；--selftest 里也带）
+        bool settingsGate = !selfTest && !probeOnly && !displayAudit
+            && args.Any(a => string.Equals(a, "--settings-migration", StringComparison.OrdinalIgnoreCase));
+        if (!selfTest && !probeOnly && !displayAudit && !settingsGate)
             return false;
 
         string outDir = "";
@@ -93,6 +98,19 @@ public static class SelfTest
                 ? Path.Combine(AppContext.BaseDirectory, "display-audit.txt")
                 : Path.Combine(outDir, "display-audit.txt");
             ExitCode = Task.Run(() => RunDisplayAudit(auditPath, emitSamples: emitAudit)).GetAwaiter().GetResult();
+            return true;
+        }
+        if (settingsGate)
+        {
+            Directory.CreateDirectory(outDir);
+            // 两条设置迁移自检一起跑：都是毫秒级、都不依赖环境，分开看没有意义
+            ExitCode = Task.Run(() =>
+            {
+                int bad = 0;
+                if (RunSettingsMigrationCheck(outDir).Status == "fail") bad++;
+                if (RunGainMapMergeCheck(outDir).Status == "fail") bad++;
+                return bad > 0 ? 1 : 0;
+            }).GetAwaiter().GetResult();
             return true;
         }
         ExitCode = Task.Run(() => Run(outDir, only, probeOnly)).GetAwaiter().GetResult();
@@ -223,6 +241,91 @@ public static class SelfTest
                 catch (Exception ex)
                 {
                     sb.AppendLine($"  色彩决定: 构造失败 {ex.GetType().Name}: {ex.Message}");
+                }
+
+                // ═══ 界面「色域映射」卡片逐格式印一遍（2026-09-26，交接 §53）═══
+                // 为什么放在审计里而不是靠人去看界面：卡片现在渲染的是 ColorDecision +
+                // FormatColorFacts，与这里【同一个函数】⇒ 这张卡就是卡片的镜像，且能覆盖
+                // "光标不在那块屏上"的另一块屏（挪光标去逐屏截屏既做不到也不该由测试代做）。
+                // HDR 一律按"开着"问 —— 要看的正是"开关为真时到底交付什么"，而它不是一种答案。
+                try
+                {
+                    var fmts = new[]
+                    {
+                        ("PNG", TrueToneCap.Core.Encoding.OutputFormat.PNG),
+                        ("JPEG LI", TrueToneCap.Core.Encoding.OutputFormat.JPEG_LI),
+                        ("JPEG XL", TrueToneCap.Core.Encoding.OutputFormat.JPEG_XL),
+                        ("AVIF", TrueToneCap.Core.Encoding.OutputFormat.AVIF),
+                        ("WebP", TrueToneCap.Core.Encoding.OutputFormat.WebP),
+                        ("TIFF", TrueToneCap.Core.Encoding.OutputFormat.TIFF),
+                        ("增益图(JPEG LI)", TrueToneCap.Core.Encoding.OutputFormat.JPEG_GAINMAP),
+                    };
+                    sb.AppendLine("  交付形态(=界面卡片那行箭头; HDR 开关按开、两档目标色域各问一次):");
+                    foreach (var (name, f) in fmts)
+                    {
+                        var sSrgb = TrueToneCap.Core.Encoding.FormatColorFacts.Delivery(
+                            TrueToneCap.Core.Capture.ColorDecision.Build(d, "sRGB", true, state.acm), f);
+                        var sWide = TrueToneCap.Core.Encoding.FormatColorFacts.Delivery(
+                            TrueToneCap.Core.Capture.ColorDecision.Build(d, "BT2020", true, state.acm), f);
+                        sb.AppendLine($"    {name,-17} sRGB⇒{sSrgb,-22} BT.2020⇒{sWide}");
+                    }
+                    // 声明通道逐格式一句：同一枚目标色域在不同容器里长什么样（BT.709 只出现在 matrix 那一维）
+                    sb.AppendLine("  声明通道(=界面卡片那句灰字; 目标按本屏解析):");
+                    foreach (var (name, f) in fmts)
+                    {
+                        var dec = TrueToneCap.Core.Capture.ColorDecision.Build(
+                            d, "System", true, state.acm);
+                        var del = TrueToneCap.Core.Encoding.FormatColorFacts.Delivery(dec, f);
+                        sb.AppendLine($"    {name,-17} " + TrueToneCap.Core.Encoding.FormatColorFacts.Declaration(
+                            f, dec.TargetTag, del == TrueToneCap.Core.Encoding.HdrDelivery.PqContainer));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine($"  交付形态: 渲染失败 {ex.GetType().Name}: {ex.Message}");
+                }
+
+                // ═══ 管线落点：那句"HDR 直通/色调映射"到底有没有变成 settings.HdrOutput ═══
+                // 上面印的是 Core 的判定，产物却由 BuildEncodingSettings 写出的那个布尔决定 ——
+                // 上一轮的缺陷正是断在这条缝上：判定说"增益图形态"，管线另有一条【无条件】的
+                // "HDR + sRGB ⇒ HdrOutput=false"，于是 JpegGainMapEncoder 走 base-only 分支，
+                // 用户开着增益图开关拿到的是一张没有增益图的普通 JPEG（界面还全程说"HDR 直通"）。
+                // 只测 Core 或只测编码器都看不见这一格，所以这里真调一次管线。
+                // 刻意不取 PNG / AVIF 两格：它们各自的位深协商与编码器回落在 ToastService 上有副作用，
+                // 而这条判据要的是"审计跑起来不会往用户桌面弹框"。
+                try
+                {
+                    // 审计跑在单实例锁之前 ⇒ AppServices 还没初始化，这里直接造一条管线。
+                    // 传一个独立的 SettingsService：BuildEncodingSettings 只用传进去的【快照】，
+                    // 不读 _settings.Current（那是 §11.3 快照纪律的要求）⇒ 这条探针碰不到设置文件。
+                    var probePipeline = new CapturePipelineService(new SettingsService());
+                    var snap = new AppSettingsData();   // 默认设置快照；本判据只看 HDR 落点，不看质量档
+                    sb.AppendLine("  管线落点(真调 BuildEncodingSettings; 交付形态 ⇒ 写进编码设置的布尔):");
+                    var probes = new (string Label, OutputFormat Fmt, string Tag, bool WantHdr)[]
+                    {
+                        ("增益图 + sRGB 底图", OutputFormat.JPEG_GAINMAP, "sRGB", true),
+                        ("增益图 + BT.2020 底图", OutputFormat.JPEG_GAINMAP, "BT2020", true),
+                        ("JPEG XL + sRGB 目标", OutputFormat.JPEG_XL, "sRGB", false),
+                        ("JPEG XL + BT.2020 目标", OutputFormat.JPEG_XL, "BT2020", true),
+                    };
+                    foreach (var p in probes)
+                    {
+                        bool hdrScreen = d is { IsHdr: true };
+                        var dcd = TrueToneCap.Core.Capture.ColorDecision.Build(d, p.Tag, true, state.acm);
+                        var es = probePipeline.BuildEncodingSettings(
+                            p.Fmt, true, null, snap, p.Tag, state.acm, dcd);
+                        var del = FormatColorFacts.Delivery(dcd, p.Fmt);
+                        // HDR 屏之外的一切都拿不到写 PQ 的授权 ⇒ 期望值随屏幕降一档（不许把"屏不授权"读成判据失败）
+                        bool expect = hdrScreen ? p.WantHdr : false;
+                        bool ok = es.HdrOutput == expect;
+                        sb.AppendLine($"    {p.Label,-24} 分类={dcd.ScreenClass} 形态={del,-20} " +
+                                      $"HdrOutput={es.HdrOutput} 色域={es.ColorSpaceTag} ⇒ 期望 {expect} " +
+                                      $"{(ok ? "✓" : "✗ 判定与落点分叉")}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine($"  管线落点: {ex.GetType().Name}: {ex.Message}");
                 }
 
                 try
@@ -425,6 +528,16 @@ public static class SelfTest
                 File.Exists(path) ? new FileInfo(path).Length : 0, detail));
         }
 
+        // ═══ 迁移门自检排在判据自检之前：它同样不依赖显示器/GPU/native，且它管的
+        // 是"用户看到的默认档从哪来"——门死了，后面所有"默认值合适吗"的讨论都无意义。═══
+        var sm = RunSettingsMigrationCheck(outDir);
+        if (sm.Status == "fail") failed++;
+        entries.Add(JsonEntry("SETTINGS_MIGRATION", sm.Note, sm.Status, sm.Ms, 0, sm.Detail, sm.JsonExtra));
+
+        var gmm = RunGainMapMergeCheck(outDir);
+        if (gmm.Status == "fail") failed++;
+        entries.Add(JsonEntry("GAINMAP_MIGRATION", gmm.Note, gmm.Status, gmm.Ms, 0, gmm.Detail, gmm.JsonExtra));
+
         // ═══ 判据自检（合成帧）排在探针【前面】：尺子先自证，再谈读数。═══
         // 它不依赖显示器/GPU/桌面 ⇒ 没有 HDR 屏、探针只能 SKIP 的机器，也仍然能证明判据是活的。
         var judge = RunHdrJudgeCheck(outDir);
@@ -452,7 +565,7 @@ public static class SelfTest
         File.WriteAllText(jsonPath, sb.ToString());
         Progress(outDir, $"json-written failed={failed}");
 
-        int total = cases.Length + 2;   // +2 = 判据自检 + 高精度源探针
+        int total = cases.Length + 4;   // +4 = 迁移门自检 + 增益图重映射自检 + 判据自检 + 高精度源探针
         Console.WriteLine($"[selftest] 结果: {total - failed}/{total} 通过 → {jsonPath}");
         Progress(outDir, "returning");
         return failed > 0 ? 1 : 0;
@@ -755,6 +868,142 @@ public static class SelfTest
         return (JudgeNote, status, detail, sw.ElapsedMilliseconds,
             $",\n      \"latticePct8bit\": {F(s8.GridPct)}, \"latticePct10bit\": {F(s10.GridPct)}, " +
             $"\n      \"levels8bit\": {s8.LevelsText}, \"levels10bit\": {s10.LevelsText}, \"neutralPixels8bit\": {s8.NeutralN}");
+    }
+
+    /// <summary>
+    /// 默认值迁移门的自检：把两份夹具喂进<b>生产那条分支</b>（<c>SettingsService.MigrateStaleDefaults</c>），
+    /// 要求"无修订号的老文件必须被交还默认表""带修订号的文件必须原样不动"。
+    /// <para>为什么只能在 App 进程内跑：Test 工程只引用 Core、碰不到 <c>AppSettingsData</c>，
+    /// 而这条门的语义恰好发生在「JSON 缺键 → 属性初始化器填什么」这一步 ——
+    /// 源码哨兵能钉初值的写法，钉不住 System.Text.Json 拿它补缺键的<b>实际结果</b>。</para>
+    /// <para>实机触发过一次（交接 §49）：一份 2026-09-16 的全量序列化旧文件被
+    /// <c>MigrateFromLegacyLocation</c> 搬进发布包目录，其中 <c>QualityAvif</c>=63（CRF 区间上界=最差档）
+    /// 一路活到界面显示 <c>CRF: 63</c>。</para>
+    /// <para>四条读数的性质：<b>独立参照</b>=缺键读作 0、rev-1 文件必须重迁、反例的 63/50/3 必须仍在
+    /// （都是字面量，不由被测常数推导）；<b>构造恒等</b>=正例迁后各键 == <c>CreateDefaults()</c>
+    /// （该表的字面量另由门禁哨兵钉死为 15/90/1.0/1.0/1.0，故此处不重复钉数字，
+    /// 但单看这一条不足以证明门有牙 —— 反例那条才是）。</para>
+    /// </summary>
+    private static (string Note, string Status, string Detail, long Ms, string JsonExtra)
+        RunSettingsMigrationCheck(string outDir)
+    {
+        const string Note = "老设置文件的默认值交还（迁移门）";
+        var sw = Stopwatch.StartNew();
+
+        // 夹具=本机真实存在的那份 2026-09-16 全量序列化文件（键名、取值、顺序都照抄，不按被测阈值反造）
+        // ⚠ 这是"GainMap 并入 JPEG LI"之前的文件 ⇒ 里面的 FormatIndex:4 按【旧表】是 AVIF（新表 4 是 WebP）。
+        //   本自检不碰 FormatIndex（重映射另有 GAINMAP_MIGRATION 那条），留着原值只是为了让夹具像真的。
+        const string legacy =
+            """{"SettingsVersion":1,"FormatIndex":4,"Quality":100,"QualityGainMap":3,"QualityJpegLi":0.5,"QualityJpegXl":0.5,"QualityAvif":63,"QualityWebp":50,"ColorSpaceIndex":5,"ChromaAvif":"444"}""";
+        // 修订号 1 那批文件：顶着"已迁移"的章、值却是迁移失效期写下的 ⇒ 必须按作废处理
+        string rev1 = "{\"SettingsRevision\":1," + legacy[1..];
+        // 与当前修订号一致的文件必须一律不动（否则"把缺键判成永远未迁移"这种伪修法也能过检）
+        string stamped = $"{{\"SettingsRevision\":{AppSettingsData.CurrentSettingsRevision}," + legacy[1..];
+
+        var ctx = AppJsonContext.Default;
+        var a = JsonSerializer.Deserialize(legacy, ctx.AppSettingsData);
+        var r1 = JsonSerializer.Deserialize(rev1, ctx.AppSettingsData);
+        var b = JsonSerializer.Deserialize(stamped, ctx.AppSettingsData);
+        if (a is null || b is null || r1 is null)
+            return (Note, "fail", "反序列化夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+
+        // ⚠ 必须在调用迁移之前取值：MigrateStaleDefaults 是就地改写 s 的，
+        // 迁移后再读 a.SettingsRevision 得到的永远是"当前号"，那一条判据就自证成功了。
+        int revRead = a.SettingsRevision;
+        bool revReadAsStale = revRead == 0;
+
+        var q0 = (a.QualityAvif, a.QualityWebp, a.QualityGainMap, a.ColorSpaceIndex);
+        bool fired = SettingsService.MigrateStaleDefaults(a);
+        var d = AppSettingsData.CreateDefaults();
+        bool handedBack = fired
+            && a.QualityAvif == d.QualityAvif && a.QualityWebp == d.QualityWebp
+            && a.QualityGainMap == d.QualityGainMap && a.QualityJpegLi == d.QualityJpegLi
+            && a.QualityJpegXl == d.QualityJpegXl && a.ColorSpaceIndex == d.ColorSpaceIndex
+            && a.SettingsRevision == AppSettingsData.CurrentSettingsRevision;
+
+        // rev 1 作废：光看初值修不好已经盖了章的那批文件
+        bool rev1Refired = SettingsService.MigrateStaleDefaults(r1)
+            && r1.QualityAvif == d.QualityAvif && r1.SettingsRevision == AppSettingsData.CurrentSettingsRevision;
+
+        bool keptIntact = !SettingsService.MigrateStaleDefaults(b)
+            && b.QualityAvif == 63 && b.QualityWebp == 50 && b.QualityGainMap == 3;
+
+        sw.Stop();
+        bool ok = revReadAsStale && handedBack && rev1Refired && keptIntact;
+        string status = ok ? "ok" : "fail";
+        string detail =
+            $"缺键的老文件读作 SettingsRevision={revRead}（应为 0）| " +
+            $"门是否触发={fired}，把 {F(q0.Item1)}/{F(q0.Item2)}/{F(q0.Item3)}/cs{q0.Item4} 交还为 " +
+            $"{F(a.QualityAvif)}/{F(a.QualityWebp)}/{F(a.QualityGainMap)}/cs{a.ColorSpaceIndex} | " +
+            $"盖章为 1 的文件重迁={rev1Refired}（AVIF 现 {F(r1.QualityAvif)}，当前修订号={AppSettingsData.CurrentSettingsRevision}）| " +
+            $"盖章为当前号的同内容文件：不动={keptIntact}（AVIF 仍 {F(b.QualityAvif)}）" +
+            (ok ? " ⇒ 门是活的，老用户的旧质量档会被交还默认表一次后由用户自选"
+                : " ⇒ 门是死的：老文件里的区间端点会被当成用户选择永久保留，界面上就是 CRF: 63");
+
+        Progress(outDir, $"SETTINGS_MIGRATION {status} {sw.ElapsedMilliseconds}ms {detail}");
+        Console.WriteLine($"[selftest] SETTINGS_MIGRATION {status} {detail}");
+
+        return (Note, status, detail, sw.ElapsedMilliseconds,
+            $",\n      \"readRevision\": {revRead}, \"gateFired\": {Bool(fired)}, " +
+            $"\"handedBack\": {Bool(handedBack)}, \"rev1Refired\": {Bool(rev1Refired)}, " +
+            $"\"stampedKeptIntact\": {Bool(keptIntact)}, \"legacyAvifCrf\": {F(q0.Item1)}");
+    }
+
+    /// <summary>
+    /// 「GainMap 并入 JPEG LI」的一次性重映射自检（2026-09-26 用户口径）。
+    /// <para>为什么必须行为级跑：这条改动的风险全在<b>裸索引</b>上 —— 旧表 1=GainMap、新表 1=JPEG LI，
+    /// 而越界钳制对两者都不触发。重映射表本身在 Core（门禁已逐格对撞），但
+    /// "表 + 反序列化 + 参数搬格 + 盖章"这条链只有 App 进程能整条跑一遍。</para>
+    /// <para>夹具取本机真实形态：一份 2026-09-25 之前的文件（无 <c>GainMapMerged</c> 键、
+    /// <c>FormatIndex:1</c>、GainMap 侧质量被用户改成 2.5 而 JPEG LI 侧仍是默认）。
+    /// 反例两格：已盖章的文件不许再动；两侧都改过时必须保留 JPEG LI 侧而不是静默覆盖。</para>
+    /// </summary>
+    private static (string Note, string Status, string Detail, long Ms, string JsonExtra)
+        RunGainMapMergeCheck(string outDir)
+    {
+        const string Note = "GainMap 并入 JPEG LI 的重映射";
+        var sw = Stopwatch.StartNew();
+        var ctx = AppJsonContext.Default;
+        var d = AppSettingsData.CreateDefaults();
+
+        // ① 老 GainMap 用户：格式号 1 在旧表里就是增益图
+        var a = JsonSerializer.Deserialize(
+            """{"FormatIndex":1,"QualityGainMap":2.5,"QualityJpegLi":1.0,"ChromaGainMap":"444","ChromaJpegLi":"420"}""",
+            ctx.AppSettingsData)!;
+        bool fired = SettingsService.MigrateGainMapMerge(a);
+        bool gmUser = fired && a.FormatIndex == 1 && a.GainMapEnabled
+            && a.QualityJpegLi == 2.5 && a.ChromaJpegLi == "444" && a.GainMapMerged;
+
+        // ② 老 JPEG LI 用户（旧表 2 号）：必须仍停在 JPEG LI，且【不许】被打开增益图
+        var b = JsonSerializer.Deserialize(
+            """{"FormatIndex":2,"QualityGainMap":2.5,"QualityJpegLi":0.8}""", ctx.AppSettingsData)!;
+        bool liUser = SettingsService.MigrateGainMapMerge(b)
+            && b.FormatIndex == 1 && !b.GainMapEnabled
+            && b.QualityJpegLi == 0.8;   // GainMap 侧改过但 LI 侧也改过 ⇒ 保留 LI 侧
+
+        // ③ 已盖章的文件：二次启动不得再搬（否则每次启动都重算一遍历史）
+        var c = JsonSerializer.Deserialize(
+            """{"GainMapMerged":true,"FormatIndex":2,"QualityJpegLi":0.8}""", ctx.AppSettingsData)!;
+        int cIdx = c.FormatIndex;
+        bool again = SettingsService.MigrateGainMapMerge(c);
+        bool idempotent = !again && c.FormatIndex == cIdx && !c.GainMapEnabled;
+
+        sw.Stop();
+        bool ok = gmUser && liUser && idempotent;
+        string status = ok ? "ok" : "fail";
+        string detail =
+            $"老 GainMap 用户(旧1)：格式→{a.FormatIndex} 增益图={a.GainMapEnabled} " +
+            $"质量 {d.QualityJpegLi}→{a.QualityJpegLi} 色度 {a.ChromaJpegLi} | " +
+            $"老 JPEG LI 用户(旧2)：格式→{b.FormatIndex} 增益图={b.GainMapEnabled} 质量仍 {b.QualityJpegLi} | " +
+            $"已盖章文件：再跑={again} 格式仍 {c.FormatIndex}" +
+            (ok ? " ⇒ 裸索引不会静默换格式，且迁移只跑一次"
+                : " ⇒ 索引/参数搬错，用户会静默换格式或丢自己挑的档位");
+
+        Progress(outDir, $"GAINMAP_MIGRATION {status} {sw.ElapsedMilliseconds}ms {detail}");
+        Console.WriteLine($"[selftest] GAINMAP_MIGRATION {status} {detail}");
+        return (Note, status, detail, sw.ElapsedMilliseconds,
+            $",\n      \"gmUser\": {Bool(gmUser)}, \"liUser\": {Bool(liUser)}, \"idempotent\": {Bool(idempotent)}, " +
+            $"\"newFormatIndex\": {a.FormatIndex}");
     }
 
     /// <summary>float 帧精度统计。</summary>

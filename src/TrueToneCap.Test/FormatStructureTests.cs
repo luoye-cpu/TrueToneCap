@@ -48,6 +48,7 @@ public static class FormatStructureTests
         Test_Tiff16Bit();
         Test_TiffWithIcc();
         Test_TiffInvalidBitDepthClamped();
+        Test_TiffHdrPinsDepthAndNotifies();
         Test_AvifBoxStructure();
 
         Console.WriteLine($"\n══════════════════════════════════════");
@@ -204,6 +205,63 @@ public static class FormatStructureTests
         catch (Exception ex)
         {
             Assert("TIFF-BPS", false, $"异常: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// HDR TIFF 把位深钉在 16-bit 是【允许的】，但必须【说出来】（2026-09-24 §48 #22）。
+    /// <para>背景：TIFF 的 BitsPerSample 只有 8/16 合法（上面那条测试就是钉这个），而 8-bit 装不下 PQ
+    /// ⇒ HDR 分支硬写 16-bit、从不读 <c>OutputBitDepth</c>。界面却仍给着"8-bit / 16-bit"两档
+    /// ⇒ 用户选 8 拿到 16，除了"文件大一倍"之外没有任何线索可查。这与 PNG 那条是同一种病的两面
+    /// （PNG 遇到 8-bit 是【降成 SDR】丢 HDR，TIFF 是【升到 16】保 HDR）——两侧现在都留了痕。</para>
+    /// <para>两条断言各盯一个方向：① 选 8 时产物确实是 16【且】通用降级通道里有原因；
+    /// ② 选 16 时通道必须是空的 —— 否则那个提示就成了无条件噪声，
+    /// 而"每次都报的提示"与"不报"在用户端等价（都会被当成误报忽略）。</para>
+    /// </summary>
+    static void Test_TiffHdrPinsDepthAndNotifies()
+    {
+        const int w = 32, h = 24;
+        // 线性中灰 + 不透明：不夹任何色域信息，只验位深与留痕这两件事
+        var lin = new float[w * h * 4];
+        for (int i = 0; i < lin.Length; i += 4)
+        { lin[i] = lin[i + 1] = lin[i + 2] = 0.2f; lin[i + 3] = 1f; }
+        var frame = new HdrFrameData { Pixels = lin, Width = w, Height = h };
+        var enc = EncoderFactory.Create(OutputFormat.TIFF);
+
+        foreach (var (requested, expectNotice) in new[] { (8, true), (16, false) })
+        {
+            var path = Path.Combine(OutDir, $"struct_tiff_hdr_bps{requested}.tif");
+            var s = new EncodingSettings
+            { Format = OutputFormat.TIFF, HdrOutput = true, OutputBitDepth = requested, ColorSpaceTag = "sRGB" };
+            EncoderFallbackNotifier.LastReason = null;      // 读前先清，防上一条残留
+            try { enc.EncodeAsync(frame, s, path).GetAwaiter().GetResult(); }
+            catch (Exception ex)
+            {
+                Assert($"HDR TIFF/请求 {requested}-bit: 编码未抛异常", false, $"{ex.GetType().Name}: {ex.Message}");
+                continue;
+            }
+
+            var tif = ParseTiff(path);
+            // Assert 是 void（只记账不返回值），所以"能不能继续"要自己拿条件判断
+            bool headerOk = tif.Ok;
+            Assert($"HDR TIFF/请求 {requested}-bit: 头部可解析", headerOk, tif.Error ?? "");
+            if (!headerOk) continue;
+            Assert($"HDR TIFF/请求 {requested}-bit: BPS 恒 16",
+                tif.BitsPerSample.Length == 4 && tif.BitsPerSample.All(b => b == 16),
+                string.Join(",", tif.BitsPerSample));
+
+            var reason = EncoderFallbackNotifier.LastReason;
+            bool has = !string.IsNullOrEmpty(reason);
+            if (expectNotice)
+            {
+                Assert("HDR TIFF/选 8-bit ⇒ 必须登记位深被改动（不许静默改参数）", has, reason ?? "（通道为空）");
+                Assert("HDR TIFF/提示文本要点名 16-bit，否则用户无从知道自己拿到了什么",
+                    has && reason!.Contains("16-bit"), reason ?? "");
+            }
+            else
+            {
+                Assert("HDR TIFF/选 16-bit ⇒ 不该有提示（无条件提示等于没提示）", !has, reason ?? "");
+            }
         }
     }
 

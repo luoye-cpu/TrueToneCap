@@ -672,6 +672,21 @@ if (-not $pyExe -and -not $toolsExe2) {
     } else {
         Write-Host "   ✅ 色彩管线判据 3/3 全部判了且通过"
     }
+
+    # ── ④ HDR AVIF 位深 A/B（2026-09-25：用户要求 libaom + HDR 可选 10/12）──
+    # 判据落在【产物】上：请求 12 必须真出 yuv444p12le，且与请求 10 的字节不同、色彩声明不许丢。
+    # 为什么必须进门禁：这条改动横跨"协商函数 / 管线 / PQ 量化 / avifenc 命令行"四处，
+    # 漏改任何一处的表现都是"界面能选 12、文件仍是 10"—— 单看代码 diff 完全看不出来。
+    # 实测还纠正了一处认知：真正决定输出位深的是中转 PNG 的 sBIT（avifenc 由输入推位深），
+    # 命令行那个 --depth 在这条路上是冗余保险 ⇒ 变异实验只能红在量化那处，别误以为命令行有牙。
+    Write-Host "   ▶ --avif-hdr-depth（HDR AVIF 位深 10 vs 12 的产物对撞）" -ForegroundColor DarkGray
+    if ($ffprobePath) { $env:TTC_FFPROBE = $ffprobePath }
+    $r = Invoke-ToolsMode -ToolsExe $toolsExe2 -Mode "--avif-hdr-depth" -Extra @() -ToolsProj $toolsProj2 -Config $Configuration
+    $v = Show-ColorVerdict -Code $r.Code -Text $r.Text
+    if ($v -eq "fail") {
+        Write-Host "❌ HDR 位深判红：请求 12-bit 没产出 12-bit 码流（或两次产物逐字节相同 ⇒ 参数没抵达编码器）" -ForegroundColor Red
+        exit 1
+    }
 }
 Write-Host ""
 

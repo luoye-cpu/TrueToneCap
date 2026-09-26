@@ -11,14 +11,14 @@ In the gap where HDR displays are becoming ubiquitous yet screenshot tools remai
 <details open>
 <summary><b>🌐 English</b></summary>
 
-Selection, annotation, OCR, translation — everything happens in real-time on a full-screen overlay after pressing a hotkey, with no pop-ups and no context switches. Screenshots export to PNG (mathematically lossless), JPEG Gain Map (Ultra HDR compatible), AVIF, JPEG XL, and more. Translation goes through Youdao's official open-platform API (bring your own credentials) or a custom LLM (OpenAI/DeepSeek); the credential-free unofficial web endpoints (Bing / Google) stay off until you explicitly opt in.
+Selection, annotation, OCR, translation — everything happens in real-time on a full-screen overlay after pressing a hotkey, with no pop-ups and no context switches. Screenshots export to PNG (mathematically lossless), JPEG LI (with an optional Ultra HDR gain map), AVIF, JPEG XL, and more. Translation goes through Youdao's official open-platform API (bring your own credentials) or a custom LLM (OpenAI/DeepSeek); the credential-free unofficial web endpoints (Bing / Google) stay off until you explicitly opt in.
 
 </details>
 
 <details>
 <summary><b>🌐 简体中文</b></summary>
 
-框选、标注、OCR、翻译——所有操作都在按下快捷键后的全屏覆盖层上实时完成，无需弹窗、无需跳转。截图可以导出为 PNG（数学无损）、JPEG Gain Map（兼容 Ultra HDR）、AVIF、JPEG XL 等格式。对于国内用户，翻译走有道官方开放平台（自备凭据，注册赠体验金）或自定义 LLM；免密的非官方网页端点（必应 / Google）默认不启用，需在设置里显式勾选。
+框选、标注、OCR、翻译——所有操作都在按下快捷键后的全屏覆盖层上实时完成，无需弹窗、无需跳转。截图可以导出为 PNG（数学无损）、JPEG LI（可附 Ultra HDR 增益图）、AVIF、JPEG XL 等格式。对于国内用户，翻译走有道官方开放平台（自备凭据，注册赠体验金）或自定义 LLM；免密的非官方网页端点（必应 / Google）默认不启用，需在设置里显式勾选。
 
 </details>
 
@@ -53,7 +53,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | 📷 **Capture** | WGC (Windows.Graphics.Capture), Float16 HDR / BGRA8 SDR, zero-latency pooling | WGC 捕获，Float16 HDR / BGRA8 SDR，池化零延迟 |
 | 🎨 **Color** | Per-monitor advanced-color detection, ICC detect & bake, target gamut: follow-display / sRGB / BT.2020, ACM | 逐屏高级色能力探测，ICC 检测与烘焙，可选目标色域：跟随显示器 / sRGB / BT.2020，ACM |
 | ✏️ **Annotate** | Rect, Ellipse, Arrow, Pen, Text, Mosaic — full-screen overlay | 矩形、椭圆、箭头、画笔、文字、马赛克 — 全屏覆盖层 |
-| 🖼️ **Export** | PNG (lossless HDR) · JPEG Gain Map (Ultra HDR) · JPEG XL · AVIF (NVENC / MFT-QSV / libaom / SVT-AV1) · WebP · JPEG LI · BMP | PNG（无损 HDR）· JPEG Gain Map（Ultra HDR）· JPEG XL · AVIF（NVENC / 系统 MFT(QSV) / libaom / SVT-AV1）· WebP · JPEG LI · BMP |
+| 🖼️ **Export** | PNG (lossless HDR) · JPEG LI (optional Ultra HDR gain map) · JPEG XL · AVIF (NVENC / MFT-QSV / libaom / SVT-AV1) · WebP · TIFF | PNG（无损 HDR）· JPEG LI（可附 Ultra HDR 增益图）· JPEG XL · AVIF（NVENC / 系统 MFT(QSV) / libaom / SVT-AV1）· WebP · TIFF |
 | 🔤 **OCR** | PP-OCRv6 (ONNX, DirectML/CPU) + Windows OCR fallback · zh/en strongest, ja needs ≥24px, ko unsupported | PP-OCRv6（ONNX，DirectML/CPU）+ Windows OCR 兜底 · 中/英文最准，日文需字高 ≥24px，韩文不支持（转系统 OCR） |
 | 🌐 **Translate** | Custom LLM → Youdao official API → (opt-in) Bing / Google web endpoints | 自定义 LLM → 有道官方开放平台 →（需显式勾选）必应 / Google 网页端点 |
 | ⌨️ **Hotkeys** | Recordable · tray minimize · autostart | 可录制 · 托盘最小化 · 开机启动 |
@@ -65,13 +65,15 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | Format | HDR | Bit Depth | Encoder / 编码器 |
 |--------|-----|-----------|------------------|
 | PNG | ✅ cICP | 8/10/12/16-bit | 托管编码器 (ManagedPngEncoder) |
-| JPEG Gain Map | ✅ Ultra HDR | 8-bit + gain map | jpegli + 增益图 |
 | JPEG XL | ✅ | 8/10/12-bit | JxlNet (NativeJxlEncoder) |
 | AVIF | ✅ | 8/10/12-bit | libaom / QSV / NVENC / MFT |
 | WebP | ❌ | 8-bit | libwebp / cwebp 回退 PNG |
-| JPEG LI | ❌ | 8-bit | jpegli |
+| JPEG LI | 单图 ❌；打开「附带增益图」⇒ ✅ Ultra HDR（HDR 在增益图里，容器不写 PQ） | 8-bit（容器恒 8） | jpegli；增益图是 JPEG LI 卡片里的开关，「目标色域」选的就是底图色域 |
 | TIFF | ✅ | 8/16-bit | 托管编码器 |
 | BMP | ❌ | 8-bit | 托管编码器 |
+
+> ⚠ BMP 那行是 Core 侧编码器的现状：界面的格式下拉里**没有**它（`ManagedBmpEncoder` 在本仓库无任何
+> 调用点）。留着待清理，别当成可选格式。
 
 ---
 
@@ -228,8 +230,9 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
   HDR 与 SDR 共用同一条色彩处理链路。
 - **可选目标色域**：跟随显示器 / sRGB / BT.2020；广色域目标在编码前完成色域矩阵搬运，
   并按目标色域给出配套声明（不是只改标签）。
-- **八种输出格式**：PNG（数学无损，可带 cICP/iCCP）· JPEG Gain Map（Ultra HDR 兼容）· JPEG XL ·
-  AVIF · WebP · JPEG LI · TIFF · BMP；HDR 通路 10-bit/16-bit 容器与位深下拉一致生效。
+- **六种界面可选格式**：PNG（数学无损，可带 cICP/iCCP）· JPEG LI（打开「附带增益图」即 Ultra HDR，
+  「目标色域」选的就是底图色域）· JPEG XL · AVIF · WebP · TIFF；HDR 通路的容器位深按各格式能力协商
+  并显式告知（PNG 至少 10-bit、TIFF 恒 16-bit、AVIF 10/12 随编码器、JPEG LI 与 WebP 恒 8-bit）。
 - **硬件与软件后端同一套色彩声明**：AVIF 支持 NVENC 与系统 MFT（QSV 候选）硬件通路，
   软件侧 libaom / SVT-AV1；同一次截图在两条路上给出相同的色域矩阵、摆幅与元数据。
 - **OCR 与翻译**：PP-OCRv6（ONNX）+ Windows OCR（DirectML 不可用时降 CPU），

@@ -3729,7 +3729,8 @@ EDD_GET_DEVICE_INTERFACE_NAME=1) → `"\\?\DISPLAY#型号#实例#{GUID}"` → �
 所以那次故障表现是"主屏读到副屏的"，而不是"读到空"。
 
 交叉验证（三条独立机制，同一次真机状态下）：
-- `publish/probe-registry-edid-per-monitor.ps1`：独立解码注册表，给出
+- `tests/manual/publish-probes/probe-registry-edid-per-monitor.ps1`（原在 `publish/` 下，2026-09-23 §47 归档）：
+  独立解码注册表，给出
   `AUO75AC → B160QAN02.7 / ΔG=0.0246`、`PHLC38F → 27M2N5800P / ΔG=0.0963`，与 `--display-audit`
   逐屏一致；**型号与分辨率对得上**（2560x1600 是那块笔电屏、3840x2160 是那块 4K），
   这才真正排掉"映射反了"这一种解释 —— 只比两块屏读数不同是排不掉的，读反了也一样不同。
@@ -4377,8 +4378,835 @@ cjxl 认不认这些值 / 我们的产品入口把提示吞没吞掉 / 标签→
 `jpegxl,rgba,iec61966-2-1,bt2020`；JXL 容器里也没有 `colr` 盒（顶层只有 `JXL`/`ftyp`/`jxlc`，
 色彩只在 `jxlc` 码流内）。产物已留在 `%TEMP%\ttc_jxl_product_probe\`，哪天拿到 djxl 可直接补语义层。
 
+---
+
+## §47 `publish/` 清理（2026-09-23）
+
+口径：用户定"保留 `TTC日志查看器` 与 `PLAN`，清理其他内容"。
+
+**最终删掉**（两轮合计 1695 MB 逻辑）：
+- 三个历史解包目录 1256.5 MB：`TrueToneCap-v0.3.4-beta/`、`-iccpred2/`、`-dirtyverify/`
+- 八件历史归档：0.3.3 的 `.7z` ×2、0.3.4 正式 / `-diag1` / `-iccpred2` 的 `.7z`+`.sha256` ×6
+- `PACKAGE.md`（`publish/` 下**唯一被 git 跟踪又被删掉**的文件 ⇒ `git status` 显示 ` D`；
+  要回退用 `git checkout -- publish/PACKAGE.md`）· `hdr-probe-out/`
+
+**移走而不是删**：11 个 `probe-*.ps1` + 3 个 `run-*.ps1` + `diag-build-notes.md` +
+`diag-wgc-log-promotion.patch` ⇒ `tests/manual/publish-probes/`（同为 gitignore 的归档位）。
+它们只占 ~120 KB，但删了不可恢复，且 §34/§37 的取证链要靠它们复现。
+全文唯一按路径引用它们的那处（本文 3731 行）已同步改到新位置。
+
+**`publish/` 现在只剩 5 项**：`PLAN/`、`TTC日志查看器/`、`TrueToneCap-v0.3.5-beta/` 与它的
+`.7z` + `.sha256`。逻辑 2646.5 MB → **951.4 MB**；实占 2.1 GB → **661 MB**。
+（⚠ 这个卷上 `du` 与逻辑字节差 ~1.7 倍：`du -sh publish/PLAN` 报 43M、实际 193.6 MB ⇒ 报数要说口径。）
+
+**代价（记清楚，不是事后诸葛）**：`git ls-remote` 实测远端 `refs/heads/main` = `0916a2a` =
+**v0.3.3-beta**，tag 也只到 `v0.3.3-beta` ⇒ 0.3.3/0.3.4 的**已分发二进制本机再没有任何副本**。
+0.3.3 可从标签重建；0.3.4 正式包内记的 `commitSha 6647e17f` 不在 `main` 历史上（只活在
+`refs/backup/pre-amend-v0.3.4`）⇒ 连"照原样重建"都做不到，只能重建等价内容。
+被跟踪的另一个文件 `PLAN/README.md` 随 `PLAN/` 保留。
+
+**本轮事故（记下来，别重犯）**：给 `iccpred2` 补归档时用了 `pack.ps1 -PackageDir` 而没带
+`-OutputPath` ⇒ 归档名由**包内 `build-info.json` 的版本号**推出，两个包都写着 `0.3.4-beta`，
+于是**覆盖了正式的 `TrueToneCap-v0.3.4-beta-win-x64.7z` 及其 `.sha256`**（127,805,750 B → 127,810,009 B）。
+已改名找回 iccpred2 那份、重新打包正式那份，并用"归档内 `build-info.json` 与目录内**逐字节相同**"
+证明找回的是正确的包（`commitSha 6647e17f…`、`builtAtUtc 2026-09-20T13:11:35Z`、`dirtyWorktree false`）。
+丢失的只有 09-20 那份归档的**容器字节**：它的 SHA256 从未记进任何文档（全仓 64 位十六进制零命中），
+且 2958 行记着同一文件在 09-17 就被删过重生成过 ⇒ 不是有留底的交付基准。
+⇒ **`pack.ps1` 对"同版本号的不同变体目录"必须显式给 `-OutputPath`**，否则同名互覆。
+
+## 48. 第三十六轮（2026-09-24）：质量阶梯测到产品配置上，顺手掀开 AVIF 的三件假设定
+
+本轮起因是用户第 N 次回到"默认选项质量最差"这件事："这个默认选项的问题修了很久都没修好，需要重视"。
+前几轮都在改**默认值本身**，这轮改成先问"**视觉无损到底对应哪个系数**"——没有实测数字，
+换几次默认值都只是在猜。下面 48.1–48.6 是测出来的东西，48.7–48.9 是顺带掀开的旧结论。
+
+### 48.1 阶梯前两轮量的是【不存在的配置】
+
+v1 有两处自身错误（SSIM 无脑当判据、VMAF 取不到数还照样出表），v2 修了度量但**编码参数错了**：
+v2 直接调 `cjxl/cjpegli/avifenc/cwebp` 的裸命令，而这些工具在不指定色度时**自选 4:4:4**，
+而产品默认 `ChromaJpegLi = "420"`、`ChromaAvif = "420"`。⇒ v2 的表描述的是用户根本不走的路。
+核对后另两处不构成差异：`SpeedArg` 是常量 `-s 6`，而本机 `avifenc -h` 显示默认速度**就是 6**；
+`webp -mt` 补上后与 v2 **逐位相同**（有损路径 `-mt` 不改码流）。
+
+v3 才按产品逐字参数重测（`artifacts/quality-ladder-v3-product-config.py`）。同一默认值在两轮下：
+
+| 格式 | 默认 | v2 分块p1 | **v3（产品配置）** | 该格式 UI 区间内的上限 |
+|---|---|---|---|---|
+| JPEG-LI | 1.0 | 39.02 | **37.16** | 42.55（q=0.5，已是区间下限） |
+| JPEG XL | 1.0 | 41.62 | **42.00** | 50.12（q=0.3） |
+| AVIF | CRF 15 | 39.36 | **38.85** | 44.15（CRF 2，软件路） |
+| WebP | 90 | 39.60 | **39.60** | 40.04（q≥95 全部饱和） |
+
+三条可直接用判据：**① "默认最差"精确地只发生在 JPEG-LI**（四家里 p1 最低，JXL 的默认本来就在线以上）；
+**② 全局 PSNR / SSIM 不能单独当门**——"PSNR≥48"这条会让 JXL 从 1.0 退到 1.5（省 20% 体积、
+但最差块 p1 从 42.00 掉到 38.96），判据之间互相打脸，分歧点就是产品要拍的地方；
+**③ WebP 有损分支在截图内容上没有"视觉无损"这一档**（详见 48.3）。
+
+### 48.2 尺子本身：分块 p1 是唯一撑得住的，VMAF 在静帧上不该采信
+
+`tile_psnr` = 先逐像素平方、再按 32×32 求均值、取最差 1% 与最差单块（亮度平面）。加它的理由：
+**SSIM 在 UI 截图上没有动态范围**——整条 jpegli 阶梯只从 0.9867 走到 0.9969，任何绝对阈值都会
+放过肉眼可见的坏。VMAF 则量到**恒等天花板 97.43 而非 100**，且 `--lossless` 式平滑能让某些
+编码点**超过 100% 天花板**（表里出现 100.5%）。回原始 JSON 定位：`integer_vif_*` 与
+`integer_adm2` 恒为 1.000，只有 `motion` 两项为 **0** ⇒ 天花板是"单帧无运动"这个形状压出来的，
+**VMAF 是视频指标，静帧截图上它不该参与判决**（本轮只把它当旁证）。
+
+⚠ 本轮我自己写的第一版复核脚本反而**制造了一次假缺陷**：它按块**先取亮度均值再求差**，正负相消，
+量的是"块平均亮度 PSNR"，比真·分块 PSNR 高约 **10.3 dB**，于是把没问题的 ladder 判成有问题
+（avif CRF15 报 49.67 vs ladder 39.36）。靠"两套实现同进程对撞 + 必须复现 ladder 已登记读数"
+才暴露是**我错在对侧**。⇒ 复核脚本必须自带一条"复现权威读数"自检，对不上就当场退出。
+
+### 48.3 4:2:0 是天花板，而**亮度平面的尺子看不见它**
+
+同参数只差色度（v2 vs v3）：jpegli q=0.5 时 p1 45.40→42.55；avif CRF 2 时 49.43→44.15；
+而 CRF 15 时只 39.36→38.85。**结论：质量系数只能在色度天花板以下动，要 p1≥45 必须换色度。**
+
+更紧要的是这条判据本身先前被记错过一次：我据 v2/v3 之差说过"444→420 只值 2.9 dB"，
+那是**用亮度平面的尺子去量一件只伤色度的事**，系统性低估。改用 Cb/Cr 平面重测（base-vs-base，
+同传递函数互比，不引外部基准），再拿"把 444 人工降成 4:2:0 再升回"做独立标定：
+
+| | 真实 444 vs 420 | 标定（人工降采样，只动色度） |
+|---|---|---|
+| Y 分块 p1 | 38.72 | 168.13（未动，证明标定没顺带糊亮度） |
+| **Cb** | **34.11（最差单块 25.70、彩边最大偏差 64/255）** | **35.33** |
+| Cr | 38.30（最差单块 29.76） | 37.79 |
+
+两条独立路径同量级 ⇒ 差异确证是色度这一维。代价 **4:4:4 多 17% 体积**。
+用户看过数字后的口径仍是"**默认仍然 420**"（`ChromaGainMap` 保持），故未改代码，只把这条判据留在文档。
+⇒ 凡"降色度值多少"的问题，**必须报色度平面**，报亮度 p1 就是报错。
+
+### 48.4 AVIF 默认根本不走 avifenc；硬件档的 CRF 是个体积滑块
+
+`Auto` 在 4:2:0 下由 `PickAuto` 硬件优先 ⇒ **本机（RTX 4060 / 驱动 616.92）落到 NVENC**，
+所以 48.1 那条 avif 曲线只描述"用户明选 LibAom/SvtAv1"或无硬件 AV1 编码器的机器。
+补测硬件档（`src/TrueToneCap.Tools/AvifBackendLadder.cs`，走产品自己的
+`AvifEncoder.EncodeSdrAsync`，不复制参数拼接逻辑）：
+
+| CRF | NVENC 分块 p1 | 体积 | 耗时 | 对照 libaom p1 |
+|---|---|---|---|---|
+| 2 | 43.50 | 287.9 KB | 335 ms | 44.15 |
+| 8 | 43.53 | 188.6 KB | 12 ms | 42.51 |
+| 15（默认） | 43.46 | 148.5 KB | 12 ms | 38.85 |
+| 30 | 43.11 | 106.0 KB | 11 ms | 31.65 |
+
+CRF 跨 28 档，硬件 p1 只掉 **0.39 dB**，体积掉 2.7 倍。先排除测量假象：10 个点解码像素
+**10 个不同哈希**，全图 MAD 单调 0.7766→0.8812 ⇒ 平坦是真的。⇒ **同一个 CRF 数字在两条分支上
+是两种东西**（硬件 15 档 43.46 / 软件 15 档 38.85，差 4.6 dB），而界面只给一个数、一句
+"15 ≈ 视觉无损"。这是 #20 剩下的真正开口，不是"默认值不够高"。
+
+⚠ 探针第一版差点给出假结论：它把"降级原因"读 `EncoderFallbackNotifier.LastReason`，而 NVENC 的
+原因走 `NvencAvifBackend.LastFallbackReason`（internal，Core 的 `InternalsVisibleTo` 只给 Test）
+⇒ 整列恒报"（无）"，把"整批其实都退回 libaom"报成没降级。改成可观测判据自证：每档再强制编一次
+libaom 作对照，**产物逐字节相同 ⇔ 本次没走硬件**。这条判据同时就是 48.5 那起粘滞的探测器。
+
+### 48.5 CRF 0 的真相：CONSTQP 的 QP0 是"请求 lossless"，被拒之后还会报废整进程的硬件编码
+
+产品把 CRF 直接写进 `NV_ENC_CONFIG.rcParams.constQP`（`NvEncoderNative.cs:803-806`），
+而 AV1 的 QP0 语义即无损 ⇒ 本机实测 `InitEncoder hr=0x00000008
+lastErr="Lossless Coding mode not supported"`。**危害不在那一张图**：该失败原先不被
+`IsInputSpecificNvencFailure` 认成"本次输入不适用" ⇒ 置位 `s_nvencFailed`，此后**同进程所有**
+AVIF 静默退回软件。顺序实验 `--crf 2,0,5,8,15`（修复前）：
+
+```
+   2  是：与 libaom 产物不同   287.9 KB   ← hr=0x0
+   0  否：与 libaom 逐字节相同  246.0 KB   ← hr=0x8
+   5  否：与 libaom 逐字节相同  100.2 KB   477 ms（硬件档是 12 ms）
+```
+
+与 §42 那次"一张 96×96 小图废掉全部 4K"是**同一个病的第二个签名**。修复两处，且只用**一张表**：
+`AvifEncoderCapabilities.MinCrf(kind)`（Nvenc/Qsv→1，软件档→0，Auto→0 由调用方先解析），
+三个消费点问它——UI 抬 `QualitySld.Minimum`、`NvEncoderNative` 两个 `Encode*Core` 在写 constQP
+前钳制（兜住滑块管不到的 `settings.json` 遗留 0 与"Auto 事后才解析成硬件"）、测试。
+分类里补上那条签名字符串。**实机 A/B**：修复后同命令五档全 `hr=0x0`、全报"是：与 libaom 产物不同"，
+且 5/8/15 的体积与一次纯净硬件扫阶**逐字相同**；CRF 0 现在 299.2 KB > CRF 2 的 287.9 KB，
+说明 QP1 确为最高质量档、与阶梯单调连续。
+
+"硬件到底有没有无损 AV1"这句先前只由产品自己的报错支撑，属未经独立确认的负断言。本轮补了两个独立来源：
+① `ffmpeg -c:v av1_nvenc -rc constqp -qp 0` 报**逐字相同**的驱动错误 ⇒ 不是产品偏移量写错；
+② 换码控也救不回来——`-rc lossless`（NVENC 确有这个枚举值 4）对 AV1 直接
+`Error applying encoder options: Invalid argument`。
+顺带否掉我自己当时的另一个假设："硬件平坦是码控接错、该走 VBR+target-quality"——
+ffmpeg 自己的 constqp **同样平坦**（QP2→30 p1 40.29→39.94），`vbr+cq` 也只有 1.97 dB 跨度，
+所以平坦是 NVENC AV1 在这类内容上的固有性质，**别再回去翻 `RcConstQp` 的地址**（已写进 `MinCrf` 注释）。
+规范侧旁证：官方头文件里唯一文档化的无损配方是
+`qpPrimeYZeroTransformBypassFlag + QP0 + CONSTQP + HIGH_444_PREDICTIVE_PROFILE`，那是 H.264 的字段；
+`NV_ENC_CONFIG_AV1`（1.4.2 时代 SDK 13.1 头 2074–2227 行）内**无任何无损开关**。
+`NV_ENC_CAPS_SUPPORT_LOSSLESS_ENCODE` 的序号由头文件反推为 **34**（反推法自检：同一数法下
+`SUPPORT_10BIT_ENCODE` 必须等于产品实测常量 39，对上才采信）。要一口定死需在 Core 露一个静态 caps 探针，
+属加 API，未擅自做。
+
+### 48.6 软件档的 CRF 0 也不是逐位无损，而且这与"兼容照片"按实现互斥
+
+本机 `avifenc` 与 `C:\PLAN\ffmpegPictureUI\tools\src\libavif`（`project(libavif VERSION 1.4.2)`，
+与 `avifenc.exe --version` = `1.4.2 (aom 3.14.1, svt v4.1.0)` 逐字对上，故行号可当行为依据）
+的 `apps/avifenc.c:2032-2083` 规定：无损模式**硬性要求** 4:4:4（灰度可 400）、full range、
+且 `matrixCoefficients ∈ {identity, YCgCo-Re, YCgCo-Ro}`；不给 `--cicp` 时 `--lossless` 自己设成 identity。
+关键：**`-q 100` 根本不进这条路径**（`lossless` 只能由 `-l` 触发）。
+产品 `AvifMatrixCoefficients` 恒返回 1 或 9（2026-08-10 实测"声明 0 时 Windows 照片自行套错矩阵→偏色"）
+⇒ **"CRF 0 逐位无损"与"bt709 矩阵"二者按实现不可兼得**，实测上限是 ±1 LSB / MAD 0.3268 / PSNR 52.99，
+不是"少传了一个参数"。反证也做了：`--lossless --yuv 444 --cicp 1/13/1` → **rc=1、不产出文件**、
+错误文本与所引源码行逐字一致。
+
+逐层加参数实测（同一 `-q 100`）：
+
+| 参数组合 | 结果 | 体积 |
+|---|---|---|
+| `-q 100` / `-q 100 --yuv 444`（产品现状） | ❌ MAD 0.33，最大偏差 1 | 402 K |
+| `-q 100 --yuv 444 --cicp 1/13/0` | ✅ **逐位无损**（pix_fmt 变 gbrp） | 566 K（+41%） |
+| `--lossless`（不带 cicp/range） | ❌ **MAD 57.47 / PSNR 11.95** | 566 K |
+| `--lossless --yuv 444 --cicp 1/13/0 --range f` | ✅ 逐位无损 | 566 K |
+
+第三行是本轮新坑，但**我先前对它的归因是错的**（曾写"avifenc 的 `--lossless` 会把摆幅/矩阵设成
+与 PNG 输入不匹配的组合"）。ffprobe 复核：那个文件 `color_range=pc` + `color_space=gbr`，两项都对；
+MAD 57 的真因是**没显式给 `--cicp` 时 primaries 从源 PNG 的 iCCP 继承成了 bt2020**
+（`pix_fmt=yuv444p / primaries=bt2020`，而逐位无损那份是 `gbrp / bt709`），解码器照声明搬矩阵。
+产品恒传 `--cicp` ⇒ 踩不到；正确告诫是"**用 `--lossless` 必须把 primaries 一起钉对**"。
+留给用户拍板的三选一（判据文件在 `artifacts/quality-ladder/lossless/`）：改标签承认 ±1 /
+换 identity（+41% 体积、撞 2026-08-10 那条照片记录）/ 试 YCgCo-Re（规范允许的可逆整数矩阵、
+非 identity，照片对它的支持未测）。
+
+### 48.7 "0.3.3 的 HDR 是正确的"——逐条比对后，那条正确不在 PNG
+
+用户以 0.3.3 为基准怀疑 HDR 回退。`git show v0.3.3-beta`（=`0916a2a`，2026-09-05）逐行比：
+
+| | v0.3.3-beta | HEAD |
+|---|---|---|
+| PNG 写的块 | IHDR/sBIT/cICP/iCCP/IDAT/IEND | 相同；`cLLI`/`mDCV` 两边都 **0 处** |
+| `hdrBitDepth` | `switch { 10=>10, 12=>12, _=>16 }` | 同一行 |
+| `HdrToPq16` | 0..1023 再 `<<6` 左对齐 | 相同 |
+| `ToneMappingParams` | PaperWhite 200 / DisplayMax 1000 | 相同 |
+| **`OutputBitDepth <= 8` 时** | **退回 `ToSdrAndDegrade`（整张变 SDR）** | 同一条 guard |
+
+⇒ **0.3.3 的 HDR PNG 在默认设置下同样是 SDR**，与"`D:\TTC` 里 66 张真实 PNG 全部 bd=8、零 sBIT、
+无一张带 PQ"吻合。#21 那个缺陷早于 0.3.3，不是回归。（本轮我一度怀疑 `#21` 的 8→10 协商把 HDR PNG
+从 16-bit 降成了 10-bit——错。`_ => 16` 只在**已进入 HDR 分支后**可达，而默认 8 进不去该分支；
+明选 16 仍走满 16-bit。）
+所以"0.3.3 正确"能指的只有 **GainMap**，而 §45 那批回归已证两侧在匹配 4:4:4 时逐字节相同、
+唯一差异是 base 色度 ⇒ 见 48.3 的色度平面实测，代价用户看过数字后仍选择保持 4:2:0。
+
+### 48.8 HDR PNG 还缺两块 PNG 3.0 声明（#27，待定义填什么值）
+
+W3C PNG 第三版定义了两个可选 HDR 辅助块，均须在 PLTE/IDAT 之前。块名与字段布局由**规范逐字符 +
+外部解码器往返**双重确认（`artifacts/png-hdr-meta/probe-chunk-names.py`）：
+
+- **`cLLI`**（§11.3.2.8）= 8 字节：MaxCLL(u32BE) + MaxFALL(u32BE)，单位 **0.0001 cd/m²**。
+  编码 `12345678` → ffprobe 报 `max_content=1234`。
+- **`mDCV`**（§11.3.2.7）= 24 字节：8 × u16BE 色度（R.xy,G.xy,B.xy,白点xy），单位 **1/50000**；
+  随后 u32BE 最大亮度、u32BE 最小亮度，单位 0.0001。写 `0.7080` → 读回 `35400/50000`。
+
+⚠ 一次无效实验要记下来：想让"哪种拼法能被解码认出"来定名字，结果 **ffmpeg 对两种大小写都认**
+⇒ 该实验只能定布局、不能定名字（名字靠规范）。另外第一版拿 sRGB 源比 HDR base，量出 Y p1=21 dB、
+"4:4:4 反而更差"——那是**传递函数失配**，整张表作废，改成立法后才得到 48.3/48.7 那些能用的数。
+
+`ManagedPngEncoder` 全部 `WriteChunk` 调用点只有六个块 ⇒ 两块从未写；而 AVIF 路径反而带 `clli`
+（`NativeAvifEncoder` 的 `clliArg`）、像素还是同一份 `HdrToPq16` ⇒ 同一个事实两边说法不一。
+未动代码，因为要先定两件事：MaxFALL 取什么（现在只有峰值亮度；FALL 是"帧平均"）、
+以及 mDCV 该不该写（它描述**母版显示器**，截屏场景里是否等于用户那块屏是产品判断）。
+**宁可只写 cLLI 也不凭猜测填 mDCV。**
+
+### 48.9 两处"界面与产物不一致"与一处提示管道缺陷
+
+- **#22 实情比原标题窄**：TIFF 的 BPS 只有 8/16 合法（写 10/12 产出打不开的文件，UI 也只给这两档，
+  且 12-bit 钳制早有测试），所以不存在"能表达却没表达"。真正的缺陷只有一个：HDR 分支硬写 16-bit、
+  从不读设置，**用户选 8 拿到 16 且零告知**。修法只补告知不改行为（16-bit 才是对的），
+  方向与 #21 的 PNG 相反（PNG 遇 8 是降 SDR 丢 HDR，TIFF 是升 16 保 HDR）。
+- **#26 顺带查出一处"靠顺序才对"的隐性耦合**：`OnQualityChanged` 原先无条件写质量描述，
+  会把无损格式顶上来的 `range.Label` 冲成一个孤零零的"100"；当时不出事纯靠赋值顺序。
+  现收敛成唯一写入点，并有 5 条源码哨兵钉住（含"描述行写入点数必须为 1"，
+  变异造成 2 处 ⇒ 恰好只有该条红、消息自带"实得 2 处"）。
+- **提示管道有两套去重**：4 处协商按消息内容比（`s_lastDegradedToast`），而
+  `NotifyEncoderFallbackIfAny` 用一个进程级布尔"只弹一次" ⇒ **第一条降级之后所有其他种类的
+  降级永久无声**，正好吃掉 #21/#22 的提示。删掉布尔、统一到既有那套。
+  ⚠ 附带一条断言设计教训：第三条哨言原写成"源码里不得出现旧变量名字样"，
+  当场把**我自己解释这次修复的注释**判红 ⇒ 断言不该管文档措辞，删；防重犯已由那条正则负责。
+
+### 48.10 数字与账
+
+门禁：上轮真实读数是 **1212**（从 `artifacts/pub5.log` 逐套件加回：716+213+14+4+12+36+217），
+本轮结束时 **1238**，两处对账都对得上：`--unit-tests` 716→**735**（+5 CRF 下限与分类、
++7 `QualityIsFixed` 七格式表、+5 UI 源码哨兵、+2 提示去重 = +19），
+`--format-tests` 36→**43**（+7 TIFF 告知），其余四套件不动。
+⇒ 我带进本轮的一个"上轮 1245"基线是**错的数**，差额当时看似"加断言却变少"，实际是基线不成立。
+教训照旧：**断言数不能拿上一轮的口头数字当基线**，要当基线就得留下当次日志。
+另外本轮门禁两次被自家那道"**宿主比源码旧 ⇒ 随后所有 RESULT 读数作废**"拦住
+（还原 mutation 只推后 mtime、内容未变），按提示 `--no-incremental` 重建后才作数——
+这道闸这次是真在防假绿，不是我先前疑心的误报。
+
+**仍未闭合，且每一条都卡在用户手上**：#20 阈值口径（48.1/48.4 已给全曲线，含"一个 CRF 数字
+服务不了软硬件两条分支"这个开口）、#21 的 App 侧升档端到端实机、#16 真机 HDR 观感、
+#26 渲染确认、#27 两块声明填什么值、#24 的 ② 三选一。本轮全部改动**未提交**。
+
+---
+
+## 49. 第三十七轮（2026-09-25）：#29 拆成两条独立缺陷 —— 一道死掉的迁移门，和一次"程序赋值被当成用户意图"
+
+一句话：**"首启把质量回写成区间端点"这个报告里其实有两件事**，而且第一件不是回写，
+是**老文件里的端点值从来没被交还过**；第二件才是真回写，且它跟迁移无关、任何时候都会发生。
+两条各自修、各自有判据、各自做过变异。门禁 **exit 0 / 1248 断言**（上轮 1242，+6 全是本轮新增）。
+
+### 49.1 取证起点：包目录里那份文件不是我看到的"首启产物"
+
+上一轮结尾留下一条反证（`publish/TrueToneCap-v0.3.5-beta/log/` 里 21:48 与 21:59 两次
+`已将设置迁移到软件同目录 … TrueToneCap.settings.json SettingsService.cs:79`），本轮顺着它读到底：
+
+- 迁移的**来源**是 `%LOCALAPPDATA%\TrueToneCap\TrueToneCap.settings.json`，本机实存 **1461 B / 2026-09-16 08:07**，
+  里面逐字写着 `"QualityAvif":63,"QualityWebp":50,"QualityGainMap":3,"QualityJpegLi":0.5,"QualityJpegXl":0.5,"ColorSpaceIndex":5`。
+- 包目录那份"首启产物"的每一个数字都与它一致 ⇒ 那**不是**首启算出来的，是 09-16 那份被搬过来的。
+- 同一条机制在 dev bin 也留了活体样本（270 B，`SettingsRevision:1` + `QualityAvif:63`），
+  而 dev 侧"删文件重启"实验不复现 —— 因为它的 `BaseDirectory` 早就有一份了，迁移根本不看这一步。
+
+⇒ 原报告里"首启写回极值"这一半当场作废：迁移只是搬运工，**问题在"搬来之后为什么没人管"**。
+
+### 49.2 第一条缺陷：`MigrateStaleDefaults` 对它唯一的受众从未触发过
+
+`SettingsService.cs:363` 的门是 `if (s.SettingsRevision >= CurrentSettingsRevision) return false;`，
+而 `AppSettingsData.cs:24` 的注释写着"旧文件（无此字段）读作 0"。**注释是对的，实现是反的**：
+
+```csharp
+public int SettingsRevision { get; set; } = CurrentSettingsRevision;   // ← 初值就是"缺键时读到的值"
+```
+
+System.Text.Json 反序列化是"先跑属性初始化器、再用 JSON 里**出现过的**键覆盖"，
+所以缺 `SettingsRevision` 的 09-16 那份文件读出来是 **1**，`1 >= 1` 恒真 ⇒ 门恒关。
+那份文件里的 `QualityAvif=63`（CRF 区间上界=最差档）于是被当成"用户亲手挑的档位"永久保留，
+界面上就是 `CRF: 63`。§48 之前那轮"默认值改不动"的账（`project-settings-defaults-never-propagated`）
+修的是**写侧**（全量序列化 ⇒ 永不缺键），本轮这条是**读侧**的同一族缺陷：
+**用初值表达"缺键"语义，等于没有缺键。**
+
+修法两行，各管一侧：
+- `AppSettingsData`：初值留 0（缺键=未迁移），并在字段上写清"不得写成当前号"；
+- `SettingsService.Save()`：`Current.SettingsRevision = CurrentSettingsRevision;` 放在 `SerializeDiffs` 之前 ——
+  盖章这件事必须在**唯一的写盘出口**说，否则新装机存盘会得到 0 号章，下次启动迁移门就把用户刚挑的档清成默认。
+
+### 49.3 修订号 1 作废、按 2 重发（不是默认表变了）
+
+1 号那套机制**从来没有对任何文件生效过**，所以它盖过章的文件（09-24 之后写过盘的那些）
+既有旧端点值、又顶着"已迁移"的凭证，光看内容无法与真正迁移过的区分 ⇒ 只能整体作废重发。
+`MigrateStaleDefaults` 的键表不变（五条质量 + `ColorSpaceIndex`），色度/位深仍按 09-19 拍板不碰。
+**真机坐实**（dev bin 那份 270 B 的 rev-1 文件，启动后）：
+
+```
+15:11:29.631 [Info] 默认值修订 2：旧文件里的值被钉死、代码默认改不动，本次交还默认表 ——
+  QualityGainMap 0.5→1，QualityJpegLi 0.5→1，QualityJpegXl 0.5→1，QualityAvif 63→15，
+  QualityWebp 50→90，ColorSpaceIndex 2→0。…  SettingsService.cs:393
+```
+
+文件 270 B → 176 B：五条质量键**全部消失**（因为现在等于默认，被差集剪掉），`SettingsRevision` 变 2。
+"键不见了"就是"值等于默认"的可见读数 —— 差集序列化在这里第一次反过来当了证据。
+
+### 49.4 第二条缺陷：`UpdateQualityPanel` 的前半段改掉了自己的输入
+
+迁移成功后，那份 176 B 里**仍然留着** `QualityGainMap:0.5`，而日志明明白白写着它被交还成 1。
+⇒ 交还之后又有人写回去。用**绝不可能是钳制结果**的中值做夹具（`QualityGainMap=2.0`，区间 0.5–3.0 的正中间）：
+
+| 构建 | 文件结果 | 界面 |
+|---|---|---|
+| 修复前 | `QualityGainMap: 0.5` | `距离: 0.5`，滑块贴最左（`artifacts/ui-captures/shot-gm2.png`）|
+| 修复后 | `QualityGainMap: 2` | `距离: 2.0`，滑块在 2/3 处（`…/shot-gm2-fixed.png`）|
+
+机制在 `MainWindow.xaml.cs` 的 `UpdateQualityPanelCore` 内部：
+`QualitySld.Minimum = 0.5` 会让 `RangeBase` 就地钳制 `Value`（此刻是 0）并抛 `ValueChanged`，
+而 `OnQualityChanged` 把每一次 `ValueChanged` 都当成"用户拖了滑块" ⇒ `_settings.SetQuality(...)` + `SaveQuiet()`；
+**同一方法的后半段**（`GetQuality(fmtIdx)`）又要从 `_settings` 读回"用户存的值"——
+读到的已经是它自己前半段写进去的 0.5。一个方法改掉了自己的输入，且顺序恰好让它读在后面。
+
+### 49.5 既有防线 `_uiReady` 为什么没盖住
+
+`MainWindow.xaml.cs:268` 那条注释（"ApplySettingsToUI 期间禁止事件覆盖 _settings"）说明这个危险
+**早被识别过**，但保护窗口只罩住 `ApplySettingsToUI()` 这一次调用；`UpdateQualityPanel()` 在
+`_uiReady = true` **之后**（276 行）执行，做的是同一类程序赋值，却站在窗口外面。
+⇒ 可迁移的一条：`_uiReady` 是"启动那一段"的粗闸，凡"程序性赋值"都该有**自己那一次调用**的细闸；
+粗闸按时间划界，细闸按来源划界，两者不互相替代。全仓 `.Minimum =` / `.Maximum =` 只有 4 处、
+且全属 `QualitySld`（区间随格式变是这个控件独有的性质），所以这一类到此为止，不外推。
+
+修法：`UpdateQualityPanel` 变成 `设标志 → try { Core() } → finally 复位` 的包装，
+`OnQualityChanged` 的入口守卫加一条 `_qualityPanelUpdating`。手法沿用同文件既有的 `_avifOptionsUpdating`。
+`finally` 不是讲究：Core 抛异常若不复位，标志永久为 true ⇒ 用户此后拖动再也不落盘，
+那是**比原缺陷更坏的静默失效**，所以它单独有一条锁（49.6-③）。
+
+### 49.6 判据落点（三层，各有分工）
+
+1. **行为级自检**（`SelfTest.RunSettingsMigrationCheck`，`--settings-migration` 单跑，毫秒级）：
+   夹具=本机那份 09-16 文件逐字照抄，**直接调** `SettingsService.MigrateStaleDefaults`
+   （为此把它从 `private` 提到 `internal` —— 走 `Load()` 外层入口的话，本机老文件早已被搬过，
+   测到的是环境不是门）。四个读数，实机当前全绿：
+   `缺键读作 SettingsRevision=0` | `门触发，63/50/3/cs5 → 15/90/1.0/cs0` |
+   `盖章为 1 的文件重迁=True` | `盖章为当前号的同内容文件不动（AVIF 仍 63）`。
+   前一条与末条是**独立参照**（字面量，不由被测常数推导），中间两条比 `CreateDefaults()`，
+   而该表的字面量另有门禁哨兵钉着 ⇒ 不重复钉数字。
+   ⚠ 本轮在这条自检里也踩了一次"读数被副作用改写"：`a.SettingsRevision` 在迁移后打印，
+   于是"应为 0"那一栏印出了 2 却仍然判绿 ⇒ 迁移类判据**必须在调用前取值**（已改成 `int revRead`）。
+2. **门禁源码哨兵 3 条**（`Test_SettingsPersistence_Sentinels`）：初值不许是非 0、
+   `Save()` 必须在序列化前盖章、`migrated` 必须驱动 `Save()`。
+   Test 工程只引用 Core、碰不到 `AppSettingsData` ⇒ 只能钉形态；三条各咬一种退化。
+3. **质量面板 3 条**（`Test_QualityPanelProgrammaticWrite_SourceSentinels`）：守卫认这个标志、
+   复位走 `finally`、主体在 `Core` 里。
+
+另外捡到一条**编译器级**的锁：仓库 `TreatWarningsAsErrors=true` ⇒ "字段赋了值却没人读"是 **CS0414 错误**，
+所以"把守卫摘掉、标志留着"这种变异**根本编不过**（本轮实测如此）。
+哨兵仍要留着，因为它管的是"标志在别处也被读、唯独守卫里没读"那种编译器看不见的情形。
+
+### 49.7 变异表（每条都核过改动范围，颜色才有意义）
+
+| # | 变异 | 结果 | 结论 |
+|---|---|---|---|
+| ① | 初值改回 `= CurrentSettingsRevision` | 行为级自检红 + 哨兵①红 | 两层都咬得住 |
+| ② | 删 `Save()` 的盖章行 | **只有**哨兵②红（自检仍绿） | 与设计一致：这条行为级管不到，靠成对补位 |
+| ③ | 修订号退回 1 | **只有** `rev1Refired` 红 | 反例夹具按当前号动态生成，才不会随版本号漂移 |
+| ④ | 摘掉 `OnQualityChanged` 守卫 | 编译失败 CS0414 | 无守卫构建的 `2.0→0.5` 已由 49.4 表左列给出 |
+| ⑤ | 复位不走 `finally` | 哨兵②③同时红 | 两种形态各咬到 |
+
+源文件全部按 sha1 + mtime 还原（`AppSettingsData`/`SettingsService` `03b22d12…`/`b2dffd76…`，
+`MainWindow.xaml.cs` `0f4519f0…`）；变异一律用编辑工具做，`diff` 对备份逐行看范围，不用 `sed`。
+
+### 49.8 本轮我自己制造的两个假信号（harness 又当了一回错误源）
+
+- **夹具被命令层改坏**：`printf '%s'` 与 `<<'EOF'` 两种写法都把 JSON 里的 `D:\\TTC` 折叠成 `D:\TTC`，
+  `\T` 是非法转义 ⇒ 反序列化抛异常 ⇒ 走 `catch { Current = new(); }` 的"全默认"分支，
+  于是文件里同时丢了 `OutputPath`/`FormatIndex`/`ChromaAvif`，看起来像"启动清空用户设置"的第三条大缺陷。
+  差点把它写进结论。⇒ 规矩：**Windows 路径夹具改用正斜杠**（`D:/TTC`，.NET 两侧都吃），
+  且每次手搓夹具后先 `ConvertFrom-Json` 自检一遍再启动程序。
+- **"未生效"伪装成"未复现"**：变异④的构建失败后我读了产物文件，值仍是 2.0 ——
+  那是**上一版好 DLL** 的读数，不是变异体的。⇒ 老规矩再加一条：A/B 之前先确认 exe/dll 的 mtime 真的换过。
+
+### 49.9 环境与账目
+
+- 停了开机自启的**旧构建**托盘实例（PID 1708，14:42 起、日志停在 14:42:18 无任何捕获动作）——
+  它锁着 dev bin，构建复制 apphost 会 MSB3027 失败。它是可重启的本地常驻实例，非用户数据。
+- dev bin 那份设置文件已按 sha1 还原成**接手时的字节**（`dec040ce…`，270 B，rev 1 + 端点值）：
+  用户下次启动会亲眼看到 49.3 那条迁移日志与滑块归位，这比我替他改好更有用。
+- 发布包目录本轮**没有跑过任何构建或程序**（上一轮清理出的 608 文件与归档一致的状态保持不变）。
+- 本轮改动仍**未提交**；`src/TrueToneCap.Core/Settings/`（`SettingsDiffPruner`）与
+  `src/TrueToneCap.Tools/AvifBackendLadder.cs` 还是 untracked —— 门禁对 untracked 失明，提交时别漏。
+- `CHANGELOG.md` 里 09-23 起还没有 `[0.3.5-beta]` 一节（09-24 那轮也没写），本轮不单独开一节，
+  等发布收口时按"一条提交=一版本"一起补。
+
+### 49.10 仍未闭合
+
+**卡在用户手上**：#20 阈值口径（曲线已给全）、#24 的 ② 三选一（要你把
+`artifacts/quality-ladder/lossless/` 那两枚在"照片"里对比一句）、#26 的渲染确认
+（本轮已可自助：`--display-audit` 之外，`artifacts/ui-shot2.ps1` 用 PrintWindow 截图，
+PNG/TIFF 两档下质量行应整行消失）、#27 `cLLI` 的 MaxFALL 填什么、#16 真机 HDR 观感（本机无 HDR 面板）。
+**新留给用户的一条**：下次启动 dev 或新包时留意日志里那句"默认值修订 2：…交还默认表"，
+其中若有你**有意**选的档位（本轮实测被交还的是 AVIF 63 / WebP 50 / GainMap 0.5 / 色彩空间），
+重新挑一次即可 —— 此后只有与默认不同的值才会落盘。
+
+---
+
+## 50. 第三十八轮（2026-09-25 同日）：设置落盘的两条口径 —— 改设置即时更新同目录 JSON；不可写就记日志并按默认值
+
+用户口径两条，分开做：**①「更改设置的时候更新这个 json」**（json 与软件同目录）；
+**②「不可写的情况下在日志记录问题，同时遵循默认值」**。
+门禁 **exit 0 / 1263 断言**（§49 收尾是 1248，本轮 +15，且 15 条逐条核对过"确实跑了"）。
+
+### 50.1 ①的审计：116 处赋值 / 16 处落盘，靠"点名"数不清，改成扫描
+
+`_settings.X = ` 在 App 里有 116 处，落盘调用只有 16 处 —— 人肉逐行看必然看漏。
+先按"赋值后 14 行内有没有 Save"粗扫（误报一堆，因为多数 handler 用的是本地包装
+`SaveSettingsQuiet()`，字面量正则认不出），再按**方法体作用域**扫，剩 6 处真漏网，逐条读源码定性：
+
+| 站点 | 性质 | 处置 |
+|---|---|---|
+| `OnOcrLangChanged` | 纯用户选择，只改内存 | **补落盘** |
+| `OnTranslationModeChanged` | 纯用户选择（翻译模式 + 是否用自建 LLM） | **补落盘** |
+| `ApplySettingsToUI` 色域索引迁移 | 注释写着"立刻落回…否则文件里长期留着旧索引"，实际只改对象 | **补落盘**（兑现自己写的承诺） |
+| `UpdateAvifOptionAvailability` ×2 | 硬件能力派生值，非用户选择；调用方 handler 末尾本来就存 | **豁免，点名 + 给理由** |
+
+前两条为什么是真缺陷而不是"反正关窗会存"：全量 `SaveSettings()` 只挂在**托盘退出**那一条路径上
+（`MainWindow.xaml.cs:234`），而本程序按"开机自启 + 最小化到托盘"设计要连续跑好几天
+⇒ 崩溃 / 注销 / 直接关机时这两项静默丢失，症状是"我明明改过，重启又变回去"，日志一个字都没有。
+
+判据落成**扫描式**（`Test_SettingsWriteSites_AllPersist`）而不是点名几个方法：新加一个 handler
+忘记落盘要当场红，并且它会**点名是哪个方法**。豁免必须写在名单里，不许留空子。
+
+### 50.2 ②的根因：属性位探测放行了真正存不下去的那一类
+
+原 `ResolveSettingsPath()` 的判据是"文件不存在 ⇒ 同目录可用；存在且带只读位 ⇒ 才降级"。
+但真实世界存不下去的主因（装进 Program Files 被 ACL 拒写、只读介质、策略拦写）
+恰恰是**文件还不存在**的形态 ⇒ 探测一路放行，随后每次 `Save()` 抛异常，
+而调用方清一色走 `SaveQuiet()`，它原先是空的 `catch { }` —— **连日志都不记**。
+⇒ 症状恰好就是那段防护声称要防的那件事。目录的只读属性位在 Windows 上也不代表不可写（系统忽略它），
+所以属性位这条路根本测不到这件事。
+
+新口径（用户拍板）：**能存才认**。`SettingsWriteProbe.CanPersistSettings` 真写一次（建了再删）；
+判 false 时程序 **既不读也不写**那个文件，整体按默认值表运行，并记一条 Error。
+同时**拆掉"降级到 %LOCALAPPDATA%"这条路** —— 设置存在哪一旦有两个答案，
+同目录那份与 LocalAppData 那份内容可以完全不同，用户与代码各信一个，比"不保存"更难查。
+连带后果（刻意的）：不可写时旧位置迁移也不做；那份文件不删不动，挪回可写目录后迁移照常生效。
+触发面很窄：只有"同目录那份被设成只读"的老用户会碰到，因为"目录不可写"在旧实现里从没被探测到。
+
+遵循口径的三处写入点：`Load()`（直接 `Current = new()`）、`Save()`（记日志后 return）、
+`App.xaml.cs` 的主题早加载（不可写 ⇒ 默认主题）。`SaveQuiet()` 的失败改为
+**按内容去重**记 Error（与 #28 降级提示同一规则：同一种失败不刷屏，不同失败各留一条）。
+
+### 50.3 实机正反两条读数
+
+- **正向**（同目录可写）：夹具 `ColorSpaceIndex:5` → 启动后文件变 `2`，日志里"设置目录不可写"出现 **0 次**。
+- **反向**（把那份文件设成只读，走探测能认的那条拒写形态）：日志出现**恰好一条**
+  `15:47:22.702 [Error] 设置目录不可写 ⇒ 不读取也不保存 …本次运行按【默认值表】；… SettingsService.cs:222`
+  （期间程序照常触发过多次保存 ⇒ 去重有效）；文件 md5 **一字未动**；界面三项全部回到默认
+  （格式 JPEG LI、butteraugli 距离 1.0、保存路径 `C:\Users\20210\Pictures\…` 而非夹具里的 `D:/TTC`），
+  截图 `artifacts/ui-captures/shot-readonly.png`。
+
+### 50.4 一条环境事实，差点让反例夹具变成恒真
+
+第一次写反例夹具用了 `C:\Windows\System32` ⇒ 两条判据当场红，报的是"`system32` 竟然可写"。
+实测本机 shell 是**提权**的（`elevated=True`，用户 ASUS\20210），
+`System32` / `System32\config` / `Program Files` 统统可写；连管理员都被拒的只有
+`WindowsApps`（TrustedInstaller）与 `System Volume Information`。
+⇒ 反例夹具改用 `C:\Program Files\WindowsApps`，并配一条**夹具成立**的前置断言
+（目录存在 + 里面本来就没有这个文件），否则"判 false"可能只是恒真/恒假的另一种写法。
+这条也提醒：任何"不可写"类判据在本机都不能靠"看起来是系统目录"来选夹具。
+
+### 50.5 变异表（本轮 5 组，全部核过改动范围）
+
+| 变异 | 结果 |
+|---|---|
+| 探针结果被无视（`return true`） | "ACL 拒写的目录必须判 false" 红，其余绿 ⇒ 负例真的有牙 |
+| `SaveQuiet` 恢复空 `catch { }` | "SaveQuiet 必须把失败写进日志" 红 |
+| 摘掉 `OnOcrLangChanged` 的落盘 | 扫描哨兵红，且点名到该方法 |
+| 摘掉 `Save()` 的盖章行（§49 那条） | 只红 §49 的哨兵②（分工如设计） |
+| 摘掉 `OnQualityChanged` 守卫 | 编译期 CS0414 直接拦（`TreatWarningsAsErrors=true`）|
+
+源文件全部按 sha1 还原；`--no-incremental` 全解决方案重建 **0 警告 0 错误**；
+dev bin 那份设置文件仍还原成接手时字节（`dec040ce…` / 270 B / mtime 14:42），
+只读属性已清除；本机无 TrueToneCap 残留进程。
+
+### 50.6 仍未闭合
+
+本轮两条口径已闭合。**新留给用户的一条**：设置位置现在只有"软件同目录"一个答案，
+不可写时会在日志里留一条 Error 并整体按默认值运行 —— 若哪天发现"设置又不记住了"，
+先看日志有没有这一条，而不是先怀疑设置代码。
+其余仍卡在用户手上：#20 阈值口径、#24 的 ② 三选一、#26 渲染确认、#27 cLLI/mDCV 取值、
+#16 真机 HDR 观感（本机无 HDR 面板）。本轮全部改动**未提交**；
+`src/TrueToneCap.Core/Settings/`（`SettingsDiffPruner` + 新增 `SettingsWriteProbe`）与
+`src/TrueToneCap.Tools/AvifBackendLadder.cs` 仍是 untracked，提交时别漏。
+
+---
+
+## 51. 第三十九轮（2026-09-25 深夜 ~ 09-26 零点）：下拉项只留名字，说明归灰字；libaom + HDR 放开 10/12
+
+用户口径两条：**①「各种下拉选项上加入了太多的额外内容，重新调整，只用灰字标明」；
+②「libaom + HDR 下应该可以选择 10/12 追求更高精度，色度采样不应该写'默认'、'Auto 可走硬件加速'之类的废话」**。
+（② 后半句其实归 ①：那是同一条下拉里的括号文字，不是能力问题。）
+门禁 **exit 0 / 1272 断言**（§50 收尾 1263，+9）。
+
+### 51.1 先划清"哪些括号是我加的"
+
+`git diff` 只认出两处（`sRGB（BT.709 原色）` 与摘掉 avifenc 档）——**其余全是已提交的旧账**，
+但同样是这几轮里我写的。所以口径按"整片设置页"执行，不按 diff 划界。
+
+### 51.2 一个必须先知道的事实：XAML 里的项文字大半是死文字
+
+`MainWindow.Localization.cs` 在运行时用 `LocaleManager` 的串逐项覆盖 `item.Content`
+（AVIF 色度、GainMap 模式与色度、色域、日志三档…）。
+⇒ **只改 XAML 等于没改**。所以每条都要两处同改，且这正是要加锁的地方（见 51.4）。
+另一处更狠：`UpdateAvifEncoderLabels` 把整张规格表拼进编码器项文字
+（`libaom · 420/422/444 / SDR ≤12-bit · HDR 10-bit · 真 10-bit 输入（实测）✓`），
+窄下拉里必然截断，而这些信息灰字 `AvifCodecHintTxt` 本来就按当前所选编码器动态给了一份
+⇒ 同一件事写三处（项文字 / 灰字 / 能力表），必漂。
+
+### 51.3 改动
+
+* **项文字只留名字**：`LocaleManager` 与 XAML 同步剥括号（日志三档、AVIF 色度三条、
+  GainMap 模式与色度、色域、PNG/JXL/TIFF 位深、遮罩与边框色、OCR 引擎、翻译模式）。
+  保留的是**身份**不是说明：`中文 (简体)`、`Gemini 2.5 Pro (Google)`、`按月 (2026-07)`（输出目录样例）。
+* **被撤下的说明落到灰字**：`LogVerbosityHint` 吸收三档各自含义；JPEG LI 色度原本没有灰字位，
+  补一行 `ChromaJpegLiNoteTxt`；JXL 位深灰字扩写"10/16 都装在 16-bit 容器里"。
+* **编码器项**改为"名字 +（仅当本机不可用时）本机不可用"。可用性是**状态**不是说明，
+  且必须在选中前看得见，故保留；"软件/硬件"与 QSV 的"码率固定 10 Mbps、质量滑块不适用"
+  改由能力表新增字段 `AvifEncoderCaps.UiNote` 承载、在灰字行显示 —— 能力表仍是唯一事实源。
+* **`Caps(Auto)` 的坑**（差点自己踩进去）：能力表里没有 Auto 这一档，查不到时回落成 **libaom** 的能力，
+  所以新写的标签函数若照单全收会把「自动」改名成「libaom」⇒ Auto 项刻意跳过。
+
+### 51.4 文案锁从"内容探针"换成"漂移锁"
+
+原有一条钉的是"420 项文字里要有『默认』二字"——那只是拿文案内容当两处同步的探针，
+本轮统一改短后它必然失效（且失效得毫无信息量）。换成 6 条：
+逐 Tag 比对 **XAML 项文字 == LocaleManager 字面量**（任一处单独改就红，包括改回长文案），
+外加"色度项不得带『（…）』解释"三条。
+另捡到一条**编译器级**保护：`TreatWarningsAsErrors=true` ⇒ 为 HDR 位深新增的局部变量若没人读就是错误。
+
+### 51.5 libaom + HDR 的 10/12：`HdrBitDepth` 从"恒定"降级为"下限"
+
+现状核对（子代理逐行追证，纠正了我一个错误假设）：HDR AVIF **本来就走得通**，
+路径是"scRGB → PQ 16-bit → 16-bit PNG 中转 → `NativeAvifEncoder.EncodeFile`"，
+产物是真 PQ + BT.2020；`Encode(..., isHdr)` 恒 false 不是丢标志，那条只是 SDR stdin 入口。
+真正的卡点是**同一个"10"写了四处**：`NegotiateBitDepth` 的 `hdr ? HdrBitDepth`、
+管线的无条件改写、`HdrToPq16(f, tag, 10)` 的字面量、avifenc 命令行的 `GetDepthArg(10)`
+⇒ 能力表给 libaom 声明的 `MaxBitDepth: 12` 在 HDR 下根本选不到。
+
+改法：新增 `HdrBitDepthFor(kind) = max(10, SdrBitDepthFor(kind))`，
+`NegotiateBitDepth(hdr:true)` 钳进 `[10, 上限]`；管线在**编码器定稿之后**（含 QSV→avifenc 回落）才钳，
+量化与命令行都吃协商结果；`DepthSupported` 的 HDR 分支由 `== 10` 改为区间判定。
+上限刻意复用 SDR 那张表而不是另列一份 HDR 表 —— 两条路只差"有下限"。
+
+诚实的边界：12-bit 的价值是**不再把 Float16 源的约 11-bit 有效精度截到 10-bit**，
+不是"造出 12-bit 信息"；硬件（NVENC / SVT）上限仍是 10，所以真值表成对写
+（libaom 满足 12 / NVENC 不满足 12），否则"HDR 一律放开 12"这种错实现也能过检。
+
+### 51.6 判据落在产物上，并且实测纠正了我对机制的判断
+
+新增 `TrueToneCap.Tools --avif-hdr-depth`（`AvifHdrDepthProbe.cs`）：同一合成 scRGB 源分别请求 10 与 12，
+四条判据 —— ① 10 → `p10`；② 12 → `p12`；③ **两次产物字节必须不同**（相同 ⇒ 参数没抵达编码器）；
+④ 两次的色彩声明都仍是 PQ(16)+BT.2020(9)。ffprobe 路径可由 `TTC_FFPROBE` 注入（门禁传它已解析的那份），
+找不到 ffprobe 就整体判 FAIL —— 不留"跳过然后打印完成"这条路。
+实跑：`yuv444p10le` vs `yuv444p12le`，SHA `066EA8239470…` vs `1BEBC626B209…`，两次都 `smpte2084/bt2020`，exit 0。
+已接进 `verify.ps1` 的 [1.8/2]（第 ④ 项），门禁内同样判绿。
+
+变异两发，其中一发教了新东西：
+* 把量化退回字面量 10 ⇒ 探针 exit 1，②③ 同时红（点名"12 没产出 + 两次逐字节相同"）✅ 有牙；
+* 把 avifenc 命令行的 `--depth` 退回写死 10 ⇒ **探针不红**。
+  查下去是：真正决定输出位深的是中转 PNG 的 **sBIT**（`ManagedPngEncoder` 会为 10/12 写真位深），
+  avifenc 从输入推位深 ⇒ 命令行那处在这条路上是**冗余保险**，不是承重点。
+  ⇒ 记下：别把"我改的那处"当成"起作用的那处"；判据只认产物，机制归机制。
+  该处仍保留（若哪天中转不再写 sBIT，它就是唯一的闸），但文档与注释不再声称它决定位深。
+
+### 51.7 环境与其他
+
+* **本机 HDR 屏上线**（09-24 还是 `HDR 硬件支持=no`）：`\\.\DISPLAY5` 3840x2160、
+  `RgbFullG2084NoneP2020`、10 bit/通道、峰值 418 nits、EDID 原生 ΔG=0.0963（过 0.05 面板自证门槛）、
+  Float16 源=有。⇒ #16 / #21 的 App 侧端到端 / #27 从"本机做不了"变成"可测"。审计卡与自测 JSON
+  存 `artifacts/display-audits/2026-09-25-*`。
+* **门禁两次拦下我**：① 我引入的 `GetEnvironmentVariable` 可空赋值（CS8600）在 [1/2] 就红；
+  ② 一处 Tools-only 修改触发 [1.9/2] 宿主新鲜度（它按"任何源码 vs 宿主"粗判）⇒ 按它给的修法
+  `--no-incremental` 全量重建后重跑，不绕检查。
+* **[1.6/2] 发布门禁回归本轮未跑**：用户 23:28 从发布包启动了实例（PID 6412），
+  而 `Publish.ps1` 的"程序正在运行"预检看到的是真进程（桩件只桩 git/dotnet）⇒ 4/5 场景必红。
+  按脚本自带口径用 `-SkipPublishGates` 跳过并在此上报，**没有**动用户的测试进程。
+  补跑条件：关掉那个实例后 `.\scripts\verify.ps1` 全量再走一遍。
+* 交付中的 `publish/TrueToneCap-v0.3.5-beta`（build-info `builtAtUtc=2026-09-25T14:50:19Z`，
+  `commitSha=614a0b1`、`dirtyWorktree=true`、`tag` 空）**不含本轮 ①②两条改动** ——
+  它测的是 §49/§50。要测新下拉与 10/12，需要重新出包（会覆盖同目录，两只旧 7z 不受影响）。
+* 顺带记一条死串：`LocaleManager.cs:232-233` 的 `RiRelative` / `RiPerceptual`（"相对比色（截图推荐）"等）
+  **全仓无消费者**（渲染意图下拉早被移除）。本轮没删，留在此处：下轮要么删掉，要么别有人再按它以为界面上有这个控件。
+* 全部改动**未提交**；新增 untracked：`src/TrueToneCap.Core/Settings/SettingsWriteProbe.cs`、
+  `src/TrueToneCap.Tools/AvifHdrDepthProbe.cs`（门禁对 untracked 失明）。
+
+---
+
+## 52. 第四十轮（2026-09-26）：JPEG Gain Map 不再是独立格式，并入 JPEG LI 作为一个开关
+
+用户口径两句：**「GainMap 不作为单独的 JPEG 选项出现，作为 JPEG LI 下选择 BT.2020 后的选项，所有相关和 JPEG LI 合并」**，
+以及澄清 **「选择的色彩空间影响的是底图的色彩空间」**。
+门禁 **exit 0 / 1290 断言**（§51 收尾 1272，+18）。
+
+### 52.1 先记一条查证：那第二句已经是现状，不需要改色彩管线
+
+`JpegGainMapEncoder.PrepareGainMapColorSpace`（`JpegGainMapEncoder.cs:97-117`）早就写着：
+默认 base 与增益图都在 sRGB/BT.709、base 嵌 sRGB ICC；**用户显式选 BT.2020** 才把整条增益图搬进 2020
+（像素 + 增益比 + 声明三件同一套原色）；"跟随显示器"即便在 P3 屏上解析成广色域也**不**触发。
+⇒ 本轮要做的只是**格式与面板的合并**，编码路径原地不动。
+顺带一条已解除的旧锁：这里以前会禁用色域下拉并把格子强推到 BT.2020（"GainMap 无视标签"年代的遗留），
+2026-09-23 已解除 —— 合并后这条语义（下拉=底图色域）正好是用户要的。
+
+### 52.2 这次合并唯一会静默损坏设置的地方：`FormatIndex` 是裸索引
+
+旧表 `0 PNG / 1 GainMap / 2 JPEG LI / … / 6 TIFF`，新表少一项 ⇒ 旧 2 变新 1、旧 3 变新 2……
+而全仓对它的唯一旧防线是越界钳制 `if (s.FormatIndex is < 0 or > 6)` —— **删一项之后旧值 1 与新默认值都仍在合法区间内**，
+钳制永不触发 ⇒ GainMap 用户静默变 JPEG LI、JPEG LI 用户静默变 JPEG XL，界面上看不出任何异常。
+同型缺陷在 `ColorSpaceIndex` 上已经发生过一次（那次靠 legacyTags 表修）。
+另外这张索引表原本被抄了**三份**：`MainWindow._formats`、`AppSettingsData.GetQuality/SetQuality` 的 `case 1 =>` switch、
+`CapturePipelineService.GetPerFormatQuality` 的 `format switch`（外加 `MainWindow.Settings.cs` 按索引取位深）
+⇒ 漏改任何一处都是"拖 A 的滑块写进 B"。
+
+### 52.3 改动
+
+* **Core 新增 `Settings/FormatOrder.cs`**：`UiFormats`（6 项，不含 JPEG_GAINMAP）、`LegacyUiFormats`（7 项，
+  即"盘上那个数字原本指谁"的证词）、`RemapLegacy(旧索引) → (新索引, 增益图开关)`、`MaxIndex/DefaultIndex/FormatAt/IndexOf`。
+  放 Core 的唯一理由是**能被门禁执行**——放 App 里就只能写源码哨兵，钉得住写法钉不住语义。
+* **索引不再当键用**：`GetQuality/SetQuality` 改成以 `OutputFormat` 为键；位深映射改按 `CurrentFormat()` 取；
+  `GetPerFormatQuality` 收敛成一句 `s.GetQuality(format)`；`Normalize` 的上界取自 `FormatOrder.MaxIndex`。
+* **迁移** `SettingsService.MigrateGainMapMerge`：整表 remap + 增益图开关 + 参数搬格。
+  门用**新字段 `GainMapMerged`**（缺键读作 false ⇒ 老文件触发一次；`Save()` 在唯一写盘出口盖章），
+  刻意不借 `SettingsRevision` —— 那个计数表达"默认值表版本"，借它触发会让所有老用户**再被清一次质量档**。
+  参数搬格保守：只有"用户改过 GainMap 侧、而 JPEG LI 侧仍是默认"才搬；两侧都改过则保留 JPEG LI 侧并在日志里说明。
+* **UI**：格式下拉摘掉 GainMap 项；JPEG LI 卡片新增开关 `附带增益图（输出 Ultra HDR 照片）`，
+  开关打开才显示说明与"增益图模式"；**色度不再另设下拉**（共用 `ChromaJpegLiCbo`，管线对 JPEG_GAINMAP 也读 `ChromaJpegLi`）；
+  HDR 在开关打开时锁定为开（沿用原行为，并在 `CaptureEncodingUiState` 再兜一次）；
+  开关→格式的翻译只有 `CurrentFormat()` 一个出口。
+* **保留 `OutputFormat.JPEG_GAINMAP` 枚举**（43 处引用与 39 条色彩判据因此不用翻），
+  `QualityGainMap`/`ChromaGainMap`/`BitDepthGainMap` 降级为"只被迁移读取的历史字段"并写明原因。
+
+### 52.4 判据三层
+
+1. **Core 表逐格对撞**（`Test_GainMapMerged_FormatIndexMigration`）：7 格全列，每格除了比索引还比**翻译后的格式名**
+   —— 只比数字的话"旧 1→新 1"这格（同号不同义，最危险）看起来毫无变化。
+2. **行为级**（`SelfTest --settings-migration` 新增 `GAINMAP_MIGRATION` 一条，直接调 `MigrateGainMapMerge`）：
+   三格夹具 = 老 GainMap 用户（旧1 → 新1 + 开关开 + 质量 2.5/色度 444 搬过来）、
+   老 JPEG LI 用户（旧2 → 新1、开关**不**开、两侧都改过时保留 LI 侧 0.8）、
+   已盖章文件（二次启动不再动）。
+3. **接线哨兵**：迁移被 `Load` 调用 + `Save` 盖章、门用 `GainMapMerged` 而非 `SettingsRevision`、
+   上界不写死 6、`CurrentFormat()` 是唯一翻译出口、开关落盘挡住程序赋值
+   （§49 那条"程序赋值被当成用户意图"在复选框上是同一形态）、管线不得再有第二份格式→质量 switch。
+
+### 52.5 变异实测
+
+把 `RemapLegacy` 退化成"原样返回"（= 没有这次迁移时用户的真实遭遇）⇒
+门禁 **6 格同时红**，读数直接把腐蚀打出来：`旧索引 2（JPEG_LI）→ 实得 index=2 翻译后=JPEG_XL`；
+`SelfTest` 的 `GAINMAP_MIGRATION` 同时 fail。还原后（`cp -p` + sha1 核对 + `--no-incremental` 重建，
+避免今天已经踩两次的"源 mtime 假旧 ⇒ 增量构建跳过"）两层都回到绿，`--settings-migration` 退出码 0（这次不接管道取）。
+
+### 52.6 数字、环境与未闭合
+
+* 门禁 **exit 0 / 1290 断言**；`--unit-tests` 787；全解决方案 0 警告 0 错误。
+* **[1.6/2] 发布门禁回归本轮仍未跑**：用户那个从发布包启动的实例（PID 6412）还在，
+  `Publish.ps1` 的"程序正在运行"预检看真进程 ⇒ 按脚本自带口径 `-SkipPublishGates` 跳过并上报。
+* **交付包 `publish/TrueToneCap-v0.3.5-beta`（build-info 14:50Z）不含 §51/§52 两轮改动** ——
+  它测的是 §49/§50。要看新下拉与 10/12 需要重新出包，而出包要求先关掉那个实例。
+* 已拍板决定的表述修正：`#16 GainMap 全 BT.2020` 现在准确说法是
+  **"增益图是 JPEG LI 的开关；底图色域跟随色彩空间下拉，只有显式选 BT.2020 才整条走 2020"** ——
+  与 §45/§46 的实现一致，不是新行为，只是原来被"独立格式"的外壳说歪了。
+* 全部改动**未提交**。untracked 累计：`Core/Settings/`（`SettingsDiffPruner` / `SettingsWriteProbe` / `FormatOrder`）、
+  `Tools/AvifBackendLadder.cs`、`Tools/AvifHdrDepthProbe.cs` —— 门禁对未跟踪文件失明，提交时别漏。
 
 
 
 
 
+
+
+
+
+---
+
+## 53. 第四十一轮（2026-09-26）：色域映射卡片改口 —— "HDR 开着"不是一种形态，是五种
+
+用户口径：**"色域映射如果选了 HDR 的情况下全部显示 HDR 直通，实际应该有多种可能，色彩空间在不同的图像
+格式上选择应该不一样，不是所有图像格式都使用 sRGB 的，也有部分格式是 BT.709，查明这些问题，作出修复"**。
+
+### 53.1 卡片原来在干什么（三条各自独立）
+
+1. **它的数据源是自己上一行写下的中文文案。** `UpdateGamutMappingUI` 第一句是
+   `var sourceTag = SourceGamutTxt.Text;`，然后 `sourceTag.Contains("HDR (BT.2020/PQ")` /
+   `Contains("HDR 未开启")` / `Contains("ACM")` 反推出"这块屏是什么档"。文案换一个字，判定跟着变。
+   更乱的是那行文案本身：它问的是【主屏】（`EnumerateDisplays().FirstOrDefault(IsPrimary)`），
+   而 ACM 那一支又单独调 `GetDisplayNativeGamut()` 去问【光标屏】的 EDID ⇒ 一张卡上两行来自两块屏。
+2. **HDR 一开只有一句话。** 三样真实存在的收口它一项都不看：屏幕证据（`HdrClamped`）、
+   目标是 sRGB（管线里那条降级）、格式没有 HDR 通道（`SupportsHdr`）⇒ 于是
+   **"→ HDR 直通 (sRGB)"** 这种自相矛盾的话能长期印在界面上。Core 的 `ColorDecision`
+   早就带着 `HdrOutput / HdrClamped / GamutClamped / NeedsMapping / ExplicitWideTarget`，卡片一次都没问过。
+3. **同一段里有三处死代码。** `DisplayP3 / DCI_P3 / AdobeRGB` 的矩阵描述与 `cicpP = 12 / 1` 这些值，
+   自 §32 把下拉收窄成 `System / sRGB / BT2020`（由 `Test_ColorSpaceOptions_NarrowedToTwo` 钉住）之后
+   再也够不到 —— 印出来的 CICP 数字是界面选不到的组合。
+
+### 53.2 顺带查出来的一条**真缺陷**（不是文案问题）
+
+"HDR 开 + 目标是 sRGB ⇒ 不许写 PQ" 这条收口住在 `CapturePipelineService.BuildEncodingSettings`
+里（本轮之前是 `:290-295`），**在 `ColorDecision.Build` 之外，且无条件生效**。对普通格式它是对的：
+sRGB 容器 + PQ 传输 = 声明自相矛盾。对增益图它是错的：Ultra HDR 的 base layer 按约定就是 SDR
+（`JpegGainMapEncoder.PrepareGainMapColorSpace` 的默认那一档），HDR 由高光增益承载、容器根本不写 PQ。
+
+后果链：`settings.HdrOutput = false` ⇒ `JpegGainMapEncoder.EncodeAsync:58` 命中
+"HDR 未开启 ⇒ Gain Map 降级为普通 JPEG（无增益图）" ⇒ **用户开着 §52 那个"附带增益图"开关、
+底图选 sRGB（默认档在窄屏上也会解析成 sRGB），拿到的是一张普通 JPEG**，而界面全程写着"HDR 直通"。
+
+口径因此定成两句：**「容器许不许写 PQ」与「这次要不要出增益图」是两件事**；
+规则收进 Core 的 `FormatColorFacts.Delivery`，管线与卡片消费同一个答案。
+（顺带对齐了一条自相矛盾的纪律：该函数顶部注释从 §41 起就写着"本函数不许再补钳制"，
+而 `:290` 那条正是它禁止的那种东西。）
+
+### 53.3 "部分格式是 BT.709" 到底指哪一维 —— 回代码与 H.273 对过
+
+`ColorProfileProvider.cs:1576-1592` + `FormatEncoders.cs:1753-1856`：
+**transfer 只有 13(sRGB) / 16(PQ) 两档，全仓没有 14**；"BT.709" 只以 **matrix** 码点存在，
+且只在 YUV 容器里出现 —— PNG matrix 恒 0(identity)（存的就是 RGB 采样），AVIF 随三原色取
+1(BT.709) / 9(BT.2020 NCL)。所以那句话的准确形状是：**同一枚 sRGB 目标，PNG 写 `1/13/0`，AVIF 写 `1/13/1`**。
+
+逐格式的声明通道（这才是"色彩空间在不同格式上选择不一样"的真实内容）：
+
+| 格式 | sRGB 目标 | BT.2020 目标(SDR) | HDR |
+| --- | --- | --- | --- |
+| PNG | cICP `1/13/0`，不嵌 ICC | cICP `9/13/0` + iCCP | cICP `9/16/0`，一律不嵌 ICC |
+| AVIF | colr(nclx) `1/13/1` | `9/13/9` + 可嵌 ICC | `9/16/9`（软件路带 `--clli`），不嵌 ICC |
+| JPEG LI | **什么都不写**（JFIF 默认） | 只有 ICC（APP2） | 容器无 HDR 通道 |
+| WebP | **什么都不写** | 只有 ICC（经中转 PNG 的 iCCP） | 无 HDR 通道；缺 cwebp 时整份换成 PNG |
+| TIFF | 连 sRGB 也嵌一份 ICC | ICC | 带 PQ TRC 的 ICC（无代码点通道） |
+| JPEG XL | color fields `sRGB` | ICC 或 color fields（二选一） | 只接受 BT.2020 家族 + `intensity_target` |
+| 增益图 | 底图恒嵌 ICC（默认 sRGB） | 显式 2020 ⇒ 三件同走 2020 | XMP hdrgm + ISO 21496-1，容器不写 PQ |
+
+### 53.4 改动
+
+* **Core 新增 `Encoding/FormatColorFacts.cs`**：`HdrDelivery{ PqContainer, GainMap, BlockedByDisplay,
+  BlockedBySrgbTarget, BlockedByFormat }` + `Delivery(决定, 格式)`（判定顺序：**屏 → 格式 → 目标**，
+  顺序本身有判据）+ `Declaration(格式, 目标, 是否写PQ)`。
+  代码点不在这里另算一遍：PNG 那组直接转调编码器用的 `FormatHelper.BuildSdrCicp/BuildHdrCicp`，
+  AVIF 的 matrix 问 `AvifMatrixCoefficients` ⇒ **界面上印的数字就是产物里的数字**。
+* **卡片重写**：`RefreshColorMappingUi()` 一个入口、一份 `ColorDecision`。源行按 `ScreenClass` 三档印
+  （外加"面板支持 HDR，系统未开启"这一句真实信息）；目标行印收口后的真实值，增益图形态标注"（底图色域）"；
+  箭头行五形态五句话；灰字 = 管线在干什么 + 该格式的声明通道 + 收口时把 `Evidence` 带上。
+  删掉 `DetectAndShowSourceGamut` / `GetDisplayNativeGamut` 与那三个死分支。
+* **刷新点只留一处**：`UpdateQualityPanelCore` 在"HDR 可用性 + 增益图锁定"算完之后再刷卡片。
+  原先散在 5 个事件处理器里各记一遍，而 `OnGainMapToggled` 正是漏掉的那个（开关一开，卡片还按 JPEG LI 说话）。
+* **管线**：那条降级改问 `Delivery`；`编码设置:` 日志的 HDR 一栏改成 `True/BlockedByFormat` 这种
+  "布尔 + 形态"，不再只报布尔 —— JPEG LI 那条 `HDR=True` 的日志一直是半句话。
+* **同一页三处互相矛盾的话一起清**：`IccStrategyHintTxt`（XAML + 两张语言表）、
+  `OnColorSpaceChanged` 与 `DetectAndApplySystemCapabilities` 写 `IccHintTxt` 的"不嵌入 ICC"、
+  HDR 警告里的"目标色域选 P3/Adobe RGB"与"ICC 烘焙开关"（那开关 2026-09-22 就删了）
+  与"如需 HDR 请选 … Gain Map"（GainMap 已不是格式）。同一页两张卡对同一枚文件给出两种说法，
+  本身就是这轮要修的东西。
+
+### 53.5 判据与实测
+
+* **新表 `Test_HdrDelivery_FiveShapesAndPerFormatChannel`（30 条断言）**：逐格式形态；
+  sRGB/增益图那两格；屏幕授权排在格式前面；**140 格全扫**（4 种屏态 × 5 个标签 × 7 个格式）上的三条不变式
+  （没有一格在 sRGB 目标下写 PQ / 增益图形态与格式一一对应 / 说得出"写 PQ"的每格编码器都 `SupportsHdr`）；
+  逐格式声明通道（含"BT.709 只在 matrix、没有 14 号 transfer"、"P3/Adobe 不许回到文案里"、
+  "JPEG LI/WebP 的 sRGB = 什么都不写而 TIFF 连 sRGB 也嵌"）；
+  卡片与管线的**接线哨兵**（`.Text` 各字段读写点计数恰好为 1、不许再有 `Contains` 反推、
+  管线不得再自己比标签）；以及**界面 `FormatCapability.SupportsHdr` 与 `EncoderFactory` 逐格式一致**
+  （两份表分叉就会印出"界面敢说、产物做不到"的形态）。
+* **变异 1** —— 去掉增益图的 sRGB 豁免：`817 中 2 红`，一条是命名判据、一条是不变式自己数出来的
+  `增益图形态与格式一一对应 —— 违例 1 格`。还原后 sha1 与原件相同、重建后 817 绿。
+* **变异 2** —— 把"格式"判据提到"屏幕"之前：`1 红`（窄屏逐格式那格）。
+  两次变异都确认了顺序判据与豁免格有牙。
+* **真机读数**（本机 HDR 屏 `\\.\DISPLAY5` 3840x2160，分类=Hdr，EDID ΔG=0.0963，峰值 418nits）：
+  `--display-audit` 本轮加两块。①**交付形态 7 行**：同一枚"HDR 开关=开"在同一块屏上给出
+  **四种不同答案**（`PqContainer` / `BlockedBySrgbTarget` / `BlockedByFormat` / `GainMap`）——
+  这就是用户说的那句"实际应该有多种可能"的量化形状。②**管线落点 4 格**：真调
+  `BuildEncodingSettings` 读回 `HdrOutput`，把 53.2 那条缝直接钉住：
+  旧条件回插时印 `增益图 + sRGB 底图 … HdrOutput=False ⇒ 期望 True ✗ 判定与落点分叉`，改回来是 `✓`。
+  * 为什么"落点"这块值得单独有：`Delivery` 是 Core 的判定，产物由那个布尔决定，而这条缝在 App 里 ——
+    门禁工程只引用 Core，测不到它。审计跑在单实例锁之前 ⇒ 不抢用户那个发布包实例也能跑。
+  * 刻意不取 PNG / AVIF 两格：它们的协商会走 `ToastService`，这条判据不许往用户桌面弹框。
+* **数字**：`--unit-tests` **817 通过 / 0 失败 / 1 跳过**（上轮 787，+30 全部来自本轮这张新表，
+  787+30=817 对得上）；Core / App / Test 全部 **0 警告 0 错误**。
+
+### 53.6 未闭合
+
+* **界面渲染仍未目视**：卡片三行的实际排版、增益图开关那一行，要看真界面才知道有没有挤行/截断。
+  审计卡是同一批函数的镜像，但它不是那块屏幕。dev 版启动与 `[1.6/2] 发布门禁回归` 都要求用户先关掉
+  那个从发布包启动的实例（PID 6412）。
+* **`BlockedByFormat` 在 UI 上够不到**（HDR 开关对 JPEG LI / WebP 已置灰）。留着是因为它是产物的真实
+  陈述、并被 53.5 的漂移判据盯着，不是给界面装饰用的死分支。
+* **增益图 + 非 HDR 屏 ⇒ 产物是普通 JPEG**（屏不授权，没有 HDR 源可交付）。卡片现在说得清，
+  但**没有 Toast**：用户看着"输出 Ultra HDR"的开关却拿到普通 JPEG，只有一行灰字告知。
+  要不要升级成一次显式告知，下一轮定。
+* **英文模式**：卡片这三行沿用仓库既有做法（中文内联）。`LocaleManager.MappingArrow` 之类的串
+  仍是"Localization 写完立刻被覆盖"的旧账，与本轮无关。
+* 全部改动**未提交**。untracked 新增 `Core/Encoding/FormatColorFacts.cs`（累计见 §52.6）。
+
+### 53.7 本地发布包（同日补，用户要手动看一眼）
+
+* 用户关掉了上一个包（`publish/TrueToneCap-v0.3.5-beta`，只含 §49/§50）⇒ 单实例锁与"进程在跑"预检都空了，
+  才可能出这个包。**没有用 `-Force` 杀进程**：那个开关的语义就是"未保存的截图/标注会丢"，需要用户点头。
+* 出到**变体目录** `publish/TrueToneCap-v0.3.5-beta-s53`（414 MB / 608 文件），不动旧包目录 ——
+  `Publish.ps1` 对 `-OutputDir` 是 `Remove-Item -Recurse`，原地覆盖会连用户那份设置一起删掉。
+  开关：`-AllowDirty`（§49~§53 全未提交，`build-info.json` 如实记 `dirtyWorktree: true` + `commitSha: 614a0b1`，
+  所以这个包**不能**按 SHA 复现，只能按补丁复现）。**没有跑 `pack.ps1`** —— 包内版本仍是 0.3.5-beta，
+  默认输出名会撞上正式包 `TrueToneCap-v0.3.5-beta-win-x64.7z`（那两个 .7z 本轮确认仍在、未被覆盖）。
+* 发布链路自身的数：`Publish.ps1` exit 0，`[1.5/6]` 七套件 **1320 断言全绿（48.8s）**、冒烟通过；
+  `scripts/verify-package.ps1` exit 0（native 工具可启动、许可 42 份、无第三方 pdb）；
+  `scripts/verify-publish-gates.ps1` **5/5 场景符合预期**（实例关掉后这层才跑得动）。
+* **产物内容核对**用 `tests/output/verify-53-content.ps1`（不是"跑过了就算新包"）：
+  Core.dll 里有 `FormatColorFacts/HdrDelivery/BlockedBySrgbTarget`；App.dll 的 UTF-16 串里有
+  "sRGB 容器装不下 PQ / 此格式没有 HDR 通道 / 底图色域"，而**被删掉的死文案**
+  （"非标准 HDR10 容器色域"、"scRGB→AdobeRGB 矩阵"、"sRGB 目标不嵌入 ICC（通用默认）"）都不在；
+  XAML 那句只能在 `MainWindow.xbf` 里查到 ⇒ 同容器另找一条仍在的旧串当对照组，否则"查不到"没有意义。
+  新鲜度那一栏顺手修了个假红：`Get-ChildItem -Recurse -Include *.xaml` 会把 `obj/` 下 dotnet 自己
+  touch 过的生成 `App.xaml` 当成"最新源码" ⇒ 每次发布都必然报"产物比源码旧"，改成只比 git 跟踪的源码。
+* **旧包那份 `TrueToneCap.settings.json`（195 B，无 `GainMapMerged` 键）原样放进新包**，
+  所以首启会真跑一遍 §52 的重映射并盖章。⚠ 它是**校验和生成之后**放下去的，不在 `SHA256SUMS.txt` 覆盖范围内。
+  原件留在 `tests/output/user-settings-035beta.json`，旧包目录未动。
+* 新包自己跑 `--display-audit` 的读数与 dev 版逐字相同（四种交付形态 + 管线落点 4 格全 ✓）⇒
+  界面文案与判定确实进了包，不是只在工作树里。

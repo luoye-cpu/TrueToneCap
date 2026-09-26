@@ -53,7 +53,7 @@
                                 <TextBlock x:Name="BasicOutputTitle" Text="基础输出" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="格式" VerticalAlignment="Center"/><ComboBox x:Name="FormatCbo" Grid.Column="1" SelectionChanged="OnFormatChanged"/></Grid>
                                 <TextBlock x:Name="FormatHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
-                                <Grid ColumnDefinitions="120,*,54,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0" TextTrimming="None" TextWrapping="NoWrap"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
+                                <Grid x:Name="QualityRow" ColumnDefinitions="120,*,54,60"><TextBlock x:Name="QualityLabel" Text="质量" VerticalAlignment="Center"/><Slider x:Name="QualitySld" Grid.Column="1" ValueChanged="OnQualityChanged"/><TextBlock x:Name="QualityLbl" Grid.Column="2" VerticalAlignment="Center" Margin="4,0,0,0" TextTrimming="None" TextWrapping="NoWrap"/><TextBox x:Name="QualityTxt" Grid.Column="3" VerticalAlignment="Center" Width="54" TextChanged="OnQualityTextChanged" LostFocus="OnQualityTextLostFocus"/></Grid>
                                 <TextBlock x:Name="QualityDescTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
                                 <Grid ColumnDefinitions="120,*,50"><TextBlock Text="保存路径" VerticalAlignment="Center"/><TextBox x:Name="PathTxt" Grid.Column="1" LostFocus="OnPathLostFocus"/><Button Grid.Column="2" Content="..." Click="OnBrowsePath" Width="40" Margin="4,0,0,0"/></Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="文件名前缀" VerticalAlignment="Center"/><TextBox x:Name="PrefixTxt" Grid.Column="1" LostFocus="OnPrefixLostFocus"/></Grid>
@@ -92,12 +92,12 @@
                                              ⚠ 项序就是持久化契约：AppSettingsData.ColorSpaceIndex 存的是【索引】，
                                              这里增删或换序必须同步 MainWindow.Settings.cs 的迁移表，
                                              否则老配置的索引会静默指向另一个色域。 -->
-                                        <ComboBoxItem Tag="System" IsSelected="True">跟随显示器（自动）</ComboBoxItem><ComboBoxItem Tag="sRGB">sRGB</ComboBoxItem>
+                                        <ComboBoxItem Tag="System" IsSelected="True">跟随显示器</ComboBoxItem><ComboBoxItem Tag="sRGB">sRGB</ComboBoxItem>
                                         <ComboBoxItem Tag="BT2020">BT.2020</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="IccStrategyHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
-                                    Text="sRGB 目标不嵌入 ICC（通用默认）；非 sRGB 色域自动嵌入标准 ICC。"/>
+                                    Text="这里选的是【目标色域】：像素搬去哪儿、容器就声明成什么，是同一个值。对增益图（JPEG LI 卡片里的开关）而言，它选的就是【底图】的色彩空间。至于某个格式靠什么通道把声明交给查看器（ICC / 代码点 / 什么都不写），下面「色域映射」按当前格式说。"/>
                             </StackPanel>
                         </Border>
 
@@ -131,7 +131,7 @@
                                      Auto 模式硬件优先，手动选择尊重用户。 -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock x:Name="AvifCodecLabelTxt" Text="AVIF 编码器" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="AvifCodecCbo" Grid.Column="1" SelectionChanged="OnAvifEncoderChanged">
-                                        <ComboBoxItem Tag="Auto" IsSelected="True">自动（硬件优先）</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV / 系统 MFT（硬件）</ComboBoxItem><ComboBoxItem Tag="LibAom">libaom（软件 · 兼容优先）</ComboBoxItem><ComboBoxItem Tag="SvtAv1">SVT-AV1（软件 · 速度优先）</ComboBoxItem><ComboBoxItem Tag="Avifenc">avifenc（软件 · 自选编码器）</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC（硬件）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Auto" IsSelected="True">自动</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV / 系统 MFT</ComboBoxItem><ComboBoxItem Tag="LibAom">libaom</ComboBoxItem><ComboBoxItem Tag="SvtAv1">SVT-AV1</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="AvifCodecHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="120,0,0,0"
@@ -141,7 +141,7 @@
                                      硬件总闸恒开（含崩溃哨兵自动降级保护，保留在 Core 层）。 -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="AvifChromaCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0（默认 · Auto 可走硬件加速）</ComboBoxItem><ComboBoxItem Tag="422">4:2:2（仅软件编码器）</ComboBoxItem><ComboBoxItem Tag="444">4:4:4（色度不压缩 · 仅软件编码器，较慢）</ComboBoxItem>
+                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0</ComboBoxItem><ComboBoxItem Tag="422">4:2:2</ComboBoxItem><ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <CheckBox x:Name="AvifPngSuffixChk" Content="额外添加 .png 后缀来提高兼容性" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
@@ -156,37 +156,47 @@
                                     <ComboBox x:Name="BdAvifCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="10" IsSelected="True">10-bit</ComboBoxItem>
-                                        <ComboBoxItem Tag="12">12-bit（仅软件编码器）</ComboBoxItem>
+                                        <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <!-- ═══ 2026-09-18：位深按编码器实际能力生效，不支持的组合会被隐藏 ═══
                                      软件 ≤12-bit（avifenc 的 depth 参数）／NVENC ≤10-bit（真 10-bit 输入）／QSV 8-bit；
-                                     HDR 恒 10-bit。>8-bit 是否"真"取决于源：只有 Float16 采集
+                                     HDR 下限 10-bit，上限仍按编码器（libaom 可到 12，2026-09-25）。
+                                     >8-bit 是否"真"取决于源：只有 Float16 采集
                                      且编码器支持真 10-bit 输入时才保留源精度，否则是容器级升位深。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="位深按所选编码器能力生效（软件 ≤12-bit、NVENC ≤10-bit、QSV 8-bit），不支持的档位已隐藏；HDR 输出恒 10-bit。8-bit 兼容性最广；>8-bit 仅在源为 Float16（HDR/高级颜色采集）时保留真精度，普通 8-bit 截图恒输出 8-bit。"/>
+                                    Text="位深按所选编码器能力生效（软件 ≤12-bit、NVENC ≤10-bit、QSV 8-bit），不支持的档位已隐藏；HDR 至少 10-bit，软件编码器（libaom）在 HDR 下还可选 12-bit。8-bit 兼容性最广；&gt;8-bit 仅在源为 Float16（HDR/高级颜色采集）时保留真精度，普通 8-bit 截图恒输出 8-bit。"/>
                             </StackPanel>
                         </Border>
 
-                        <!-- GainMap 专属选项 -->
-                        <Border x:Name="GainMapOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
+                        <!-- JPEG LI 选项卡片（2026-09-26：GainMap 并入，成为这里的一个开关） -->
+                        <Border x:Name="JpegLiOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
                             <StackPanel Spacing="12">
-                                <TextBlock x:Name="GainMapOptionsTitle" Text="JPEG Gain Map (Ultra HDR)" FontSize="14" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="GainMapOptionsDesc" Text="输出兼容 JPEG 的 HDR 照片。SDR 查看器显示基础图，HDR 查看器自动还原完整动态范围。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
-                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="GainMapModeLabelTxt" Text="增益图模式" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="GainMapModeCbo" Grid.Column="1" SelectionChanged="OnGainMapModeChanged">
-                                        <ComboBoxItem Tag="Rgb">RGB 增益（色彩准确，体积较大）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Gray" IsSelected="True">灰度增益（体积最优，亮度还原）</ComboBoxItem>
+                                <TextBlock Text="JPEG LI 选项" FontSize="14" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="ChromaJpegLiCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
+                                        <ComboBoxItem Tag="422">4:2:2</ComboBoxItem>
+                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <!-- ═══ 2026-09-19（用户决定）：GainMap 色度成为真设置，默认 4:2:0、最高可选 4:4:4 ═══
-                                     此前主路径把 base 硬编码成 4:4:4、只有降级旁路读设置 ⇒ 界面上没有这个下拉时
-                                     字段是假配置（交接 §27）。现在两条路径同源，故补上下拉。 -->
-                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="GainMapChromaLabelTxt" Text="色度采样" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="GainMapChromaCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0（默认 · 兼容性最好）</ComboBoxItem>
-                                        <ComboBoxItem Tag="422">4:2:2</ComboBoxItem>
-                                        <ComboBoxItem Tag="444">4:4:4（色度不压缩，体积更大）</ComboBoxItem>
+                                <TextBlock x:Name="ChromaJpegLiNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小（截图里的文字边缘最容易看出差别）。增益图开与不开共用这一项。"/>
+                                <!-- ═══ 增益图开关 ═══
+                                     2026-09-26（用户口径）：GainMap 不再是输出格式下拉里的一项，
+                                     而是"JPEG LI 的另一个形态"。打开后编码走 JPEG_GAINMAP 那条路，
+                                     且 HDR 锁定开启（关掉就没有增益图，这个形态本身不成立）。
+                                     色度刻意【不另设下拉】—— 它就是这个卡片上面那一条 ChromaJpegLiCbo，
+                                     两处各设一个下拉去写同一个字段，就是刚被合并掉的那种分裂。 -->
+                                <CheckBox x:Name="GainMapEnableChk" Content="附带增益图（输出 Ultra HDR 照片）"
+                                          Checked="OnGainMapToggled" Unchecked="OnGainMapToggled"/>
+                                <TextBlock x:Name="GainMapOptionsDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
+                                    Text="SDR 查看器显示基础图（底图），HDR 查看器自动还原完整动态范围。上面「目标色域」选的就是这张【底图】的色彩空间：sRGB ⇒ 底图与增益图同在 BT.709/sRGB 原色；手动选 BT.2020 ⇒ 底图、增益比、色彩声明三件全走 BT.2020（「跟随显示器」即便解析成广色域也不触发，只有亲手选才会）。打开此开关时 HDR 输出锁定为开。"/>
+                                <Grid x:Name="GainMapModeRow" ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="GainMapModeLabelTxt" Text="增益图模式" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="GainMapModeCbo" Grid.Column="1" SelectionChanged="OnGainMapModeChanged">
+                                        <ComboBoxItem Tag="Rgb">RGB 增益</ComboBoxItem>
+                                        <ComboBoxItem Tag="Gray" IsSelected="True">灰度增益</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="GainMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
@@ -200,8 +210,8 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="BdPngCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8" IsSelected="True">8-bit</ComboBoxItem>
-                                        <ComboBoxItem Tag="10">10-bit (PNG 3.0)</ComboBoxItem>
-                                        <ComboBoxItem Tag="12">12-bit (PNG 3.0)</ComboBoxItem>
+                                        <ComboBoxItem Tag="10">10-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="12">12-bit</ComboBoxItem>
                                         <ComboBoxItem Tag="16">16-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
@@ -215,20 +225,6 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- JPEG LI 选项卡片 -->
-                        <Border x:Name="JpegLiOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
-                            <StackPanel Spacing="12">
-                                <TextBlock Text="JPEG LI 选项" FontSize="14" FontWeight="SemiBold"/>
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="ChromaJpegLiCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="444">4:4:4（最佳质量）</ComboBoxItem>
-                                        <ComboBoxItem Tag="422">4:2:2（平衡）</ComboBoxItem>
-                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0（最小体积）</ComboBoxItem>
-                                    </ComboBox>
-                                </Grid>
-                            </StackPanel>
-                        </Border>
-
                         <!-- JPEG XL 选项卡片 -->
                         <Border x:Name="JpegXlOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
                             <StackPanel Spacing="12">
@@ -236,8 +232,8 @@
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="位深" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="BdJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="8">8-bit</ComboBoxItem>
-                                        <ComboBoxItem Tag="10" IsSelected="True">10-bit（16-bit 容器）</ComboBoxItem>
-                                        <ComboBoxItem Tag="16">16-bit（Float16 源真精度）</ComboBoxItem>
+                                        <ComboBoxItem Tag="10" IsSelected="True">10-bit</ComboBoxItem>
+                                        <ComboBoxItem Tag="16">16-bit</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <!-- 2026-09-17：原 12-bit 选项已移除。cjxl 没有 -b 参数，
@@ -249,7 +245,7 @@
                                      JXL 的 8 / 10 / 16 三档产物确实互不相同，但"16-bit"对 8-bit 截图源
                                      只是容器精度、不产生新信息 —— 这一点必须写在界面上而不是文档里。 -->
                                 <TextBlock x:Name="BdJpegXlNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。"/>
+                                    Text="8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。cjxl 没有独立的位深参数，位深由输入容器决定 ⇒ 10-bit 与 16-bit 都装在 16-bit 容器里，差别在 sBIT 标注与量化步长。"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="ChromaJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="444" IsSelected="True">4:4:4</ComboBoxItem>
@@ -312,7 +308,7 @@
                                 <Grid ColumnDefinitions="120,*">
                                     <TextBlock Text="覆盖遮罩颜色" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="OverlayColorCbo" Grid.Column="1" SelectionChanged="OnOverlayColorChanged">
-                                        <ComboBoxItem Tag="#80000000">灰色半透明（默认）</ComboBoxItem>
+                                        <ComboBoxItem Tag="#80000000">灰色半透明</ComboBoxItem>
                                         <ComboBoxItem Tag="#99000000">纯黑半透明</ComboBoxItem>
                                         <ComboBoxItem Tag="#991A1A2E">深紫半透明</ComboBoxItem>
                                         <ComboBoxItem Tag="#990D1B2A">深海蓝</ComboBoxItem>
@@ -324,7 +320,7 @@
                                 <Grid ColumnDefinitions="120,*">
                                     <TextBlock Text="选区边框颜色" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="BorderColorCbo" Grid.Column="1" SelectionChanged="OnBorderColorChanged">
-                                        <ComboBoxItem Tag="#FF4488FF">天蓝（默认）</ComboBoxItem>
+                                        <ComboBoxItem Tag="#FF4488FF">天蓝</ComboBoxItem>
                                         <ComboBoxItem Tag="#FF00FF88">翠绿</ComboBoxItem>
                                         <ComboBoxItem Tag="#FFFF6644">橙红</ComboBoxItem>
                                         <ComboBoxItem Tag="#FFFF44AA">粉红</ComboBoxItem>
@@ -369,9 +365,9 @@
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="引擎" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="OcrEngineCbo" Grid.Column="1" SelectionChanged="OnOcrEngineChanged">
-                                        <ComboBoxItem Tag="OnnxGpu" IsSelected="True">DirectML GPU (推荐)</ComboBoxItem>
-                                        <ComboBoxItem Tag="OnnxCpu">ONNX CPU (兼容)</ComboBoxItem>
-                                        <ComboBoxItem Tag="WindowsOcr">Windows OCR (系统)</ComboBoxItem>
+                                        <ComboBoxItem Tag="OnnxGpu" IsSelected="True">DirectML GPU</ComboBoxItem>
+                                        <ComboBoxItem Tag="OnnxCpu">ONNX CPU</ComboBoxItem>
+                                        <ComboBoxItem Tag="WindowsOcr">Windows OCR</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <Grid x:Name="OcrLangPanel" ColumnDefinitions="100,*"><TextBlock Text="识别语言" VerticalAlignment="Center"/>
@@ -395,9 +391,9 @@
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="模式" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="TranslationModeCbo" Grid.Column="1" SelectionChanged="OnTranslationModeChanged">
-                                        <ComboBoxItem Tag="Free" IsSelected="True">免费翻译 (有道 / Google)</ComboBoxItem>
-                                        <ComboBoxItem Tag="LLM">LLM 翻译 (OCR → AI 翻译文字)</ComboBoxItem>
-                                        <ComboBoxItem Tag="Vision">视觉翻译 (图片直传 AI，实验性)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Free" IsSelected="True">免费翻译</ComboBoxItem>
+                                        <ComboBoxItem Tag="LLM">LLM 翻译</ComboBoxItem>
+                                        <ComboBoxItem Tag="Vision">视觉翻译</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="目标语言" VerticalAlignment="Center"/>
@@ -566,9 +562,9 @@
                                 <Grid ColumnDefinitions="120,*">
                                     <TextBlock x:Name="LogVerbosityLabel" Text="日志详细度" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="LogVerbosityCbo" Grid.Column="1" SelectionChanged="OnLogVerbosityChanged">
-                                        <ComboBoxItem Tag="Brief" IsSelected="True">简（默认：操作与降级）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Diagnose">诊断（加每拍快照/回退原因/耗时）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Trace">全（逐帧逐子进程，仅排障时用）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Brief" IsSelected="True">简</ComboBoxItem>
+                                        <ComboBoxItem Tag="Diagnose">诊断</ComboBoxItem>
+                                        <ComboBoxItem Tag="Trace">全</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="LogVerbosityHint" FontSize="11"

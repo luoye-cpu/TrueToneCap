@@ -5,18 +5,55 @@
 // 所有属性必须有合理的默认值，新属性必须在此处添加默认值
 
 using System.Text.Json.Serialization;
+using TrueToneCap.Core.Encoding;   // OutputFormat —— 每格式参数以【枚举】为键，见下方 AppSettingsQuality
 
 namespace TrueToneCap.App.Models;
 
 /// <summary>应用设置数据模型。</summary>
 public sealed class AppSettingsData
 {
-    // 2026-09-15 清理：原 SettingsVersion 字段已删除。
-    //   它注释称"用于设置迁移，每次不兼容改动时递增"，但全仓零引用 —— 迁移机制从未实现，
-    //   留着只是一个会误导后来者以为"改默认值时该递增它"的空字段。
-    //   当前新增设置项靠 C# 属性初始化器兜底（旧 settings.json 缺该字段 → 用代码默认值），
-    //   配合 SettingsService.Normalize() 修正越界值，已能覆盖实际需求。
-    //   若将来真需要"把旧值转换成新值"的迁移，届时应连同迁移逻辑一起引入，而不是先加个空版本号。
+    // ═══ 设置版本与"默认值改不动"的根因（2026-09-24）═══
+    // 2026-09-15 曾删掉一个同名 SettingsVersion 字段，理由是"全仓零引用、迁移机制从未实现"
+    //   —— 那个判断当时是对的，但它依赖的前提是错的：注释写"旧 settings.json 缺该字段 → 用代码
+    //   默认值"，而 Save() 走的是【全量序列化】，64 个键每次都整份写回，所以文件里【永远不会缺键】。
+    //   结果：Normalize() 的 ClampTo 只在越界/NaN 时才回落默认 ⇒ 区间内的旧值永久保留 ⇒
+    //   改代码默认值对任何已有 settings.json 的用户都不生效。这就是"默认值修了很久修不好"的机制。
+    // 本次两件事一起做（不再留空版本号）：
+    //   ① Save 改为只写【与当前默认不同】的键 ⇒ "缺键=用代码默认"这条兜底第一次真的成立，
+    //      今后改默认值会自动传到所有没亲手碰过该控件的用户；
+    //   ② 本版本号负责补历史账 —— 已经钉在文件里的旧值不会自己消失，需要一次显式重置。
+    /// <summary>设置文件的默认值修订号。旧文件（无此字段）读作 0。</summary>
+    /// <remarks>
+    /// ⚠ 初值【必须留 0】，不得写成 <c>CurrentSettingsRevision</c>。System.Text.Json 反序列化
+    /// 是"先跑属性初始化器、再用 JSON 里【出现过的】键覆盖"，所以初值就是"缺键时读到的值"：
+    /// 一旦写成当前修订号，2026-09-24 之前那份【根本没有此字段】的老文件会被读成"已迁移"，
+    /// <c>MigrateStaleDefaults</c> 对它唯一的受众永不触发（实机症状：2026-09-16 的全量序列化
+    /// 旧文件里 <c>QualityAvif</c>=63 —— CRF 区间上界、最差档 —— 直达界面，且被当成用户自选）。
+    /// 写盘侧由 <c>SettingsService.Save()</c> 统一钉成当前修订号，本初值只在"读"这一侧有意义。
+    /// </remarks>
+    public int SettingsRevision { get; set; }
+
+    /// <summary>当前代码所认为的"默认值表"版本。改任何默认值都要 +1 并在迁移里点名受影响的键。</summary>
+    /// <remarks>
+    /// 1→2（2026-09-25）：<b>不是默认表变了，是 1 号从未生效过</b>。修订号 1 的整套机制靠
+    /// "老文件缺 <c>SettingsRevision</c> ⇒ 读作 0"来触发，而缺键实际被属性初值填成了 1
+    /// ⇒ 1 号迁移对它唯一的受众（2026-09-24 之前那份全量序列化文件）一次都没跑过。
+    /// 于是那批文件里既有旧端点值、又顶着"已迁移"的章，光看内容无法与真正迁移过的文件区分，
+    /// 只能把 1 号作废、按 2 号重发一次（受影响的只有 0.3.4/0.3.5-beta 期间写过盘的文件）。
+    /// </remarks>
+    public const int CurrentSettingsRevision = 2;
+
+    /// <summary>
+    /// 默认值表的<b>唯一事实源</b> —— 就是本类属性初始化器。
+    /// <para><c>SettingsService.Normalize()</c> 的钳制回落值、以及 <c>Save()</c> 判断
+    /// "这个键要不要写盘"的比较基准，都必须从这里取，不得再各写一份字面量。
+    /// 2026-09-15 那份默认配置评审记的是 JXL 0.8 / AVIF 18 / WebP 92，而代码已是
+    /// 1.0 / 15 / 90 —— 两处各写一份就一定会漂，这是那次漂移的来源。</para>
+    /// <para>刻意做成<b>每次新建实例</b>的属性而不是 <c>static readonly</c> 字段：本类是可变对象
+    /// （全部属性带 setter），共享单例意味着任何一处误写就会污染整张默认表，
+    /// 而那正是本机制要防的"两处事实源打架"的第三种形态。调用频率只有"存盘/读盘"两次，代价可忽略。</para>
+    /// </summary>
+    public static AppSettingsData CreateDefaults() => new();
 
     /// <summary>
     /// 取一份**按下截图那一刻**的设置快照，交给后台编码线程使用。
@@ -30,9 +67,27 @@ public sealed class AppSettingsData
     /// </summary>
     public AppSettingsData Snapshot() => (AppSettingsData)MemberwiseClone();
 
-    // ── 输出格式 (0=PNG, 1=GainMap, 2=JPEG LI, 3=JPEG XL, 4=AVIF, 5=WebP, 6=TIFF) ──
-    // 默认 JPEG LI (索引 2): 体积小 + 兼容性最佳 + 编码快 (jpegli), 适合默认截图
-    public int FormatIndex { get; set; } = 2;
+    // ── 输出格式：索引的含义由 Core 的 FormatOrder 单一定义（顺序就是持久化契约）──
+    // 2026-09-26：GainMap 不再是独立格式 ⇒ 表从 7 项变 6 项，默认 JPEG LI。
+    // ⚠ 这里【不再抄一遍索引表】：以前注释写"1=GainMap,2=JPEG LI"、AppSettingsQuality 里又复刻一份
+    //   switch，删一项就得同步三处，漏一处就是静默改用户设置。现在只有 FormatOrder 一处。
+    public int FormatIndex { get; set; } = TrueToneCap.Core.Settings.FormatOrder.DefaultIndex;
+
+    /// <summary>
+    /// 结构迁移标记：本文件是否已经经过"GainMap 并入 JPEG LI"的一次性重映射。
+    /// <para>为什么不用 <see cref="SettingsRevision"/> 当触发器：那个计数表达的是<b>默认值表</b>的版本，
+    /// 拿它去门控结构迁移，等于让所有老用户再被清一次质量档（<c>MigrateStaleDefaults</c> 会跟着触发）。
+    /// 两件事必须各有自己的门。本标记由 <c>SettingsService.Save()</c> 在唯一的写盘出口统一盖章，
+    /// 缺键（= 2026-09-26 之前的老文件）读作 false ⇒ 迁移触发一次。</para>
+    /// </summary>
+    public bool GainMapMerged { get; set; } = false;
+
+    /// <summary>
+    /// JPEG LI 是否附带增益图（Ultra HDR）。2026-09-26 起 GainMap 不再是独立输出格式，
+    /// 而是 JPEG LI 的一个选项；打开时管线内部仍走 <see cref="TrueToneCap.Core.Encoding.OutputFormat.JPEG_GAINMAP"/>
+    /// 那条编码路径，且强制 HDR 输出。
+    /// </summary>
+    public bool GainMapEnabled { get; set; } = false;
 
     // ── 质量 ──
     // 兼容字段：当前格式的质量（保留用于旧配置文件/其他读取点）。
@@ -41,7 +96,16 @@ public sealed class AppSettingsData
 
     // ── 每格式独立质量（GetQualityRange 区间内）──
     public double QualityPng { get; set; } = 100;          // 无损 (0-100)
+
+    /// <summary>
+    /// <b>遗留字段</b>：GainMap 独立成格式时代的质量。2026-09-26 合并后界面与管线都不再读它
+    /// （增益图态共用 <see cref="QualityJpegLi"/>），它只服务两件事：
+    /// ① <c>SettingsService</c> 的一次性参数迁移要判断"用户是否真的改过 GainMap 那侧"；
+    /// ② 老文件里的值仍要能被钳制，不能因为字段消失而读不进来。
+    /// 删掉它会让老配置的这一维直接蒸发；重新接回界面则等于把刚合并掉的东西又拆回去。
+    /// </summary>
     public double QualityGainMap { get; set; } = 1.0;      // butteraugli 距离 (0.5-3.0)
+
     public double QualityJpegLi { get; set; } = 1.0;       // butteraugli 距离 (0.5-3.0)
     // ═══ 2026-09-16：默认质量统一对齐到"视觉无损" ═══
     // 取值依据（业界公认的视觉无损阈值）：
@@ -86,7 +150,9 @@ public sealed class AppSettingsData
     /// <summary>
     /// AVIF 编码器 —— **单一**选项，取代原来的"编码后端 + 软件编码器"两层。
     /// <para>取值（见 Core 的 <c>AvifEncoderKind</c>）：
-    /// Auto / Avifenc / Qsv / LibAom / SvtAv1 / Nvenc。</para>
+    /// Auto / Qsv / LibAom / SvtAv1 / Nvenc。<c>Avifenc</c> 于 2026-09-24 从界面移除
+    /// （它只是"不传 --codec"，与 LibAom 同义），但仍是<b>内部可达值</b>：管线在硬件不支持
+    /// HDR 路径时改写为它，旧设置里的 "Avifenc" 由 SettingsService 迁到 LibAom。</para>
     /// <para>Auto = 严格按 NVENC → QSV → SVT-AV1 → libaom → avifenc 取第一个<b>可用</b>的
     /// （硬件优先）。2026-09-17 起<b>不再</b>因"不满足色度/位深需求"而跳过硬件 ——
     /// 那样会让默认色度下的硬件永远选不上；能力不足改由 Core 协商降级并明确提示。</para>
@@ -264,35 +330,43 @@ public sealed class AppSettingsData
     public string FontFamily { get; set; } = "";
 }
 
-/// <summary>AppSettingsData 扩展：格式索引 ↔ 每格式质量字段映射。</summary>
+/// <summary>AppSettingsData 扩展：格式 ↔ 每格式质量字段映射。</summary>
+/// <remarks>
+/// 刻意以 <see cref="OutputFormat"/> 为键，<b>不是</b>以下拉索引为键。
+/// 2026-09-26 之前这里是 <c>case 1 =&gt; QualityGainMap, case 2 =&gt; QualityJpegLi…</c> 的索引 switch，
+/// 与 <c>MainWindow._formats</c> 是同一张顺序表的<b>第二次抄写</b> —— 把 GainMap 从下拉里摘掉时
+/// 两处必须同时改，漏一处的表现是"拖 AVIF 的滑块写进了 GainMap 那格"这类静默错位。
+/// 现在索引→格式只在 UI 那一层翻译一次（<c>FormatOrder.FormatAt</c>）。
+/// <para>增益图态不单独占一格：它就是 JPEG LI 的另一个形态，共用 <c>QualityJpegLi</c>
+/// （两者同为 butteraugli 0.5–3.0、默认同为 1.0，合并前也没有用户能区分）。</para>
+/// </remarks>
 public static partial class AppSettingsQuality
 {
-    /// <summary>按格式索引获取每格式独立质量。</summary>
-    /// <param name="formatIndex">0=PNG,1=GainMap,2=JPEGLI,3=JPEGXL,4=AVIF,5=WebP,6=TIFF。</param>
-    public static double GetQuality(this AppSettingsData s, int formatIndex) => formatIndex switch
+    /// <summary>该格式当前生效的独立质量。</summary>
+    public static double GetQuality(this AppSettingsData s, OutputFormat f) => f switch
     {
-        0 => s.QualityPng,
-        1 => s.QualityGainMap,
-        2 => s.QualityJpegLi,
-        3 => s.QualityJpegXl,
-        4 => s.QualityAvif,
-        5 => s.QualityWebp,
-        6 => s.QualityTiff,
+        OutputFormat.PNG => s.QualityPng,
+        OutputFormat.JPEG_LI => s.QualityJpegLi,
+        OutputFormat.JPEG_GAINMAP => s.QualityJpegLi,   // 增益图态共用 JPEG LI 那一格
+        OutputFormat.JPEG_XL => s.QualityJpegXl,
+        OutputFormat.AVIF => s.QualityAvif,
+        OutputFormat.WebP => s.QualityWebp,
+        OutputFormat.TIFF => s.QualityTiff,
         _ => s.Quality,
     };
 
-    /// <summary>按格式索引设置每格式独立质量。</summary>
-    public static void SetQuality(this AppSettingsData s, int formatIndex, double value)
+    /// <summary>写入该格式的独立质量（与 <see cref="GetQuality"/> 同一张键表）。</summary>
+    public static void SetQuality(this AppSettingsData s, OutputFormat f, double value)
     {
-        switch (formatIndex)
+        switch (f)
         {
-            case 0: s.QualityPng = value; break;
-            case 1: s.QualityGainMap = value; break;
-            case 2: s.QualityJpegLi = value; break;
-            case 3: s.QualityJpegXl = value; break;
-            case 4: s.QualityAvif = value; break;
-            case 5: s.QualityWebp = value; break;
-            case 6: s.QualityTiff = value; break;
+            case OutputFormat.PNG: s.QualityPng = value; break;
+            case OutputFormat.JPEG_LI:
+            case OutputFormat.JPEG_GAINMAP: s.QualityJpegLi = value; break;
+            case OutputFormat.JPEG_XL: s.QualityJpegXl = value; break;
+            case OutputFormat.AVIF: s.QualityAvif = value; break;
+            case OutputFormat.WebP: s.QualityWebp = value; break;
+            case OutputFormat.TIFF: s.QualityTiff = value; break;
             default: s.Quality = value; break;
         }
     }
