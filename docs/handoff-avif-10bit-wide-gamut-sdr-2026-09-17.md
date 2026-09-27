@@ -6565,9 +6565,20 @@ primaries 与 PQ 的组合" —— 那只对 `-x color_space=` 的**简写名**�
 * ⚠ 输出目录**没有复用** `_scratch\TrueToneCap-v0.3.5-beta-0926-i18n\`：那里面已经有用户数据
   （今天 03:46 那笔还在往里写 `TrueToneCap.settings.json` 与 `log/app_2026-09-27.log`），
   而 `-OutputDir` 走的是 `Remove-Item -Recurse` ⇒ 新包另起目录。
-* 标签与提交的关系（免得下次误读）：`v0.3.6-beta` 打在 **`cabf9ea`** 上，就是 `build-info.commitSha`
-  那一笔 ⇒ **包内容与该标签逐字对应**；本节这条出包记录是标签之后的纯文档提交、不进包，
-  要复现这枚包检出 `v0.3.6-beta` 即可。
+* 标签与提交的关系（**2026-09-27 当日改过一次，以本条为准**）：`v0.3.6-beta` 最初由
+  `Publish.ps1 -Tag` 打在出包时的 HEAD `cabf9ea` 上；随后按维护者口径**挪到合并精简的那笔发布提交
+  `4368eed`**（`git tag -f -a`，标签对象由 `86d36db` 换成 `aa39792`）⇒ 现在满足"一条提交 = 一个版本"。
+  代价要说清：**包里的 `build-info.json` 仍记 `commitSha = cabf9ea…`**（那是真正出包所在的那一笔）。
+  为什么从 `4368eed` 检出重出仍等价：两者之间只差 `CHANGELOG.md` 与本文件两笔纯文档提交，
+  而**这两个文件既不是构建输入也不随包分发**（`grep CHANGELOG|handoff-` 过
+  `src/*/*.csproj`、`Directory.Build.props`、`Publish.ps1`、`pack.ps1`、`verify-package*.ps1`，
+  唯一命中是 LogViewer.csproj 里一句无关注释；包内的 `README.md` / `THIRD-PARTY-NOTICES.md`
+  是另外生成的文件，不含它们）。
+  ⚠ 上一笔提交 `c26411d` 的提交信息里那句"包内容与标签 cabf9ea 逐字对应"**已经因为这次挪动而过期**，
+  历史提交的信息不改，以本节为准。
+  ⇒ 想让 `build-info.commitSha` 与标签逐字相等，只能在 `4368eed` 上重跑一次 `Publish.ps1` + `pack.ps1`
+  （约 3–5 分钟，且会覆盖现有归档）——**未做**，等一句话。
+
 * 仍未做：**没有推送**；界面目视与英文模式那条计数（#52）依旧 0 读数。
 
 
