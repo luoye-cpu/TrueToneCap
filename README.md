@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.4-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
+> **v0.3.6-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
 
 **TrueToneCap** is a scalpel built for pixels. / **TrueToneCap** 是一把为像素而生的手术刀。
 
@@ -11,14 +11,14 @@ In the gap where HDR displays are becoming ubiquitous yet screenshot tools remai
 <details open>
 <summary><b>🌐 English</b></summary>
 
-Selection, annotation, OCR, translation — everything happens in real-time on a full-screen overlay after pressing a hotkey, with no pop-ups and no context switches. Screenshots export to PNG (mathematically lossless), JPEG Gain Map (Ultra HDR compatible), AVIF, JPEG XL, and more. Translation goes through Youdao's official open-platform API (bring your own credentials) or a custom LLM (OpenAI/DeepSeek); the credential-free unofficial web endpoints (Bing / Google) stay off until you explicitly opt in.
+Selection, annotation, OCR, translation — everything happens in real-time on a full-screen overlay after pressing a hotkey, with no pop-ups and no context switches. Screenshots export to PNG (mathematically lossless), JPEG (with an optional Ultra HDR gain map), AVIF, JPEG XL, and more. Translation goes through Youdao's official open-platform API (bring your own credentials) or a custom LLM (OpenAI/DeepSeek); the credential-free unofficial web endpoints (Bing / Google) stay off until you explicitly opt in.
 
 </details>
 
 <details>
 <summary><b>🌐 简体中文</b></summary>
 
-框选、标注、OCR、翻译——所有操作都在按下快捷键后的全屏覆盖层上实时完成，无需弹窗、无需跳转。截图可以导出为 PNG（数学无损）、JPEG Gain Map（兼容 Ultra HDR）、AVIF、JPEG XL 等格式。对于国内用户，翻译走有道官方开放平台（自备凭据，注册赠体验金）或自定义 LLM；免密的非官方网页端点（必应 / Google）默认不启用，需在设置里显式勾选。
+框选、标注、OCR、翻译——所有操作都在按下快捷键后的全屏覆盖层上实时完成，无需弹窗、无需跳转。截图可以导出为 PNG（数学无损）、JPEG（可附 Ultra HDR 增益图）、AVIF、JPEG XL 等格式。对于国内用户，翻译走有道官方开放平台（自备凭据，注册赠体验金）或自定义 LLM；免密的非官方网页端点（必应 / Google）默认不启用，需在设置里显式勾选。
 
 </details>
 
@@ -28,7 +28,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 | Step / 步骤 | English | 中文 |
 |-------------|---------|------|
-| 1 | 获取发布包 `TrueToneCap-v0.3.4-beta-win-x64.7z`（由维护者出包分发） | 获取发布包 `TrueToneCap-v0.3.4-beta-win-x64.7z`（由维护者出包分发） |
+| 1 | 获取发布包 `TrueToneCap-v0.3.6-beta-win-x64.7z`（由维护者出包分发） | 获取发布包 `TrueToneCap-v0.3.6-beta-win-x64.7z`（由维护者出包分发） |
 | 2 | Extract the archive | 解压压缩包 |
 | 3 | Run `TrueToneCap.exe` | 双击运行 `TrueToneCap.exe` |
 | 4 | Press `Ctrl+Shift+S` to capture | 按 `Ctrl+Shift+S` 截图 |
@@ -51,9 +51,9 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | Feature / 功能 | English | 中文 |
 |----------------|---------|------|
 | 📷 **Capture** | WGC (Windows.Graphics.Capture), Float16 HDR / BGRA8 SDR, zero-latency pooling | WGC 捕获，Float16 HDR / BGRA8 SDR，池化零延迟 |
-| 🎨 **Color** | Per-monitor advanced-color detection, ICC detect & bake, target gamut: follow-display / sRGB / BT.2020, ACM | 逐屏高级色能力探测，ICC 检测与烘焙，可选目标色域：跟随显示器 / sRGB / BT.2020，ACM |
+| 🎨 **Color** | Per-monitor advanced-color detection, ICC detect & bake, target gamut: follow-display / Rec.709 / Rec.2020, ACM state readout | 逐屏高级色能力探测，ICC 检测与烘焙，可选目标色域：跟随显示器 / Rec.709 / Rec.2020，ACM 状态探测 |
 | ✏️ **Annotate** | Rect, Ellipse, Arrow, Pen, Text, Mosaic — full-screen overlay | 矩形、椭圆、箭头、画笔、文字、马赛克 — 全屏覆盖层 |
-| 🖼️ **Export** | PNG (lossless HDR) · JPEG Gain Map (Ultra HDR) · JPEG XL · AVIF (NVENC / MFT-QSV / libaom / SVT-AV1) · WebP · JPEG LI · BMP | PNG（无损 HDR）· JPEG Gain Map（Ultra HDR）· JPEG XL · AVIF（NVENC / 系统 MFT(QSV) / libaom / SVT-AV1）· WebP · JPEG LI · BMP |
+| 🖼️ **Export** | PNG (lossless HDR) · JPEG (optional Ultra HDR gain map) · JPEG XL · AVIF (NVENC / MFT-QSV / libaom / SVT-AV1) · WebP · TIFF | PNG（无损 HDR）· JPEG（可附 Ultra HDR 增益图）· JPEG XL · AVIF（NVENC / 系统 MFT(QSV) / libaom / SVT-AV1）· WebP · TIFF |
 | 🔤 **OCR** | PP-OCRv6 (ONNX, DirectML/CPU) + Windows OCR fallback · zh/en strongest, ja needs ≥24px, ko unsupported | PP-OCRv6（ONNX，DirectML/CPU）+ Windows OCR 兜底 · 中/英文最准，日文需字高 ≥24px，韩文不支持（转系统 OCR） |
 | 🌐 **Translate** | Custom LLM → Youdao official API → (opt-in) Bing / Google web endpoints | 自定义 LLM → 有道官方开放平台 →（需显式勾选）必应 / Google 网页端点 |
 | ⌨️ **Hotkeys** | Recordable · tray minimize · autostart | 可录制 · 托盘最小化 · 开机启动 |
@@ -65,13 +65,14 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | Format | HDR | Bit Depth | Encoder / 编码器 |
 |--------|-----|-----------|------------------|
 | PNG | ✅ cICP | 8/10/12/16-bit | 托管编码器 (ManagedPngEncoder) |
-| JPEG Gain Map | ✅ Ultra HDR | 8-bit + gain map | jpegli + 增益图 |
-| JPEG XL | ✅ | 8/10/12-bit | JxlNet (NativeJxlEncoder) |
-| AVIF | ✅ | 8/10/12-bit | libaom / QSV / NVENC / MFT |
-| WebP | ❌ | 8-bit | libwebp / cwebp 回退 PNG |
-| JPEG LI | ❌ | 8-bit | jpegli |
+| JPEG XL | ✅ | 8/10/16-bit（界面下拉三档；HDR 走 16-bit 中转） | `cjxl.exe` 子进程 (NativeJxlEncoder) — JxlNet 依赖已移除 |
+| AVIF | ✅ | 8/10/12-bit（SDR 上限按编码器；HDR 以 10 为**下限**，libaom 可到 12） | libaom / SVT-AV1 / NVENC / 系统 MFT(QSV) |
+| WebP | ❌ | 8-bit | `cwebp.exe`；缺它时整份产物换成 PNG |
+| JPEG | 单图 ❌；打开「附带增益图」⇒ ✅ Ultra HDR（HDR 在增益图里，容器不写 PQ） | 8-bit（容器恒 8） | jpegli（实现名，界面上这一档就叫 JPEG）；增益图是 JPEG 卡片里的开关，「目标色域」选的就是底图色域 |
 | TIFF | ✅ | 8/16-bit | 托管编码器 |
-| BMP | ❌ | 8-bit | 托管编码器 |
+
+> 表里的位深是**界面能选到的档**，不是容器理论上限；实际生效值还要过编码器能力协商
+> （`AvifEncoderCapabilities` 等），协商改动会显式提示，不静默改参数。
 
 ---
 
@@ -81,7 +82,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 | 组件 | 版本 | 说明 |
 |------|------|------|
-| .NET SDK | `11.0.100-preview.7.26381.103` | 由 `global.json` 固定，含 Windows 桌面负载 |
+| .NET SDK | `11.0.100-preview.7.26381.103` | `global.json` 里写的是**下限**（`rollForward: latestPatch`、`allowPrerelease: true`）⇒ 本机实际解析到 `11.0.100-rc.1.26425.128`；需含 Windows 桌面负载 |
 | Windows SDK | ≥ 10.0.26100.0 | 需要 `fxc.exe` 编译 HLSL 着色器；构建脚本会**枚举已安装的最高版本**，不要写死具体版本号 |
 | GPU | 支持 D3D11 的显卡 | 色彩管线与硬件编码必需 |
 
@@ -147,12 +148,12 @@ dotnet run --project src\TrueToneCap.Test -- --unit-tests   # 单套件示例
 .\scripts\install-git-hooks.ps1 -Uninstall # 摘掉
 ```
 
-| 钩子 | 做什么 | 耗时 |
+| 钩子 | 做什么 | 耗时（2026-09-27 本机实测，Debug） |
 |------|--------|------|
-| `pre-commit` | 只构建，挡"编译不过" | 约 27s |
-| `pre-push` | 构建 + 发布门禁回归 + 7 个门禁套件，挡"测不过" | 约 110s |
+| `pre-commit` | 只构建（`verify.ps1 -BuildOnly`），挡"编译不过" | 增量 9.6 s / `--no-incremental` 21.2 s |
+| `pre-push` | 构建 + `[1.6/2]` 发布门禁回归 + `[1.7/2]` 外部判据 + `[1.8/2]` 色彩管线 + `[1.9/2]` 宿主新鲜度 + 7 个 headless 套件，挡"测不过" | 105 s（全绿、一个跳过开关都不用） |
 
-分开放是有意的：把 110s 压在每次 commit 上，实际结果是人人都加 `--no-verify`，
+分开放是有意的：把 100 多秒压在每次 commit 上，实际结果是人人都加 `--no-verify`，
 钩子整体失效反而更糟。临时跳过用 `git commit --no-verify` / `git push --no-verify`。
 
 钩子本体在 `scripts/git-hooks/`（入库、可 review），靠 `core.hooksPath` 挂载，
@@ -174,21 +175,34 @@ CI 见 `.github/workflows/ci.yml`，默认面向 self-hosted Windows 运行器
 
 | 步骤 | 内容 | 备注 |
 |------|------|------|
-| `[1/2]` | 构建解决方案 | 失败即退出 |
+| `[1/2]` | 构建解决方案 | 失败即退出（`-SkipBuild` 可跳） |
 | `[1.5/2]` | 代码格式检查 | 需 `-Format`；仅报告不阻断 |
-| `[1.6/2]` | 发布门禁回归 | 调 `verify-publish-gates.ps1`；**观察期只告警不阻断** |
-| `[2/2]` | 7 个门禁套件 | 失败即退出 |
+| `[1.6/2]` | 发布门禁回归 | 调 `verify-publish-gates.ps1`；**失败即退出**（2026-09-15 观察期已结束，不阻断的门禁等于没有门禁） |
+| `[1.7/2]` | 外部判据 12 条 | `scripts/precision/*.py` 与探针；`-SkipPrecision` 可跳 |
+| `[1.8/2]` | 色彩管线判据 | 3 条 + `--avif-hdr-depth`，**没有跳过开关** |
+| `[1.9/2]` | 宿主新鲜度 | Tools 宿主早于最新源码 ⇒ **本轮读数作废**（增量构建会跳过没动的宿主） |
+| `[2/2]` | 7 个门禁套件 | `-IncludeDesktop` 追加第 8 个（WGC，需真实桌面会话）；失败即退出 |
+
+> ⚠ `[1.7/2]` / `[1.8/2]` 在探测不到 `python` / `ffprobe` / `cjxl` 时是**逐条打 SKIP 并继续** ——
+> SKIP 的含义是"这一轮没判"，不是"判了且通过"。看结果要数判据条数，不能只看 exit 0。
 
 `[1.6/2]` 会以**子进程**隔离执行（`verify-publish-gates.ps1` 给 `git`/`dotnet` 打桩，
 同会话执行会污染后续构建）；宿主路径取当前 PowerShell 自身，不写死 `pwsh`。
 
+```powershell
 .\Publish.ps1                          # ② 版本号自动取自 Directory.Build.props
-.\Publish.ps1 -Version v0.3.4-beta     # 显式指定版本
+.\Publish.ps1 -Version v0.3.6-beta     # 显式指定版本
+.\Publish.ps1 -Tag                     #    出包同时打 v<版本> 附注标签（一条提交 = 一个版本）
 .\Publish.ps1 -NoReadyToRun            # 禁用 ReadyToRun（体积更小）
 .\PublishLogViewer.ps1                 # 单独发布日志查看器（可选工具）
 
-.\scripts\pack.ps1 -PackageDir publish\TrueToneCap-v0.3.4-beta   # ③ 压缩 + 压缩包哈希入库
+.\scripts\pack.ps1 -PackageDir publish\TrueToneCap-v0.3.6-beta   # ③ 压缩 + 压缩包哈希入库
 ```
+
+> ⚠ 出包两条硬规矩（都是踩出来的）：`Publish.ps1 -OutputDir` 会对目标目录
+> **`Remove-Item -Recurse`**，而旧包目录里可能有用户的 `log/`、`settings.json` ⇒ 出**试验包**请指到
+> 一处独立目录（本仓现放于 `publish\_scratch\`），别拿正式目录当输出；
+> `pack.ps1` 不给 `-OutputPath` 时会按固定规则命名 ⇒ 同名版本号变体会**覆盖正式压缩包**。
 
 发布流程包含依赖完整性校验（缺失即中止，不会产出残缺包）、
 **原生工具链 SHA256 校验**（`src/TrueToneCap.Core/Resources/tools-manifest.json`，
@@ -201,7 +215,7 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 冒烟也可对任意已有产物单独执行：
 
 ```powershell
-.\scripts\verify-package.ps1 -PackageDir publish\TrueToneCap-v0.3.4-beta -ExpectedVersion 0.3.4-beta
+.\scripts\verify-package.ps1 -PackageDir publish\TrueToneCap-v0.3.6-beta -ExpectedVersion 0.3.6-beta
 ```
 
 > ⚠️ 发布前请退出正在运行的 TrueToneCap。如确需强制终止进程请加 `-Force`
@@ -218,6 +232,59 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 > （`NvEncoderNative.cs` 的偏移表与 GUID 段、`ManagedTiffEncoder.cs`、`MftEncoderNative.cs` 等），
 > 完整叙述另见 `docs/pipeline-review-*.md` 与 git 历史。
 
+### v0.3.6-beta
+
+**新增能力**
+
+- **默认格式改为 PNG**：截图工具的失败模式应该是"无损但大"，不是"小但不可逆"。⚠ 只影响盘上没有
+  `FormatIndex` 键的人（设置是差量写盘），显式选过格式的不受牵连。
+- **格式收成六档，增益图不再是第七个"格式"**：那一档对用户就叫 **JPEG**，Ultra HDR 是它卡片里的
+  「附带增益图」开关，而「目标色域」下拉选的就是这张底图的原色。旧标签 `JPEG LI` 是编码器实现名，
+  已退出所有面向用户的表面（内部枚举、日志与判据消息仍用 `JPEG_LI`）。
+- **目标色域只叫两个名字：Rec.709 / Rec.2020**。此前同一档在界面叫 sRGB、卡片叫 BT.709、声明文案叫
+  BT.2020，而 `BT.2020 (HDR)` 那种写法把【原色】和【动态范围】混进一个词。盘上的值**没动**（那是
+  老配置迁移表与下拉匹配的键），名字现在只有 Core 一个来源。
+- **AdobeRGB 目标一律收口进 Rec.2020**：不是加一条映射，而是消掉三份互相矛盾的映射（界面侧、HDR 路、
+  JPEG XL 的 SDR 路原先各说各话）。DisplayP3 / DCI-P3 **不受影响**，它们各有忠实出路（cICP 12、P3 的 ICC）。
+- **AVIF 的编码器选择器回来了**：自动 / 系统 MFT(QSV) / libaom / SVT-AV1 / NVENC 这一档在 0.3.5 的
+  发布提交里被误删了"展开卡片"那一行 ⇒ 整张选项卡永不显示（构建、日志、测试全都不响）。
+- **JPEG XL 的 HDR 声明不再自相矛盾**：目标为 P3 时旧写法递的是【SDR 曲线】的 ICC，而 ICC 在 cjxl 里
+  压过 color fields ⇒ 产物读回 `Transfer=sRGB` 却仍写 `intensity_target=1000`（PQ 被按 SDR 曲线解释）。
+  现在改递带 PQ 曲线的那份 ICC（与 HDR TIFF 同一函数）⇒ 读回 P3 原色 + PQ，像素一字未动。
+- **BMP 不再被列为支持的格式**：界面下拉里本来就没有它，Core 那个无人调用的编码器已删。
+- **英文界面收口为一条机制**：XAML 写死的中文 = 翻译表键 + 一张显式声明的扫描面 + 每个窗口挂的钩子，
+  五个副窗口与按钮 ToolTip 全进范围；扫描面之外出现中文控件**门禁直接报红**，而不是不翻就算了。
+
+**工程规范（本轮新增）**
+
+- 三条常驻判据补住"改一处漏三处"：每个"以收起起步"的命名控件必须有点亮它的那一行（孤儿即红并点名）、
+  面向用户的格式标签不许是编码器实现名、Hint 与降级 Toast 不许留着已废弃的叫法。
+- 源码型判据不再拿 `Environment.NewLine` 当锚点（本仓存 LF、检出可能是 CRLF），并且**锚点找不到就判红
+  并停手**，不许退化成"整份文件都算方法体"——那会让否定断言恒假、肯定断言恒真。
+- JXL 的 HDR 层交给 libjxl 自己的 `jxlinfo` / `djxl` 读回（第三方实现，不用本仓第二份解析器自证）；
+  第三方工具探不到时这一层报 **SKIP** 而不是绿。
+
+### v0.3.5-beta
+
+**新增能力**
+
+- **色域映射卡片按真实决定渲染**：五种形态（容器写 PQ / 增益图 / 屏幕不授权 / sRGB 容器装不下 PQ /
+  该格式没有 HDR 通道），外加**逐格式的声明通道**——同一枚目标色域在 PNG 写 cICP `1/13/0`、在 AVIF 随
+  三原色取 `9/13/9`（不许 identity）、在 JPEG 与 WebP 只有 ICC 通道、在 TIFF 连 Rec.709 也老实嵌一份
+  profile、在 JPEG XL 则是 color fields 与 ICC 二选一。
+- **增益图并入 JPEG 那一档**（结构变化）：格式表少一档、老设置里的格式号做重映射并记日志。
+- **AVIF 可选编码器与位深**：libaom + HDR 从"恒 10-bit"改成"下限 10 + 上限按编码器"（可到 12）。
+- **设置只认同目录一份、改哪条即时落盘**；存不下去时记一条日志并按默认值跑，不再悄悄降级到
+  `%LOCALAPPDATA%`（设置一旦有两个答案，两边内容可以完全不同）。那道对老文件从未触发过的默认值
+  交还门现在真的会触发（症状曾是：上一版遗留的 `QualityAvif=63` 原样上界面）。
+- **降级都会告知，并按消息内容去重**：HDR + PNG 至少升到 10-bit、HDR + TIFF 恒 16-bit、非 HDR 通道的
+  格式开关落空都会出一条提示；此前一个进程只弹第一次，之后**所有其他种类**的降级永久无声。
+
+**工程规范（本轮新增）**
+
+- `[1.9/2]` 宿主新鲜度：取证宿主早于最新源码即**作废本轮读数**。增量构建会合理跳过没动的宿主，
+  所以绝对值不可比，也不许拿上一轮的数顶。
+
 ### v0.3.4-beta
 
 **新增能力**
@@ -228,8 +295,9 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
   HDR 与 SDR 共用同一条色彩处理链路。
 - **可选目标色域**：跟随显示器 / sRGB / BT.2020；广色域目标在编码前完成色域矩阵搬运，
   并按目标色域给出配套声明（不是只改标签）。
-- **八种输出格式**：PNG（数学无损，可带 cICP/iCCP）· JPEG Gain Map（Ultra HDR 兼容）· JPEG XL ·
-  AVIF · WebP · JPEG LI · TIFF · BMP；HDR 通路 10-bit/16-bit 容器与位深下拉一致生效。
+- **六种界面可选格式**：PNG（数学无损，可带 cICP/iCCP）· JPEG LI（打开「附带增益图」即 Ultra HDR，
+  「目标色域」选的就是底图色域）· JPEG XL · AVIF · WebP · TIFF；HDR 通路的容器位深按各格式能力协商
+  并显式告知（PNG 至少 10-bit、TIFF 恒 16-bit、AVIF 10/12 随编码器、JPEG LI 与 WebP 恒 8-bit）。
 - **硬件与软件后端同一套色彩声明**：AVIF 支持 NVENC 与系统 MFT（QSV 候选）硬件通路，
   软件侧 libaom / SVT-AV1；同一次截图在两条路上给出相同的色域矩阵、摆幅与元数据。
 - **OCR 与翻译**：PP-OCRv6（ONNX）+ Windows OCR（DirectML 不可用时降 CPU），
@@ -254,8 +322,9 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 
 - **可复现构建**：`global.json` 钉住 .NET SDK；依赖版本集中在 `Directory.Packages.props`（CPM）
   并强制提交 `packages.lock.json`；公共属性集中在 `Directory.Build.props`，版本号只写一处。
-- **质量门禁**：`scripts/verify.ps1` 一次跑完 8 个套件 + 12 条外部判据（`scripts/precision/` 与
-  `scripts/probes/`）；判据一律用**外部实现读回**
+- **质量门禁**：`scripts/verify.ps1` 默认跑 7 个套件（`-IncludeDesktop` 追加第 8 个 WGC），外加
+  `[1.7/2]` 外部判据 12 条（`scripts/precision/` 与 `scripts/probes/`）、`[1.8/2]` 色彩管线判据、
+  `[1.9/2]` 宿主新鲜度；判据一律用**外部实现读回**
   （ffprobe / ffmpeg / Pillow / avifdec / 浏览器），不用仓库自己的第二份解析器自证。
 - **交付物可校验**：包内 `SHA256SUMS.txt`（含原生工具链 SHA256 清单）与 `build-info.json`
   （commit SHA、SDK 与 Windows SDK 版本、构建时间、工作树是否干净）；出包前强制冒烟，

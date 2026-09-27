@@ -86,6 +86,11 @@ public sealed partial class MainWindow : Window
         if (_settings is not null && OcrLangCbo.SelectedItem is ComboBoxItem item)
         {
             _settings.OcrLanguage = (string)item.Tag;
+            // 必须当场落盘：本程序按"开机自启 + 最小化到托盘"常驻数天，
+            // 而全量 SaveSettings() 只在托盘【退出】那条路径上跑（MainWindow.xaml.cs:234）。
+            // 少这一行时，用户选的 OCR 语言只活在内存里 —— 崩溃/注销/直接关机都会静默丢失，
+            // 表现是"我明明改过，重启又变回去"，且日志里没有任何线索。
+            SaveSettingsQuiet();
         }
     }
 
@@ -155,6 +160,7 @@ public sealed partial class MainWindow : Window
         {
             _settings.TranslationMode = tag ?? "Free";
             _settings.UseCustomLlm = showLlm;
+            SaveSettingsQuiet();   // 同上：翻译模式是用户挑的后端，不能只活在内存里等托盘退出
         }
     }
 }

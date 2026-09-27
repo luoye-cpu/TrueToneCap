@@ -74,6 +74,7 @@ public sealed partial class SilentCaptureToast : Window
     public SilentCaptureToast(string position = "BottomRight")
     {
         InitializeComponent();
+        MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
 
         var hwnd = WindowNative.GetWindowHandle(this);
         var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);

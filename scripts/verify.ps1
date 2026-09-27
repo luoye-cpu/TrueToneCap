@@ -448,7 +448,7 @@ if ($SkipPrecision) {
         # 2026-09-20：ICC 的【字节本身】——外部读回一致 + 结构自洽 + 跨格式/跨后端同源。
         # 上面两条判据只管"声明成什么色域"，管不到"嵌进去的那份 profile 是不是这个色域的"。
         @{ Script = "icc_readback_matrix.py";      Samples = $dstCicp },
-        # 2026-09-20（交接 §32.8）：容器 av1C 的颜色记录 vs 码流真身。此前无人核对过 av1C，
+        # 2026-09-20（交接 §32.9-4）：容器 av1C 的颜色记录 vs 码流真身。此前无人核对过 av1C，
         # 于是自研序列头解析器把 profile 0 恒 4:2:0 读成"该读两位"，三份硬件 AVIF 一律标成 4:4:4。
         @{ Script = "av1c_vs_bitstream.py";        Samples = $dstSweep }
     )
@@ -626,8 +626,15 @@ if (-not $pyExe -and -not $toolsExe2) {
     #   报了 SKIP。这类"路径变成单字母"的错只能靠显式包数组拦住，不能指望调用处记得。
     $cjxlCands  = @(Get-ExternalToolCandidates -Tool "cjxl")
     $uhdrCands  = @(Get-ExternalToolCandidates -Tool "ultrahdr_app")
+    # 2026-09-27（交接 §62）：--jxl-color-product 新增的 HDR 层要用第三方读回【传递函数】，
+    #   递空表等于那一层在门禁里恒 SKIP ⇒ "像素是 PQ、容器声明被 ICC 覆盖成 sRGB"这类错
+    #   （§31.3-5，本轮实测成立并已修）永远判不到。候选表向 precision_env 要，不在这写死路径。
+    #   ⚠ "文件在"≠"能用"：jxlinfo/djxl 是 libjxl 的构建产物，离开同目录那批 dll 就是
+    #     0xC0000135（STATUS_DLL_NOT_FOUND）⇒ C# 侧对每个候选真跑一次、把退出码留下，全不可用才 SKIP。
+    $jxlReadCands = @(@(Get-ExternalToolCandidates -Tool "jxlinfo") + @(Get-ExternalToolCandidates -Tool "djxl"))
     Write-Host "   ℹ️  cjxl: $(if ($cjxlCands) { $cjxlCands -join ' | ' } else { '(未探到)' })" -ForegroundColor DarkGray
     Write-Host "   ℹ️  ultrahdr_app: $(if ($uhdrCands) { $uhdrCands -join ' | ' } else { '(未探到 ⇒ 第 4 层会 SKIP)' })" -ForegroundColor DarkGray
+    Write-Host "   ℹ️  JXL 第三方读回（HDR 层前置）: $(if ($jxlReadCands) { $jxlReadCands -join ' | ' } else { '(未探到 ⇒ HDR 层本轮不判)' })" -ForegroundColor DarkGray
 
     $colorFailed  = $false
     $colorSkipped = @()
@@ -653,7 +660,7 @@ if (-not $pyExe -and -not $toolsExe2) {
     # ── ②③ 走产品自己入口的两条：把候选表整个递给 C#，由它逐个做能力探测 ──
     foreach ($m in @(
             @{ Mode = "--gainmap-color-product"; What = "产品 GainMap 编码器 + 外部参考解码器第 4 层"; Extra = $uhdrCands },
-            @{ Mode = "--jxl-color-product";     What = "产品 JXL 入口的 color_space 落地";            Extra = @() })) {
+            @{ Mode = "--jxl-color-product";     What = "产品 JXL 入口的 color_space 落地 + HDR 层第三方读回传递函数"; Extra = $jxlReadCands })) {
         Write-Host "   ▶ $($m.Mode)（$($m.What)）" -ForegroundColor DarkGray
         $r = Invoke-ToolsMode -ToolsExe $toolsExe2 -Mode $m.Mode -Extra $m.Extra -ToolsProj $toolsProj2 -Config $Configuration
         $v = Show-ColorVerdict -Code $r.Code -Text $r.Text
@@ -671,6 +678,21 @@ if (-not $pyExe -and -not $toolsExe2) {
         Write-Host "      这不是通过。补上外部工具（TTC_CJXL / TTC_ULTRAHDR_APP）再跑一遍才算判过。" -ForegroundColor Yellow
     } else {
         Write-Host "   ✅ 色彩管线判据 3/3 全部判了且通过"
+    }
+
+    # ── ④ HDR AVIF 位深 A/B（2026-09-25：用户要求 libaom + HDR 可选 10/12）──
+    # 判据落在【产物】上：请求 12 必须真出 yuv444p12le，且与请求 10 的字节不同、色彩声明不许丢。
+    # 为什么必须进门禁：这条改动横跨"协商函数 / 管线 / PQ 量化 / avifenc 命令行"四处，
+    # 漏改任何一处的表现都是"界面能选 12、文件仍是 10"—— 单看代码 diff 完全看不出来。
+    # 实测还纠正了一处认知：真正决定输出位深的是中转 PNG 的 sBIT（avifenc 由输入推位深），
+    # 命令行那个 --depth 在这条路上是冗余保险 ⇒ 变异实验只能红在量化那处，别误以为命令行有牙。
+    Write-Host "   ▶ --avif-hdr-depth（HDR AVIF 位深 10 vs 12 的产物对撞）" -ForegroundColor DarkGray
+    if ($ffprobePath) { $env:TTC_FFPROBE = $ffprobePath }
+    $r = Invoke-ToolsMode -ToolsExe $toolsExe2 -Mode "--avif-hdr-depth" -Extra @() -ToolsProj $toolsProj2 -Config $Configuration
+    $v = Show-ColorVerdict -Code $r.Code -Text $r.Text
+    if ($v -eq "fail") {
+        Write-Host "❌ HDR 位深判红：请求 12-bit 没产出 12-bit 码流（或两次产物逐字节相同 ⇒ 参数没抵达编码器）" -ForegroundColor Red
+        exit 1
     }
 }
 Write-Host ""

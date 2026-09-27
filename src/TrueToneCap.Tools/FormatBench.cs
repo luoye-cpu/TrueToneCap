@@ -80,6 +80,20 @@ if (args.Length >= 1 && args[0] == "--gainmap-color-product")
     return;
 }
 
+// ═══ GainMap 两模式的观感对比 (--gainmap-look <rgba> <宽> <高> [目录]，交接 §47) ═══
+if (args.Length >= 1 && args[0] == "--gainmap-look")
+{
+    Environment.ExitCode = GainMapColorProductProbe.RunLook(args);
+    return;
+}
+
+// ═══ AVIF 后端 × CRF 实测阶梯 (--avif-ladder <png> [目录] …，交接 §48) ═══
+if (args.Length >= 1 && args[0] == "--avif-ladder")
+{
+    Environment.ExitCode = AvifBackendLadder.Run(args);
+    return;
+}
+
     // ═══ 宽高比/宽度扫描（整行 vs 分块）(--ocr-ar-sweep [modelDir] [fontSize]) ═══
     if (args.Length >= 1 && args[0] == "--ocr-ar-sweep")
     {
@@ -200,6 +214,16 @@ if (args.Length >= 1 && args[0] == "--avif-caps")
 if (args.Length >= 1 && args[0] == "--avif-hdr-test")
 {
     AvifHdrDiag.Run(args);
+    return;
+}
+
+// ═══ HDR AVIF 位深 A/B (--avif-hdr-depth) ═══
+// 2026-09-25：用户要求"libaom + HDR 可选 10/12 追求更高精度"。这条改动的落点横跨四处
+// （协商函数 / 管线 / PQ 量化 / avifenc 命令行），只看 diff 证明不了"产物真的成了 12-bit"
+// ⇒ 判据落在产物上：请求 10 得 p10、请求 12 得 p12、两次字节必须不同、色彩声明不许丢。
+if (args.Length >= 1 && args[0] == "--avif-hdr-depth")
+{
+    AvifHdrDepthProbe.Run();
     return;
 }
 
@@ -808,7 +832,11 @@ if (args.Length >= 1 && args[0] == "--param-sweep")
     {
         var s = new EncodingSettings
         {
-            Format = fmt, Quality = q, HdrOutput = false, ColorSpaceTag = tag,
+            Format = fmt, Quality = q, HdrOutput = false,
+            // 目标标签先过【产品那一份收口】再编码：AdobeRGB ⇒ BT2020（2026-09-27 用户口径）。
+            // 宿主以前原样塞 tag，等于让判据去判一个界面产不出来的形态 —— 七个容器各自还留着
+            // 自己的 Adobe 出路，于是"改一处收口"就红成跨容器不一致。现在两侧同源的收口。
+            ColorSpaceTag = TrueToneCap.Core.ColorManagement.ColorProfileProvider.MapAdobeTargetToWide(tag),
             OutputBitDepth = depth, ChromaSubsampling = chroma, AvifEncoderKind = kind,
         };
         var path = Path.Combine(sdir, name + "." + ext);
@@ -979,8 +1007,13 @@ if (args.Length >= 1 && args[0] == "--cicp-sweep")
         // 判据侧对 avifnv 一行按 SKIP 处理（缺产物不算失败，但软件行缺产物算回归）。
         ("avifnv", OutputFormat.AVIF,    "avif", AvifEncoderKind.Nvenc,  60f),
     };
-    // adobe 是刻意留的一格：H.273 无 AdobeRGB 码点 ⇒ 期望"不写 cICP、只靠 ICC 声明"，
-    // 若某容器真写了 primaries=1（＝宣称像素是 sRGB），而像素已被矩阵搬到 Adobe，就是撒谎。
+    // adobe 这一格 2026-09-27 起走【产品同一份收口】（用户口径：AdobeRGB 塞进 Rec.2020）。
+    // 以前这里是把 "AdobeRGB" 原样塞进 EncodingSettings，绕过了 ColorProfileProvider
+    // .CollapseSelectableTag —— 而产品路径（CapturePipelineService 用 ColorDecision 解析）
+    // 永远拿不到 Adobe 这个目标值。结果是"样张判的是一个用户根本做不到的形态"：
+    // 七个容器里 Adobe 各有出路（PNG/AVIF 靠 ICC、JXL 原先退 sRGB），改一处就红一片。
+    // 现在收口后再编码：adobe 列应当与 bt2020 列同声明（primaries=9），
+    // 这一格因此变成"收口有没有在每个容器里都生效"的回归位，而不是第四种口径。
     var tags = new (string Key, string Tag)[]
     {
         ("srgb",   "sRGB"),
@@ -1002,7 +1035,11 @@ if (args.Length >= 1 && args[0] == "--cicp-sweep")
     {
         var s = new EncodingSettings
         {
-            Format = fmt, Quality = q, HdrOutput = false, ColorSpaceTag = tag,
+            Format = fmt, Quality = q, HdrOutput = false,
+            // 目标标签先过【产品那一份收口】再编码：AdobeRGB ⇒ BT2020（2026-09-27 用户口径）。
+            // 宿主以前原样塞 tag，等于让判据去判一个界面产不出来的形态 —— 七个容器各自还留着
+            // 自己的 Adobe 出路，于是"改一处收口"就红成跨容器不一致。现在两侧同源的收口。
+            ColorSpaceTag = TrueToneCap.Core.ColorManagement.ColorProfileProvider.MapAdobeTargetToWide(tag),
             OutputBitDepth = depth, ChromaSubsampling = chroma, AvifEncoderKind = kind,
         };
         var path = Path.Combine(cdir, name + "." + ext);

@@ -208,7 +208,9 @@ public sealed class CapturePipelineService
             OutputFormat.AVIF => (s.BitDepthAvif, s.ChromaAvif),
             OutputFormat.WebP => (s.BitDepthWebP, "420"),
             OutputFormat.TIFF => (s.BitDepthTiff, "444"),
-            OutputFormat.JPEG_GAINMAP => (s.BitDepthGainMap, s.ChromaGainMap),
+            // 2026-09-26：增益图不再是独立格式，而是 JPEG LI 的一个开关 ⇒ 参数与 JPEG LI 同源。
+            // 位深沿用 JPEG LI 侧（GainMap 侧历史上恒 8 且界面上从来没有控件，合并后不留第二份）。
+            OutputFormat.JPEG_GAINMAP => (s.BitDepthJpegLi, s.ChromaJpegLi),
             _ => (s.OutputBitDepth, s.ChromaAvif),
         };
 
@@ -285,14 +287,49 @@ public sealed class CapturePipelineService
         // GainMap 要区分"用户手动选 2020"与"跟随显示器在 P3 屏上解析出 2020"⇒ 这个标记只能在这里传，
         // 编码器自己看不到下拉（也绝不该去猜）。
         settings.ExplicitWideTarget = decision.ExplicitWideTarget;
-        if (hdrOutput && resolvedTag == "sRGB")
+        // ═══ 2026-09-26："HDR 开 + 目标是 sRGB" 这条收口改由 Core 的 FormatColorFacts.Delivery 回答 ═══
+        // 挪走有两个理由，都不是为了好看：
+        //  ① 界面（色域映射卡片）要说同一句话。它原先自己再推一遍，且推的是"开关为真 ⇒ HDR 直通"，
+        //     于是这条降级在日志里有、在产物里有、在界面上【没有】。
+        //  ② 它原先无条件生效，把增益图也一起打死了 —— 而 sRGB base 正是 Ultra HDR 的约定形状：
+        //     HdrOutput=false 会让 JpegGainMapEncoder.EncodeAsync 命中 :58 那条"降级成普通 JPEG、
+        //     没有增益图"的路。界面上那个开关写着"HDR 的 JPEG 载体"，选个 sRGB 底图就整条功能失效，
+        //     这不是降级而是消失，且除了日志没有任何地方告知。
+        var delivery = FormatColorFacts.Delivery(decision, format);
+        if (delivery == HdrDelivery.BlockedBySrgbTarget)
         {
             settings.HdrOutput = false;
             hdrOutput = false;
-            LogService.Info("Pipeline", $"HDR 开启 + sRGB 目标 → 自动降级为 SDR 色调映射输出");
+            LogService.Info("Pipeline",
+                $"HDR 开启 + sRGB 目标 → 自动降级为 SDR 色调映射输出（sRGB 容器声明不了 PQ；增益图不受此限制）");
         }
         // HDR 开启 + 广色域目标 (P3/AdobeRGB/BT.2020) → 保留 HDR 直通编码
         // 用户选择广色域目标意味着要保留 HDR 动态范围
+
+        // ═══ 2026-09-24（§48 #21）：HDR 开启时 PNG 的容器位深至少 10-bit ═══
+        // 旧行为：HdrEnabled 默认 true、BitDepthPng 默认 8 ⇒ FormatEncoders.cs:25-36 命中
+        // `s.OutputBitDepth <= 8` ⇒ 整次输出走 ToSdrAndDegrade。也就是说【默认设置下 PNG 的 HDR
+        // 截图根本不是 HDR】，只在编码器里提示一次。旁证很硬：D:\TTC 里 66 张真实 PNG 全部
+        // bd=8、零 sBIT、没有一张带 PQ。这不是"8-bit 装不下 PQ"的技术限制，是默认值与默认意图打架。
+        // 与 AVIF 的 HDR 协商同构（HDR ⇒ 恒 10）：升的是【容器位深】这个次要意图，
+        // 保住的是【HDR】这个主要意图；且必须像 AVIF 那样显式告知，不许静默改参数。
+        // ⚠ TIFF 不在这里 —— 它的 HDR 分支固定 16-bit 全精度（FormatEncoders.cs:503），
+        //   压根不读 OutputBitDepth，所以没有降级问题（代价是位深下拉对 TIFF+HDR 形同摆设，
+        //   那是"假配置"另一类缺陷，记在 §48 待办，不在这里顺手改）。
+        if (hdrOutput && format == OutputFormat.PNG && bitDepth < 10)
+        {
+            string pngHdrDepth =
+                $"PNG 的 HDR 输出需要 ≥10-bit 容器 ⇒ 本次位深从 {bitDepth}-bit 升为 10-bit"
+                + "（旧实现遇到 8-bit 会把整张图退回 SDR 色调映射，即「看起来在出 HDR、实际出的是 SDR」）";
+            LogService.Warn("Pipeline", $"PNG HDR 位深协商: {pngHdrDepth}");
+            if (s_lastDegradedToast != pngHdrDepth)
+            {
+                s_lastDegradedToast = pngHdrDepth;
+                ToastService.ShowToast("PNG HDR 位深提示", pngHdrDepth, ToastTone.Warning);
+            }
+            bitDepth = 10;
+            settings.OutputBitDepth = 10;
+        }
 
         // ═══ 2026-09-17 修复：AVIF 能力协商必须在 HdrOutput【最终确定之后】，并分 SDR / HDR 场景 ═══
         // 旧实现把协商放在 HdrOutput 被改写之前，且只看 format==AVIF、不看 HDR，导致两处失真：
@@ -312,9 +349,9 @@ public sealed class CapturePipelineService
 
             if (settings.HdrOutput)
             {
-                // HDR：位深恒 10（PQ，avifenc --depth 10 硬编码），不参与协商。
-                bitDepth = AvifEncoderCapabilities.HdrBitDepth;
-
+                // HDR：位深**下限** 10（PQ 在 8-bit 下分层明显），上限按编码器（libaom 可到 12）。
+                // 真正的钳制放在下面"编码器改写"之后 —— 先定最终用哪个编码器、再按它的能力钳，
+                // 否则会拿被弃用的那档能力算上限（QSV→avifenc 回落时上限从 8 变 12 就是这种错）。
                 // ═══ 2026-09-18：HDR 硬件支持已扩至 NVENC（真 10-bit PQ 输入 + colr PQ 声明）═══
                 // 仍不支持的只剩 QSV（NV12 8-bit 输入）⇒ 管线层改写为 avifenc 并告知。
                 if (!AvifEncoderCapabilities.SupportsHdrPath(avifKind))
@@ -337,7 +374,7 @@ public sealed class CapturePipelineService
                     {
                         string hdrHwMsg =
                             $"{hwName} 不支持 HDR 输出"
-                            + "（容器层不写 PQ / BT.2020 元数据，HDR 会被误判为 SDR）"
+                            + "（容器层不写 PQ / Rec.2020 码点，HDR 会被误判为 SDR）"
                             + "，已改用 avifenc 软件编码";
                         LogService.Warn("Pipeline", $"AVIF HDR 编码器回落: {hdrHwMsg}");
                         if (s_lastDegradedToast != hdrHwMsg)
@@ -369,11 +406,32 @@ public sealed class CapturePipelineService
                 // 同一组合会被反复弹出，去重形同虚设。去重键就是提示文本本身：
                 // 编码器或参数一变，文本自然不同，会自动重新提示，无需靠清空来"重置"。
 
+                // ═══ 2026-09-25：HDR 位深改为"按编码器能力协商"，不再无条件钉在 10 ═══
+                // 之前这里写死 HdrBitDepth，而软件编码器（libaom）能力表本来就声明 12-bit ⇒
+                // 用户想要更高精度时没有任何入口，且这个 10 在管线、量化、avifenc 命令行各写一遍。
+                // 现在：下限 10（PQ 要求）、上限 HdrBitDepthFor(avifKind)，且必须在 avifKind
+                // 定稿（含 QSV→avifenc 回落）之后才算。
+                int hdrCeil = AvifEncoderCapabilities.HdrBitDepthFor(avifKind);
+                bitDepth = AvifEncoderCapabilities.NegotiateBitDepth(avifKind, bitDepth, hdr: true);
+                if (want.Item1 != bitDepth)
+                {
+                    string depthMsg =
+                        $"{AvifEncoderCapabilities.Caps(avifKind).DisplayName} 的 HDR 位深："
+                        + $"{want.Item1}-bit 调整为 {bitDepth}-bit"
+                        + $"（该编码器 HDR 可用区间 {AvifEncoderCapabilities.HdrBitDepth}–{hdrCeil}）";
+                    LogService.Warn("Pipeline", $"AVIF HDR 参数协商: {depthMsg}");
+                    if (s_lastDegradedToast != depthMsg)
+                    {
+                        s_lastDegradedToast = depthMsg;
+                        ToastService.ShowToast("AVIF HDR 位深提示", depthMsg, ToastTone.Warning);
+                    }
+                }
+
                 settings.AvifEncoderKind = avifKind;
                 settings.ChromaSubsampling = chroma;
                 settings.OutputBitDepth = bitDepth;
                 LogService.Info("Pipeline",
-                    "AVIF HDR 输出：位深恒 10-bit（PQ）；NVENC 支持 HDR 硬件直通，QSV 将回落 avifenc");
+                    $"AVIF HDR 输出：{bitDepth}-bit（PQ）；NVENC 支持 HDR 硬件直通，QSV 将回落 avifenc");
             }
             else
             {
@@ -404,22 +462,20 @@ public sealed class CapturePipelineService
             }
         }
 
-        LogService.Info("Pipeline", $"编码设置: {format} HDR={settings.HdrOutput} 质量={settings.Quality:F1} 位深={settings.OutputBitDepth} 色度={settings.ChromaSubsampling} AVIF编码器={settings.AvifEncoderKind} 色域={resolvedTag}");
+        // HDR 这一栏写"交付形态"而不是只写布尔：JPEG LI / WebP 上 settings.HdrOutput 仍为真（编码器
+        // 自己在内部降级），只打布尔就会留下"HDR=True 的 JPEG"这种对不上账的日志。
+        LogService.Info("Pipeline", $"编码设置: {format} HDR={settings.HdrOutput}/{delivery} 质量={settings.Quality:F1} 位深={settings.OutputBitDepth} 色度={settings.ChromaSubsampling} AVIF编码器={settings.AvifEncoderKind} 色域={resolvedTag}");
         return settings;
     }
 
-    /// <summary>按格式获取每格式独立质量（避免切换格式互相覆盖）。</summary>
-    private static double GetPerFormatQuality(AppSettingsData s, OutputFormat format) => format switch
-    {
-        OutputFormat.PNG => s.QualityPng,
-        OutputFormat.JPEG_GAINMAP => s.QualityGainMap,
-        OutputFormat.JPEG_LI => s.QualityJpegLi,
-        OutputFormat.JPEG_XL => s.QualityJpegXl,
-        OutputFormat.AVIF => s.QualityAvif,
-        OutputFormat.WebP => s.QualityWebp,
-        OutputFormat.TIFF => s.QualityTiff,
-        _ => s.Quality,
-    };
+    /// <summary>
+    /// 按格式获取每格式独立质量（避免切换格式互相覆盖）。
+    /// <para>2026-09-26：这里原本是自己的一份 <c>format switch</c> —— 与
+    /// <c>AppSettingsQuality.GetQuality</c>（AppSettingsData.cs）以及 UI 的 <c>_formats</c> 列表
+    /// 构成同一张表的<b>三份抄写</b>。现在统一走那个扩展方法，增益图态由它内部映射到 JPEG LI 那一格。</para>
+    /// </summary>
+    private static double GetPerFormatQuality(AppSettingsData s, OutputFormat format) =>
+        s.GetQuality(format);
 
     /// <summary>构建输出文件路径。</summary>
     /// <remarks>
@@ -668,7 +724,12 @@ public sealed class CapturePipelineService
         return actualPath;
     }
 
-    private static bool s_hwFallbackNotified;
+    // 降级提示的去重只有【一条】规则：与上一次弹过的文案比内容（s_lastDegradedToast）。
+    // 原先这里另有一个 `s_hwFallbackNotified` 静态布尔 —— "整个进程只弹一次"。两种后果都很糟：
+    //   ① 第一条降级（往往是 NVENC→libaom）之后，本进程内所有【其他种类】的降级永久无声，
+    //      包括 HDR+PNG 的位深协商(#21)与 HDR TIFF 被改成 16-bit(#22)；
+    //   ② 用户要再看到原因只能去翻日志，而"弹过一次就不弹"在用户端等价于"这个功能坏了"。
+    // 同一件事在本文件里已经有正确做法（4 处协商点都走 s_lastDegradedToast），不该再有第二套。
 
     /// <summary>
     /// 若本次编码发生过<b>任何形式的后端降级</b>（硬件→软件、cwebp 缺失→PNG 保底、
@@ -696,8 +757,10 @@ public sealed class CapturePipelineService
         if (string.IsNullOrEmpty(reason)) return;
 
         LogService.Warn("Pipeline", reason);          // UI 日志面板可见
-        if (s_hwFallbackNotified) return;
-        s_hwFallbackNotified = true;
+        // 与上面 4 处位深/色度协商共用同一条规则：只有"和上一条弹过的文案完全相同"才压，
+        // 换了种类的降级必须再告诉用户一次 —— 降级不许静默。
+        if (s_lastDegradedToast == reason) return;
+        s_lastDegradedToast = reason;
         ToastService.ShowCaptureDegraded(reason);
     }
 }

@@ -85,6 +85,7 @@ public sealed partial class ThirdPartyNoticesWindow : Window
     private ThirdPartyNoticesWindow()
     {
         InitializeComponent();
+        MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
 
         HeaderTitleTxt.Text = En ? "Third-party software licenses" : "第三方软件许可";
         HeaderHintTxt.Text = En

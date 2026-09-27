@@ -1,235 +1,128 @@
-# TrueToneCap 分发打包说明 / Distribution Packaging Guide
+# 打包与产物保留规范
 
-> v0.3.1 Beta · 2026-08-10
->
-> ⚠ **本文整体已过时（2026-09-20 整洁审计，`docs-staleness-audit-2026-09-14.md:20` 早判 🔴 未修）**：
-> 版本停在 v0.3.1-beta，而现行版本是 0.3.4-beta（也未打 tag）；下面引用的四个分发件名
-> （`TrueToneCap-v0.3.1-beta/`、`-lite/`、`-win-x64.zip`、`-win-x64-lite.zip`）**都已不存在**——
-> 现行打包链路是 `Publish.ps1`（本地测试包另有 `scripts/publish-with-prebuilt.ps1`），产物为目录 + `.7z`
-> + `SHA256SUMS.txt` + `build-info.json`，`publish/` 整体被 .gitignore 覆盖（仓库里只剩本文与该目录）。
-> 要发布/复现请读 `Publish.ps1` 的参数与本仓 `CHANGELOG.md` 的发布小节，别照本文的手工步骤做。
+制定于 2026-09-26。起因很直接：`publish/` 里同时躺着 4 份 414 MB 的展开目录
+（`TrueToneCap-v0.3.5-beta`、`-s53`、`-cde6168`、`-i18n`）加两枚 09-24 的归档，共 2021 MB。
+根因有两条：**目录后缀是我每轮现编的**（`-s53`/`-cde6168`/`-i18n`，名字既不说状态也不说能不能删），
+以及**从来没有"留几份"的规则** ⇒ 每出一次包就多一份。`.gitignore` 第 52 行早给本文件留了位置
+（`!publish/PACKAGE.md`），一直没写。
 
-
----
-
-## 一、发布包结构 / Package Structure
-
-```
-TrueToneCap-v0.3.1-beta-win-x64/
-├── TrueToneCap.exe              # 主程序入口
-├── TrueToneCap.dll              # WinUI 3 应用层
-├── TrueToneCap.Core.dll         # 核心引擎（捕获/编码/色彩/OCR）
-├── TrueToneCap.pri              # 编译后的 XAML 资源索引
-├── TrueToneCap.deps.json        # .NET 依赖清单
-├── TrueToneCap.runtimeconfig.json
-│
-├── *.xbf                        # 编译后的 XAML 二进制文件 (7 个)
-│   ├── App.xbf
-│   ├── MainWindow.xbf
-│   ├── AnnotationWindow.xbf
-│   ├── SelectionOverlay.xbf
-│   ├── OcrPreviewWindow.xbf
-│   ├── SilentCaptureToast.xbf
-│   └── WindowPreviewTooltip.xbf
-│
-├── data/                       # 运行时数据目录
-│   ├── Models/                  # OCR ONNX 模型（详见 §五）
-│   │   ├── PP-OCRv6_medium_det.onnx   (~59 MB)
-│   │   ├── PP-OCRv6_medium_rec.onnx   (~73 MB)
-│   │   └── ppocrv6_dict.txt            (~26 KB)
-│   ├── Shaders/                 # HLSL 着色器 (.cso)
-│   └── TrueToneCap.Core.pdb     # 调试符号
-│
-├── native/                     # 原生工具链（Publish.ps1 [3/6] 从 Core/Resources/ 复制，详见 §六）
-│   ├── avifenc.exe             # AVIF 编码器 (~16 MB；自编译的 libavif 1.4.2，含 aom + SVT-AV1，配方见 scripts/build-avifenc.py)
-│   ├── cjpegli.exe             # JPEG LI 编码器 (~5 MB)
-│   └── cwebp.exe               # WebP 编码器 (~0.7 MB)
-│
-├── README.md                    # 用户文档
-├── LICENSE                      # Apache 2.0
-│
-├── Microsoft.WindowsAppRuntime.Bootstrap.dll  # Windows App Runtime 引导
-├── Microsoft.WindowsAppRuntime.dll
-│
-├── Microsoft.UI.Xaml.dll        # WinUI 3 框架
-├── Microsoft.UI.Xaml/           # WinUI 3 XAML 资源
-│
-├── onnxruntime.dll              # ONNX Runtime (OCR 推理, DirectML)
-├── Microsoft.ML.OnnxRuntime.dll # ONNX Runtime .NET 绑定
-├── Microsoft.ML.OnnxRuntime.DirectML.dll # DirectML 执行提供程序
-│
-├── Magick.NET-Q16-HDRI-AnyCPU.dll  # ImageMagick 绑定 (图像编码)
-├── Magick.NET.Core.dll
-├── Magick.Native-Q16-HDRI-x64.dll   # ImageMagick 原生库
-│
-├── Vortice.Direct3D11.dll       # D3D11 绑定
-├── Vortice.Direct3D12.dll       # D3D12 绑定
-├── Vortice.DXGI.dll             # DXGI 绑定
-├── Vortice.DirectX.dll          # DirectX 通用
-├── Vortice.Mathematics.dll      # 数学库
-│
-├── Microsoft.Graphics.Canvas.dll    # Win2D GPU 加速 2D 渲染
-├── Microsoft.Graphics.Canvas.Interop.dll
-│
-├── Microsoft.Web.WebView2.Core.dll  # WebView2（可选，LLM 翻译 UI 使用）
-├── WebView2Loader.dll
-│
-├── WinRT.Runtime.dll            # WinRT 互操作
-├── SharpGen.Runtime.dll         # COM 互操作（Vortice 依赖）
-│
-├── System.Drawing.Common.dll    # GDI+ 互操作
-├── System.Windows.Forms.dll     # WinForms 托盘图标/剪贴板
-├── System.Text.Json.dll         # JSON 序列化
-│
-├── runtimes/                    # .NET 运行时原生库
-├── zh-CN/ en-us/ ja/ ...        # 多语言资源 (68 种语言)
-│
-└── *.dll (250+ .NET 框架程序集)  # Self-contained 发布包含完整 .NET 10 运行时
-```
+本规范只管**命名与保留**。构建正确性的判据在门禁脚本与
+`docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 里，这里不重复。
 
 ---
 
-## 二、版本变体 / Release Variants
+## 1 `publish/` 这一层允许存在什么
 
-| 变体 | 文件名 | 大小 | 说明 |
-|------|--------|------|------|
-| **标准版** | `TrueToneCap-v0.3.1-beta-win-x64.zip` | ~550 MB | 包含 OCR 模型，开箱即用识字/翻译 |
-| **精简版** | `TrueToneCap-v0.3.1-beta-win-x64-lite.zip` | ~400 MB | 不含 OCR 模型，需联网下载或仅用 Windows OCR |
+| 允许 | 形态 | 依据 / 说明 |
+| --- | --- | --- |
+| 当前待测的**一份**展开目录 | 正式名，或 `_scratch/` 下的一份 | 同时最多一份；出新包前按 §5 处理旧的 |
+| 已发布版本的归档 | `TrueToneCap-v<版本>-win-x64.7z` + `.sha256` | 每个已打 tag 的版本一枚；**未发布的树不出归档** |
+| 原生依赖暂存 | `PLAN/tools/` | ⚠ **不是发布包**。`avifenc / cjpegli / cjxl / cwebp` + 依赖 DLL + 色域取证 `.raw`，组包从这里取料，删了下次发布断料 |
+| 配套程序的产物 | `TTC日志查看器/` | `PublishLogViewer.ps1:10` 的默认 `-OutputDir`，与主程序版本号无耦合；要用就现出（约 1 分钟），别长期留着 |
+| 本文件 | `PACKAGE.md` | `.gitignore` 里唯一被反选的常规文件 |
 
-### 制作方法
+## 2 命名
+
+- **正式产物**：`TrueToneCap-v<版本>-win-x64`。版本号实测来自 `Directory.Build.props:49`
+  （`<Version Condition="'$(Version)' == ''">…</Version>`），**不在 `App.csproj`**；
+  `Publish.ps1 -Version` 留空时读的就是它，为的是别让手填版本号漂。
+- **未提交 / 实验产物**：`publish/_scratch/TrueToneCap-v<版本>-<MMDD>-<标记>/`，
+  例：`publish/_scratch/TrueToneCap-v0.3.5-beta-0926-i18n/`。
+- **叶子名必须以 `TrueToneCap-v` 开头**：实测 `Publish.ps1:448` 的白名单是
+  `GetFileName($OutputDir) -notmatch '^TrueToneCap-v'` ⇒ `throw`，只有 `publish\` 前缀不够。
+  （本规范初稿写的 `_scratch/<MMDD>-<标记>` 撞的就是这道闸门，属于"规则撞自己脚本"，已改正。）
+  父目录 `_scratch/` 就是"一轮一删"的标记；`publish/*` 已被忽略，不进版本库。
+- **禁止**再往正式目录名后面加现编后缀。要区分来源，写进标记或 `build-info.json` 旁边的说明，
+  不要污染版本名。
+
+## 3 出包与归档（参数逐条对过脚本）
 
 ```powershell
-# 1. 运行发布脚本（自动编译 + 从单一事实源复制工具链与模型）
-.\Publish.ps1 -Configuration Release -Runtime win-x64
+# 全新编译：先 --no-incremental 全量重建，再出包（原因见 §4）
+dotnet build TrueToneCap.slnx -c Release --no-incremental
 
-# 2. 制作精简版（不含 data/Models/）
-$publishDir = "publish\TrueToneCap-v0.3.1-beta"
-$liteDir = "publish\TrueToneCap-v0.3.1-beta-lite"
-Copy-Item $publishDir $liteDir -Recurse
-Remove-Item "$liteDir\data\Models" -Recurse -Force -ErrorAction SilentlyContinue
+# 出包。脏树必须显式 -AllowDirty：脚本默认拒绝，因为 build-info 记的 commitSha 会与内容不符
+.\Publish.ps1 -Configuration Release -AllowDirty `
+    -OutputDir "publish\_scratch\TrueToneCap-v<版本>-<MMDD>-<标记>"
+# 绝不用 -Force —— 它的含义是强杀正在运行的 TrueToneCap.exe（第 33 行注释写明）
 
-# 3. 打包标准版（含 OCR 模型）
-Compress-Archive -Path "$publishDir\*" -DestinationPath "publish\TrueToneCap-v0.3.1-beta-win-x64.zip"
+# 归档只在"提交 + 打 tag"之后做，且 -OutputPath 必须给：
+# 不给时 pack.ps1 第 97–99 行按版本算默认名，第 113–115 行对同名文件 Remove-Item -Force
+# ⇒ 这就是"覆盖同版本号正式包"的确切机制
+.\scripts\pack.ps1 -PackageDir <目录> -OutputPath "publish\TrueToneCap-v<版本>-win-x64.7z"
 
-# 4. 打包精简版（不含 OCR 模型）
-Compress-Archive -Path "$liteDir\*" -DestinationPath "publish\TrueToneCap-v0.3.1-beta-win-x64-lite.zip"
+# 校验两件，缺一不可
+.\scripts\verify-package.ps1 -PackageDir <目录> -ExpectedVersion <版本>
+.\scripts\verify-package-content.ps1 -Pkg <目录>
 ```
 
----
+## 4 校验与新鲜度
 
-## 三、依赖说明 / Dependencies
+- **`RESULT content=PASS` 才算出过包。** `verify-package-content.ps1` 第一道是内容核对
+  （本轮新串在 / 本轮删掉的旧串不在 / **同容器对照组**），第二道才是时间戳。
+  XAML 文字只存在于 `.xbf`（不在 DLL），所以对照必须在 `.xbf` 里做——拿 DLL 里的串当对照会得出假结论。
+- 时间戳那道判"比源码旧"时，**不要用"这是启发式误报"说服自己**：`.cs` 改动不会重生成 `.xbf`
+  （`.xbf` 只随 XAML 变），所以"改了 C# 又跑回原样"这类操作把 mtime 推后，就足以让它红。
+  正确动作：`dotnet build <slnx> -c Release --no-incremental` 后重出，让所有产物晚于所有源。
+  2026-09-26 实测走过一遍：红只在 `[6]`，`[1]–[5]` 内容核对全过；全量重建重出后转 
 
-### 运行时依赖（已内嵌，无需安装）
+- **分清"判据判红"与"工具抛红"**：`Publish.ps1` 的 `PUBLISH_EXIT=1` 不一定是测试红。
+  实测有一次是脚本内部 `dotnet run` 撞上"MSBuild 服务器不可用 … 回退到进程内生成"，
+  stderr 被 PowerShell 抛成 `NativeCommandError`，目标目录根本没建。
+  判据：去日志里找 `RESULT suite=… failed=…` 与"❌ …套件…"行；只有红字异常、没有 RESULT 行
+  ⇒ 是工具噪声，动作是 `dotnet build-server shutdown` 后重跑，绝不是去放宽判据。
+- **产物目录深度不是契约**：把包挪进 `_scratch/` 后 `verify-package-content.ps1` 判 `FAIL(1)`，
+  原因是它按"包目录往上数两层"推算仓库根（`publish\<名>` 的深度被写死），两上层落到 `publish\`
+  ⇒ `git ls-files` 空 ⇒ 新鲜度整层"没判"（失败方向安全，但整层失效）。
+  已改成问 git：`git -C $Pkg rev-parse --show-toplevel`，时间戳比较逻辑一字未动；
+  新布局与旧布局各跑一次，同一个仓库根、126 个跟踪源、都是 `RESULT content=PASS`。
+  ⇒ 任何脚本都不许用"往上数几层"定位仓库根。`PASS`。
+- `build-info.json` 里 `dirtyWorktree: true` ⇒ **包内容 ≠ 它记的 commitSha**。
+  对外只能称"本地待测产物"，不得当可复现产物引用。
 
-| 组件 | 版本 | 说明 |
-|------|------|------|
-| .NET 10 Runtime | 10.0.x | Self-contained 内嵌 (~80 MB) |
-| Windows App SDK | 2.3.1 | Bootstrap 内嵌，运行时自动加载框架 |
-| WinUI 3 | 3.1.6 | 内嵌在 Microsoft.UI.Xaml.dll |
-| ONNX Runtime | 1.24.4 | DirectML 后端，OCR 推理 (PP-OCRv6) |
-| ImageMagick (Magick.NET) | 14.15.0 Q16-HDRI | ICC 烘焙 + 色域映射（编码器已全部替换为托管/原生实现） |
-| Win2D | 1.4.0 | GPU 加速 2D 渲染 |
-| Vortice (DirectX) | 3.8.3 | D3D11/D3D12/DXGI 底层绑定 |
+## 5 保留与清理
 
-### 系统要求
+保留：当前待测的一份展开目录 + 每个**已打 tag** 版本的 `.7z`/`.sha256`。其余算过时，可删。
 
-| 要求 | 最低 | 推荐 |
-|------|------|------|
-| **操作系统** | Windows 11 24H2 (Build 26100) | 最新 Windows 11 |
-| **架构** | x64 | x64 |
-| **GPU** | 任何支持 D3D11 的 GPU | D3D12 + DirectML 兼容 GPU |
-| **显示器** | SDR | HDR (BT.2020 / Display P3) |
-| **内存** | 8 GB | 16 GB+ |
-| **磁盘** | 1 GB (精简) / 1.5 GB (标准) | SSD |
+删除前两步必做，因为展开目录里可能有手动测试跑出来的数据：
 
----
+```bash
+ls <目录>/TrueToneCap.settings.json ; du -sm <目录>/log     # ① 有没有用户数据
+# ② 有就先挪走并核对，才允许删目录
+```
 
-## 四、字体说明 / Fonts
+挪到 `C:\PLAN\qoder-scratch\ttc-publish-userdata-<日期>\<包名>\`，逐个核 sha1 相同后才 `rm -rf`。
+`Publish.ps1` 的 `-OutputDir` 是**先校验、门禁通过后才 `Remove-Item -Recurse`**（第 551 行；
+第 435–443 行注释写明原先"先删后跑门禁"会把唯一能回退的东西一起毁掉）⇒ 出包失败不吃上一份可用包，
+但**目录名写对仍是操作者的责任**（白名单只保证它在 `publish\` 内且叶子以 `TrueToneCap-v` 开头）。
 
-TrueToneCap 默认使用 **微软雅黑** 作为 UI 字体。可在系统设置 → 界面字体中自定义为任意已安装的系统字体。
+## 6 禁止事项
 
----
+1. 不给 `pack.ps1` 省略 `-OutputPath`（§3 写明它删同名归档）。
+2. 不用 `Publish.ps1 -Force`，除非明确要求终止自己正在跑的实例。
+3. 不在 `publish/` 放构建中间产物、日志、截图、临时脚本 —— 那些归 `tests/output/`。
+4. 不把 `publish/PLAN/tools/` 当"过时的包"删。
+5. 一轮结束不清理自己那份实验目录 —— 本规范要拦的就是这个。
+6. 不给未提交的树出 `.7z` 归档（归档只属于 tag）。
 
-## 五、OCR 模型说明 / OCR Models
+## 7 清理记录
 
-### 模型列表
+**2026-09-26 第一次**：删三份被取代的展开目录 `TrueToneCap-v0.3.5-beta/`、`-s53/`、`-cde6168/`
+（414 MB × 3）。删前三份 `TrueToneCap.settings.json` 与四个日志文件先挪进
+`qoder-scratch\ttc-publish-userdata-2026-09-26\`，三对 settings 哈希相同、`log` 清单哈希相同。
+`publish/` 2021 MB → **782 MB，释放 1239 MB**。
 
-| 文件 | 大小 | 用途 |
-|------|------|------|
-| `PP-OCRv6_medium_det.onnx` | **29.7 MB** | 文字检测（FP16 中型） |
-| `PP-OCRv6_medium_rec.onnx` | **36.6 MB** | 文字识别（FP16 中型） |
-| `ppocrv6_dict.txt` | **73 KB** (74947 B) | 中英文字典 |
+**同日第二次**：删两枚 09-24 归档 + 两个 `.sha256`（254 MB）。判定依据（实测）：
+仓库**没有 `v0.3.5-beta` 这个 tag**（最新是 `v0.3.4-beta`），两枚内 `build-info.json` 都是
+`commitSha 614a0b1` + `dirtyWorktree: true`，即未发布预产且已被今天的树取代。
+删除前留档：`…win-x64.7z` 126,802,233 B / sha256 `9b34cc1f92e317b1…`；
+`…build2.7z` 126,958,073 B / sha256 `b17271613c347231…`（两个 `.sha256` 与实算一致）。
 
-> **2026-09-14 更正**：此前标注的 ~59 MB / ~73 MB 是 **FP32 原始模型**的体积
-> （现存放于 `official_models/onnx_fp32/`，已被 `.gitignore` 排除、不入库）。
-> 仓库中实际打包的是经 `scripts/onnx_fp16_quantize.py` 量化后的 **FP16** 版本。
+同日按本规范重出全新产物：`publish/_scratch/TrueToneCap-v0.3.5-beta-0926-i18n/`，
+旧的非规范命名目录 `publish/TrueToneCap-v0.3.5-beta-i18n/` 经查**无** settings、**无** log
+（未被运行过）后删除
 
-### 模型来源
-
-基于 PaddleOCR PP-OCRv6 导出为 ONNX 格式（FP16 中型），支持中文 + 英文混合识别。
-FP16 模型由 `scripts/onnx_fp16_quantize.py` 从官方 FP32 模型转换而来；
-如需重新获取，可用 `download_models.ps1`（输出到 `src/TrueToneCap.App/Models/`）。
-
-### 模型加载优先级
-
-1. 首先查找 `<应用目录>\data\Models\` （发布包自带，由 `Publish.ps1` **[4/6] 步骤**从
-   **`src/TrueToneCap.App/Models/`** 复制 —— 该目录是模型单一事实源）
-2. 回退到 `%LOCALAPPDATA%\TrueToneCap\onnx_models\` （用户自行下载）
-3. 如果 ONNX 模型不可用，降级使用 Windows 内置 OCR
-
-### 设置文件位置
-
-- **软件同目录**的 `TrueToneCap.settings.json`（默认）—— 设置随程序走，
-  便于整目录拷贝的绿色 / 便携用法
-- 若同目录**不可写**（例如安装到 `Program Files`、放在只读介质、以无权限账户运行），
-  自动改用 `%LOCALAPPDATA%\TrueToneCap\TrueToneCap.settings.json`
-- 从旧版本升级时：若同目录尚无配置文件，会自动把旧位置的配置搬过来，**旧文件保留**以便回退
-- **恢复默认设置**：删除上述 `TrueToneCap.settings.json` 后重启即可
-
-> 崩溃哨兵文件（`encoder-crash.sentinel`）始终位于
-> `%LOCALAPPDATA%\TrueToneCap\`，不随程序目录 —— 程序目录可能只读，
-> 而哨兵必须"进程被杀死后仍然留下"，放在只读位置会让它彻底失效。
-
----
-
-## 六、依赖来源 / Dependency Sources
-
-> ⚠️ **2026-09-14 重要变更：本节描述的旧流程已废弃。**
->
-> 早期版本把非核心运行时组件统一放在 `publish/PLAN/` 下，并要求
-> `PLAN/tools/` 与 `src/TrueToneCap.Core/Resources/` **人工保持同步** —— 这带来了
-> 双份人工维护的漂移隐患（见 `docs/repo-hygiene-review.md`）。
->
-> **现已改为单一事实源**，`publish/PLAN/` 下的工具与模型副本**均已从版本控制移除**，
-> `Publish.ps1` 不再读取该目录。
-
-### 单一事实源（当前）
-
-| 内容 | 单一事实源 | 发布包目标 | Publish.ps1 步骤 |
-|------|-----------|-----------|:---:|
-| 原生工具链 | `src/TrueToneCap.Core/Resources/` | `native/` | **[3/6]** |
-| OCR ONNX 模型 | `src/TrueToneCap.App/Models/` | `data/Models/` | **[4/6]** |
-| 用户字体 | `publish/PLAN/fonts/`（可选） | — | — |
-
-> `src/TrueToneCap.Core/Resources/` 中的 exe 既嵌入 DLL 供运行时自动提取，
-> **也**由 `Publish.ps1` [3/6] 直接复制进发布包 `native/` —— 两者同源，无需同步。
-
----
-
-## 七、更新检查清单 / Release Checklist
-
-- [ ] `Directory.Build.props` 版本号更新（Version / AssemblyVersion / FileVersion）
-      —— 全仓库版本唯一事实源，各 csproj 不再单独声明
-- [ ] `Publish.ps1` 输出目录更新
-- [ ] `README.md` 版本号和更新日志更新
-- [ ] `src/TrueToneCap.Core/Resources/` 与 `src/TrueToneCap.App/Models/` 内容齐全
-      （`Publish.ps1` [0/6] 会校验并阻断缺失）
-- [ ] 依赖变更后的 `packages.lock.json` 已重新生成并提交
-      （`Publish.ps1` [0/6] 会校验锁定文件齐全性）
-- [ ] 编译通过 `dotnet build -c Release -r win-x64`
-- [ ] 运行 `.\Publish.ps1` 生成发布包（自动验证 PLAN 完整性）
-- [ ] 检查 `native/` 包含 3 个工具（avifenc.exe, cjpegli.exe, cwebp.exe）
-- [ ] 检查 `data/Models/` 包含 3 个 OCR 文件（标准版）
-- [ ] 生成精简版（不含 `data/Models/`）
-- [ ] 打包 ZIP
-- [ ] 验证 ZIP 解压后可直接运行 `TrueToneCap.exe`
+**终态**：`publish/` = **540 MB** 四样东西 —— `PACKAGE.md`、`PLAN/`(43 MB 依赖暂存)、
+`TTC日志查看器/`(84 MB 配套程序)、`_scratch/TrueToneCap-v0.3.5-beta-0926-i18n/`
+(414 MB 当前待测 / 608 文件 / `builtAtUtc 2026-09-26T14:57:10Z` / `dirtyWorktree: true` /
+门禁 7 套件 46.4 s 全过 + 冒烟过 + 两个校验器都 `PASS`)。自 2021 MB 起累计**释放 1481 MB**。。

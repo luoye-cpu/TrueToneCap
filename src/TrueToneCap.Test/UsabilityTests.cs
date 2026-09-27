@@ -159,10 +159,10 @@ public static class UsabilityTests
         Png_IccAndCicp_Coexist();
         Png_StreamOutput();
 
-        // ─── 11. ManagedBmpEncoder 专项测试 ───
-        Console.WriteLine("\n── 11. BMP 编码器专项 ──");
-        Bmp_AllSizes();
-        Bmp_StreamOutput();
+        // ─── 11. （已删）BMP 编码器专项 ───
+        // 2026-09-26 随 Core/Encoding/ManagedBmpEncoder.cs 一并删除：`OutputFormat` 无 BMP、
+        // EncoderFactory 无 BMP 档、界面格式下拉无 BMP ⇒ 这两个测试测的是一个没有产品入口的格式。
+        // 编号留空不重排：本节号在多处日志与交接里被引用过，重排会让历史读数对不上。
 
         // ─── 12. JpegGainMapEncoder 专项测试 ───
         Console.WriteLine("\n── 12. JPEG Gain Map ──");
@@ -835,7 +835,7 @@ public static class UsabilityTests
                 {
                     OutputFormat.PNG => ".png", OutputFormat.JPEG_LI => ".jpg",
                     OutputFormat.JPEG_XL => ".jxl", OutputFormat.AVIF => ".avif",
-                    OutputFormat.WebP => ".webp", OutputFormat.TIFF => ".bmp",
+                    OutputFormat.WebP => ".webp", OutputFormat.TIFF => ".tif",   // 原来写 ".bmp"：内容是 TIFF、文件名是 BMP
                     _ => ".bin"
                 };
                 string path = Path.Combine(OutDir, $"sdr_{fmt}_{w}x{h}{ext}");
@@ -1596,36 +1596,6 @@ public static class UsabilityTests
         using var ms = new MemoryStream();
         ManagedPngEncoder.Encode(bgra, 8, 8, ms, 8);
         Assert($"PNG 流输出: {ms.Length}B", ms.Length > 20);
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  11. BMP 专项
-    // ═══════════════════════════════════════════════════════════════
-
-    static void Bmp_AllSizes()
-    {
-        foreach (var size in new[] { 1, 2, 3, 16, 127, 256 })
-        {
-            var bgra = new byte[size * size * 4];
-            for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = (byte)(i % 256); bgra[i + 1] = (byte)(i * 2 % 256); bgra[i + 2] = (byte)(i * 3 % 256); bgra[i + 3] = 255; }
-            string path = Path.Combine(OutDir, $"bmp_{size}x{size}.bmp");
-            if (File.Exists(path)) File.Delete(path);
-            ManagedBmpEncoder.Encode(bgra, size, size, path);
-            var fi = new FileInfo(path);
-            bool valid = fi.Exists && fi.Length > 50;
-            // BMP 签名: 'BM'
-            if (valid) { var header = File.ReadAllBytes(path); valid = header[0] == (byte)'B' && header[1] == (byte)'M'; }
-            Assert($"BMP {size}x{size}: {fi.Length}B, BM={valid}", valid);
-        }
-    }
-
-    static void Bmp_StreamOutput()
-    {
-        var bgra = new byte[8 * 8 * 4];
-        for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 100; bgra[i + 1] = 150; bgra[i + 2] = 200; bgra[i + 3] = 255; }
-        using var ms = new MemoryStream();
-        ManagedBmpEncoder.Encode(bgra, 8, 8, ms);
-        Assert($"BMP 流输出: {ms.Length}B", ms.Length > 50);
     }
 
     // ═══════════════════════════════════════════════════════════════

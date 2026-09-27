@@ -15,7 +15,9 @@
   A) 组内所有显式写了 primaries 的文件，码值必须彼此相同，且等于该 tag 的期望值
      （期望表直接复用 `param_sweep_check.TAG_PRIM`，不另写一份事实源）。
   B) 任何文件都不许声明成【别的】色域：写了码又不等于该 tag 的期望 ⇒ 红。
-     AdobeRGB 在 H.273 没有码点 ⇒ 期望是"根本不写 cICP，只带 ICC"，写 primaries=1 就是宣称"像素是 sRGB"，
+     AdobeRGB 自 2026-09-27 起作为【目标】收口进 Rec.2020（CollapseSelectableTag 与样张宿主同源）
+     ⇒ 期望与 bt2020 同为码点 9。旧口径"不许写码点、只带 ICC"给七个容器各留一条 Adobe 出路，
+     任何一侧单独改映射都会判成"跨容器不一致"——那正是这次要消掉的东西。
      而像素其实被矩阵搬到了 Adobe ⇒ 这一条必须红。
   C) 既没写 primaries、又不带 ICC、tag 还不是 srgb ⇒ 红（该图【没有任何色彩声明】，查看器只能猜 sRGB）。
   D) 组内 transfer 码必须一致（允许"未声明"，但不许出现 13 与 16 混在一组 —— 那说明 SDR/HDR 分派走岔了）。
@@ -54,14 +56,18 @@ NAME_TO_PRIM["unknown"] = None
 # "没写码又没 ICC"这种真正危险的情形。
 UNSPECIFIED = 2
 
-# 明确记录过"该格式承载不了此色域的声明 ⇒ 退回 sRGB"的格式（值 = 允许声明 sRGB 码点 1 的格式名）。
-# 依据：libjxl 对无法精确匹配的 ICC 会归到最近的已知枚举并【丢弃 profile】—— 实测把产物 PNG 里
-# 那份 3144 字节 AdobeRGB1998 ICC 直接喂 cjxl，产物被 ffprobe 读成 primaries=bt2020 且不含 acsp，
-# 而 cjxl 只有 color_space 枚举 / icc_pathname 两个入口，没有"原样保留"开关。
-# ⇒ 产品侧的处置是「JXL + AdobeRGB 退回 sRGB 像素 + sRGB 声明」（FormatEncoders.cs 的 JXL 分支），
-#   这条允许清单就是给那个处置开的口子；若哪天那处被改回"硬传 ICC"，本判据会因为
-#   "声明成 bt2020 又不带 ICC"重新变红 —— 不是白名单，是有出处的例外。
-DOWNGRADE_OK = frozenset({"jxl"})
+# 明确记录过"该格式承载不了此色域的声明 ⇒ 允许只写码不带 ICC"的格式（值 = 允许声明 sRGB 码点 1 的格式名）。
+# ⚠ 2026-09-27 清空：原先这里放着 {"jxl"}，是 JXL + AdobeRGB 退回 sRGB 那条例外的口子，
+#   而那条降级连同它的理由（"libjxl 把承载不了的 ICC 归到最近枚举并丢弃 profile"）一起被实测推翻，
+#   用户随后拍定 **AdobeRGB 一律收口进 Rec.2020**（交接 §56.4 / §59）⇒ JXL 的 adobe 样张现在
+#   必须和别的广色域目标一样声明 primaries=9，不再允许声明成 1。
+#   留着这条口子就会把"有人把 Adobe 改回退 sRGB"判成合法 —— 白名单清空本身就是判据的一部分。
+#   旧的两条机制说明也留在这儿免得有人再抄回去：
+#     ① "文件里没有 acsp 魔数"不能当"没嵌 ICC"的判据 —— JXL 的 ICC 走 delta 压缩（enc_icc_codec.cc），
+#        实测内嵌 820 字节校准 ICC 的产物 grep acsp 也是 0；要判嵌没嵌读 jxlinfo 的那行 "N-byte ICC profile"。
+#     ② ffprobe 报 primaries=bt2020 是【读取方】把自定义原色映射到最近的 H.273 码点，
+#        不代表文件自己的声明被改成 bt2020。
+DOWNGRADE_OK = frozenset()
 
 FORMATS = ("png", "tiff", "jxl", "jpegli", "webp", "avifsw", "avifnv")
 TAGS = ("srgb", "p3", "bt2020", "adobe")

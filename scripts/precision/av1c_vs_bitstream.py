@@ -1,6 +1,6 @@
 """判据：AVIF 的 av1C 记录必须与【码流自己说的】一致（色度/位深/mono）。
 
-为什么需要它（2026-09-20，交接 §32.8）：`IvfWriter` 自己走位解析 AV1 序列头，再把
+为什么需要它（2026-09-20，交接 §32.9-4）：`IvfWriter` 自己走位解析 AV1 序列头，再把
 profile / 位深 / mono / chroma_subsampling_x/y / chroma_sample_position 写进 ISOBMFF 的
 `av1C` 记录。本仓库此前**没有任何一条判据核对过"这份记录 vs 码流真身"** —— 于是
 `ParseAv1SequenceHeader` 把 profile 0（Main，规范规定恒 4:2:0 且码流里【不写】subsampling 位）

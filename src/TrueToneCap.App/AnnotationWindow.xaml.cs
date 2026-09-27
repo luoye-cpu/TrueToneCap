@@ -48,6 +48,9 @@ public sealed partial class AnnotationWindow : Window
     public AnnotationWindow(byte[] bgraPixels, int width, int height)
     {
         this.InitializeComponent();
+        MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
+        // 窗口标题不在可视树里，只能在这里显式翻译。
+        Title = LocaleManager.Tr(Title);
         _rawPixels = bgraPixels;
         _imgW = width; _imgH = height;
 

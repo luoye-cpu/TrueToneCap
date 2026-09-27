@@ -322,9 +322,13 @@ def main() -> int:
         bad += len(errs)
         if not errs:
             print(f"  ✅ {name}: ICC {len(prof)}B sha={sha(prof)} 自洽且外部读回一致（{note}）")
+        # *_adobe 样张归到 bt2020 组：目标 AdobeRGB 已收口成 Rec.2020（用户口径 2026-09-27），
+        # 所以它【必须】与同格式的 *_bt2020 是同一份 profile。让它自成一格等于"Adobe 到底算哪个色域"
+        # 永远没人对账；并组之后一旦哪一侧没收口，④"同 tag 跨格式必须同一份 profile"当场红。
+        group_of = {"p3": "p3", "bt2020": "bt2020", "adobe": "bt2020", "srgb": "srgb"}
         for t in ("p3", "bt2020", "adobe", "srgb"):
             if t in name.lower():
-                per_tag.setdefault(t, {})[ext] = prof
+                per_tag.setdefault(group_of[t], {})[ext] = prof
                 break
 
     # ④ 同一色域跨格式必须同一份 profile；⑤ 不同色域必须两两不同

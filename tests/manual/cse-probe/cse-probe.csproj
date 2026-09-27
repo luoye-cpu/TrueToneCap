@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- TargetFramework / Nullable / LangVersion / TreatWarningsAsErrors 均由 Directory.Build.props 提供 -->
+    <Nullable>disable</Nullable>
+    <AssemblyName>cse-probe</AssemblyName>
+    <RootNamespace>CseProbe</RootNamespace>
+    <!-- 锁文件对一次性探针无意义，避免污染 -->
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+</Project>
