@@ -5591,6 +5591,8 @@ i18n 工作 —— 实际 `grep '^### 54'` 只有 54.1…54.5，§54 到"本轮�
   ⇒ 已出**本地待测包**（详见 §55.7 末）：`publish\TrueToneCap-v0.3.5-beta-i18n\`（只产出目录，
   **没有** `.7z`）。脏树 `-AllowDirty` ⇒ `build-info.json` 记 `dirtyWorktree: true`、
   commitSha = HEAD `ca04539` ⇒ **包内容 ≠ 那个 SHA**，只用于手动验界面，不能当"可复现产物"引用。
+  （2026-09-27 记：`ca04539` 这笔纯文档提交后来被并入 v0.3.6-beta 的发布提交 `4368eed`，主线不再
+  经过它 —— 这句话里的 SHA 是**当时那次出包**的坐标，按快照保留，别去 `git show` 找它。）
 
 ### 55.7 复核二轮（用户："一起收"）—— 先撤我上一轮那句错的发现
 
@@ -6485,6 +6487,65 @@ primaries 与 PQ 的组合" —— 那只对 `-x color_space=` 的**简写名**�
   （`gate-final-62b.log`：`[1/2]` 0 警告 0 错误、`[1.8/2]` 3/3 判了且通过、`[1.9/2]` 过、
   1365 断言 35.9 s、exit 0）。⇒ 推论：改一句注释也要连全解重编的账一起算，
   或者把源码注释类改动攒成一批、只跑一轮门禁。
+
+---
+
+## §63 历史合并精简 + v0.3.6-beta 发布与出包（2026-09-27，用户："处理历史提交，一定程度合并精简，版本号 0.3.6beta，然后出包"）
+
+### 63.1 先把不可逆动作的退路和判据建好，再动手
+
+本轮唯一改写历史的地方：把 `cde6168`(release v0.3.5-beta) + `ca04539`(docs) + 66 项未提交
+压成 **一笔** `release: v0.3.6-beta`。动手前：
+
+* 全 refs 离仓退路：`git bundle create … --all`（含 `refs/heads/*`、`refs/tags/*`、
+  历史遗留的 `refs/backup/*`）落在 `C:\PLAN\qoder-scratch\ttc-history-2026-09-27\pre-rewrite.bundle`，
+  `bundle verify` 报"complete history"。⚠ bundle 包不住脏工作树 ⇒ 未提交改动另有
+  `tests/output/uncommitted-2026-09-27e.patch`（含 `publish/PACKAGE.md` 的 `--no-index` 段）。
+* **先补 `v0.3.5-beta` 标签再重写**（这是 #47 欠的那句话，两件事一次做完）：
+  `ca04539` 之外的 `cde6168` 被标签钉住 ⇒ 全仓 13 处文档引用 + `MainWindow.xaml.cs`、
+  `CorePipelineTests.cs` 两处源码注释里的 `cde6168` **全部继续可解析**，不用改写。
+  ⇒ 顺序反过来就会制造一批坏指针，这条记成规矩：**重写前先给被引用的旧提交找锚点**。
+* 内容不变的判据：暂存后 `git write-tree` = `7ca1242c1836a536b23d774d07077f9e106b35bb`，
+  重写并提交后 `HEAD^{tree}` 必须逐字等于它 ⇒ 只换了父提交（`ca04539` → `614a0b1`），
+  没动一个字节。实测相等 ✅。
+* ⚠ 我一开始在提交信息里写了**一条不成立的判据**："`git diff ca04539 HEAD` 为空"——
+  那次 diff 本来就该是本轮 67 个文件的改动。已在同一笔提交里改成 tree 指纹那条，并把作废过程
+  写进提交信息正文，不当没发生过。
+
+### 63.2 版本号与文档锚点必须同一笔改（§61 那条教训的直接落实）
+
+`0.3.5-beta → 0.3.6-beta` 一次改全：`Directory.Build.props` 的 `Version` / `AssemblyVersion` /
+`FileVersion`、README 徽章、Quick Start 的包名、`Publish.ps1` / `pack.ps1` / `verify-package.ps1`
+三处命令示例。改完逐条 grep `0.3.5-beta` 确认剩下的都是**历史记录里的**提法（CHANGELOG 0.3.5 节、
+`publish/PACKAGE.md` 的清理记录），不是"当前版本"的提法。
+
+### 63.3 CHANGELOG 按"哪条真在已发布那一版里"拆开
+
+拆的判据不靠人眼：写了一个一次性脚本（`tests/output/split_changelog_036.py`），要求
+① 拆完旧节的 bullet 多重集与 `cde6168:CHANGELOG.md` 那一节**逐条相同**；
+② 新旧两节合起来的多重集 == 拆前整节 ⇒ 一条文本没丢、没被顺手改写。
+结果：**搬走 22 条、留 18 条**。其中 **6 条**是本轮顺手改了措辞的"已发布条目"
+（`JPEG LI 卡片`、`七种格式`、`sRGB 目标什么都不写`…），一律**还原成发布当时的原文** ——
+改名这件事由新节自己的 bullet 记账，"发布记录不重写"这条不打折。
+⚠ 拆分脚本把 `### 小节头` 整节吞掉了（旧节四个小节头变 0 个），且把标题重复输出了一次 ——
+都是我自己写的脚本的错，靠"结构回读 + 再写一个带断言的还原脚本"发现并修回
+（`tests/output/restore_035_headers.py`：小节头序列必须等于已发布版、且每个头后面必须有 bullet）。
+⇒ 结论与代码同理：**一次性脚本也要带能一票区分的断言**，不然它悄悄吃掉的东西正好是最难发现的。
+
+### 63.4 提交前后的门禁读数
+
+* 提交前：`scripts/verify.ps1 -Configuration Debug` **exit 0**（`tests/output/gate-036-precommit.log`）
+  —— 0 警告 0 错误、`[1.6/2]` 通过、`[1.7/2]` 通过、`[1.8/2]` **3/3 全部判了且通过**、
+  `[1.9/2]` 过、`[2/2]` 7 套件 **1365 断言**（35.7 s）。
+* ⚠ 第一次跑同一命令在 `[1/2]` 就中断（exit 1）：MSBuild 服务器启动失败的那句提示走 stderr，
+  被 `verify.ps1` 的 `Stop` 语义当终止错误。单独 `dotnet build` 复跑 20.3 s / 0 警告 0 错误 ⇒
+  判定为**环境瞬时故障**，不是代码回归；暖好服务器后重跑即绿。这条留在账上，免得下次误读成回归。
+* ⚠ 本机 `.git/hooks` 里**没有 `pre-commit`**（只有 Qoder 自己的 `post-commit` 跟踪钩子，
+  `core.hooksPath` 指向 `.git/hooks` 而不是 `scripts/git-hooks/`）⇒ 提交时不会自动跑构建门禁，
+  上面那轮全靠手动。我不改 git 配置，只把这件事记下来：**这台机器上"提交了"不等于"门禁跑过"**。
+* 新主线：`4368eed`(release v0.3.6-beta) → `614a0b1`(v0.3.4-beta) → `0916a2a`(v0.3.3-beta，= `origin/main`)。
+  工作树 `git status --porcelain` 为空。`origin/main` 还停在 v0.3.3-beta ⇒ **v0.3.4 之后从未推送过**。
+
 
 
 
