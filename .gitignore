@@ -91,8 +91,29 @@ publish/PLAN/models/
 #   并非此处。本目录仅为官方原始模型的手工留档位置。
 official_models/
 
-# ── 手动测试/调试脚本 (统一管理, 不上传 GitHub) ──
-tests/manual/
+# ── 手动测试/调试脚本 (默认不上传；被文档按路径引用的取证件例外) ──
+# 2026-09-26：整目录忽略与 §47 归档它们的理由自相矛盾 ——「删了不可恢复，且 §34/§37 的
+# 取证链要靠它们复现」。忽略掉的取证脚本对新克隆既跑不了也验不了，等于没有。
+# 规则写 `tests/manual/*` 而不是 `tests/manual/`：后者排除的是目录本身，
+# 而"父目录一旦被排除，其中的文件无法再反选纳入"是 git 的固定语义 ⇒ 下面的 ! 会全部失效。
+tests/manual/*
+!tests/manual/publish-probes/
+!tests/manual/cse-probe/
+tests/manual/cse-probe/*
+!tests/manual/cse-probe/Program.cs
+!tests/manual/cse-probe/cse-probe.csproj
+!tests/manual/avif_matrix_test.py
+!tests/manual/enum_windows.ps1
+!tests/manual/ocr-real-bench-20260825-seed20260825.txt
+!tests/manual/diag_ttc_window.ps1
+!tests/manual/smoke-anno-test.ps1
+!tests/manual/test_hang.ps1
+# ⚠ glm_* 三个脚本【已于 2026-09-26 删除】（它们的输入根目录 Pictures\TrueToneCap 整个不在了，
+#   且三份各硬编码一把活的 GLM API Key —— 账本 §5359 记着这件事）。删除只是移除了本机上的明文副本，
+#   【密钥本身仍需在智谱侧撤销】，撤销前它还是活的。
+#   留这条规则的理由不变：今后再写带密钥的探针，一律【不】反选入库；要入库先把密钥改成读环境变量。
+#   注意本文件的反选是【逐条点名】的 —— 往 tests/manual 里新增文件不会被自动纳入，
+#   所以放开了几个不等于放开目录，新脚本要入库必须显式加一行，那一行就是审查点。
 
 # ── Python ──
 __pycache__/
@@ -154,6 +175,10 @@ scripts/Check*.ps1
 TestResults/
 *.tmp
 *.temp
+# 2026-09-26：整个 tests/output/ 归入忽略。这里放的是探针日志、临时夹具与备份补丁，
+# 而只有 *.log 命中时 `.patch/.tar/.orig/.ps1` 会让工作区变"脏" —— Publish.ps1 的脏树门禁
+# 硬拦未跟踪改动（本轮真被这一点挡过一次：出包前必须先把临时补丁挪出仓库）。
+tests/output/
 
 # ── 冒烟测试截图 (运行时产生, 禁止上传) ──
 scripts/*.png

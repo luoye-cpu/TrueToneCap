@@ -65,7 +65,11 @@ TOOL_ENV = {"ffprobe": "TTC_FFPROBE", "ffmpeg": "TTC_FFMPEG",
             "avifdec": "TTC_AVIFDEC", "avifenc": "TTC_AVIFENC",
             # 2026-09-22 色彩管线三判据新增：cjxl（JXL 标签判别）、
             # ultrahdr_app（GainMap 探针第 4 层的外部参考解码器）
-            "cjxl": "TTC_CJXL", "ultrahdr_app": "TTC_ULTRAHDR_APP"}
+            "cjxl": "TTC_CJXL", "ultrahdr_app": "TTC_ULTRAHDR_APP",
+            # 2026-09-27 §31.3-5 补办：JXL 的【第三方读回】实现。判"容器里剩下 ICC 还是 color
+            # fields"只能问 libjxl 自己的 jxlinfo/djxl —— 拿本仓库第二份解析器自证是禁止的。
+            # 两者都是仓库外构建产物（要同目录的 jxl.dll 才起得来），所以进候选表而不是写死进 C#。
+            "jxlinfo": "TTC_JXLINFO", "djxl": "TTC_DJXL"}
 
 # 展开式安装布局（winget/手动解压）目录名带版本号，所以要 glob 而不是常量。
 _DIR_GLOBS = (
@@ -105,6 +109,19 @@ _EXTRA_GLOBS = {
     "ultrahdr_app": (
         r"C:\PLAN\ffmpegPictureUI\tools\src\libultrahdr\build\Release\ultrahdr_app.exe",
         os.path.join(repo_root(), r"publish\PLAN\tools\ultrahdr_app.exe"),
+    ),
+    # jxlinfo / djxl（libjxl 的读回工具）：同 ultrahdr_app 的处境 —— 仓库外另一项目的构建目录。
+    # ⚠ 这两个 exe 的运行时 DLL 不在同目录（CMake 把 *.dll 放在 build/lib/<Config>/ 与
+    #   build/third_party/**/<Config>/），所以"候选探到"≠"能用"：调用方必须真跑一次看退出码，
+    #   0xC0000135(STATUS_DLL_NOT_FOUND) 要报成"这一层没判"，不能报成判定结论。
+    #   （`--jxl-color-product` 的 HDR 层自己会把构建根里的 dll 目录追加进子进程 PATH。）
+    "jxlinfo": (
+        r"C:\PLAN\ffmpegPictureUI\tools\src\libjxl\build\tools\Release\jxlinfo.exe",
+        r"C:\PLAN\ffmpegPictureUI\tools\src\libjxl\build\tools\Debug\jxlinfo.exe",
+    ),
+    "djxl": (
+        r"C:\PLAN\ffmpegPictureUI\tools\src\libjxl\build\tools\Release\djxl.exe",
+        r"C:\PLAN\ffmpegPictureUI\tools\src\libjxl\build\tools\Debug\djxl.exe",
     ),
 }
 

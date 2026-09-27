@@ -12,7 +12,8 @@ namespace TrueToneCap.Core.Encoding;
 public sealed class EncodingSettings
 {
     // ⚠️ 下面这两个默认值只是「类型兜底」，【不代表产品默认值】：
-    //   · Format: 产品默认是 JPEG LI（AppSettingsData.FormatIndex = 2），此处为 PNG；
+    //   · Format: 产品默认是 PNG（`AppSettingsData.FormatIndex` 缺键 ⇒ `FormatOrder.DefaultIndex`
+    //     = 表里 PNG 那一格，即 0），此处也写 PNG；
     //   · Quality: 90 仅对 WebP(50-100) 之类的"百分比式"区间有意义，
     //     对 JPEG LI(0.5-3.0 butteraugli) / AVIF(0-63 CRF) / JPEG XL(0.1-4.0) 都是【越界值】。
     // 真正的产品默认值在 AppSettingsData 的 Quality* 字段，与各编码器的
@@ -51,7 +52,14 @@ public sealed class EncodingSettings
     /// JPEG XL 8/16、JPEG LI / GainMap / WebP 恒 8（编码器无位深概念）。</para>
     /// </summary>
     public int OutputBitDepth { get; set; } = 8;
-    /// <summary>色彩空间标签（用于 CICP 元数据嵌入）。默认 "System"。</summary>
+    /// <summary>色彩空间标签（用于 CICP 元数据嵌入）。默认 "System"。
+    /// <para><b>这里故意不做任何映射</b>（2026-09-27 试过后退回）：把 "AdobeRGB ⇒ BT2020" 塞进本属性的
+    /// setter 确实能一处收口所有容器，但它同时吃掉了 <c>HdrDeclarableTag</c> 的【留痕】设计 ——
+    /// 那条分支存在的意义是"用户显式选的色域没生效，必须让他看见"（判据 "AdobeRGB: 必须留痕" 就是它）。
+    /// 属性静默改写 ⇒ 编码器再也看不到"用户原本要的是 Adobe"，代价从可见变成不可见。
+    /// 收口因此放在<strong>调用方</strong>：界面侧 <c>CollapseSelectableTag</c>、
+    /// 编码侧与样张宿主共用 <c>ColorProfileProvider.MapAdobeTargetToWide</c>（JXL 的 SDR 分支、
+    /// HDR 的 <c>HdrDeclarableTag</c>、<c>FormatBench</c> 的两处）。</para></summary>
     public string ColorSpaceTag { get; set; } = "System";
     /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>
     public GainMapMode GainMapMode { get; set; } = GainMapMode.Gray;
@@ -105,6 +113,18 @@ public abstract class ImageEncoder
     public abstract Task EncodeSdrAsync(byte[] sdrPixels, int width, int height,
         EncodingSettings settings, string outputPath, CancellationToken ct = default);
     public abstract (float Min, float Max, float Default, string Label) GetQualityRange();
+
+    /// <summary>该格式<b>有没有可调的质量参数</b>（区间退化成一个点 ⇒ 没有）。</summary>
+    /// <remarks>
+    /// PNG / TIFF 是无损格式，<see cref="GetQualityRange"/> 恒返回 <c>(100,100,100)</c>，
+    /// 所以界面那根滑块划不动、那个输入框只能填 100 —— 不是坏了，是【本来就没有这个参数】。
+    /// 判据写成"区间退化"而不是"点名格式"：App 侧旧写法是
+    /// <c>QualitySld.IsEnabled = format != OutputFormat.PNG</c>，只挡住了 PNG，
+    /// 同样是 (100,100) 的 TIFF 仍渲染出一根 enabled 却划不动的滑块 —— 同一条事实被两处
+    /// 各写一遍、其中一处漏了一个格式。UI 与测试现在都问这一个属性。
+    /// </remarks>
+    public bool QualityIsFixed => GetQualityRange() is (var min, var max, _, _) && max <= min;
+
     public virtual string GetQualityDescription(float quality) => quality.ToString("F0");
 }
 

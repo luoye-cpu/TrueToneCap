@@ -2,7 +2,9 @@
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/FormatEncoders.cs
 // 全部编码器 — 零 Magick.NET 依赖
-// PNG: 托管编码器 | JPEG LI: jpegli P/Invoke | JXL: cjxl | AVIF: libavif/硬件 | WebP: libwebp | BMP: 托管
+// PNG: 托管编码器 | JPEG LI: jpegli P/Invoke | JXL: cjxl | AVIF: libavif/硬件 | WebP: libwebp | TIFF: 托管
+// （2026-09-26 删除 BMP 托管编码器：`OutputFormat` 里没有 BMP、工厂与界面下拉都没有它，
+//   唯一调用点是门禁自己的两个专项测试 —— 一个没有产品入口的格式不构成"支持的格式"。）
 using System.Threading.Tasks;
 using System.IO;
 using TrueToneCap.Core.Logging;
@@ -177,35 +179,52 @@ public sealed class JpegXlEncoder : ImageEncoder
                 // `-x color_space=Rec2100PQ` 已声明 BT.2020 + PQ + intensity_target。
                 // 嵌入 ICC (标准 ICC, sRGB TRC) 会覆盖 color fields → PQ 传输丢失 →
                 // 解码器按 sRGB gamma 解码 PQ 值 → 图像错误。
-                // ═══ 2026-10-08 修复(P1②): 传真实 csTag ═══
-                // csTag 为 DisplayP3/DCI_P3 时 cjxl 不支持 P3+PQ 组合 → EncodeHdr 内部
-                // 回退 Rec2100PQ (BT2020)，此处需嵌 ICC 兜底声明真实色域。
+                // ═══ 2026-09-27 实测收口（交接 §62，闭 §31.3-5）：P3 那一档违反的正是上面这条 ═══
+                // 旧写法给 P3 递的是 `GetStandardIccProfile(csTag)`、或用户那份可嵌 ICC ——
+                // 两者按定义都是 **SDR 曲线**的 profile，而 ICC 在 cjxl 里压过 color fields
+                //（`icc_pathname` 与 `-x color_space` 两种先后顺序产物逐字节相同，实测）⇒ P3 目标下
+                // jxlinfo 读回 Primaries=[P3] / Transfer=[sRGB]，而同一条声明里 intensity_target 仍写
+                // 1000 nits：一张图同时自称 SDR 曲线与 HDR 峰值。码值差的倍数是量的，不是推的
+                //（同一批 PQ 像素按 sRGB 解 ⇒ 100 nit 档 22.1×、203 nit 档 1.46×）。
+                // 改法 = 递【带 PQ 曲线】的那份 ICC。`GetHdrStandardIccProfile` 在 HDR TIFF 一路早就
+                // 这么用了（见同文件 TIFF 分支同段注释：非用 PQ TRC ICC 不可），JXL 这边只是漏了同步。
+                // 实测随包 cjxl v0.11.2 把这份 ICC 归约成 color fields（Custom P3 原色 + Transfer=PQ、
+                // 209 B、与改前像素 max|Δ|=1）⇒ 原色与传递函数两个维度不再互相牺牲。
+                // ⚠ 用户那份 s.IccProfile 在 HDR 路不再透传：它描述的是面板、且是 SDR 曲线，
+                //   而像素已被 HdrToPq16 搬到 csTag + PQ ⇒ 声明要说【编码后】的空间，不是说面板。
+                // ⚠ 可达性如实记账：界面侧 <c>CollapseSelectableTag</c> 把 DisplayP3 / DCI_P3 一律并成
+                //   BT2020 ⇒ 【今天】从界面走不进这一支，这不是正在出货的错。留着的理由是分支本来就在，
+                //   而加一档或改解析顺序随时会把它接通（接通的瞬间旧写法就交出"PQ 被按 sRGB 曲线解释"的产物）。
+                //   它【已有判据盯着】：--jxl-color-product 的 HDR 层直接驱动编码器、不经过界面，
+                //   把下面这个函数换回 GetStandardIccProfile 就当场红（变异实测见交接 §62.4）。
                 byte[]? jxlIcc = csTag is "DisplayP3" or "DCI_P3"
-                    ? (FormatHelper.IsEmbeddableIcc(s.IccProfile) ? s.IccProfile
-                        : ColorManagement.ColorProfileProvider.GetStandardIccProfile(csTag))
+                    ? ColorManagement.ColorProfileProvider.GetHdrStandardIccProfile(csTag)
                     : null;
                 NativeJxlEncoder.EncodeHdr(pq16, f.Width, f.Height, path, s.Quality, jxlIcc, intensityTarget, csTag, s.ChromaSubsampling);
             }, ct);
         }
         else
         {
-            // ═══ 2026-09-19 缺陷 B（交接 §30.9）：JXL 承载不了 AdobeRGB 的声明 ⇒ 该组合退回 sRGB ═══
-            // 实测取证方式：把【我们自己产物里】那份 3144 字节 AdobeRGB1998 ICC（从 cc_png_adobe 的
-            // iCCP 解出）直接喂给 cjxl ⇒ 产物被 ffprobe 读成 primaries=bt2020，且文件里已无 acsp 魔数
-            //（profile 被丢弃）。Adobe 原色 (0.64,0.33) 恰在 P3 与 BT.2020 之间 ⇒ libjxl 把无法精确匹配的
-            // ICC"归到最近的已知枚举"。cjxl 只有 color_space 枚举与 icc_pathname 两个入口（-h 实证），
-            // 没有"原样保留"开关 ⇒ 不是传参能解决的。
-            // 两害相权：宁可这一格式不做 Adobe 搬运（像素与声明自洽），也不产出"声明 BT.2020 的 Adobe 文件"
-            //（采信码点的查看器会系统性偏色）。代价经 EncoderFallbackNotifier 留痕，用户能看到。
-            // 其余色域不受影响：DisplayP3 / BT.2020 libjxl 都能精确映射（实测读回 12 / 9 正确）。
+            // ═══ 2026-09-27（用户口径）：AdobeRGB 收口进 Rec.2020，不再退回 sRGB ═══
+            // 旧写法（2026-09-19 缺陷 B）在这里把 tag 改成 sRGB 并清掉 ICC，理由是
+            // "libjxl 会把承载不了的 ICC 归到最近枚举并丢弃 profile"。那条理由【已被实测推翻】
+            //（交接 §56.4）：用我们自己产物里那份 3144 字节 Adobe ICC 走 icc_pathname 通路喂
+            // 随包 cjxl v0.11.2，jxlinfo 读回 Custom(0.639998,0.329997) —— Adobe 原色逐字还在；
+            // 旧结论里的"primaries=bt2020"是 ffprobe 在【读取方】把自定义原色归到最近 H.273 码点。
+            // 更要紧的是口径不一致：界面侧 CollapseSelectableTag 与 HDR 侧 HdrDeclarableTag
+            // 早就把 Adobe 收口成 BT2020，只有这条 JXL SDR 路往反方向（sRGB）收 ——
+            // 同一枚用户选择在三个地方得到三种产物。现在三处同向。
+            // BT.2020 比 AdobeRGB 宽 ⇒ 归一不裁色域；代价是"用户显式选的 Adobe 未被单独搬运"，
+            // 所以仍走 EncoderFallbackNotifier 留痕，不静默。
             if (s.ColorSpaceTag == "AdobeRGB")
             {
-                s.ColorSpaceTag = "sRGB";
-                s.IccProfile = null;   // 必须一起清掉：8-bit 子路径会把 s.IccProfile 交给 cjxl，
-                                       // 留着就成了"sRGB 像素 + Adobe 的 ICC"，比写错码点更难查
+                s.ColorSpaceTag = ColorManagement.ColorProfileProvider.MapAdobeTargetToWide(s.ColorSpaceTag);
+                s.IccProfile = null;   // 必须一起清：实测 ICC 在 cjxl 里压过 color fields
+                                       //（两种参数顺序都给 ICC 那份声明），留着 Adobe 的 ICC
+                                       // 就会"像素按 2020 搬、声明写 Adobe 原色" —— 比原先更难查。
                 EncoderFallbackNotifier.LastReason =
-                    "JPEG XL 无法忠实声明 AdobeRGB（libjxl 会把无匹配的 ICC 归到最近枚举并丢弃 profile，" +
-                    "实测产物被读成 BT.2020）⇒ 本张已退回 sRGB，未做 Adobe 色域搬运";
+                    "目标色域 AdobeRGB 已按产品口径收口为 Rec.2020（界面只留 Rec.709 / Rec.2020 两档，"
+                    + "HDR 路同样收口）⇒ 本张像素与声明同为 Rec.2020，未单独做 Adobe 原色搬运";
             }
             // ═══ 2026-09-19 解耦：两件事各自的判据（详见 PNG 分支同段说明）═══
             // ① 输入精度：本入口源恒为 Float16 scRGB ⇒ 恒走浮点链（矩阵 + 色调映射 + gamma）
@@ -306,8 +325,11 @@ public sealed class AvifEncoder : ImageEncoder
                             $"NVENC 的 HDR 直通抛出异常（{ex.GetType().Name}）⇒ 已改由 avifenc 软件编码";
                     }
                 }
-                // AVIF HDR 固定 10-bit 全精度
-                var p16 = FormatHelper.HdrToPq16(f, csTag, 10);
+                // 量化位深 = 上游按编码器能力协商出的结果（HDR 下限 10，libaom 可到 12）。
+                // 2026-09-25 前这里是字面量 10，而能力表给 libaom 声明的是 MaxBitDepth:12 ⇒
+                // "选了 12 也只给 10"，且这个 10 在管线 / 量化 / avifenc 命令行各写了一遍。
+                int hdrDepth = s.OutputBitDepth;
+                var p16 = FormatHelper.HdrToPq16(f, csTag, hdrDepth);
                 var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(p16, f.Width, f.Height);
                 byte[] cicpHdr = FormatHelper.BuildHdrCicp(csTag); // PQ transfer=16, matrix=identity（AVIF 侧换成 9，见 FormatHelper.AvifMatrixCoefficients）
                 // ═══ 2026-08-09 修复: HDR 不嵌 ICC (同 PNG, CICP 优先声明) ═══
@@ -331,7 +353,8 @@ public sealed class AvifEncoder : ImageEncoder
                     //   中转是兜底路径（cICP 已带 PQ 声明，无"HDR 被当 SDR"问题）。
                     NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr, csTag, peakNits,
                         chroma: s.ChromaSubsampling,
-                        codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind));
+                        codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
+                        bitDepth: hdrDepth);
                 }
                 finally { try { File.Delete(tmpPng); } catch { } }
             }, ct);
@@ -507,6 +530,16 @@ public sealed class TiffEncoder : ImageEncoder
                 // TIFF 无 CICP 机制, 必须嵌 ICC。但标准 ICC 是 sRGB TRC, 与 PQ 像素矛盾。
                 // 用 PQ TRC ICC (GetHdrStandardIccProfile), 否则解码器按 sRGB gamma 解码 PQ 值。
                 byte[]? iccHdr = ColorManagement.ColorProfileProvider.GetHdrStandardIccProfile(csTag);
+                // ═══ 2026-09-24（#22）：这里改掉用户选的位深，就必须留下痕迹 ═══
+                // TIFF 的 BitsPerSample 只有 8/16 两档合法（写 10/12 会产出打不开的文件，见 XAML 那条
+                // 注释），而 8-bit 装不下 PQ ⇒ HDR 只能落 16-bit。方向与 PNG 相反：PNG 遇 8-bit 是
+                // 【降成 SDR】（丢 HDR 意图，#21 已给它加了协商 + 提示），TIFF 是【升到 16-bit】
+                // （保住 HDR，代价是体积翻倍）。两者都属"界面设置与产物不一致"，都不许无声 ——
+                // 不告知的话用户只会发现"我选了 8-bit，文件怎么是 16-bit 的、还大一倍"，无从归因。
+                if (s.OutputBitDepth <= 8)
+                    EncoderFallbackNotifier.LastReason =
+                        "HDR TIFF 的容器位深恒为 16-bit（TIFF 只承认 8/16 两档 BitsPerSample，"
+                        + $"而 8-bit 装不下 PQ）⇒ 本张未按所选的 {s.OutputBitDepth}-bit 输出，而是 16-bit";
                 // 显式声明输入为 16-bit，避免依赖数组长度推断
                 ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, iccHdr, inputBitDepth: 16);
             }, ct);
@@ -968,6 +1001,13 @@ public sealed class NvencAvifBackend : IAvifEncoder
              || msg.Contains("no encode capability", StringComparison.OrdinalIgnoreCase)
              || msg.Contains("buffer format", StringComparison.OrdinalIgnoreCase)
              || msg.Contains("input format", StringComparison.OrdinalIgnoreCase)
+             // ═══ 2026-09-24：CRF 0（AV1 的 QP0 = 请求 lossless）实测签名 ═══
+             // 本机 RTX 4060：InitEncoder hr=0x00000008 lastErr="Lossless Coding mode not
+             // supported." ⇒ 这是"这个参数组合硬件给不出"，不是"这张卡的编码器坏了"。
+             // 漏掉它的代价被实测放大过一整轮：一次 CRF 0 失败会把 s_nvencFailed 置位，
+             // 此后【同进程所有】AVIF 都退回软件（顺序实验 --crf 2,0,5,8,15：只有 2 走了硬件），
+             // 只能靠重启恢复 —— 与上面那段"一张小图废掉全部大图"是同一个病。
+             || msg.Contains("Lossless Coding mode not supported", StringComparison.OrdinalIgnoreCase)
              // NV_ENC_ERR_UNSUPPORTED_PARAM (0xC)：实测 RTX 5080 上 AV1+NV16 4:2:2 在
              // EncodePicture 阶段被驱动以此码拒绝（NVENC 的 4:2:2 编码仅 HEVC 支持，
              // AV1 只支持 420）。属"该输入组合不适用"，不应永久禁用 NVENC。
@@ -1838,26 +1878,27 @@ public static class FormatHelper
     /// HDR 场景下"容器能忠实声明"的目标色域归一（2026-09-19 缺陷 D-3：PNG/AVIF/JXL 三处同根）。
     /// <para><b>为什么 HDR 要单独问一遍</b>：SDR 侧"AdobeRGB 在 H.273 Table 2 没有 primaries 码点
     /// ⇒ 不写码点、只靠 ICC 声明"的守卫挂在 <see cref="BuildSdrCicp"/> 上，而 HDR 声明路径
-    /// （PQ + cICP / colr(nclx) / cjxl 的 color_space）<b>根本不经过它</b>；同时 HDR 又按 2026-08-09
-    /// 的教训一律不嵌 ICC。于是"HDR + AdobeRGB"会走完 Adobe 矩阵、再把 Adobe 原色的像素报成
+    /// （PQ + cICP / colr(nclx) / cjxl 的 color_space）<b>根本不经过它</b>；而这些通道都只认 H.273 的
+    /// 原色码点，里面没有 Adobe 那一格。于是"HDR + AdobeRGB"会走完 Adobe 矩阵、再把 Adobe 原色的像素报成
     /// primaries=1(BT.709)（PNG/AVIF 硬件）或 BT.2020（JXL 的 Rec2100PQ）—— 声明与像素矛盾且无兜底。</para>
     /// <para><b>口径</b>：HDR 容器家族本来就是 BT.2020（<c>ResolveColorSpaceTag</c> 把 "System"+HDR
     /// 也解析成它），故把不可声明的 AdobeRGB 归一到 BT2020，并<b>就地改写 s.ColorSpaceTag</b> ——
     /// 矩阵（<see cref="HdrToPq16"/> / <c>ToneMapper.HdrToArgb10Pq</c>）与声明（cICP/colr/color_space/
     /// PQ-ICC）都从同一个 <c>s</c> 取值 ⇒ 两者同源，不会出现"像素搬了、声明没搬"。BT.2020 比 AdobeRGB
     /// 更宽，归一不裁色域；代价是用户显式选的 Adobe 未生效 ⇒ 必须留痕（下方 Toast 文案）。</para>
-    /// <para><b>只在 HDR 分支调用</b>：SDR 侧 Adobe 有成熟出路（PNG iCCP / AVIF colr(prof)），
-    /// 承载不了的 JXL 另有"退回 sRGB"处理。</para>
+    /// <para><b>只在 HDR 分支调用</b>：SDR 侧 Adobe 在 PNG / AVIF / TIFF / JPEG LI / WebP 上还有
+    /// "不写码点、只带 Adobe 的 ICC"这条忠实出路；而 JXL 的 SDR 路自 2026-09-27 起与这里同向
+    /// （收口成 BT2020），不再单独退回 sRGB —— 见 <c>ImageEncoder</c> 的 JXL 分支说明。</para>
     /// </summary>
     public static string HdrDeclarableTag(EncodingSettings s)
     {
         var tag = s.ColorSpaceTag ?? "sRGB";
         if (tag != "AdobeRGB") return tag;
 
-        s.ColorSpaceTag = "BT2020";
+        s.ColorSpaceTag = ColorManagement.ColorProfileProvider.MapAdobeTargetToWide(tag);
         EncoderFallbackNotifier.LastReason =
-            "HDR(PQ) 容器无法忠实声明 AdobeRGB（H.273 无该 primaries 码点，HDR 路径又不嵌 ICC）"
-            + "⇒ 本张已按 HDR 家族的 BT.2020 输出，像素与声明同色域";
+            "HDR(PQ) 容器无法忠实声明 AdobeRGB（H.273 没有 Adobe 这一格原色码点，而这条路的声明走 "
+            + "cICP / colr(nclx) / cjxl 的 color fields）⇒ 本张已按 HDR 家族的 Rec.2020 输出，像素与声明同色域";
         return "BT2020";
     }
 

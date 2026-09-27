@@ -52,6 +52,9 @@ public sealed partial class OcrPreviewWindow : Window
         Func<byte[], int, int, Task>? saveHandler = null)
     {
         this.InitializeComponent();
+        MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
+        // 窗口标题不在可视树里，只能显式翻译。
+        Title = LocaleManager.Tr(Title);
         _rawPixels = bgraPixels;
         _imgW = width; _imgH = height;
         _ocr = ocr;
@@ -269,7 +272,9 @@ public sealed partial class OcrPreviewWindow : Window
     {
         bool show = OverlayToggle.IsChecked == true;
         OverlayCanvas.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        OverlayToggleTxt.Text = show ? "隐藏覆盖" : "显示覆盖";
+        // 两态都有英文说法：原先右侧写的是中文"显示覆盖"，于是英文模式下"关着覆盖层"
+        // 这一态反而显示中文（复核轮抓到，交接 §55.6 剩余缺口第一条）。
+        OverlayToggleTxt.Text = show ? LocaleManager.Tr("隐藏覆盖") : "Show overlay";
     }
 
     /// <summary>取行的原图边界矩形，带 4px padding。</summary>

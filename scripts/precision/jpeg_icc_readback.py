@@ -120,6 +120,11 @@ def main() -> int:
     bad = 0
     with_icc = []
     per_gamut: dict[str, bytes] = {}
+    # 目标 AdobeRGB 自 2026-09-27 起收口成 Rec.2020（MapAdobeTargetToWide，样张宿主也过同一个函数）
+    # ⇒ adobe 样张的 profile 必须【等于】bt2020 的那一份。原来这条判据把 adobe 当独立色域、
+    #   要求它与 bt2020 两两不同 —— 收口之后那条要求本身就与口径矛盾（会红在正确行为上）。
+    GAMUT_OF_KEY = {"p3": "p3", "bt2020": "bt2020", "adobe": "bt2020"}
+    per_raw: dict[str, bytes] = {}
     for f in files:
         p = os.path.join(d, f)
         segs = scan_segments(open(p, "rb").read())
@@ -129,7 +134,8 @@ def main() -> int:
             with_icc.append(f)
             for k in WIDE_GAMUT_KEYS:
                 if k in f.lower():
-                    per_gamut[k] = prof
+                    per_raw[k] = prof
+                    per_gamut[GAMUT_OF_KEY[k]] = prof
         # 关键一条：另一家实现必须读到同样的字节
         got = pil_read(p)
         if isinstance(got, str):
@@ -152,6 +158,16 @@ def main() -> int:
         bad += 1
     if len(with_icc) < 3:
         print(f"  ❌ 带 ICC 的样张只有 {len(with_icc)} 张（期望 ≥3：P3/BT.2020/Adobe 各一）")
+        bad += 1
+    # 收口的正证：adobe 与 bt2020 必须是同一份 profile（两侧都取到才判，取不到不算通过）
+    if "adobe" in per_raw and "bt2020" in per_raw:
+        if per_raw["adobe"] != per_raw["bt2020"]:
+            print("  ❌ adobe 与 bt2020 不是同一份 profile ⇒ 「AdobeRGB 收口进 Rec.2020」没落到文件里")
+            bad += 1
+        else:
+            print("  ✅ adobe 与 bt2020 同一份 profile（目标收口在容器里成立）")
+    elif "adobe" in per_raw or "bt2020" in per_raw:
+        print(f"  ❌ 只取到 adobe/bt2020 其中一份（{sorted(per_raw)}）⇒ 这条比对没执行，不许当通过")
         bad += 1
     if len(per_gamut) >= 2:
         vals = list(per_gamut.items())

@@ -14,6 +14,7 @@ using TrueToneCap.Core.Logging;   // CoreLog 档位模型（Test_LogDetailLevelI
 using TrueToneCap.Core.Services;
 using DEnum = TrueToneCap.Core.Capture.DisplayEnumerator;   // 三档判据的别名（方法体内不能用 var 给类型起别名）
 using CDec = TrueToneCap.Core.Capture.ColorDecision;        // 一次截图的唯一色彩决定（§41 收口的落点）
+using FOrder = TrueToneCap.Core.Settings.FormatOrder;       // 格式下拉顺序 + 旧表重映射（§52）
 
 namespace TrueToneCap.Test;
 
@@ -107,6 +108,8 @@ public static class CorePipelineTests
 
         // 跨项目源码契约（App 层的"两处常量必须同步"类约束）
         Test_SettingsWhitelist_MatchesXamlTags();
+        Test_SettingsDiffPruner_Semantics();
+        Test_SettingsPersistence_Sentinels();
         Test_LlmConfig_InjectsYoudaoCredentials();
         Test_StartupManager_ReadHandlesQuotedCommand();
 
@@ -117,6 +120,15 @@ public static class CorePipelineTests
 
         // NVENC 失败分类（防"一张小图失败 → 后续大图永久退软件"）
         Test_NvencFailureClassification();
+        Test_LosslessQualityRowCollapsed_SourceSentinels();
+        Test_QualityPanelProgrammaticWrite_SourceSentinels();
+        Test_SettingsWriteSites_AllPersist();
+        Test_SettingsWriteProbe_RealProbe();
+        Test_SettingsPersistence_BlockedPath_Sentinels();
+        Test_GainMapMerged_FormatIndexMigration();
+        Test_HdrPngDepthNegotiation_SourceSentinels();
+        Test_AvifCrfFloorTable();
+        Test_DegradationToast_SingleDedupRule();
 
         // MFT（QSV 选项的实际实现路径）真实编码验证
         Test_MftAv1EncodeIfAvailable();
@@ -156,6 +168,11 @@ public static class CorePipelineTests
         Test_Display_PerMonitorCapabilityTruthTable();
         Test_Edid_ReadIsHandleDriven_NotFirstMatch();
         Test_ColorDecision_SingleSourceOfTruth();
+        Test_HdrDelivery_FiveShapesAndPerFormatChannel();
+        Test_Xaml_HardcodedChineseIsLocalized();
+        Test_FormatLabels_AreUserFacingNames();
+        Test_VisibleToastAndHintStrings_UseCurrentNames();
+        Test_Xaml_CollapsedCards_HaveVisibilityOwner();
         Test_Jxl_ColorSpaceMapping();
         Test_HdrProbeJudge_NotDead();
         Test_HdrAdobeTag_NormalizedBeforeMatrix();
@@ -999,6 +1016,21 @@ public static class CorePipelineTests
             if (min > max || def < min || def > max) { ok = false; break; }
         }
         Assert("EncoderFactory: 所有编码器质量范围合法 (min≤default≤max)", ok);
+
+        // ★ 哪些格式【没有质量参数】必须是一张明写的表，而不是"界面上滑块划不动"这种观感。
+        //   这两个是无损格式：滑块恒 100、输入框只能填 100 ⇒ App 侧据此把整行收起（#26）。
+        //   反向断言同样重要：哪天有人给 PNG 真加了压缩级别之类的可调项，或把某个有损格式的
+        //   区间写退化，这里会立刻指出"UI 该不该显示这根滑块"的判断变了。
+        var expectFixed = new (OutputFormat F, bool Fixed)[]
+        {
+            (OutputFormat.PNG, true), (OutputFormat.TIFF, true),
+            (OutputFormat.JPEG_LI, false), (OutputFormat.JPEG_XL, false),
+            (OutputFormat.JPEG_GAINMAP, false), (OutputFormat.AVIF, false),
+            (OutputFormat.WebP, false),
+        };
+        foreach (var (f, expect) in expectFixed)
+            Assert($"质量参数可调性: {f} 的区间{(expect ? "退化为固定值" : "确有可调范围")}",
+                EncoderFactory.Create(f).QualityIsFixed == expect);
     }
 
     static void Test_EncodingSettings_Defaults()
@@ -2020,7 +2052,14 @@ public static class CorePipelineTests
         var xaml = File.ReadAllText(xamlPath);
         var srv = File.ReadAllText(srvPath);
         CheckWhitelistEqualsTags(xaml, srv, "OcrEngineCbo", "s.OcrEngineMode", expectTags: 3);
-        CheckWhitelistEqualsTags(xaml, srv, "AvifCodecCbo", "s.AvifEncoder", expectTags: 6);
+        CheckWhitelistEqualsTags(xaml, srv, "AvifCodecCbo", "s.AvifEncoder", expectTags: 5);
+
+        // ═══ "Avifenc" 档 2026-09-24 从界面移除，但旧值必须迁到 LibAom 而不是 Auto ═══
+        // Auto 优先走硬件 ⇒ 拿它当迁移目标会翻转用户"选了软件编码器"的语义。
+        // 这条判据防的是将来有人"顺手简化"成一句白名单回落。
+        Assert("旧值 Avifenc 显式迁到 LibAom（不是悄悄落到 Auto）",
+            System.Text.RegularExpressions.Regex.IsMatch(srv,
+                "s\\.AvifEncoder == \"Avifenc\"[\\s\\S]{0,200}s\\.AvifEncoder = \"LibAom\""));
     }
 
     static void CheckWhitelistEqualsTags(string xaml, string srv, string combo, string prop, int expectTags)
@@ -2036,6 +2075,265 @@ public static class CorePipelineTests
                  && !whitelist.Except(tags, StringComparer.Ordinal).Any()
                  && !tags.Except(whitelist, StringComparer.Ordinal).Any();
         Assert($"设置白名单[{string.Join(",", whitelist)}] == {combo} Tag[{string.Join(",", tags)}]", same);
+    }
+
+    /// <summary>
+    /// 设置"只写差集"的<b>语义</b>测试（2026-09-24）。
+    /// <para>要修的原始缺陷：<c>Save()</c> 全量序列化 ⇒ 文件里 64 个键一个不缺 ⇒ "缺键才回落代码默认"
+    /// 这条兜底从未生效 ⇒ 改代码默认值对任何老用户都不生效。这就是"默认值修了很久修不好"的机制。</para>
+    /// <para>为什么测算法本体而不是源码文本：哨兵只能证明调用点还在，证明不了剪枝真的在剪。
+    /// 本算法最常见的失效形态是"两份 JSON 因格式化差异被判不等 ⇒ 一个键都删不掉"，
+    /// 那是不报错、不失败的空转 —— 恰好是原缺陷的另一种表现。算法因此放在 Core（Test 只引用 Core）。</para>
+    /// </summary>
+    static void Test_SettingsDiffPruner_Semantics()
+    {
+        var P = typeof(TrueToneCap.Core.Settings.SettingsDiffPruner);
+        var prune = P.GetMethod("PruneToJson")!;
+        string Run(System.Text.Json.Nodes.JsonObject live, System.Text.Json.Nodes.JsonObject defs,
+                   string[]? keep = null)
+            => (string)prune.Invoke(null, [live, defs, keep])!;
+
+        var live = new System.Text.Json.Nodes.JsonObject
+        {
+            ["QualityAvif"] = 15.0, ["QualityWebp"] = 50.0, ["ChromaGainMap"] = "420",
+            ["ColorSpaceIndex"] = 2
+        };
+        var defs = new System.Text.Json.Nodes.JsonObject
+        {
+            ["QualityAvif"] = 15.0, ["QualityWebp"] = 90.0, ["ChromaGainMap"] = "420",
+            ["ColorSpaceIndex"] = 0
+        };
+        var json = Run(live, defs);
+        Assert("等于默认的键被剪掉 ⇒ 下次读盘自动跟随新默认",
+            !json.Contains("QualityAvif") && !json.Contains("ChromaGainMap"), json);
+        Assert("用户真正改过的键必须保留（WebP 50、色域 2）",
+            json.Contains("QualityWebp") && json.Contains("ColorSpaceIndex"), json);
+
+        // double 判等：源生成写出的数字是 15 vs 15.0 这类形态，格式化不一致就会一个键都剪不掉
+        var a = new System.Text.Json.Nodes.JsonObject { ["q"] = System.Text.Json.Nodes.JsonValue.Create(15.0) };
+        var b = new System.Text.Json.Nodes.JsonObject { ["q"] = System.Text.Json.Nodes.JsonValue.Create(15.0) };
+        Assert("double 相等要判等（否则整个机制空转）", !Run(a, b).Contains("q"), "空转：一个键都没剪掉");
+
+        // 版本号被剪掉 ⇒ 下次读成 0 ⇒ 迁移反复触发，所以它必须永远落盘
+        var v = new System.Text.Json.Nodes.JsonObject { ["SettingsRevision"] = 1, ["q"] = 15 };
+        var vd = new System.Text.Json.Nodes.JsonObject { ["SettingsRevision"] = 1, ["q"] = 15 };
+        Assert("alwaysKeep 的键即使等于默认也留下",
+            Run(v, vd, ["SettingsRevision"]).Contains("SettingsRevision"));
+
+        Assert("默认表里没有的键（老版本写的未知字段）一律保留，删了等于丢用户数据",
+            TrueToneCap.Core.Settings.SettingsDiffPruner.ShouldKeepUnknownKey(
+                "LegacyThing", new System.Text.Json.Nodes.JsonObject()));
+    }
+
+    /// <summary>App 侧接线：Test 引用不到 App，只能钉调用点与"不许再出现第二处事实源"。</summary>
+    static void Test_SettingsPersistence_Sentinels()
+    {
+        var srvPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SettingsService.cs"));
+        var mdlPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "AppSettingsData.cs"));
+        if (srvPath is null || mdlPath is null)
+        {
+            Skip("设置持久化接线", "未找到 SettingsService.cs / AppSettingsData.cs");
+            return;
+        }
+        var srv = File.ReadAllText(srvPath);
+        var mdl = File.ReadAllText(mdlPath);
+        Assert("Save 走差集序列化，不再全量写回", srv.Contains("SerializeDiffs(Current)"));
+        Assert("默认表唯一事实源是 CreateDefaults()（每次新建，不做可变单例）",
+            mdl.Contains("public static AppSettingsData CreateDefaults() => new()")
+            && !mdl.Contains("static readonly AppSettingsData"));
+        // 注：ClampTo 不许写数字兜底，由 Test_Settings_QualityDefaultsSingleSource 统一测
+        //（它同时管接线齐全与指对字段，这里再解析一遍只会多一处会漂移的正则）。
+        Assert("修订迁移只碰质量与色域；色度/位深是 2026-09-19 拍板的产品决定，不许顺手动",
+            !System.Text.RegularExpressions.Regex.IsMatch(srv, @"s\.(Chroma|BitDepth)\w+ = dft?\.")
+            && srv.Contains("MigrateStaleDefaults"));
+
+        // ═══ 迁移门的两个坏形态，各钉一处（2026-09-25 §49：门对"无修订号的老文件"从未触发过）═══
+        // 行为级判据在 App 侧 SelfTest.RunSettingsMigrationCheck（Test 引用不到 App，只能钉形态），
+        // 两条各自咬一种：① 初值写成当前号 ⇒ 缺键被读成"已迁移"；② 只在初值上做文章、
+        // 写盘不盖章 ⇒ 新装机存一次就得 0，下次启动把用户刚挑的档清成默认。
+        var mdlCode = StripLineComments(mdl);
+        var srvCode = StripLineComments(srv);
+        Assert("SettingsRevision 的初值不许是【非 0】的任何值（缺键必须读作未迁移；写 0 等价于不写）",
+            !System.Text.RegularExpressions.Regex.IsMatch(
+                mdlCode, @"SettingsRevision\s*\{\s*get;\s*set;\s*\}\s*=(?!\s*0)"),
+            "初值带非 0 ⇒ STJ 用它填缺键 ⇒ MigrateStaleDefaults 恒不触发");
+        Assert("Save() 必须在序列化前把修订号钉成当前号（唯一的写盘出口）",
+            srvCode.IndexOf("Current.SettingsRevision = AppSettingsData.CurrentSettingsRevision;",
+                System.StringComparison.Ordinal) >= 0
+            && srvCode.IndexOf("Current.SettingsRevision = AppSettingsData.CurrentSettingsRevision;",
+                   System.StringComparison.Ordinal)
+               < srvCode.IndexOf("SerializeDiffs(Current)", System.StringComparison.Ordinal),
+            "缺这一行 ⇒ 新装机的文件盖 0 号章，重启即被迁移门清成默认档");
+        Assert("迁移结果必须驱动写盘（否则交还的默认值只活在内存里，重启即复原）",
+            srvCode.Contains("migrated |= MigrateStaleDefaults(") && srvCode.Contains("if (migrated) Save();"),
+            "返回值没人接 ⇒ 门开了也不落盘");
+    }
+
+    /// <summary>
+    /// 「JPEG Gain Map 并入 JPEG LI」的重映射与接线（2026-09-26 用户口径）。
+    /// <para>为什么这是本轮最需要判据的一处：<c>FormatIndex</c> 存的是<b>裸索引</b>，
+    /// 旧表 1=GainMap、2=JPEG LI，新表 1=JPEG LI。而全仓对它的唯一旧防线是越界钳制
+    /// （<c>is &lt; 0 or &gt; 6</c>）—— 删掉一项之后，旧值 1 与新默认值都仍在合法区间内 ⇒
+    /// 钳制【永不触发】，用户静默换了输出格式，界面上看不出任何异常。
+    /// 同型缺陷在 ColorSpaceIndex 上已经发生过一次。</para>
+    /// <para>所以整张重映射表逐格对撞，且每格都额外核对<b>翻译后的格式名</b>——
+    /// 只比数字的话，"旧 1→新 1"这格（同号不同义，最危险的一格）看起来毫无变化，
+    /// 而它恰恰是 GainMap 用户会不会被静默降成普通 JPEG LI 的分界。</para>
+    /// </summary>
+    static void Test_GainMapMerged_FormatIndexMigration()
+    {
+        var table = new (int Legacy, string OldName, int NewIdx, string NewName, bool Gm)[]
+        {
+            (0, "PNG",          0, "PNG",     false),
+            (1, "JPEG_GAINMAP", 1, "JPEG_LI", true),    // 同号不同义：整次迁移最危险的一格
+            (2, "JPEG_LI",      1, "JPEG_LI", false),
+            (3, "JPEG_XL",      2, "JPEG_XL", false),
+            (4, "AVIF",         3, "AVIF",    false),
+            (5, "WebP",         4, "WebP",    false),
+            (6, "TIFF",         5, "TIFF",    false),
+        };
+        foreach (var c in table)
+        {
+            var (idx, gm) = FOrder.RemapLegacy(c.Legacy);
+            Assert($"旧索引 {c.Legacy}（{c.OldName}）→ {c.NewIdx}（{c.NewName}）+ 增益图={(c.Gm ? "开" : "关")}",
+                idx == c.NewIdx && gm == c.Gm && FOrder.FormatAt(idx).ToString() == c.NewName,
+                $"实得 index={idx} 翻译后={FOrder.FormatAt(idx)} gainmap={gm}");
+        }
+
+        Assert("新表不含 JPEG_GAINMAP（它不再是用户可选项）",
+            !FOrder.UiFormats.Contains(OutputFormat.JPEG_GAINMAP));
+        Assert("新表 6 项 / 上界 5 / 默认落在 PNG（2026-09-26 产品口径：默认编码器 = PNG，失败模式要「无损但大」）",
+            FOrder.UiFormats.Length == 6 && FOrder.MaxIndex == 5
+            && FOrder.FormatAt(FOrder.DefaultIndex) == OutputFormat.PNG
+            && FOrder.DefaultIndex == 0);
+        Assert("旧表 7 项、1 号确为 GainMap、2 号确为 JPEG LI（这张表是「盘上那个数字原本指谁」的证词）",
+            FOrder.LegacyUiFormats.Length == 7
+            && FOrder.LegacyUiFormats[1] == OutputFormat.JPEG_GAINMAP
+            && FOrder.LegacyUiFormats[2] == OutputFormat.JPEG_LI);
+        Assert("越界索引：FormatAt 回落默认格式（PNG）、RemapLegacy 回落默认且不开增益图（不得抛）",
+            FOrder.FormatAt(9) == OutputFormat.PNG && FOrder.FormatAt(-1) == OutputFormat.PNG
+            && FOrder.RemapLegacy(9).Index == FOrder.DefaultIndex && !FOrder.RemapLegacy(9).GainMapEnabled
+            && FOrder.RemapLegacy(-1).Index == FOrder.DefaultIndex);
+
+        // 缺陷判据（2026-09-26 用户报"默认选项缺失"）：换 ItemsSource 会把 SelectedIndex 打回 -1，
+        // 而 RebuildFormatCombo() 每次 ApplyLocale() 都跑、构造期又排在 ApplySettingsToUI() 之后
+        // ⇒ 每次开机格式下拉都是空的。判据只能钉形态（Test 工程引用不到 App）。
+        // ⚠ 形态匹配必须先在**剥掉注释**的文本上做：这个函数体内就有一段解释 WinUI 行为的注释，
+        //   里面写着 "SelectedIndex" —— 拿原文找锚点会先命中那行注释，于是"把读取挪到赋值之后"
+        //   这种真实退化【照样绿】（2026-09-26 变异实测：挪序后 --unit-tests 851 全过）。
+        var mxcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var mxcBody = StripComments(File.ReadAllText(mxcPath!));
+        int rbAt = mxcBody.IndexOf("private void RebuildFormatCombo()", System.StringComparison.Ordinal);
+        var rbBody = rbAt < 0 ? "" : mxcBody.Substring(rbAt, mxcBody.IndexOf("\n    }", rbAt, System.StringComparison.Ordinal) - rbAt);
+        int firstSel = rbBody.IndexOf("SelectedIndex", System.StringComparison.Ordinal);
+        int assignSel = rbBody.IndexOf("SelectedIndex =", System.StringComparison.Ordinal);
+        int itemsAt = rbBody.IndexOf("ItemsSource =", System.StringComparison.Ordinal);
+        Assert("RebuildFormatCombo 必须在换 ItemsSource 前读回选中项、换完后重新赋值"
+               + "（否则格式下拉在每次开机/每次切语言后是空的）",
+            rbBody.Length > 0
+            && firstSel >= 0 && firstSel < itemsAt          // 先读
+            && assignSel > itemsAt                           // 后写
+            && rbBody.Contains("FormatOrder.DefaultIndex"),   // 未选中时的落点 = 产品默认
+            $"读选中@{firstSel} / ItemsSource@{itemsAt} / 写选中@{assignSel}");
+
+        // ── App 侧接线（Test 引用不到 App，只能钉形态；行为级在 SelfTest --settings-migration）──
+        var svcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SettingsService.cs"));
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var pipePath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
+        if (svcPath is null || mwPath is null || pipePath is null)
+        { Skip("增益图合并的 App 侧接线", "未找到源文件"); return; }
+        var svc = StripLineComments(File.ReadAllText(svcPath));
+        var mw = StripLineComments(File.ReadAllText(mwPath));
+        var pipe = StripLineComments(File.ReadAllText(pipePath));
+
+        Assert("迁移被 Load 调用，且盖章发生在唯一的写盘出口 Save()",
+            svc.Contains("migrated |= MigrateGainMapMerge(Current);")
+            && svc.Contains("Current.GainMapMerged = true;"));
+        Assert("门用 GainMapMerged，不借 SettingsRevision（借默认表版本触发会再清一次用户质量档）",
+            svc.Contains("if (s.GainMapMerged) return false;"));
+        Assert("FormatIndex 的合法上界取自 FormatOrder，不许再写死 6",
+            !svc.Contains("s.FormatIndex is < 0 or > 6") && svc.Contains("FormatOrder.MaxIndex"));
+        Assert("开关→格式的翻译只有一个出口，编码快照走它",
+            mw.Contains("private OutputFormat CurrentFormat()") && mw.Contains("Format: CurrentFormat()"));
+        Assert("增益图开关的落盘必须挡住程序赋值（§49 那条缺陷在复选框上的同一形态）",
+            mw.Contains("if (!_uiReady || _qualityPanelUpdating) return;"));
+        Assert("管线里不得再有第二份「格式→质量字段」switch（三份抄写就是这次合并要消掉的东西）",
+            !pipe.Contains("OutputFormat.JPEG_GAINMAP => s.QualityGainMap")
+            && pipe.Contains("s.GetQuality(format)"));
+
+        // ═══ 2026-09-26 补：格式下拉的标签曾经有【第二份清单】，摘掉 GainMap 后整列错位 ═══
+        // 现场：Localization 里另抄的 7 项标签数组在构造期就把 ItemsSource 换掉，
+        // 于是「JPEG Gain Map (HDR)」编成 JPEG LI、「JPEG LI」编成 JPEG XL、「WebP」编成 TIFF、
+        // 末尾「BMP」被钳成 TIFF，而真正的 TIFF 选不到 —— 7 个可见项里 5 个点谁都不是谁。
+        // 上面那条"三份抄写"的判据管的是字段映射，管不到标签表，所以这里补一条针对项序的锁。
+        var locPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Localization.cs"));
+        var lmPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        if (locPath is null || lmPath is null) { Skip("格式下拉的标签来源", "未找到源文件"); return; }
+        var loc = StripLineComments(File.ReadAllText(locPath));
+        var lm = StripLineComments(File.ReadAllText(lmPath));
+        Assert("格式下拉的 ItemsSource 只能由一个构建口生成（标签数组不许另抄一份）",
+            loc.Contains("RebuildFormatCombo()")
+            && !loc.Contains("FormatCbo.ItemsSource")
+            && !loc.Contains("fmtLabels = new[]")
+            && !lm.Contains("FmtJpegGainMap") && !lm.Contains("FmtBmp"));
+        // 构建口本身：**整个 App 工程**里 `FormatCbo.ItemsSource` 只能被赋值一次，且紧跟一次契约自检。
+        // 扫描范围故意不限定在 xaml.cs —— 这类"另抄一份清单"的缺陷正是从别的文件里长出来的，
+        // 只钉一个文件等于给下一次留了个别的文件。
+        var appDir = Path.GetDirectoryName(mwPath)!;
+        var assignSites = new System.Collections.Generic.List<string>();
+        foreach (var cs in Directory.GetFiles(appDir, "*.cs", SearchOption.AllDirectories))
+        {
+            if (cs.Contains("\\obj\\") || cs.Contains("\\bin\\")
+                || cs.Contains("/obj/") || cs.Contains("/bin/")) continue;
+            int hits = Regex.Matches(StripLineComments(File.ReadAllText(cs)),
+                "FormatCbo\\.ItemsSource\\s*=").Count;
+            for (int k = 0; k < hits; k++) assignSites.Add(Path.GetFileName(cs));
+        }
+        Assert("整个 App 只有一处能给格式下拉赋值（两处以上就等于允许第二份清单）",
+            assignSites.Count == 1, $"实得 {assignSites.Count} 处：{string.Join(",", assignSites)}");
+        Assert("唯一的构建口自带显示层↔编码层↔契约表三方自检，且错位只报 Error 不静默修复",
+            Regex.IsMatch(mw, "private void RebuildFormatCombo\\(\\)[\\s\\S]{0,400}CheckFormatComboContract\\(\\);")
+            && mw.Contains("private void CheckFormatComboContract()")
+            && mw.Contains("LogService.Error(\"MainWindow\""));
+        // 界面格式表 vs Core 的 FormatIndex 契约表：逐项同序。这两张表任何一张单独漂了，
+        // 老配置里的裸索引就会"静默指向别的格式"——§52 与本轮的错位都是这么来的。
+        var fmtBlock = Regex.Match(mw, "_formats\\s*=\\s*\\[([\\s\\S]*?)\\];");
+        Assert("能解析到界面格式表（解析不到就是改了写法，判据会静默失效）", fmtBlock.Success);
+        var uiList = Regex.Matches(fmtBlock.Groups[1].Value, @"OutputFormat\.(\w+)")
+                         .Select(m => m.Groups[1].Value).ToList();
+        var contract = FOrder.UiFormats.Select(f => f.ToString()).ToList();
+        Assert("_formats 与 FormatOrder.UiFormats 逐项同序同数（FormatIndex 的两侧必须是同一张表）",
+            string.Join(",", uiList) == string.Join(",", contract),
+            $"界面={string.Join(",", uiList)} 契约={string.Join(",", contract)}");
+        Assert("格式表不许再自带标签（标签只有一个来源：LocaleManager.GetFormatLabel）",
+            !Regex.IsMatch(fmtBlock.Value, "\"[^\"]+\""));
+        var missingLabel = FOrder.UiFormats
+            .Where(f => !lm.Contains($"OutputFormat.{f} =>"))
+            .Select(f => f.ToString());
+        Assert("每个界面格式都必须有显式标签档（漏一格就在下拉里显示裸枚举名）",
+            !missingLabel.Any(), string.Join(",", missingLabel));
+        Assert("增益图不许回到格式标签里（它是 JPEG LI 面板里的开关）",
+            !lm.Contains("OutputFormat.JPEG_GAINMAP =>"));
+
+        // 同一类毛病的另一处：驱动脚本把"要驱动哪个 exe"和"去哪儿读日志"写成两条独立路径，
+        // 跑 Release 树时它还在看 Debug 目录 ⇒ 观察不到任何变化却照样跑完（§e2e 那轮就是这么判红的）。
+        var manualDir = FindRepoFile(Path.Combine("tests", "manual", "smoke-anno-test.ps1"));
+        if (manualDir is not null)
+        {
+            var badPathHardcode = new System.Collections.Generic.List<string>();
+            foreach (var ps in Directory.GetFiles(Path.GetDirectoryName(manualDir)!, "*.ps1", SearchOption.AllDirectories))
+                if (Regex.IsMatch(File.ReadAllText(ps), "bin\\\\x64\\\\(Debug|Release)[^\"']*\\\\log\""))
+                    badPathHardcode.Add(Path.GetFileName(ps));
+            Assert("tests/manual 的驱动脚本不许把日志目录写成第二条硬路径（必须从被驱动进程推）",
+                badPathHardcode.Count == 0, string.Join(",", badPathHardcode));
+        }
+
+        // ═══ BMP：一个没有产品入口的格式不构成"支持的格式"（2026-09-26 删除）═══
+        // `OutputFormat` 无 BMP、EncoderFactory 无 BMP 档、界面下拉无 BMP —— 唯一调用点是
+        // 门禁自己的两个专项测试。测一个用户拿不到的格式，只会让它看起来仍然被支持。
+        var bmpSrc = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ManagedBmpEncoder.cs"));
+        Assert("BMP 托管编码器已随格式摘除（源码里不再存在该文件与类型）",
+            bmpSrc is null && !lm.Contains("\"BMP\"") && !mw.Contains("ManagedBmpEncoder"));
     }
 
     /// <summary>
@@ -2204,6 +2502,313 @@ public static class CorePipelineTests
     ///（实测 4K AVIF 硬件 ~0.12s vs 软件 ~22s，约 180 倍），
     /// 用户只会觉得"变慢了"，只能靠重启恢复。</para>
     /// </summary>
+    /// <summary>
+    /// 无损格式那根质量滑块的收起方式（#26），四条源码哨兵。
+    /// <para>为什么只能测源码、不能测行为：这是界面可见性，Test 项目不引用 App，
+    /// 也没有可渲染的宿主 ⇒ 只能把"写法"钉住。三条各防一种退化：</para>
+    /// <list type="number">
+    /// <item><b>判据必须是"区间退化"而不是"点名格式"</b>。旧写法
+    /// <c>QualitySld.IsEnabled = format != OutputFormat.PNG</c> 就是点名 PNG，结果同为 (100,100)
+    /// 的 TIFF 漏在外面 —— 一根 enabled 却划不动的滑块。同一条事实写两遍必漏一遍。</item>
+    /// <item><b>描述行只能有一个写入点</b>。<c>OnQualityChanged</c> 原先无条件写
+    /// <c>GetQualityDescription</c>，会把无损格式那句"无损 (固定 100%)"冲成一个孤零零的 100；
+    /// 当时不出事纯靠赋值顺序，而"靠顺序才对"正是本仓库反复踩的隐性耦合。</item>
+    /// <item><b>XAML 那行必须还叫这个名字</b>：代码里按 <c>QualityRow</c> 引用，
+    /// 改名会让编译期就断，但反过来"名字在、却忘了收"只能靠这条盯。</item>
+    /// </list>
+    /// </summary>
+    static void Test_LosslessQualityRowCollapsed_SourceSentinels()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var xaPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"));
+        var encPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ImageEncoder.cs"));
+        if (mwPath is null || xaPath is null || encPath is null)
+        { Skip("无损格式收起质量行", "未找到源文件"); return; }
+        var mw = StripLineComments(File.ReadAllText(mwPath));
+        var xa = File.ReadAllText(xaPath);
+        var enc = File.ReadAllText(encPath);
+
+        Assert("界面按共享判据 QualityIsFixed 决定收起（不是点名某个格式）",
+            mw.Contains("encoder.QualityIsFixed")
+            && mw.Contains("QualityRow.Visibility = noQualityKnob"));
+        Assert("判据本身在 Core 且写作『区间退化』（max<=min），界面不许再算第二遍",
+            enc.Contains("max <= min"));
+        Assert("旧写法不得复活：QualitySld.IsEnabled = format != OutputFormat.PNG（那条漏掉 TIFF）",
+            !System.Text.RegularExpressions.Regex.IsMatch(
+                mw, @"QualitySld\.IsEnabled\s*=\s*format\s*!="));
+        Assert("质量描述行只有一个写入点（两处各写就会互相覆盖）",
+            System.Text.RegularExpressions.Regex.Matches(mw, @"QualityDescTxt\.Text\s*=").Count == 1,
+            $"实得 {System.Text.RegularExpressions.Regex.Matches(mw, @"QualityDescTxt\.Text\s*=").Count} 处");
+        Assert("XAML 里那行仍带 x:Name=QualityRow（代码按它收起整行）",
+            xa.Contains("x:Name=\"QualityRow\""));
+    }
+
+    /// <summary>
+    /// 程序性刷新质量面板<b>不得</b>回写设置（#29 的第二条，与迁移门相互独立）。源码哨兵。
+    /// <para>实机回归（2026-09-25）：夹具存 <c>QualityGainMap=2.0</c>（区间 0.5–3.0 的中段，
+    /// 既非端点也不越界），启动后<b>界面与文件双双变成 0.5</b>。机制：
+    /// <c>UpdateQualityPanel</c> 赋 <c>Minimum=0.5</c> 时 <c>RangeBase</c> 就地钳制 <c>Value</c>
+    /// 并抛 <c>ValueChanged</c>，而 <c>OnQualityChanged</c> 把这条程序事件当成"用户拖了滑块"
+    /// 写进 <c>_settings</c>；同一方法后半段又要 <c>GetQuality()</c> 从 <c>_settings</c>
+    /// 读回"用户存的值" ⇒ 前半段的副作用被后半段当输入读走，一个方法改掉了自己的输入。</para>
+    /// <para>为什么只能钉源码：这条藏在 WinUI 控件的事件时序里，Test 不引用 App、无可渲染宿主。</para>
+    /// <para>三条各咬一种退化：① 守卫被摘掉（改回只判 <c>_uiReady</c>）；② 复位没走
+    /// <c>finally</c>（Core 一旦抛异常，标志永久为 true ⇒ 用户此后拖动再也不落盘，
+    /// 那是比原缺陷更坏的静默失效）；③ 面板主体被搬回 <c>UpdateQualityPanel</c> 本体
+    /// （包装失去作用域 ⇒ 等价于①）。</para>
+    /// </summary>
+    static void Test_QualityPanelProgrammaticWrite_SourceSentinels()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (mwPath is null) { Skip("质量面板程序赋值不回写", "未找到 MainWindow.xaml.cs"); return; }
+        var mw = StripLineComments(File.ReadAllText(mwPath));
+
+        Assert("OnQualityChanged 的入口守卫必须认这个标志（程序赋值≠用户意图）",
+            System.Text.RegularExpressions.Regex.IsMatch(
+                mw, @"OnQualityChanged[\s\S]{0,220}?if \([^\)]*_qualityPanelUpdating[^\)]*\)\s*return;"),
+            "守卫里没有 _qualityPanelUpdating ⇒ 程序钳制会被写成用户选择");
+        Assert("标志的复位必须走 finally（否则 Core 抛异常后用户拖动永久不落盘）",
+            mw.Contains("_qualityPanelUpdating = true;")
+            && mw.Contains("finally { _qualityPanelUpdating = false; }"));
+        Assert("面板主体在 UpdateQualityPanelCore 里（包装才有作用域可言）",
+            mw.Contains("private void UpdateQualityPanelCore()")
+            && mw.Contains("try { UpdateQualityPanelCore(); }"));
+    }
+
+    /// <summary>
+    /// 「改了设置就要落盘」的全仓扫描（用户口径：设置 JSON 与软件同目录，改设置时更新它）。
+    /// <para>背景（2026-09-25 审计）：写 <c>_settings.X = ...</c> 的站点共 116 处，而落盘调用点只有 16 处，
+    /// 逐行看不出来谁漏了。扫到 4 个真漏网，其中两个是<b>纯用户选择</b>：
+    /// <c>OnOcrLangChanged</c>（OCR 语言）与 <c>OnTranslationModeChanged</c>（翻译模式）——
+    /// 它们只改内存对象，全量 <c>SaveSettings()</c> 又只挂在托盘<b>退出</b>那一条路径上
+    /// （<c>MainWindow.xaml.cs:234</c>），而本程序按"开机自启 + 最小化到托盘"设计要连续跑好几天
+    /// ⇒ 用户选的这两项在崩溃/注销/直接关机时静默丢失，症状是"我明明改过，重启又变回去"且日志无线索。
+    /// 另两处是<b>注释承诺了却没做</b>：<c>ApplySettingsToUI</c> 里那句"立刻落回设置对象，
+    /// 否则文件里长期留着旧索引"——只改对象不改文件，旧索引照样在盘上。</para>
+    /// <para>规则写成扫描而不是点名几个方法：新加一个 handler 忘记落盘，这条要当场红。
+    /// 豁免必须<b>点名并给理由</b>，不许留空子。</para>
+    /// </summary>
+    static void Test_SettingsWriteSites_AllPersist()
+    {
+        var names = new[] { "MainWindow.xaml.cs", "MainWindow.Settings.cs", "MainWindow.OcrSettings.cs" };
+        // 派生归一化：值来自硬件能力而非用户选择，且随调用方 handler 末尾的 Save 一并落盘 ⇒ 不属本类
+        var derived = new[] { "UpdateAvifOptionAvailability" };
+        var sig = new System.Text.RegularExpressions.Regex(
+            @"^    (private|public|internal|protected|static|async|override|partial|unsafe)[^=;]*\(");
+        var write = new System.Text.RegularExpressions.Regex(@"_settings\.[A-Za-z]\w* *= (?!/)");
+        var save = new System.Text.RegularExpressions.Regex(
+            @"Settings\.Save(Quiet)?\(\)|SaveSettings(Quiet)?\(\)");
+
+        int sites = 0, methods = 0;
+        var offenders = new List<string>();
+        foreach (var n in names)
+        {
+            var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", n));
+            if (p is null) { Skip("设置写入点全部落盘", $"未找到 {n}"); return; }
+            string cur = "(文件级)"; bool hasWrite = false, hasSave = false;
+            void Flush()
+            {
+                if (!hasWrite) return;
+                methods++;
+                if (!hasSave && !derived.Any(d => cur.Contains(d))) offenders.Add($"{n}:{cur}");
+            }
+            foreach (var raw in File.ReadAllLines(p))
+            {
+                if (sig.IsMatch(raw)) { Flush(); cur = raw.Trim(); hasWrite = hasSave = false; }
+                var line = raw.TrimStart();
+                if (line.StartsWith("//")) continue;          // 注释里的示例不算写入点
+                if (write.IsMatch(line)) { sites++; hasWrite = true; }
+                if (save.IsMatch(line)) hasSave = true;
+            }
+            Flush();
+        }
+
+        Assert("确实扫到了写入点（扫描本身不许空过）", sites >= 100, $"实得 {sites} 处赋值 / {methods} 个方法");
+        Assert("每个给 _settings 赋值的方法都必须自己落盘（豁免需点名）",
+            offenders.Count == 0, offenders.Count == 0 ? "" : string.Join("，", offenders));
+    }
+
+    /// <summary>
+    /// 「设置存得下来吗」必须用<b>真写一次</b>来判（#31 第二条，判据在 Core ⇒ 可行为级测，不必读源码）。
+    /// <para>背景：原实现的探测只看"文件不存在 ⇒ 同目录可用；存在且带只读位 ⇒ 才降级"。
+    /// 而真实世界存不下去的主因（装进 Program Files 被 ACL 拒写、只读介质、策略拦写）
+    /// 恰恰是<b>文件还不存在</b>的形态 ⇒ 探测一路放行，随后每次 Save 抛异常，
+    /// 调用方又全走 <c>SaveQuiet()</c> 的空 <c>catch { }</c> ⇒ 用户改什么都没保存、日志里一个字都没有。
+    /// 目录的只读属性位在 Windows 上不代表不可写（系统忽略它），所以属性位那条路根本测不到这件事。</para>
+    /// <para>下面每条都标了性质：<b>独立参照</b>=对 ACL 拒写目录必须判 false（旧实现在这里必然误判 true，
+    /// 这是本判据存在的唯一理由）；<b>会动的读数</b>=同一个目录摘掉只读位后必须翻回 true
+    /// （否则"判 false"可能只是恒假，抓不住任何东西）。</para>
+    /// </summary>
+    static void Test_SettingsWriteProbe_RealProbe()
+    {
+        bool CanPersist(string path) =>
+            TrueToneCap.Core.Settings.SettingsWriteProbe.CanPersistSettings(path);
+        bool CanWrite(string dir) =>
+            TrueToneCap.Core.Settings.SettingsWriteProbe.CanWriteNewFile(dir);
+
+        var dir = Path.Combine(Path.GetTempPath(), "ttc-probe-" + Guid.NewGuid().ToString("N")[..8]);
+        var f = Path.Combine(dir, "TrueToneCap.settings.json");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            Assert("空目录（真的可写）判为可持久化", CanPersist(f));
+            Assert("探针不留垃圾：跑完目录必须还是空的", Directory.GetFiles(dir).Length == 0,
+                string.Join("，", Directory.GetFiles(dir)));
+
+            File.WriteAllText(f, "{}");
+            File.SetAttributes(f, FileAttributes.ReadOnly);
+            Assert("已存在且只读的文件判为不可持久化", !CanPersist(f));
+            File.SetAttributes(f, FileAttributes.Normal);
+            Assert("同一目录摘掉只读位后翻回可写（判据不是恒假）", CanPersist(f));
+
+            // 独立参照 + 旧实现的误判点：目录在、里面本来就没有这个文件、但 ACL 拒写。
+            // ⚠ 夹具必须挑"连管理员都拒"的目录：本机 shell 是【提权】的（实测 elevated=True），
+            //   所以 System32 / Program Files 这些"常规不可写"的直觉答案在这里统统可写，
+            //   拿它们当反例会让这条判据悄悄变成恒真。WindowsApps 属 TrustedInstaller，
+            //   Administrators 没有写 ACE ⇒ 提权与不提权都判 false。
+            var denied = @"C:\Program Files\WindowsApps";
+            var deniedFile = Path.Combine(denied, "TrueToneCap.settings.json");
+            Assert("反例夹具成立：WindowsApps 存在且里面没有这个文件（旧属性位判据会放行）",
+                Directory.Exists(denied) && !File.Exists(deniedFile), denied);
+            Assert("ACL 拒写的目录必须判为不可持久化",
+                !CanPersist(deniedFile), $"{denied} 竟然可写 ⇒ 探针没有真的写一次");
+            Assert("CanWriteNewFile 对拒写目录同样判 false", !CanWrite(denied));
+            Assert("不存在的目录判为不可持久化",
+                !CanPersist(Path.Combine(dir, "no-such-sub", "x.json")));
+        }
+        finally
+        {
+            try { File.SetAttributes(f, FileAttributes.Normal); } catch { }
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// App 侧接线：不可写时的口径是「记日志 + 按默认值」，且<b>只认同目录这一个位置</b>。
+    /// <para>为什么还要钉源码：这套判定发生在进程启动早期（静态属性初始化），Test 引用的 Core
+    /// 只能测判据本身，测不到 App 有没有照它办。三条各咬一种退化。</para>
+    /// </summary>
+    static void Test_SettingsPersistence_BlockedPath_Sentinels()
+    {
+        var svcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SettingsService.cs"));
+        var appPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "App.xaml.cs"));
+        if (svcPath is null || appPath is null)
+        { Skip("不可写时的落盘口径", "未找到 SettingsService.cs / App.xaml.cs"); return; }
+        var svc = StripLineComments(File.ReadAllText(svcPath));
+
+        Assert("路径唯一事实源 = 软件同目录（不再有「降级到别处」的第二答案）",
+            svc.Contains("Path.Combine(AppContext.BaseDirectory, SettingsFileName)")
+            && !svc.Contains("ResolveSettingsPath"));
+        Assert("Load/Save 都必须先问 CanPersist（存不下就不读也不写，整体按默认值）",
+            svc.Contains("if (!CanPersist)") && svc.Contains("if (!CanPersist) { LogPersistBlocked(); return; }"));
+        Assert("SaveQuiet 必须把失败写进日志（不许再有空吞）",
+            svc.Contains("catch (Exception ex) { LogOnce($\"设置保存失败"),
+            "SaveQuiet 又变回 catch { } ⇒ 改了设置没保存且零线索");
+        Assert("失败日志按内容去重（同一种失败不刷屏，不同失败各留一条）",
+            svc.Contains("if (s_lastLoggedIssue == msg) return;"));
+        Assert("早于窗口的主题加载也要认同一个口径（不可写时直接默认主题）",
+            File.ReadAllText(appPath).Contains("if (!SettingsService.CanPersist) return AppThemeMode.Default;"));
+    }
+
+    /// <summary>
+    /// 降级提示的去重只能有【一条】规则：按消息内容比（<c>s_lastDegradedToast</c>），
+    /// 不许再有"整个进程只弹一次"的布尔开关。
+    /// <para>回归背景（2026-09-24，#22 的副产物）：本文件原先并存两套机制 —— 4 处位深/色度
+    /// 协商按内容去重，而 <c>NotifyEncoderFallbackIfAny</c> 用一个 <c>s_hwFallbackNotified</c>
+    /// 静态布尔做到"弹过一次就永久不弹"。后果是<b>第一条</b>降级（通常是 NVENC→libaom）
+    /// 之后，本进程内<b>所有其他种类</b>的降级全部无声，包括 HDR+PNG 的位深协商(#21)
+    /// 与 HDR TIFF 被改成 16-bit(#22)。"这次没有再提示"与"这个提示坏了"在用户端无法区分。</para>
+    /// <para>第二条断言刻意写成模式匹配而不是点名那个变量：换个名字重犯同样要红。</para>
+    /// </summary>
+    static void Test_DegradationToast_SingleDedupRule()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
+        if (p is null) { Skip("降级提示只有一条去重规则", "未找到 CapturePipelineService.cs"); return; }
+        var cps = StripLineComments(File.ReadAllText(p));
+
+        Assert("降级提示按【消息内容】去重（与位深/色度协商同一规则）",
+            cps.Contains("if (s_lastDegradedToast == reason) return;"));
+        Assert("不许再出现『整个进程只弹一次』这类一次性布尔开关（改名重犯也算）",
+            !System.Text.RegularExpressions.Regex.IsMatch(
+                cps, @"private\s+static\s+(volatile\s+)?bool\s+s_\w*(Notified|Shown|Warned)"));
+        // 这里原本还有第三条"源码里不得出现 s_hwFallbackNotified 字样"——写错了，删掉：
+        // 本文件有一段注释正是用那个名字解释这次修复，断言不该去禁文档措辞（它当场把注释判红）。
+        // 防重犯已由上面那条正则负责，第三条没有增量价值。
+    }
+
+    /// <summary>
+    /// 源码哨兵在匹配前必须先去掉**整行注释**。
+    /// <para>2026-09-24 实测出来的洞：把 `settings.OutputBitDepth = 10;` 注释掉做成半修变异，
+    /// "必须含该语句"的断言照样绿 —— 因为 `Contains` 看见的是注释里的字面量。
+    /// 同一个洞有两个方向：`must contain` 会被注释【喂饱】（假绿），
+    /// `must not contain` 会被解释性注释【冤枉】（假红，本轮另一条断言就是这么误伤自己的）。</para>
+    /// <para>只剥"以 // 或 /// 开头的整行"：不动行内内容，避免把字符串字面量里的
+    /// `http://`、路径之类切掉。行尾注释（`code; // 说明`）保留代码部分，不影响判据。</para>
+    /// </summary>
+    /// <summary>读源码文本判据用的文件：一律先把 CRLF 归一成 LF。
+    /// <para>2026-09-27 实测踩到的坑：几条"切方法体"的断言拿 <c>Environment.NewLine + "    }"</c>
+    /// 当收尾锚点，而工作树里源码的行尾并不统一（<c>core.autocrlf=true</c> 之下检出的是 CRLF，
+    /// 被脚本重写过的是 LF）。锚点找不到时旧写法退化成"拿整份文件继续判"，
+    /// 于是一次无关的行尾变化报出三条红 —— 红得毫无道理，但暴露的是判据自己会失焦。</para></summary>
+    static string ReadSourceNormalized(string path) => File.ReadAllText(path).Replace("\r\n", "\n");
+
+    /// <summary>从 <paramref name="from"/> 起切出方法体（到缩进四空格的收尾 <c>}</c> 为止）。
+    /// <para>锚点找不到 ⇒ 返回 <c>false</c> 且 <paramref name="body"/> 为空：调用方必须判红，
+    /// 不许退化成"整份文件都算方法体"—— 那会让否定断言（"方法体里不许有 X"）恒假、
+    /// 让肯定断言（"必须有 Y"）恒真，两个方向都是假绿灯。</para></summary>
+    static bool TrySliceMethodBody(string text, int from, out string body)
+    {
+        int end = text.IndexOf("\n    }", from, StringComparison.Ordinal);
+        body = end > from ? text[from..end] : "";
+        return end > from;
+    }
+
+    static string StripLineComments(string src)
+    {
+        var kept = new List<string>();
+        foreach (var line in src.Replace("\r\n", "\n").Split('\n'))
+        {
+            var t = line.TrimStart();
+            if (t.StartsWith("//")) continue;
+            kept.Add(line);
+        }
+        return string.Join("\n", kept);
+    }
+
+    /// <summary>
+    /// HDR + PNG 的位深协商（#21）—— 源码哨兵，因为<b>这台机器根本走不到那条路</b>。
+    /// <para>为什么只能钉源码：`--display-audit` 实测本机 <c>HDR 硬件支持=no</c>、
+    /// 唯一那块屏 <c>分类=NarrowSdr</c>（ΔG=0.0246）、<c>实得源 Float16=无</c>、
+    /// <c>多屏拼接的 HDR 源 →(无)</c> ⇒ 本机产不出任何一张真 HDR 截图，端到端实机验收
+    /// 在这里对谁都做不到（先前把它记成"等用户给一张截图"是错的，2026-09-24 更正）。
+    /// 编码器那一侧已有 <c>EncodedPng_HdrCicp_10BitSbit</c> 逐块读回取证；缺的是 App 决策层，
+    /// 而它在 App 程序集内（Test 只引用 Core）⇒ 用源码哨兵钉写法。</para>
+    /// <para>四条各防一种真发生过的半修：
+    /// ① 守卫必须同时看 hdrOutput、格式、以及"位深确实不足"；
+    /// ② <b>局部变量与 settings 字段必须一起改</b>——只改 <c>bitDepth</c> 的话，
+    ///    后面 <c>settings.OutputBitDepth = bitDepth</c> 早已赋过，编码器仍拿 8；
+    /// ③ 位置必须在 <c>settings.HdrOutput = hdrOutput</c> 之后（协商依赖场景已定）；
+    /// ④ 必须留痕（日志 + Toast），且走内容去重而不是进程级一次性布尔。</para>
+    /// </summary>
+    static void Test_HdrPngDepthNegotiation_SourceSentinels()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
+        if (p is null) { Skip("HDR+PNG 位深协商", "未找到 CapturePipelineService.cs"); return; }
+        var cps = StripLineComments(File.ReadAllText(p));
+
+        Assert("协商守卫同时看 hdrOutput / 格式 / 位深不足（三样少一样就会错伤或漏判）",
+            cps.Contains("if (hdrOutput && format == OutputFormat.PNG && bitDepth < 10)"));
+        Assert("局部变量与 settings 字段必须一起抬到 10（只改一个就是半修，编码器照旧拿 8）",
+            cps.Contains("bitDepth = 10;") && cps.Contains("settings.OutputBitDepth = 10;"));
+        int atHdrFlag = cps.IndexOf("settings.HdrOutput = hdrOutput", StringComparison.Ordinal);
+        int atNegot = cps.IndexOf("format == OutputFormat.PNG && bitDepth < 10", StringComparison.Ordinal);
+        Assert("协商必须排在场景(HdrOutput)最终确定之后（否则按错的场景协商）",
+            atHdrFlag >= 0 && atNegot > atHdrFlag, $"HdrOutput@{atHdrFlag} 协商@{atNegot}");
+        Assert("升档要留痕：日志 + Toast + 按内容去重（不许退回进程级只弹一次）",
+            cps.Contains("PNG HDR 位深协商") && cps.Contains("ToastService.ShowToast(\"PNG HDR 位深提示\"")
+            && cps.Contains("if (s_lastDegradedToast != pngHdrDepth)"));
+    }
+
     static void Test_NvencFailureClassification()
     {
         // ① 输入不适用（不应永久禁用硬件）
@@ -2227,6 +2832,46 @@ public static class CorePipelineTests
             !NvencAvifBackend.IsInputSpecificNvencFailure(null));
         Assert("NVENC 分类: 空消息异常不误判",
             !NvencAvifBackend.IsInputSpecificNvencFailure(new Exception("")));
+
+        // ④ 2026-09-24 实测签名：CRF 0 让 NVENC 请求 lossless 被拒（RTX 4060，
+        //   InitEncoder hr=0x00000008）。漏这一条时它会被缓存成"整卡不可用"，
+        //   此后同进程所有 AVIF 都退软件 —— 顺序实验 --crf 2,0,5,8,15 只有 2 走了硬件。
+        Assert("NVENC 分类: CRF 0 的『Lossless 模式不支持』属『输入不适用』，不得粘滞禁用",
+            NvencAvifBackend.IsInputSpecificNvencFailure(
+                new InvalidOperationException("[NVENC] InitEncoder: 0x00000008 "
+                    + "(presetCfg=0x00000000; 1920x1080; sdk=0x0100000D; lastErr=Lossless Coding mode not supported.)")));
+    }
+
+    /// <summary>
+    /// CRF 下限表：只有硬件档到不了 0，软件档必须到得了。
+    /// <para>为什么要单独钉这张表：同一个数字有三个消费点（UI 抬滑块下限、
+    /// <c>NvEncoderNative</c> 写 constQP 前的兜底、本测试），事实源是
+    /// <c>AvifEncoderCapabilities.MinCrf</c> 一处。三条断言各自防的是：</para>
+    /// <list type="number">
+    /// <item>硬件档回退成 0 ⇒ 用户能划到 0，每张图白吃一次 InitEncoder 失败再退软件；</item>
+    /// <item>软件档被抬成 1 ⇒ libaom 的无损档凭空消失，而且是在"修硬件"时顺手发生的；</item>
+    /// <item><c>Auto</c> 返回非 0 ⇒ 说明有人把 Auto 的解析塞进了能力表，
+    /// Auto 会在别处被解析成具体档，两处解析迟早分叉。</item>
+    /// </list>
+    /// </summary>
+    static void Test_AvifCrfFloorTable()
+    {
+        Assert("CRF 下限: NVENC/QSV 为 1（AV1 的 QP0 = 请求硬件没有的 lossless 模式）",
+            AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Nvenc) == 1
+            && AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Qsv) == 1);
+        Assert("CRF 下限: 软件档（libaom/SVT/avifenc）保持 0，不许被硬件那条规则带高",
+            AvifEncoderCapabilities.MinCrf(AvifEncoderKind.LibAom) == 0
+            && AvifEncoderCapabilities.MinCrf(AvifEncoderKind.SvtAv1) == 0
+            && AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Avifenc) == 0);
+        Assert("CRF 下限: Auto 不在此表内回答（由调用方解析成具体档后再问）",
+            AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Auto) == 0);
+
+        // 下限必须落在该格式声明的质量区间内，否则滑块会被抬成一个空区间
+        var (min, max, _, _) = EncoderFactory.Create(OutputFormat.AVIF).GetQualityRange();
+        Assert("CRF 下限: 抬到 1 后仍在 AVIF 声明区间内（不会把滑块抬空）",
+            AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Nvenc) >= min
+            && AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Nvenc) <= max,
+            $"区间 [{min}, {max}]");
     }
 
     /// <summary>
@@ -2468,15 +3113,30 @@ public static class CorePipelineTests
         Assert("位深: SDR 8-bit 原样保留",
             AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.LibAom, 8, hdr: false) == 8);
 
-        // ── HDR：恒 10，与编码器、请求值都无关 ──
-        Assert("位深: HDR NVENC 8-bit → 10",
+        // ── HDR：10 是**下限**（PQ 分层要求），上限按编码器 ──
+        // 2026-09-25（用户要求"libaom+HDR 应可选 10/12"）：原先这里写的是"HDR 恒 10，与编码器无关"，
+        // 于是能力表给 libaom 声明的 MaxBitDepth:12 在 HDR 下永远选不到。
+        // 下面刻意成对写：同一请求在 libaom 得 12、在 NVENC/SVT 得 10 —— 只放开软件编码器，
+        // 不是"HDR 一律允许 12"（那会把硬件能力谎报进 UI）。
+        Assert("位深: HDR NVENC 8-bit → 10（下限）",
             AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.Nvenc, 8, hdr: true) == 10);
-        Assert("位深: HDR QSV 8-bit → 10",
+        Assert("位深: HDR QSV 8-bit → 10（下限）",
             AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.Qsv, 8, hdr: true) == 10);
-        Assert("位深: HDR SVT 12-bit → 10",
+        Assert("位深: HDR SVT 12-bit → 10（SVT 上限就是 10）",
             AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.SvtAv1, 12, hdr: true) == 10);
-        Assert("位深: HDR libaom 16-bit → 10",
-            AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.LibAom, 16, hdr: true) == 10);
+        Assert("位深: HDR NVENC 12-bit → 10（硬件上限，不得跟着放开）",
+            AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.Nvenc, 12, hdr: true) == 10);
+        Assert("位深: HDR libaom 12-bit → 12（本条就是用户要的那档）",
+            AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.LibAom, 12, hdr: true) == 12);
+        Assert("位深: HDR libaom 10-bit → 10（不被抬高）",
+            AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.LibAom, 10, hdr: true) == 10);
+        Assert("位深: HDR libaom 16-bit → 12（超过编码器能力仍要钳）",
+            AvifEncoderCapabilities.NegotiateBitDepth(AvifEncoderKind.LibAom, 16, hdr: true) == 12);
+        Assert("位深: HDR 上限表 = max(10, 该编码器 SDR 上限)",
+            AvifEncoderCapabilities.HdrBitDepthFor(AvifEncoderKind.LibAom) == 12
+            && AvifEncoderCapabilities.HdrBitDepthFor(AvifEncoderKind.Nvenc) == 10
+            && AvifEncoderCapabilities.HdrBitDepthFor(AvifEncoderKind.SvtAv1) == 10
+            && AvifEncoderCapabilities.HdrBitDepthFor(AvifEncoderKind.Qsv) == 10);
 
         // 常量与协商结果自洽（防止常量与实现各写各的数字）
         Assert("位深: SDR 全局上限 = 12（avifenc --depth 只接受 8/10/12）",
@@ -2531,11 +3191,15 @@ public static class CorePipelineTests
         Assert("暴露: 软件满足 SDR 10-bit",
             AvifEncoderCapabilities.Satisfies(AvifEncoderKind.LibAom, "420", 10, hdr: false)
             && AvifEncoderCapabilities.Satisfies(AvifEncoderKind.Avifenc, "420", 10, hdr: false));
-        // HDR 恒 10-bit ⇒ 8 与 12 在 HDR 场景下都不满足（都会被协商成 10）
-        Assert("暴露: HDR 下仅 10-bit 满足",
+        // HDR：10 是下限、上限按编码器 ⇒ 8 一律不满足；12 只有能力到 12 的软件编码器满足。
+        // 成对写是刻意的：只断"libaom 满足 12"会被"HDR 一律放开 12"这种错实现蒙过，
+        // 配上"NVENC 不满足 12"才把边界钉住（硬件到 10 是 2026-09-17 实测的结论）。
+        Assert("暴露: HDR 下 libaom 满足 10 与 12、不满足 8；NVENC 只满足 10",
             AvifEncoderCapabilities.Satisfies(AvifEncoderKind.LibAom, "420", 10, hdr: true)
+            && AvifEncoderCapabilities.Satisfies(AvifEncoderKind.LibAom, "420", 12, hdr: true)
             && !AvifEncoderCapabilities.Satisfies(AvifEncoderKind.LibAom, "420", 8, hdr: true)
-            && !AvifEncoderCapabilities.Satisfies(AvifEncoderKind.LibAom, "420", 12, hdr: true));
+            && AvifEncoderCapabilities.Satisfies(AvifEncoderKind.Nvenc, "420", 10, hdr: true)
+            && !AvifEncoderCapabilities.Satisfies(AvifEncoderKind.Nvenc, "420", 12, hdr: true));
     }
 
     /// <summary>
@@ -2791,21 +3455,47 @@ public static class CorePipelineTests
             block.IndexOf("IsSelected='True'", StringComparison.Ordinal)
             == block.LastIndexOf("IsSelected='True'", StringComparison.Ordinal));
 
-        // 第三处事实源：本地化文案会在运行时覆盖 XAML 的项文本 ⇒ 默认项的说明不能只写在 XAML 里。
+        // 第三处事实源：本地化文案会在运行时覆盖 XAML 的项文本 ⇒ 两处必须逐 Tag 完全一致。
+        // 2026-09-25（用户口径：下拉项只留采样名，说明走灰字行）：原先这条钉的是
+        // "420 项文字里要有『默认』二字"，那只是拿文案内容当"两处同步"的探针；
+        // 现在项文字统一变短，探针失效 ⇒ 换成真正的漂移锁：逐 Tag 比对 XAML 与 LocaleManager，
+        // 任何一处单独改（包括改回带括号的长文案）都当场红。
         var locPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
         if (locPath is not null)
         {
-            var loc = File.ReadAllText(locPath).Replace('"', '\'');
-            int k = loc.IndexOf("AvifChroma420 =>", StringComparison.Ordinal);
-            var line = k >= 0 ? loc[k..(loc.IndexOf('\n', k) < 0 ? loc.Length : loc.IndexOf('\n', k))] : "";
-            Assert("默认色度: 本地化文案里 420 项标了「默认」（运行时会覆盖 XAML 文本）",
-                line.Contains("默认") || line.Contains("default"), line);
+            var locRaw = File.ReadAllText(locPath);
+            foreach (var (tag, prop) in new[]
+            {
+                ("420", "AvifChroma420"), ("422", "AvifChroma422"), ("444", "AvifChroma444")
+            })
+            {
+                var mx = System.Text.RegularExpressions.Regex.Match(
+                    block, @"Tag='" + tag + @"'[^>]*>([^<]*)<");
+                int k = locRaw.IndexOf(prop + " =>", StringComparison.Ordinal);
+                string locLine = k < 0 ? "" : locRaw[k..(locRaw.IndexOf('\n', k) < 0
+                    ? locRaw.Length : locRaw.IndexOf('\n', k))];
+                var ml = System.Text.RegularExpressions.Regex.Match(locLine, "\"([^\"]*)\"");
+                string xamlText = mx.Success ? mx.Groups[1].Value.Trim() : "";
+                string locText = ml.Success ? ml.Groups[1].Value : "";
+                Assert($"色度 {tag} 项：XAML 与 LocaleManager 文案逐字一致（运行时后者覆盖前者）",
+                    xamlText.Length > 0 && locText.Length > 0 && xamlText == locText,
+                    $"XAML='{xamlText}' 本地化='{locText}'");
+            }
+            // 项文字里不许再出现解释性括号 —— 说明归灰字行（AvifCodecHintTxt）。
+            foreach (var prop in new[] { "AvifChroma420", "AvifChroma422", "AvifChroma444" })
+            {
+                int k = locRaw.IndexOf(prop + " =>", StringComparison.Ordinal);
+                string locLine = k < 0 ? "" : locRaw[k..(locRaw.IndexOf('\n', k) < 0
+                    ? locRaw.Length : locRaw.IndexOf('\n', k))];
+                Assert($"色度项 {prop} 只留采样名（不带『（…）』解释）",
+                    !locLine.Contains('（') && !locLine.Contains("default"), locLine.Trim());
+            }
         }
         else
         {
             // 与同文件其它用例一致：源文件缺失要【留痕跳过】。原写法整段被 if 吞掉，
             // LocaleManager.cs 一旦改名 / 移动，这条契约既不高亮也不记 Skip —— 静默消失。
-            Skip("默认色度: 本地化文案标注「默认」", "未找到源文件 LocaleManager.cs");
+            Skip("默认色度: 本地化文案与 XAML 逐 Tag 一致", "未找到源文件 LocaleManager.cs");
         }
     }
 
@@ -2819,7 +3509,7 @@ public static class CorePipelineTests
         var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
         if (path is null) { Skip("AVIF 选项按能力暴露", "未找到源文件"); return; }
 
-        var text = File.ReadAllText(path);
+        var text = ReadSourceNormalized(path);
         int i = text.IndexOf("private void UpdateAvifOptionAvailability()", StringComparison.Ordinal);
         if (i < 0) { Assert("找到 UpdateAvifOptionAvailability", false); return; }
 
@@ -2830,8 +3520,12 @@ public static class CorePipelineTests
         Assert("找到 SetItemsVisible（隐藏逻辑的实际所在）", j > i);
         if (j <= i) return;
 
-        int end = text.IndexOf(Environment.NewLine + "    }", j, StringComparison.Ordinal);
-        var body = end > i ? text[i..end] : text[i..];
+        // 收尾锚点找不到 ⇒ 判红并停手。旧写法在这里退化成"整份文件都算方法体"，
+        // 于是"不许含 X"的否定断言恒假、"必须含 Y"的肯定断言恒真 —— 两个方向都不可信。
+        int end = text.IndexOf("\n    }", j, StringComparison.Ordinal);
+        Assert("必须切到 SetItemsVisible 的收尾锚点（行尾已由 ReadSourceNormalized 归一）", end > j, $"j={j} end={end}");
+        if (end <= j) return;
+        var body = text[i..end];
 
         Assert("AVIF 选项: 使用 Visibility.Collapsed 隐藏不支持项", body.Contains("Visibility.Collapsed"));
         Assert("AVIF 选项: 不再把三个下拉整体禁用",
@@ -2850,11 +3544,11 @@ public static class CorePipelineTests
         var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
         if (path is null) { Skip("改选早于隐藏", "未找到源文件"); return; }
 
-        var text = File.ReadAllText(path);
+        var text = ReadSourceNormalized(path);
         int i = text.IndexOf("SetItemsVisible(ComboBox cbo", StringComparison.Ordinal);
         if (i < 0) { Assert("找到 SetItemsVisible", false); return; }
-        int end = text.IndexOf(Environment.NewLine + "    }", i, StringComparison.Ordinal);
-        var body = end > i ? text[i..end] : text[i..];
+        if (!TrySliceMethodBody(text, i, out var body))
+        { Assert("必须切到 SetItemsVisible 的收尾锚点", false, "锚点丢失 ⇒ 不许拿整份文件判顺序"); return; }
 
         int iSel = body.IndexOf("fallback.IsSelected = true;", StringComparison.Ordinal);
         int iVis = body.IndexOf("item.Visibility = visible[i]", StringComparison.Ordinal);
@@ -2946,12 +3640,16 @@ public static class CorePipelineTests
             modelDefaults[m.Groups[1].Value] = double.Parse(m.Groups[2].Value,
                 System.Globalization.CultureInfo.InvariantCulture);
 
-        // ② 规范化兜底：ClampTo(s.QualityAvif, v => s.QualityAvif = v, 0, 63, 15);
-        var clampDefaults = new Dictionary<string, double>(StringComparer.Ordinal);
+        // ② 规范化兜底：2026-09-24 起必须写成 dft.QualityXxx —— 值来自 ①，② 不再自带字面量。
+        //    于是 ②≡① 由构造保证，本段改测【接线齐全且指对字段】：
+        //    漏接某格式、或接错字段（QualityAvif 那行误写 dft.QualityWebp）仍会红；
+        //    同时禁止任何人把数字默认值加回来（那会重新制造第二处事实源）。
+        var clampWired = new HashSet<string>(StringComparer.Ordinal);
         foreach (Match m in Regex.Matches(svc,
-            @"ClampTo\(s\.Quality(\w+),\s*v\s*=>\s*s\.Quality\1\s*=\s*v,\s*([0-9]*\.?[0-9]+),\s*([0-9]*\.?[0-9]+),\s*([0-9]*\.?[0-9]+)\)"))
-            clampDefaults[m.Groups[1].Value] = double.Parse(m.Groups[4].Value,
-                System.Globalization.CultureInfo.InvariantCulture);
+            @"ClampTo\(s\.Quality(\w+),\s*v\s*=>\s*s\.Quality\1\s*=\s*v,\s*[0-9]*\.?[0-9]+,\s*[0-9]*\.?[0-9]+,\s*dft\.Quality(\w+)\)"))
+            if (m.Groups[1].Value == m.Groups[2].Value) clampWired.Add(m.Groups[1].Value);
+        int literalDefaults = Regex.Matches(svc,
+            @"ClampTo\(s\.Quality\w+,[^\n]*,\s*[0-9][0-9.]*\);").Count;
 
         // ③ 编码器声明的默认质量
         var expected = new (string Field, OutputFormat Format)[]
@@ -2961,24 +3659,23 @@ public static class CorePipelineTests
             ("Avif", OutputFormat.AVIF), ("Webp", OutputFormat.WebP), ("Tiff", OutputFormat.TIFF),
         };
 
-        Assert("质量默认: 三处都解析到条目",
-            modelDefaults.Count >= 7 && clampDefaults.Count >= 7,
-            $"模型 {modelDefaults.Count} 条 / 规范化 {clampDefaults.Count} 条");
+        Assert("质量默认: ① 模型与 ② 接线都覆盖到 7 个格式",
+            modelDefaults.Count >= 7 && clampWired.Count >= 7,
+            $"模型 {modelDefaults.Count} 条 / 接线 {clampWired.Count} 条"
+            + $"（缺：{string.Join(",", expected.Select(e => e.Field).Where(f => !clampWired.Contains(f)))}）");
+        Assert("质量默认: ② 不许重新出现数字兜底值（第二处事实源）",
+            literalDefaults == 0, $"{literalDefaults} 处写回了字面量");
 
         foreach (var (field, format) in expected)
         {
             var (min, max, def, _) = EncoderFactory.Create(format).GetQualityRange();
             modelDefaults.TryGetValue(field, out double modelDef);
-            clampDefaults.TryGetValue(field, out double clampDef);
 
             Assert($"质量默认: {field} 编码器默认 {def} 落在区间 [{min}, {max}]",
                 def >= min && def <= max);
             Assert($"质量默认: {field} 设置模型与编码器一致（{modelDef} vs {def}）",
                 Math.Abs(modelDef - def) < 1e-6,
                 "改了 GetQualityRange().Default 却没改 AppSettingsData，新用户会拿到越界值");
-            Assert($"质量默认: {field} 规范化兜底与编码器一致（{clampDef} vs {def}）",
-                Math.Abs(clampDef - def) < 1e-6,
-                "Normalize 的兜底值停留在旧默认，会把越界值『修正』成已废弃的值");
         }
     }
 
@@ -3261,7 +3958,7 @@ public static class CorePipelineTests
     /// </summary>
     /// <summary>
     /// AV1 序列头解析器 —— 夹具一律用【真实产物的字节】。
-    /// <para>为什么重做（2026-09-20，交接 §32.8）：旧夹具是手写的 11 字节 payload，其
+    /// <para>为什么重做（2026-09-20，交接 §32.9-4）：旧夹具是手写的 11 字节 payload，其
     /// matrix_coefficients 恰好落在 <b>0(Identity)</b> 上 ⇒ 走的是解析器里"CICP 为 sRGB-identity
     /// 就硬写 1,1"那条分支，所以"4:2:0 判对"在坏代码上也成立、测试恒绿。而 NVENC 真实码流的
     /// matrix 是 1，走 else 分支：那里 <b>profile 0 的码流根本不写 subsampling 位</b>
@@ -3331,11 +4028,11 @@ public static class CorePipelineTests
         var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
         if (path is null) { Skip("HDR Auto 不弹假警报", "未找到源文件"); return; }
 
-        var text = File.ReadAllText(path);
+        var text = ReadSourceNormalized(path);
         int i = text.IndexOf("public EncodingSettings BuildEncodingSettings", StringComparison.Ordinal);
         if (i < 0) { Assert("找到 BuildEncodingSettings", false); return; }
-        int end = text.IndexOf(Environment.NewLine + "    }", i, StringComparison.Ordinal);
-        var body = end > i ? text[i..end] : text[i..];
+        if (!TrySliceMethodBody(text, i, out var body))
+        { Assert("必须切到 BuildEncodingSettings 的收尾锚点", false, "锚点丢失 ⇒ 不许拿整份文件判分支"); return; }
 
         Assert("HDR: 记录用户是否显式选择了编码器", body.Contains("avifAutoResolved"));
 
@@ -3343,7 +4040,7 @@ public static class CorePipelineTests
         Assert("HDR: 存在按 Auto / 显式选择分流的分支", iAuto >= 0);
         if (iAuto < 0) return;
 
-        int iElse = body.IndexOf(Environment.NewLine + "                    else", iAuto, StringComparison.Ordinal);
+        int iElse = body.IndexOf("\n                    else", iAuto, StringComparison.Ordinal);
         var autoBranch = iElse > iAuto ? body[iAuto..iElse] : "";
         Assert("HDR: Auto 分支不弹 Toast（否则默认设置 + HDR 会弹假警报）",
             autoBranch.Length > 0 && !autoBranch.Contains("ShowToast"));
@@ -3366,13 +4063,13 @@ public static class CorePipelineTests
     {
         var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
         if (path is null) { Skip("编码设置走快照", "未找到源文件"); return; }
-        var text = File.ReadAllText(path);
+        var text = ReadSourceNormalized(path);
 
         int i = text.IndexOf("public EncodingSettings BuildEncodingSettings", StringComparison.Ordinal);
         Assert("找到 BuildEncodingSettings", i >= 0);
         if (i < 0) return;
-        int end = text.IndexOf(Environment.NewLine + "    }", i, StringComparison.Ordinal);
-        var body = end > i ? text[i..end] : text[i..];
+        if (!TrySliceMethodBody(text, i, out var body))
+        { Assert("必须切到 BuildEncodingSettings 的收尾锚点", false, "锚点丢失 ⇒ 整份文件都会被当成方法体"); return; }
 
         int sigEnd = body.IndexOf('{');
         var sig = sigEnd > 0 ? body[..sigEnd] : body;
@@ -3533,20 +4230,31 @@ public static class CorePipelineTests
                 ("AvifChromaCbo", "ChromaAvif"),
                 ("ChromaJpegLiCbo", "ChromaJpegLi"),
                 ("ChromaJpegXlCbo", "ChromaJpegXl"),
-                ("GainMapChromaCbo", "ChromaGainMap"),
+                // 2026-09-26：GainMapChromaCbo 随"增益图并入 JPEG LI"删除 —— 见下面两条专项断言。
             })
             {
                 Assert($"色度下拉 {combo} 存在于 XAML", xamlText.Contains($"x:Name=\"{combo}\""));
                 Assert($"管线映射表读 s.{field}（不读则该下拉是装饰）",
                     pipeText.Contains($"s.{field}"));
             }
+
+            // 增益图态的色度必须与 JPEG LI 同源，且【不得】再长出第二个下拉
+            Assert("管线对 JPEG_GAINMAP 读 JPEG LI 的位深与色度（合并后同源）",
+                pipeText.Contains("OutputFormat.JPEG_GAINMAP => (s.BitDepthJpegLi, s.ChromaJpegLi)"),
+                "增益图态若还读 ChromaGainMap，那个字段已经没有任何界面能改它 ⇒ 假配置复活");
+            Assert("XAML 里不得再有第二个增益图色度下拉（两个控件写同一个字段就是刚合并掉的分裂）",
+                !xamlText.Contains("GainMapChromaCbo"));
         }
     }
 
     /// <summary>
-    /// GainMap 的色度必须是"真设置"：默认 4:2:0，最高允许手动选 4:4:4（2026-09-19 用户决定）。
+    /// 增益图的色度必须是"真设置"：默认 4:2:0，最高允许手动选 4:4:4（2026-09-19 用户决定）。
     /// <para>回归背景（交接 §27）：主路径把 base JPEG 硬编码成 "444"，只有两条降级旁路读设置
     /// ⇒ 同一格式因走哪条路而色度不同，字段本身形同虚设。现在主路径与旁路同源。</para>
+    /// <para>2026-09-26（增益图并入 JPEG LI）：这条判据的<b>语义不变、载体变了</b> ——
+    /// 生效的下拉与字段改成 JPEG LI 那一对（<c>ChromaJpegLiCbo</c> / <c>ChromaJpegLi</c>），
+    /// 因为管线对 JPEG_GAINMAP 也读它。所以本用例同时钉三件事：
+    /// 编码器不硬编码色度、生效字段默认 420、以及"不许再长出第二个增益图色度下拉"（见 ⑦ 那两条）。</para>
     /// </summary>
     static void Test_GainMap_ChromaIsRealSetting()
     {
@@ -3574,17 +4282,22 @@ public static class CorePipelineTests
         // 增益图平面走真灰度（YCbCr400），与 base 的色度开关无关 —— 别把它一并改掉
         Assert("GainMap: 增益图平面仍走灰度编码", gm.Contains("EncodeGray"));
 
-        // 默认值与下拉档位同源（三处：字段默认 / XAML IsSelected / 兜底值）
+        // 默认值与下拉档位同源（三处：字段默认 / XAML IsSelected / 兜底值）。
+        // 2026-09-26：增益图并入 JPEG LI ⇒ 生效的下拉就是 ChromaJpegLiCbo、生效的字段是 ChromaJpegLi。
+        // ChromaGainMap 降级为"只被一次性迁移读取的历史字段"，但它仍须默认 420 ——
+        // 迁移靠"是否等于默认"判断用户有没有改过，默认漂了就会把没改过的老值当成用户选择搬过去。
         var model = File.ReadAllText(modelPath).Replace('"', '\'');
-        Assert("GainMap: 字段默认值为 420",
+        Assert("增益图态实际生效的色度字段 ChromaJpegLi 默认 420",
+            model.Contains("public string ChromaJpegLi { get; set; } = '420'"));
+        Assert("遗留字段 ChromaGainMap 仍默认 420（迁移拿它判'用户是否改过'，默认漂=误搬）",
             model.Contains("public string ChromaGainMap { get; set; } = '420'"));
         var xaml = File.ReadAllText(xamlPath).Replace('"', '\'');
-        int i = xaml.IndexOf("GainMapChromaCbo", StringComparison.Ordinal);
+        int i = xaml.IndexOf("ChromaJpegLiCbo", StringComparison.Ordinal);
         int end = i >= 0 ? xaml.IndexOf("</ComboBox>", i, StringComparison.Ordinal) : -1;
         var block = (i >= 0 && end > i) ? xaml[i..end] : "";
-        Assert("GainMap: 下拉存在且默认落在 420 项",
-            block.Contains("Tag='420' IsSelected='True'"), block.Length > 0 ? "" : "未找到 GainMapChromaCbo 块");
-        Assert("GainMap: 下拉提供 422 与 444（用户可手动升到最高色度）",
+        Assert("JPEG LI 色度下拉存在且默认落在 420 项（增益图态共用这一条）",
+            block.Contains("Tag='420' IsSelected='True'"), block.Length > 0 ? "" : "未找到 ChromaJpegLiCbo 块");
+        Assert("该下拉提供 422 与 444（用户可手动升到最高色度，增益图态同样有效）",
             block.Contains("Tag='422'") && block.Contains("Tag='444'"));
     }
 
@@ -4109,6 +4822,18 @@ public static class CorePipelineTests
                 .Contains("public bool IccBakeAvailable"));
         Assert("有捕获结果的入口按被截屏决定，不再拿光标屏顶替",
             mw.Contains("ColorDecision.Build(captureResult.SourceDisplay"));
+        // ═══ §48 #21：HDR 开着却出 8-bit PNG ⇒ 整次被退回 SDR，默认设置下"以为在出 HDR"═══
+        // 协商必须①在 HdrOutput 定稿之后（早于 sRGB→SDR 那段就会给已降级的场景升位深），
+        // ②真的写回 settings（只改局部 bitDepth 等于没改，编码器看到的还是 8）。
+        Assert("HDR + PNG 的位深协商存在且写回 settings.OutputBitDepth",
+            cps.Contains("format == OutputFormat.PNG && bitDepth < 10")
+            && cps.Contains("settings.OutputBitDepth = 10"));
+        Assert("位深协商排在 HdrOutput 定稿之后（否则会给已降级成 SDR 的场景白升位深）",
+            cps.IndexOf("settings.HdrOutput = hdrOutput;") >= 0
+            && cps.IndexOf("settings.HdrOutput = hdrOutput;")
+               < cps.IndexOf("bitDepth < 10"));
+        Assert("协商要像 AVIF 那样显式告知，不许静默改参数",
+            cps.Contains("PNG HDR 位深协商") && cps.Contains("PNG HDR 位深提示"));
         // ★ 这条是本轮自己差点引进的行为变化：合并成一份决定时，把旧实现"ACM 开着 + EDID 探测失败
         //   + 目标本来就是 sRGB ⇒ 原样返回、不碰显示器 ICC"那个默认值顺手抹掉了，于是那种屏会掉进
         //   传统烘焙、拿用户校准 ICC 多做一次矩阵。判据是"源标签缺省时仍按 isSRgbTarget 兜一次"。
@@ -4130,7 +4855,628 @@ public static class CorePipelineTests
             gmSrc.Contains("IsEmbeddableIcc(icc2020)"));
         Assert("编码器侧不许自己解析下拉：显式与否只能来自 ColorDecision 转写的 settings 标记",
             !gmSrc.Contains("ResolveColorSpaceTag") && gmSrc.Contains("settings.ExplicitWideTarget"));
+        // ═══ 2026-09-23：UI 侧不许再把色域下拉锁走 ═══
+        // GainMap 分支曾在这里 ColorCbo.IsEnabled=false 并把格子强推到 BT.2020 —— 那是『GainMap
+        // 无视标签』年代的遗留。标签一旦被真实读取（上面 requireExplicit 那组判据），这个锁定就等于
+        // 替所有用户按下『整条增益图走 2020』，两档设计里的 sRGB 底图根本选不到。
+        Assert("GainMap 分支不再禁用/强推色域下拉（锁住 = 用户拿不到 sRGB 底图那一档）",
+            !mw.Contains("ColorCbo.IsEnabled = false") && !mw.Contains("bt2020Idx"));
+        Assert("HDR 开关仍锁开启（Ultra HDR 没有『无增益图』这种产物），但只锁这一个",
+            mw.Contains("HdrSwitch.IsEnabled = false;") && mw.Contains("HdrSwitch.IsOn = true;"));
+        Assert("能力表里 GainMap 不再被标成不支持广色域（那条声明与两档实现相反）",
+            !System.Text.RegularExpressions.Regex.IsMatch(
+                mw, @"JPEG_GAINMAP\][\s\S]{0,120}SupportsWideGamut: false"));
     }
+
+
+    /// <summary>
+    /// <b>"HDR 开着"≠"HDR 直通"：五种交付形态 + 逐格式的声明通道</b>（2026-09-26 用户指令，交接 §53）。
+    /// <para>为什么这张表必须存在：色域映射卡片原先只有一种画法 —— <c>HdrSwitch.IsOn</c> 为真就印
+    /// "→ HDR 直通 (目标色域)"，而它的数据来源是自己上一行刚写下的那行中文文案（用 <c>Contains</c> 反推）。
+    /// 产品里同一枚开关至少被三样东西收口：屏幕证据（<c>HdrClamped</c>）、目标是 sRGB（管线里的降级）、
+    /// 格式没有 HDR 通道（<c>SupportsHdr</c> 为假）。三样都不在卡片上，于是"HDR 直通 (sRGB)"
+    /// 这种自相矛盾的话能长期印在界面上。</para>
+    /// <para>第三格（增益图 + sRGB 底图）测的是<b>产物缺陷</b>而不只是文案：那条降级原先无条件生效，
+    /// <c>HdrOutput=false</c> 会让 <c>JpegGainMapEncoder.EncodeAsync</c> 命中"降级为普通 JPEG、无增益图"
+    /// 那条路 —— 用户开着增益图开关、选 Ultra HDR 约定的 sRGB 底图，拿到的是一张普通 JPEG。</para>
+    /// </summary>
+    static void Test_HdrDelivery_FiveShapesAndPerFormatChannel()
+    {
+        const int ModeWcg = 1, ModeHdr = 2;
+        static TrueToneCap.Core.Capture.DisplayInfo Scr(bool isHdr, int acMode, string edidTag)
+            => new TrueToneCap.Core.Capture.DisplayInfo
+            {
+                IsHdr = isHdr, SupportsHdr = true, BitsPerColor = 10,
+                AdvancedColorInfoAvailable = true, AdvancedColorActiveMode = acMode,
+                WideColorEnabled = true, NativeGamutKnown = true,
+                NativeGamutWide = edidTag != "sRGB", NativeGamutTag = edidTag,
+            };
+        var hdrScreen = Scr(true, ModeHdr, "DisplayP3");      // 三档里的 Hdr
+        var sdrWideScreen = Scr(false, ModeWcg, "DisplayP3"); // WideGamutSdr：HDR 硬件在、系统没开
+        var narrowScreen = Scr(false, ModeWcg, "sRGB");       // NarrowSdr：ACM 全开但面板自证不宽
+
+        var allFormats = new[]
+        {
+            OutputFormat.PNG, OutputFormat.JPEG_LI, OutputFormat.JPEG_XL,
+            OutputFormat.AVIF, OutputFormat.WebP, OutputFormat.TIFF, OutputFormat.JPEG_GAINMAP,
+        };
+        // 一律按"HDR 开关打开"问 —— 这条测试的主题就是"开关为真时到底交付什么"。
+        HdrDelivery Del(TrueToneCap.Core.Capture.DisplayInfo? s, string tag, OutputFormat f)
+            => FormatColorFacts.Delivery(CDec.Build(s, tag, true, true), f);
+
+        // ═══ ① 同一个"HDR 开"，换格式就换形态 ═══
+        foreach (var f in new[] { OutputFormat.PNG, OutputFormat.JPEG_XL, OutputFormat.AVIF, OutputFormat.TIFF })
+            Assert($"{f} + HDR 屏 + BT.2020 ⇒ 容器写 PQ",
+                Del(hdrScreen, "BT2020", f) == HdrDelivery.PqContainer);
+        foreach (var f in new[] { OutputFormat.JPEG_LI, OutputFormat.WebP })
+            Assert($"{f} + HDR 屏 + BT.2020 ⇒ 容器没有 HDR 通道（开关落空，界面不许再说直通）",
+                Del(hdrScreen, "BT2020", f) == HdrDelivery.BlockedByFormat);
+        Assert("默认档「跟随显示器」在 HDR 屏上解析成 BT.2020 ⇒ 也是写 PQ（不是又一格特例）",
+            Del(hdrScreen, "System", OutputFormat.PNG) == HdrDelivery.PqContainer);
+
+        // ═══ ② 目标是 sRGB ⇒ 普通格式退成 SDR，增益图不退 ═══
+        Assert("★ PNG + HDR + 显式 sRGB ⇒ BlockedBySrgbTarget（旧卡片在这一格印「HDR 直通 (sRGB)」）",
+            Del(hdrScreen, "sRGB", OutputFormat.PNG) == HdrDelivery.BlockedBySrgbTarget);
+        Assert("★ 增益图 + HDR + sRGB 底图 ⇒ 仍是增益图：base 层恒 SDR 是 Ultra HDR 的约定，不是降级",
+            Del(hdrScreen, "sRGB", OutputFormat.JPEG_GAINMAP) == HdrDelivery.GainMap);
+        Assert("增益图 + Rec.2020 底图 ⇒ 同一个形态（两档只差底图用哪套原色，不改交付物是什么）",
+            Del(hdrScreen, "BT2020", OutputFormat.JPEG_GAINMAP) == HdrDelivery.GainMap);
+
+        // ═══ ③ 屏幕证据排在格式与目标前面 ═══
+        Assert("窄色域屏 + HDR 开关 ⇒ 逐格式全是同一格 BlockedByDisplay（没有 HDR 源可交付）",
+            allFormats.All(f => Del(narrowScreen, "BT2020", f) == HdrDelivery.BlockedByDisplay));
+        Assert("★ 增益图 + 窄色域屏 ⇒ 屏不授权 ⇒ 产物退成普通 JPEG（这一格以前完全无声，现在卡片要说清）",
+            Del(narrowScreen, "sRGB", OutputFormat.JPEG_GAINMAP) == HdrDelivery.BlockedByDisplay);
+        var wcg = CDec.Build(sdrWideScreen, "BT2020", true, true);
+        Assert("P3 SDR 屏（HDR 未开启）⇒ HDR 收口，但广色域声明照常可用（两个方向不是一回事）",
+            Del(sdrWideScreen, "BT2020", OutputFormat.PNG) == HdrDelivery.BlockedByDisplay
+            && wcg.TargetTag == "BT2020" && !wcg.GamutClamped);
+
+        // ═══ ④ 承重不变式：全表扫（4 屏态 × 5 标签 × 7 格式 = 140 格），防"以后加一档漏一格" ═══
+        int pqInSrgbContainer = 0, gainMapMismatch = 0, pqWithoutEncoderConsent = 0, cells = 0;
+        foreach (var s in new[] { hdrScreen, sdrWideScreen, narrowScreen, null })
+            foreach (var t in new[] { "System", "sRGB", "BT2020", "DisplayP3", "AdobeRGB" })
+                foreach (var f in allFormats)
+                {
+                    cells++;
+                    var d = CDec.Build(s, t, true, true);
+                    var v = FormatColorFacts.Delivery(d, f);
+                    // (a) sRGB 容器 + PQ 声明 = 声明与像素矛盾（§39 那类错），一格都不许有
+                    if (v == HdrDelivery.PqContainer && d.TargetTag == "sRGB") pqInSrgbContainer++;
+                    // (b) 增益图形态只属于增益图格式，且增益图格式在授权时只能是这个形态
+                    if ((v == HdrDelivery.GainMap) != (f == OutputFormat.JPEG_GAINMAP
+                            && d.HdrOutput && v != HdrDelivery.BlockedByDisplay)) gainMapMismatch++;
+                    // (c) 界面说得出「写 PQ」的每一格，编码器自己也都认（不许承诺产物做不到的事）
+                    if (v == HdrDelivery.PqContainer && !EncoderFactory.Create(f).SupportsHdr)
+                        pqWithoutEncoderConsent++;
+                }
+        Assert("不变式：140 格里没有一格在 sRGB 目标下写 PQ", pqInSrgbContainer == 0,
+            $"违例 {pqInSrgbContainer} 格");
+        Assert("不变式：增益图形态与格式一一对应", gainMapMismatch == 0, $"违例 {gainMapMismatch} 格");
+        Assert("不变式：说得出「写 PQ」的格子，编码器全部 SupportsHdr", pqWithoutEncoderConsent == 0,
+            $"违例 {pqWithoutEncoderConsent} 格");
+        Assert("扫描真的覆盖到 140 格（少一格就是这张表自己漏了组合）", cells == 140, $"cells={cells}");
+
+        // ═══ ⑤ 逐格式的声明通道："同一枚目标色域，装进不同格式长得不一样" ═══
+        string Decl(OutputFormat f, string tag, bool pq) => FormatColorFacts.Declaration(f, tag, pq);
+        Assert("PNG 的 matrix 恒 identity(0)，AVIF 的 matrix 随三原色取 1/9 ⇒ 同一个 sRGB 目标两格数字不同",
+            Decl(OutputFormat.PNG, "sRGB", false).Contains("1/13/0")
+            && Decl(OutputFormat.AVIF, "sRGB", false).Contains("1/13/1")
+            && Decl(OutputFormat.PNG, "BT2020", false).Contains("9/13/0")
+            && Decl(OutputFormat.AVIF, "BT2020", false).Contains("9/13/9"));
+        Assert("HDR 两格都是 16 号传输（PQ）：9/16/0 与 9/16/9",
+            Decl(OutputFormat.PNG, "BT2020", true).Contains("9/16/0")
+            && Decl(OutputFormat.AVIF, "BT2020", true).Contains("9/16/9"));
+        Assert("★「有些格式是 BT.709」指的是 matrix 那一维；transfer 只有 13(sRGB)/16(PQ)，全仓没有 14 号",
+            ColorSpaceConverter.GetCicpTransfer("sRGB", false) == 13
+            && ColorSpaceConverter.GetCicpTransfer("BT2020", false) == 13
+            && ColorSpaceConverter.GetCicpTransfer("BT2020", true) == 16
+            && ColorSpaceConverter.GetCicpTransfer("DisplayP3", false) == 13);
+        Assert("Rec.709 目标下 JPEG LI / WebP 什么都不写，TIFF 却连 Rec.709 也嵌一份 ICC ⇒ 同一目标两种通道",
+            Decl(OutputFormat.JPEG_LI, "sRGB", false).Contains("什么都不写")
+            && Decl(OutputFormat.WebP, "sRGB", false).Contains("什么都不写")
+            && Decl(OutputFormat.TIFF, "sRGB", false).Contains("连 Rec.709 也")
+            && !Decl(OutputFormat.TIFF, "sRGB", false).Contains("什么都不写"));
+
+        // ═══ 2026-09-27 用户口径：面向用户的色域名字只有 Rec.709 / Rec.2020 两个 ═══
+        // 原来同一档在界面上叫 sRGB、卡片里叫 BT.709/sRGB、声明文案里叫 BT.2020、灰字里还写过"非 sRGB"，
+        // 而"BT.2020 (HDR)"那种写法把【原色】和【动态范围】两个维度混进一个词里。
+        Assert("Core 的两个可选目标名 = Rec.709 / Rec.2020（Tag 仍是 sRGB/BT2020，那是盘上契约）",
+            ColorProfileProvider.GetColorSpaceDisplayName("sRGB") == "Rec.709"
+            && ColorProfileProvider.GetColorSpaceDisplayName("BT2020") == "Rec.2020",
+            $"[{ColorProfileProvider.GetColorSpaceDisplayName("sRGB")}] [{ColorProfileProvider.GetColorSpaceDisplayName("BT2020")}]");
+        Assert("七种格式的声明文案里不许再出现 BT.2020 / BT.709 这两个旧叫法（CICP 码点数字照旧印）",
+            new[] { "sRGB", "BT2020" }.All(tag => new[] { false, true }.All(pq =>
+                Enum.GetValues<OutputFormat>().All(f =>
+                    !Decl(f, tag, pq).Contains("BT.2020") && !Decl(f, tag, pq).Contains("BT.709")))),
+            string.Join(" | ", Enum.GetValues<OutputFormat>()
+                .Select(f => Decl(f, "BT2020", false)).Where(s => s.Contains("BT.")).ToArray()));
+        // 名字必须只有一份事实源：界面标签属性从 Core 要，XAML 里的字面量与 Core 的返回值必须相同
+        var locPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        var locSrc = locPath is null ? "" : StripComments(File.ReadAllText(locPath));
+        Assert("下拉标签不再自己写字面量，改成向 Core 的名字函数要（两处各写一份随时会漂）",
+            locSrc.Contains("CsSRgb => TrueToneCap.Core.ColorManagement.ColorProfileProvider.GetColorSpaceDisplayName(\"sRGB\")")
+            && locSrc.Contains("CsBT2020 => TrueToneCap.Core.ColorManagement.ColorProfileProvider.GetColorSpaceDisplayName(\"BT2020\")"),
+            "LocaleManager 里这两行没按单源写法出现");
+        var xamlNames = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"))!);
+        Assert("XAML 里那两项的显示文字就是这个新名字（Tag 不动 ⇒ 盘上那个值与迁移表都不受影响）",
+            xamlNames.Contains("<ComboBoxItem Tag=\"sRGB\">Rec.709</ComboBoxItem>")
+            && xamlNames.Contains("<ComboBoxItem Tag=\"BT2020\">Rec.2020</ComboBoxItem>")
+            && !xamlNames.Contains("<ComboBoxItem Tag=\"BT2020\">BT.2020</ComboBoxItem>"),
+            "XAML 下拉项文字与 Core 的名字不同步");
+        Assert("增益图那一格必须说出「容器不写 PQ」——它是 HDR 的第三种形态，不是 PQ 容器",
+            Decl(OutputFormat.JPEG_GAINMAP, "sRGB", false).Contains("不写 PQ"));
+        Assert("可选目标只剩 sRGB / BT.2020 ⇒ 通道文案不许再教用户去选 P3、Adobe RGB",
+            allFormats.All(f => !Decl(f, "sRGB", false).Contains("P3")
+                             && !Decl(f, "sRGB", false).Contains("Adobe")
+                             && !Decl(f, "BT2020", false).Contains("P3")
+                             && !Decl(f, "BT2020", true).Contains("Adobe")));
+        Assert("7 个格式在 sRGB/2020 × SDR/PQ 的可达格上全部答得出话（不许留 _ => \"\" 的静默格）",
+            allFormats.All(f => new[] { ("sRGB", false), ("BT2020", false), ("BT2020", true) }
+                .All(k => Decl(f, k.Item1, k.Item2).Length > 24)));
+
+        // ═══ ⑥ 接线哨兵：卡片与管线都必须问这一份，不许再各推一遍 ═══
+        string Read(string rel) => File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", rel))!);
+        // ⚠ 计数从"上一次命中的下一个字符"起找：写成 IndexOf(needle) 每次从头找同一处 ⇒ 死循环
+        //   （这条判据第一次跑就把测试进程钉死在 90% CPU，13 分钟没吐一行日志）。
+        static int Count(string hay, string needle)
+        {
+            int n = 0, i = 0;
+            while ((i = hay.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+            return n;
+        }
+        var cm = StripLineComments(Read("MainWindow.ColorManagement.cs"));
+        Assert("「显示器色域」「目标」两行各只有一个写入点，且没有任何读取点（旧代码把 .Text 当数据源）",
+            Count(cm, "SourceGamutTxt.Text") == 1 && Count(cm, "TargetGamutTxt.Text") == 1
+            && Count(cm, "MappingArrow.Text") == 1 && Count(cm, "GamutMapHintTxt.Text") == 1);
+        Assert("卡片不再用 Contains 反推显示字符串", !cm.Contains(".Contains("));
+        Assert("卡片三个字段全部来自同一份决定 + 同一份交付形态判定",
+            cm.Contains("DecisionForCursorScreen(ui, ui.HdrEnabled)")
+            && cm.Contains("FormatColorFacts.Delivery(decision, ui.Format)")
+            && cm.Contains("FormatColorFacts.Declaration(format, d.TargetTag, writesPq)"));
+        Assert("旧的显示文案前缀不许回来（它们曾经是判据的输入）",
+            !cm.Contains("BT.2020/PQ") && !cm.Contains("HDR 未开启"));
+
+        var pipe = StripLineComments(Read(Path.Combine("Services", "CapturePipelineService.cs")));
+        Assert("管线里那条「HDR + sRGB ⇒ 降级」改问 FormatColorFacts，不再自己比标签",
+            pipe.Contains("FormatColorFacts.Delivery(decision, format)")
+            && pipe.Contains("delivery == HdrDelivery.BlockedBySrgbTarget")
+            && !pipe.Contains("hdrOutput && resolvedTag == \"sRGB\""));
+
+        // ═══ ⑦ 两份能力表不许分叉：界面表说的必须等于编码器自己说的 ═══
+        var mwRaw = Read("MainWindow.xaml.cs");
+        var drift = new System.Text.StringBuilder();
+        foreach (var f in allFormats)
+        {
+            var m = Regex.Match(mwRaw, @"\[OutputFormat\." + f + @"\]\s*=\s*new\(\s*OutputFormat\."
+                + f + @",\s*\n?\s*SupportsHdr:\s*(true|false)");
+            if (!m.Success) { drift.Append($" {f}(读不到行)"); continue; }
+            if ((m.Groups[1].Value == "true") != EncoderFactory.Create(f).SupportsHdr)
+                drift.Append($" {f}(界面={m.Groups[1].Value} 编码器={EncoderFactory.Create(f).SupportsHdr})");
+        }
+        Assert("界面能力表与 EncoderFactory 的 SupportsHdr 逐格式一致（分叉了就会印出界面敢说、产物做不到的形态）",
+            drift.Length == 0, drift.ToString());
+    }
+
+    /// <summary>
+    /// 界面中文本地化覆盖（2026-09-26，交接 §55）。
+    /// <para>要防的是同一类病：显示层另存一份真相。XAML 里写死中文，英文模式靠谁翻？
+    /// 第一版答案是"代码里恰好也存在这条中文" —— 那个判据既证明不了机制（字符串可能只出现在注释里），
+    /// 也证不出漏翻（控件类型不在扫描面、副窗口压根没挂扫描钩子时，判据照样绿）。
+    /// 现在锁的是一条机制的四件事：</para>
+    /// <list type="number">
+    /// <item><description>每个窗口都挂可视树扫描钩子（漏挂 = 该窗口英文模式整窗中文）；</description></item>
+    /// <item><description>XAML 每条中文静态文字都在 <c>LocaleManager.ZhToEn</c> 里（表是英文侧唯一真相）；</description></item>
+    /// <item><description>承载中文的 (控件类型, 属性) 都在 App 声明的扫描面里 —— 判据读 App 自己
+    /// 那份 <c>SweepSurface</c> 声明，不抄第二份清单；</description></item>
+    /// <item><description>同一个中文只许有一种英文说法（表 vs 中英三元）。</description></item>
+    /// </list>
+    /// <para>判据自身两个坑都记在这儿，因为它们能把真假报反：
+    /// ① 第一版取"代码侧已知中文"用 <c>"([^"]*中文[^"]*)"</c>，<c>[^"]</c> 吃换行 ⇒ 引号配对整体错位，
+    /// 量到 221 条里全是几十行代码当一条的垃圾，"就绪""截图设置"这类表里明明有的条目反而报成孤儿；
+    /// ② 临时探针忘了 XAML 实体解码，<c>gt;8-bit</c> 与表键对不上，又假报一条"代码里完全没有"。
+    /// ⇒ 于是：字面量禁止跨行、实体解码、以及"抽掉一条必须恰好红一条"的变异自检都进了判据。</para>
+    /// <para>覆盖层里 <c>RenderTextBitmap</c> 自绘的文字不经 XAML 属性 ⇒ 不在本判据范围内，另计。</para>
+    /// </summary>
+    /// <summary>
+    /// 格式那一列对用户只报**界面名**，不许把编码器实现名或已合并的旧格式名卖出去（2026-09-27）。
+    /// <para>起因（用户口径）："JPEG LI 和 JPEG GainMap 合并了啊，不再作为 2 个选项，只有一个下拉选项 JPEG 啊" ——
+    /// 合并之后下拉里只剩一个 JPEG 档，而标签当时写的是 <c>"JPEG LI"</c>（那是编码器 jpegli 的实现名、
+    /// 也是内部枚举名），卡片标题、灰字、声明文案、审计卡跟着一起说"JPEG LI"，
+    /// 读起来就像界面上还有两种 JPEG。内部名保留在代码/日志/判据消息里，界面面一律 <c>JPEG</c>。</para>
+    /// <para>判据形状与两条纪律：① 事实源是 <c>LocaleManager.FmtJpegLi</c>，直接钉它的右值；
+    /// ② 扫"可见文字"而不是整个文件 —— XAML 先剥 XML 注释、C# 先剥整行注释（§56.5 那条教训：
+    /// 解释这次改名的注释里必然写着被禁的词，不剥就是自我误伤）；
+    /// ③ 枚举为空一律判红（扫不到东西就是判据自己瞎了，不是"很干净"）。</para>
+    /// </summary>
+    static void Test_FormatLabels_AreUserFacingNames()
+    {
+        var locPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        var xamlPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"));
+        if (locPath is null || xamlPath is null)
+        { Skip("格式标签不许用实现名", "找不到 LocaleManager.cs 或 MainWindow.xaml"); return; }
+
+        var loc = StripComments(File.ReadAllText(locPath));
+        Assert("JPEG_LI 这一档的界面标签 = 「JPEG」（增益图已并入，下拉里只有这一个 JPEG 档）",
+            loc.Contains("FmtJpegLi => \"JPEG\""), "没找到 FmtJpegLi => \"JPEG\" 这一行");
+
+        var xaml = System.Text.RegularExpressions.Regex.Replace(
+            File.ReadAllText(xamlPath), @"<!--.*?-->", "",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+        var visible = System.Text.RegularExpressions.Regex
+            .Matches(xaml, "(?:Text|Content)=\"([^\"\n]*)\"").Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value).ToList();
+        Assert("XAML 可见文字要枚举得到（空或过少 = 判据自己瞎了）", visible.Count > 30, $"count={visible.Count}");
+        var badXaml = visible.Where(s => s.Contains("JPEG LI") || s.Contains("JPEG Gain")).ToList();
+        Assert("界面可见文字里不许出现「JPEG LI」「JPEG Gain Map」（实现名 / 已合并的旧格式名）",
+            badXaml.Count == 0, string.Join(" | ", badXaml));
+
+        // 翻译表两侧都算用户可见：键 = 界面中文，值 = 英文
+        var pairs = System.Text.RegularExpressions.Regex
+            .Matches(loc, @"\[""([^""\n]*)""\]\s*=\s*\r?\n?\s*""([^""\n]*)""")
+            .Cast<System.Text.RegularExpressions.Match>().ToList();
+        Assert("翻译表要枚举得到（本仓当前 180 条以上，少于 100 条就是解析掉了）",
+            pairs.Count > 100, $"pairs={pairs.Count}");
+        var badTable = pairs.Where(m => m.Groups[1].Value.Contains("JPEG LI")
+                                     || m.Groups[2].Value.Contains("JPEG LI")
+                                     || m.Groups[1].Value.Contains("JPEG Gain")
+                                     || m.Groups[2].Value.Contains("JPEG Gain")).ToList();
+        Assert("翻译表两侧都不许留着实现名（英文侧漏一条就是「中文改了英文没改」的另一种不一致）",
+            badTable.Count == 0,
+            string.Join(" | ", badTable.Select(m => m.Groups[1].Value + " ⇒ " + m.Groups[2].Value)));
+
+        // 声明卡（七格 ×两档）是用户读"这个格式怎么写声明"的地方，同样不许冒出实现名
+        var badDecl = (from f in Enum.GetValues<OutputFormat>()
+                       from tag in new[] { "sRGB", "BT2020" }
+                       from pq in new[] { false, true }
+                       let s = FormatColorFacts.Declaration(f, tag, pq)
+                       where s.Contains("JPEG LI") || s.Contains("JPEG Gain")
+                       select $"{f}/{tag}/{pq}: {s}").ToList();
+        Assert("逐格式声明文案用界面名（JPEG / JPEG（附带增益图）），不用 JPEG LI",
+            badDecl.Count == 0, string.Join(" | ", badDecl));
+
+        // 增益图仍然是"JPEG 的开关"而不是第二个格式（§52 那条锁的同族，这里再钉一次界面侧）
+        Assert("界面可见文字里「增益图」必须挂在 JPEG 名下说，不再作为第二个格式选项",
+            !visible.Any(s => s.Contains("JPEG Gain Map")),
+            string.Join(" | ", visible.Where(s => s.Contains("JPEG Gain Map"))));
+    }
+
+    /// <summary>
+    /// 两处"面向用户、但此前没有任何判据看着"的文本面：格式能力表的 <c>Hint:</c> 与
+    /// <c>EncoderFallbackNotifier.LastReason</c>（降级 Toast 的正文）。
+    /// <para>为什么要单独一条：§57–§59 连着做了三轮改名（Rec.709/Rec.2020、JPEG、Adobe 收口），
+    /// 每轮都有判据护住 XAML 可见文字、翻译表两侧和逐格式声明卡 —— 而这两个面**一条锁都没有**，
+    /// 于是同一句话里"Rec.2020 原色 + sRGB 传输（对）"和"退回 BT.2020"（错）能同时存在好几轮。
+    /// 判据形态：扫字面量、命中旧叫法即红；并带 fail-closed 下限（扫不到东西就是自己瞎了）。</para>
+    /// </summary>
+    static void Test_VisibleToastAndHintStrings_UseCurrentNames()
+    {
+        // 旧叫法里，只有"说【用户可选项】"的写法算违规：sRGB 作为**传递函数/容器事实**必须允许出现
+        //（"Rec.2020 原色 + sRGB 传输"是对的，"sRGB 目标不写声明"是过期的）。
+        // ⚠ 故意不收 "BT2020" —— 那是盘上的 Tag 值与 ICC 生成的键，出现在代码字面量里是对的；
+        //   带点的 "BT.2020" 才是给人看的旧叫法（ICC 描述文本除外：那是要写进文件的字节，
+        //   所以只扫下面这几个文件，不扫 IccStore / ColorProfileProvider）。
+        var stale = new[] { "BT.2020", "BT.709", "JPEG LI", "JPEG Gain Map", "目标 sRGB", "sRGB 目标" };
+        var hits = new List<string>();
+
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (mwPath is null) { Skip("Toast/Hint 用现行名", "找不到 MainWindow.xaml.cs"); return; }
+        var mw = StripComments(ReadSourceNormalized(mwPath));
+        // 按整条语句取，因为不少 Hint 是 `"a" + "b"` 拼接的 —— 只取第一段字面量会漏掉后半句。
+        var hints = System.Text.RegularExpressions.Regex
+            .Matches(mw, @"Hint:\s*([\s\S]{0,600}?),\s*\n")
+            .Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value)
+            .Where(s => s.Length > 0).ToList();
+        Assert("格式能力表的 Hint 要枚举得到（本仓 7 个格式各一条，少于 5 条 = 判据自己瞎了）",
+            hints.Count >= 5, $"count={hints.Count}");
+
+        var notifySources = new[]
+        {
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"),
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "JpegGainMapEncoder.cs"),
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeJxlEncoder.cs"),
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeAvifEncoder.cs"),
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "ImageEncoder.cs"),
+        };
+        var toasts = new List<string>();
+        foreach (var rel in notifySources)
+        {
+            var p = FindRepoFile(rel);
+            if (p is null) continue;
+            var src = StripComments(ReadSourceNormalized(p));
+            foreach (System.Text.RegularExpressions.Match m in
+                     System.Text.RegularExpressions.Regex.Matches(
+                         src, @"EncoderFallbackNotifier\.LastReason\s*=\s*([\s\S]{0,400}?);"))
+                toasts.Add(m.Groups[1].Value);
+        }
+        Assert("降级 Toast 的赋值点要枚举得到（>0，否则这条锁什么都不判）",
+            toasts.Count > 0, $"Hint {hints.Count} 条、Toast {toasts.Count} 条");
+
+        foreach (var s in hints.Concat(toasts))
+            foreach (var word in stale)
+                if (s.Contains(word))
+                    hits.Add($"「{word}」← {System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ")[..Math.Min(90, s.Length)]}");
+
+        Assert("Hint / 降级 Toast 里不许用旧色域名或实现名说【用户可选项】（Rec.709/Rec.2020/JPEG）",
+            hits.Count == 0, string.Join(" | ", hits.Distinct().Take(6)));
+    }
+
+    /// <summary>
+    /// 锁：XAML 里【以 Collapsed 起步】的命名控件，代码里必须存在对它 <c>.Visibility</c> 的赋值。
+    /// <para>为什么要有这条（2026-09-27，用户报「AVIF 缺少编码器选项」查出的一次发布期回归）：
+    /// <c>AvifOptionsCard</c> 在 XAML 里是 <c>Visibility="Collapsed"</c>，而
+    /// <c>AvifOptionsCard.Visibility = isAvif ? Visible : Collapsed</c> 那一行在
+    /// <b>cde6168（release: v0.3.5-beta，我自己做的那个发布提交）里被删掉了</b> ⇒
+    /// 「AVIF 编码器 / 色度采样 / .png 后缀」三行在任何状态下都不再出现，而 7 个套件全绿 ——
+    /// 门禁对"控件存在但没人点亮"这一类完全失明：不崩、不报错、日志干净，只是界面上没有。</para>
+    /// <para>判据形状：枚举 XAML 里同时带 <c>x:Name</c> 与 <c>Visibility="Collapsed"</c> 的开标签
+    /// （两个属性的先后顺序不假设），再在 <c>MainWindow*.cs</c> 这几份 partial 里找
+    /// <c>名字.Visibility</c> 或 <c>名字?.Visibility</c>。剥行注释 —— 注释里提到控件名不算点亮。</para>
+    /// <para>⚠ 枚举为空必须判红：这条锁的全部意义是"一个都不能漏"，扫不到东西就是自己瞎了。</para>
+    /// </summary>
+    static void Test_Xaml_CollapsedCards_HaveVisibilityOwner()
+    {
+        var xamlPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"));
+        if (xamlPath is null) { Skip("Collapsed 卡片的点亮归属", "找不到 MainWindow.xaml"); return; }
+        var appDir = Path.GetDirectoryName(xamlPath)!;
+        var sources = Directory.GetFiles(appDir, "MainWindow*.cs")
+            .Where(f => !f.Contains(".g.cs") && !f.Contains(".i.cs"))
+            .ToList();
+        if (sources.Count == 0) { Skip("Collapsed 卡片的点亮归属", "找不到 MainWindow*.cs partial"); return; }
+
+        var xaml = File.ReadAllText(xamlPath);
+        var owners = string.Join("\n", sources.Select(f => StripLineComments(File.ReadAllText(f))));
+
+        var collapsed = new List<string>();
+        foreach (System.Text.RegularExpressions.Match tag in
+                 System.Text.RegularExpressions.Regex.Matches(xaml, @"<[A-Za-z][\w.]*\b[^>]*>"))
+        {
+            var name = System.Text.RegularExpressions.Regex.Match(tag.Value, @"x:Name=""(\w+)""");
+            if (name.Success && tag.Value.Contains(@"Visibility=""Collapsed"""))
+                collapsed.Add(name.Groups[1].Value);
+        }
+        collapsed = collapsed.Distinct().ToList();
+
+        Assert($"XAML 里必须枚举得到 Collapsed 起步的命名控件（0 个 = 判据自己瞎了，当前 App 侧有 16 个这样的控件）",
+            collapsed.Count > 0, $"partial 源 {sources.Count} 份，枚举到 {collapsed.Count} 个");
+
+        var orphans = collapsed
+            .Where(n => !owners.Contains(n + ".Visibility") && !owners.Contains(n + "?.Visibility"))
+            .ToList();
+        Assert("每个以 Collapsed 起步的控件都必须有代码点亮它（漏一个就是「界面里永远看不见」，而门禁不会响）",
+            orphans.Count == 0,
+            $"孤儿控件：{string.Join("、", orphans)}（共 {collapsed.Count} 个 Collapsed 控件，扫了 {sources.Count} 份 partial）");
+
+        // 这条锁的【牙】不是自称的：把 AvifOptionsCard 那一行删掉就红 —— 实测过（见交接 §57）
+        Assert("判据真的覆盖到 AvifOptionsCard 本身（否则这次修的缺陷不在锁的保护范围内）",
+            collapsed.Contains("AvifOptionsCard"), $"枚举结果：{string.Join("、", collapsed)}");
+    }
+
+    static void Test_Xaml_HardcodedChineseIsLocalized()
+    {
+        var lmPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        var mainXaml = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"));
+        if (lmPath is null || mainXaml is null)
+        { Skip("界面中文本地化覆盖", "未找到源文件"); return; }
+        var appDir = Path.GetDirectoryName(mainXaml)!;
+        var lcPath = Path.Combine(appDir, "MainWindow.Localization.cs");
+
+        string Cut(string s) => s.Length > 24 ? s[..24] + "…" : s;
+        bool HasCjk(string s) => s.Any(c => c >= 0x4E00 && c <= 0x9FFF);
+
+        // ── 1) 对照表：只取 ZhToEn 初始化块里的 ["中文"] = "English" ──
+        var lmText = File.ReadAllText(lmPath);
+        int at = lmText.IndexOf("ZhToEn =", StringComparison.Ordinal);
+        if (at < 0) { Skip("界面中文本地化覆盖", "未找到 ZhToEn 表"); return; }
+        var block = lmText.Substring(at, lmText.IndexOf("};", at, StringComparison.Ordinal) - at);
+        var entries = Regex.Matches(block, @"\[""([^""\n]*)""]\s*=\s*""([^""\n]*)""")
+            .Select(m => (Zh: m.Groups[1].Value, En: m.Groups[2].Value)).ToList();
+        var table = new HashSet<string>(entries.Select(e => e.Zh), StringComparer.Ordinal);
+        var tableEn = entries.ToDictionary(e => e.Zh, e => e.En, StringComparer.Ordinal);
+
+        Assert("对照表解析出条目（解析失败 = 判据瞎了，不等于表是空的）", entries.Count > 100,
+            $"只解析出 {entries.Count} 条");
+        Assert("解析出的键值不跨行、不含反斜杠（不跨行=没吃到配对垃圾；不含反斜杠=本判据不必处理引号转义）",
+            entries.All(e => e.Zh.IndexOf('\\') < 0 && e.En.IndexOf('\\') < 0),
+            $"含反斜杠 {entries.Count(e => e.Zh.IndexOf('\\') >= 0 || e.En.IndexOf('\\') >= 0)} 条");
+        Assert("对照表条目数 = 去重键数（重复键在静态构造期抛 ArgumentException，设置页直接起不来）",
+            entries.Count == table.Count,
+            $"{entries.Count} 条 / {table.Count} 键，重复：" +
+            string.Join(",", entries.GroupBy(e => e.Zh).Where(g => g.Count() > 1).Select(g => Cut(g.Key)).Take(5)));
+        Assert("每条都有英文（空英文 ⇒ 英文模式显示空白，比留中文更糟）",
+            entries.All(e => e.En.Trim().Length > 0),
+            $"空英文 {entries.Count(e => e.En.Trim().Length == 0)} 条");
+        Assert("英文侧不残留中文（残留 = 这条根本没翻）",
+            entries.All(e => !HasCjk(e.En)),
+            $"残留：{string.Join(" | ", entries.Where(e => HasCjk(e.En)).Select(e => Cut(e.Zh)).Take(6))}");
+
+        // ── 2) 扫描面：读 App 那份声明本身（判据自己再抄一份类型清单，就是第二份真相）──
+        // 形状写死成"行首缩进 + (typeof(名字), 属性)"，解析前先剥 C# 注释：
+        // 一条被注释掉的旧声明和真声明长得一模一样，留着它就是"扫描器不看这个控件、判据却认为看"。
+        // ⚠ 本轮实测过方向本身：现在并不红（11 项，剥与不剥同一结果），这条是防将来的。
+        var lcStripped = StripComments(File.ReadAllText(lcPath));
+        var surface = ParseSweepSurface(lcStripped);
+        Assert("扫描面从 App 声明里读到（少于 8 项 = 声明形状变了，判据得跟着改而不是静默放行）",
+            surface.Count >= 8, $"只读到 {surface.Count} 项");
+        // 对抗夹具：把一条声明整行放进块注释里。行注释（`// (typeof…`）本来就撞不上 `^\s*\(typeof\(`
+        // 这个锚点，所以真正的风险形状是块注释里的"注释掉的旧声明"——它和真声明逐字符一样。
+        // 不剥注释会数到 2 项（多出的那条能让"控件属性必须在扫描面里"从此对 Header 恒真）。
+        const string Fixture = "        (typeof(TextBlock), \"Text\",\n"
+                             + "/* 旧的写法留着当参考\n"
+                             + "        (typeof(PhantomHeaderControl), \"Header\",\n"
+                             + "*/\n";
+        Assert("块注释里的声明不算扫描面（夹具：不剥=2 项 / 剥了=1 项，两个读数都得对上）",
+            ParseSweepSurface(Fixture).Count == 1 && ParseSweepSurface(Fixture, strip: false).Count == 2,
+            $"剥了 {ParseSweepSurface(Fixture).Count} 项 / 不剥 {ParseSweepSurface(Fixture, strip: false).Count} 项");
+        // 判据自身的哨兵：按原文包含判断"挂没挂钩子"这种写法，只许待在 CallsLocaleSweep 的定义里
+        // （那里是唯一的收口点），别处再冒出来一处，就等于"谁在注释里提一句 HookLocaleSweep，
+        // 那个窗口算挂了钩子"。⚠ 上一版我写成"整文件不许出现该模式"，结果连定义自己都不许有 ⇒
+        // 它从写下来那一刻就恒红（发布门禁替我抓到），这版改成计数。
+        // needle 用拼接构造，否则这条断言自己就会命中它要找的模式。
+        var self = File.ReadAllText(FindRepoFile(
+            Path.Combine("src", "TrueToneCap.Test", "CorePipelineTests.cs"))!);
+        var needle = ".Contains(\"HookLocaleSweep" + "\")";
+        int rawSites = CountOccurrences(self, needle);
+        // 只数"按原文判断"的写法不许超过收口那一处。⚠ 上一版还挂着半句
+        // `self.Contains("static bool CallsLocaleSweep(...)")`，看着像"检查收口存在"，
+        // 其实把定义改名它照样绿（假保护）—— 已去掉，不留装饰性的右半句。
+        Assert("原文包含判断只允许出现一处（= CallsLocaleSweep 的收口点），别处再冒出来一处即判红",
+            rawSites == 1, $"数到 {rawSites} 处按原文判断的写法");
+
+        // 翻译与"英文模式残留计数"必须共用同一个匹配函数。复核轮抓到的缺陷正是残留那边
+        // 写成了精确类型相等（`slot.Control == …`）⇒ 声明在 FrameworkElement 上的 ToolTip 一格都不算，
+        // 那条运行时告警报出的 N 是假的低，而静态判据全绿。这条是它的镜像断言。
+        // 同样只看代码行：注释里出现 `slot.Control ==` 不算分叉（本轮那条说明注释就会误伤）。
+        int body = lcStripped.IndexOf("ApplyLocaleCollect(DependencyObject? root", System.StringComparison.Ordinal);
+        var residue = body < 0 ? "" : lcStripped.Substring(body, System.Math.Min(700, lcStripped.Length - body));
+        Assert("残留计数与翻译共用 MatchesSurface（不许退回精确类型相等，那会漏掉 ToolTip 那一整类）",
+            residue.Contains("MatchesSurface") && !residue.Contains("slot.Control =="),
+            residue.Length == 0 ? "找不到 ApplyLocaleCollect" : "两处匹配规则又分叉了");
+
+        // ── 3) XAML：App 下每一份都算，逐个元素带控件标签取出中文属性 ──
+        var xamlFiles = Directory.GetFiles(appDir, "*.xaml")
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+        Assert("枚举到 App 的 XAML 文件（枚举为空必须拦，不许当成界面没有中文）",
+            xamlFiles.Count >= 6, $"只枚举到 {xamlFiles.Count} 份");
+
+        var attrs = new List<(string File, string Tag, string Prop, string Value)>();
+        foreach (var f in xamlFiles)
+        {
+            var src = Regex.Replace(File.ReadAllText(f), @"<!--.*?-->", "",
+                System.Text.RegularExpressions.RegexOptions.Singleline);
+            foreach (Match el in Regex.Matches(src, @"<([\w:]+)((?:[^<"">]|""[^""]*"")*?/?>)",
+                         System.Text.RegularExpressions.RegexOptions.Singleline))
+            {
+                foreach (Match a in Regex.Matches(el.Groups[2].Value, XamlTextAttrPattern))
+                {
+                    var val = System.Net.WebUtility.HtmlDecode(a.Groups[2].Value);
+                    if (!HasCjk(val)) continue;
+                    var prop = a.Groups[1].Value;
+                    var tag2 = el.Groups[1].Value.Split(':').Last();
+                    // 附加属性（ToolTipService.ToolTip）沿基类链注册，运行时任何 FrameworkElement
+                    // 都扫得到 ⇒ 判据侧把两侧一起收口到上限名，否则"控件名对不上"会报假红。
+                    if (prop.Contains('.')) tag2 = "FrameworkElement";
+                    // <Window Title="…"> 不在可视树里（扫描器读不到），只能由构造器显式 Tr(Title)
+                    // ⇒ 不进"必须对照表"的口子。窗口标题有没有英文，本判据管不到，另计。
+                    if (tag2 == "Window" && prop == "Title") continue;
+                    attrs.Add((Path.GetFileName(f), tag2, prop, val));
+                }
+            }
+        }
+        Assert("XAML 里量到一批中文静态文字（读不到就是判据瞎了，不是界面干净了）", attrs.Count > 150,
+            $"只解析出 {attrs.Count} 处 / {attrs.Select(a => a.Value).Distinct().Count()} 条");
+
+        var notInTable = attrs.Where(a => !table.Contains(a.Value))
+            .Select(a => $"[{a.File}:{a.Tag}.{a.Prop}] {Cut(a.Value)}")
+            .Distinct(StringComparer.Ordinal).OrderBy(s => s, StringComparer.Ordinal).ToList();
+        Assert("XAML 每条中文静态文字都在对照表里（对照表 + 可视树扫描是英文界面的唯一机制）",
+            notInTable.Count == 0, $"待接 {notInTable.Count}：" + string.Join(" | ", notInTable.Take(6)));
+
+        var outside = attrs.Where(a => !surface.Contains((a.Tag, a.Prop)))
+            .Select(a => $"{a.Tag}.{a.Prop}").Distinct(StringComparer.Ordinal)
+            .OrderBy(s => s, StringComparer.Ordinal).ToList();
+        Assert("XAML 出现中文的每个控件属性都在扫描面里（表里有译文、扫描器却不看这类控件 = 英文界面留中文）",
+            outside.Count == 0, "表外控件属性：" + string.Join(",", outside));
+
+        // ── 4) 每个 Window 都必须挂扫描钩子：漏挂的窗口英文模式整窗中文，上面两条全看不出来 ──
+        // 判据形状按"源文件是否声明 `class X : … Window`"判定：WinUI 窗口都是 Window 的子类，
+        // 而 App 里唯一的 Application 派生类（App.xaml.cs）不是窗口 ⇒ 不需要"非窗口源"这条断言，
+        // 加一条反而会在将来出现 helper 源文件时报假红（判据不许有恒真式）。
+        var windowSources = Directory.GetFiles(appDir, "*.xaml.cs")
+            .Where(f => Regex.IsMatch(StripComments(File.ReadAllText(f)),
+                        @"\bclass\s+\w+\s*:\s*[\w.,\s<>]*\bWindow\b"))
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+        // 包含判断走 CallsLocaleSweep：注释里提一句 HookLocaleSweep 不算挂了钩子
+        // （这条判据自己的注释早就这么声称，实际原先读的是原文 —— 声称的保护要回代码查）。
+        var unhooked = windowSources.Where(f => !CallsLocaleSweep(File.ReadAllText(f)))
+            .Select(f => Path.GetFileName(f)).ToList();
+        Assert("每个 Window 都挂了本地化扫描钩子（XAML 中文只有可视树扫描这一条出路）",
+            unhooked.Count == 0, "漏挂：" + string.Join(",", unhooked));
+
+        // ── 5) 同一个中文不许有两种英文说法 ──
+        // 扫【全部 App 源码】而不是只扫 LocaleManager.cs：本轮实测有 3 格（BrandTagline /
+        // PageOutputTitle / AvifCodecLabelTxt）把中英对写在 MainWindow.Localization.cs 里，
+        // 英文侧与表里不一致（"Output & Color" vs 表里 "Output & Colour"）—— 只扫一个文件的
+        // 歧义锁看不见它，而那正是"后写入的一份说了算、表里那份成死文案"的现场。
+        // 两种写法都认：`? "中" : "英"` 与 `En ? "英" : "中"`。
+        var enOfPair = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        int suppressed = 0, stateLabels = 0;
+        foreach (var srcFile in Directory.GetFiles(appDir, "*.cs", SearchOption.AllDirectories)
+                     .Where(f => !f.Contains("\\obj\\") && !f.Contains("\\bin\\")))
+        {
+            var code = Regex.Replace(File.ReadAllText(srcFile), @"(?://[^\n]*)|/\*.*?\*/", "",
+                System.Text.RegularExpressions.RegexOptions.Singleline);
+            foreach (Match m in Regex.Matches(code, @"\?\s*""([^""\n]*)""\s*:\s*""([^""\n]*)"""))
+            {
+                var (lhs, rhs) = (m.Groups[1].Value, m.Groups[2].Value);
+                string? zh, en;
+                if (HasCjk(lhs) && !HasCjk(rhs)) { zh = lhs; en = rhs; }
+                else if (!HasCjk(lhs) && HasCjk(rhs)) { zh = rhs; en = lhs; }
+                else { if (HasCjk(lhs) || HasCjk(rhs)) stateLabels++; continue; }
+                if (en.Trim().Length == 0) { suppressed++; continue; }   // 英文模式把这句抹掉
+                if (!enOfPair.TryGetValue(zh, out var set))
+                    enOfPair[zh] = set = new HashSet<string>(StringComparer.Ordinal);
+                set.Add(en);
+            }
+        }
+        var divergent = new List<string>();
+        foreach (var kv in enOfPair)
+            if (tableEn.TryGetValue(kv.Key, out var tEn) && !kv.Value.Contains(tEn))
+                divergent.Add($"[{Cut(kv.Key)}] 表=[{Cut(tEn)}] 代码={string.Join("/", kv.Value.Select(Cut))}");
+        Assert("同一个中文只许有一种英文说法（否则切语言时后写入的那份说了算，前一份是死文案）",
+            divergent.Count == 0, $"{divergent.Count} 处分歧：" + string.Join(" | ", divergent.Take(5)));
+        Assert("歧义锁真的扫到了跨文件的中英对（少于 100 条 = 它退化成只看得见一个文件）",
+            enOfPair.Count > 100,
+            $"只数到 {enOfPair.Count} 条；另有 {suppressed} 条抹除式、{stateLabels} 条双中文状态标签");
+        // ── 6) 判据自己的牙：各抽掉一条，对应判据必须恰好变红 ──
+        var distinct = attrs.Select(a => a.Value).Distinct(StringComparer.Ordinal).ToList();
+        var probe = distinct.OrderBy(k => k, StringComparer.Ordinal).First();
+        var shrunken = new HashSet<string>(table, StringComparer.Ordinal);
+        shrunken.Remove(probe);
+        Assert("变异自检：抽掉对照表一条 ⇒ 待接必须恰好多出这一条",
+            shrunken.Count == table.Count - 1 && distinct.Count(k => !shrunken.Contains(k)) == 1,
+            $"抽掉 [{Cut(probe)}] 后待接数 = {distinct.Count(k => !shrunken.Contains(k))}");
+        var noTb = surface.Where(s => s.Item1 != "TextBlock" || s.Item2 != "Text").ToHashSet();
+        Assert("变异自检：抽掉扫描面一项 ⇒ 必须量到落在表外的中文控件属性",
+            noTb.Count == surface.Count - 1 && attrs.Any(a => !noTb.Contains((a.Tag, a.Prop))),
+            $"抽掉 TextBlock.Text 后表外处数 = {attrs.Count(a => !noTb.Contains((a.Tag, a.Prop)))}");
+        var noHook = windowSources.Count(f => !CallsLocaleSweep(File.ReadAllText(f)));
+        Assert("变异自检：钩子判据有牙 —— 窗口源必须 5 份以上且逐个含 HookLocaleSweep",
+            windowSources.Count >= 5 && noHook == 0,
+            $"窗口源 {windowSources.Count} 份，缺钩子 {noHook} 份");
+    }
+
+    /// <summary>
+    /// 从 App 源码文本里解析扫描面声明（可选先剥注释）。
+    /// 判据对真实文件和对抗夹具走同一个函数 ⇒ "剥注释"这道保护是被量过的，不是写在注释里的愿望。
+    /// </summary>
+    static HashSet<(string Type, string Prop)> ParseSweepSurface(string csharpText, bool strip = true)
+        => Regex.Matches(strip ? StripComments(csharpText) : csharpText,
+                @"(?m)^\s*\(typeof\(([\w.]+)\)\s*,\s*(?:nameof\((?:\w+)\.(\w+)\)|""([^""\n]+)"")")
+            .Select(m => (m.Groups[1].Value.Split('.').Last(),
+                          m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value))
+            // 附加属性（带点名字）沿基类链注册，运行时任何 FrameworkElement 都扫得到
+            // ⇒ XAML 侧与声明侧一起收口到上限名 FrameworkElement。
+            .Select(s => s.Item2.Contains('.') ? ("FrameworkElement", s.Item2) : s)
+            .ToHashSet();
+
+    /// <summary>
+    /// 一个 .xaml.cs 是否真的挂了扫描钩子：注释里提一句 <c>HookLocaleSweep</c> 不算。
+    /// 判据里那条"每个 Window 都挂钩子"和变异自检都走这里，保证两者口径一致。
+    /// </summary>
+    static bool CallsLocaleSweep(string sourceText)
+        => StripComments(sourceText).Contains("HookLocaleSweep");
+
+    /// <summary>XAML 文字类属性（含 ToolTipService.ToolTip 这种带点前缀的附加属性）。</summary>
+    const string XamlTextAttrPattern =
+        @"\b(ToolTipService\.ToolTip|Text|Content|Header|PlaceholderText)=""([^""\n]*)""";
+
+    /// <summary>剥掉行注释与块注释 —— 钩子判据不能被一句写在注释里的"HookLocaleSweep"喂绿。</summary>
+    static string StripComments(string src)
+        => Regex.Replace(src, @"(?://[^\n]*)|/\*.*?\*/", "",
+             System.Text.RegularExpressions.RegexOptions.Singleline);
+
 
 
     /// <summary>
@@ -4149,8 +5495,12 @@ public static class CorePipelineTests
             F("BT2020") == "RGB_D65_202_Rel_SRG");
         Assert("DisplayP3 / DCI_P3 ⇒ DisplayP3",
             F("DisplayP3") == "DisplayP3" && F("DCI_P3") == "DisplayP3");
-        Assert("AdobeRGB ⇒ sRGB：上游 FormatEncoders 已因 libjxl 归并行为把 Adobe 收口成 sRGB，映射必须同向",
-            F("AdobeRGB") == "sRGB");
+        // 2026-09-27（用户口径）：AdobeRGB 一律收口进 Rec.2020。旧断言要求它兜成 sRGB，
+        // 那是"同一枚用户选择在界面/HDR/JXL 三处得到三种产物"里 JXL 这一份反方向的口径
+        //（理由"libjxl 归到最近枚举并丢弃 profile"已被 §56.4 实测推翻）。
+        Assert("★ AdobeRGB ⇒ 与 BT2020 同值（收口进 Rec.2020，绝不许兜成 sRGB = 把广色域报成窄色域）",
+            F("AdobeRGB") == F("BT2020") && F("AdobeRGB") == "RGB_D65_202_Rel_SRG",
+            $"AdobeRGB→{F("AdobeRGB")}");
         Assert("没见过的标签兜 sRGB 而不是抛异常", F("SomethingElse") == "sRGB");
 
         // 交叉耦合：映射表产出的每个值，都必须在判别脚本真机验过的那批里。
@@ -4171,6 +5521,38 @@ public static class CorePipelineTests
         Assert("有可嵌 ICC 时只给 icc_pathname，不再叠 color_space",
             System.Text.RegularExpressions.Regex.Matches(code, @"colorArg = \$?""-x icc_pathname").Count == 2
             && code.Contains("-x color_space={JxlColorSpaceValue(colorSpaceTag)}"));
+
+        // 2026-09-26 实测（cjxl v0.11.2）：`-x icc_pathname=… -x color_space=Rec2100PQ` 无论先后，
+        // 产物都只剩 ICC 的声明（PQ 被丢弃）⇒ "两个都给"不是"冗余"，而是【静默丢掉一半声明】。
+        // HDR 分支原先就这么写着（那一格 color_space 是死参数），现已改成二选一。这条锁住回退。
+        var bothArgs = code.Split('\n')
+            .Where(l => l.Contains("Arguments =") && l.Contains("iccArg") && l.Contains("color_space"))
+            .Select(l => { var s = l.Trim(); return s.Substring(0, Math.Min(70, s.Length)); }).ToList();
+        Assert("任何一条 cjxl 命令行都不许同时出现 icc_pathname 与 color_space（同时给 = ICC 赢、PQ 消失）",
+            bothArgs.Count == 0, string.Join(" | ", bothArgs));
+
+        // 色度值域必须与界面下拉【逐项相等】：共享白名单放行 422、而 JXL 下拉只有 444/420，
+        // 一旦盘上出现 422，按 Tag 选中就落空 ⇒ 下拉空白 + 下次保存被静默兜底（用户报的同族症状）。
+        var jxlCbo = System.Text.RegularExpressions.Regex.Match(
+            File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"))!),
+            @"ChromaJpegXlCbo[\s\S]{0,400}?</ComboBox>");
+        var uiChroma = System.Text.RegularExpressions.Regex.Matches(jxlCbo.Value, @"Tag=""([^""]+)""")
+            .Select(m => m.Groups[1].Value).ToArray();
+        Assert("JXL 色度：Core 的值域 = 界面下拉的项（谁改了另一边就红，杜绝「值合法但界面没得选」）",
+            uiChroma.Length == TrueToneCap.Core.Encoding.NativeJxlEncoder.ChromaOptions.Length
+            && uiChroma.Zip(TrueToneCap.Core.Encoding.NativeJxlEncoder.ChromaOptions, (a, b) => a == b).All(x => x),
+            $"界面 [{string.Join(",", uiChroma)}] vs Core [{string.Join(",", TrueToneCap.Core.Encoding.NativeJxlEncoder.ChromaOptions)}]");
+        Assert("JXL 色度归一化：422 回默认 444（不冒充 4:2:0，也不留空让下拉落空）",
+            TrueToneCap.Core.Encoding.NativeJxlEncoder.NormalizeChroma("422") == "444"
+            && TrueToneCap.Core.Encoding.NativeJxlEncoder.NormalizeChroma("420") == "420"
+            && TrueToneCap.Core.Encoding.NativeJxlEncoder.NormalizeChroma(null) == "444"
+            && TrueToneCap.Core.Encoding.NativeJxlEncoder.NormalizeChroma("  444  ") == "444",
+            $"422→{TrueToneCap.Core.Encoding.NativeJxlEncoder.NormalizeChroma("422")}");
+
+        // 卡片文案：被实测推翻的机制解释不许回来，且必须说清"有损产物像素在 XYB"。
+        var jxlDecl = FormatColorFacts.Declaration(OutputFormat.JPEG_XL, "BT2020", false);
+        Assert("JXL 声明文案：写「XYB」、且不写已被推翻的「归到最近的枚举」（实测：Custom 原色精确保留 / 整份 ICC 内嵌）",
+            jxlDecl.Contains("XYB") && !jxlDecl.Contains("归到最近的枚举"), jxlDecl);
     }
 
 
@@ -4290,7 +5672,10 @@ public static class CorePipelineTests
     /// D-3（§30.9 的延伸）：HDR 声明路径必须先把"H.273 无法忠实表达"的色域归一掉。
     /// <para>背景：SDR 侧那道 <c>BuildSdrCicp("AdobeRGB") ⇒ null</c> 的守卫管住了 PNG cICP / AVIF colr /
     /// avifenc --cicp，但 HDR 分支（PQ）根本不问它 ⇒ 像素走完 Adobe 矩阵，声明却写成 primaries=1(BT.709)
-    /// 或 BT.2020，而 HDR 又一律不嵌 ICC —— 三处（PNG P1b / AVIF H1-Adobe / JXL J4）同根。</para>
+    /// 或 BT.2020 —— 三处（PNG P1b / AVIF H1-Adobe / JXL J4）同根。
+    /// ⚠ 这句里的"HDR 一律不嵌 ICC"到 2026-09-27 已不成立：JXL 的 P3/DCI_P3 目标改递【带 PQ 曲线的】
+    /// ICC（交接 §62 —— 旧的那份 SDR TRC ICC 会把 PQ 挤掉，因为 ICC 压过 color fields）。
+    /// 归一这一件事不受影响：Adobe 仍收口成 BT2020，下面两条判据照旧判它。</para>
     /// <para>这里钉两件事：①归一发生在<b>矩阵之前</b>且是就地改写（像素与声明必须同源，不能一个搬了一个没搬）；
     /// ②改写必须留痕（用户显式选的色域没生效，静默等于骗人）。TIFF 故意不在其列：它靠 ICC 声明，
     /// "Adobe 原色 + PQ TRC"的 profile 合法存在，归一反而把用户要的色域裁窄。</para>

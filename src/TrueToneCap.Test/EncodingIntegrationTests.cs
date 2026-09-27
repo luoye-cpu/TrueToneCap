@@ -352,7 +352,9 @@ public static class EncodingIntegrationTests
         OutputFormat.JPEG_XL => ".jxl",
         OutputFormat.AVIF => ".avif",
         OutputFormat.WebP => ".webp",
-        OutputFormat.TIFF => ".bmp",
+        // TIFF 的产物扩展名过去写成 ".bmp"（BMP 编码器专项测试的残留），
+        // 文件内容一直是真 TIFF ⇒ 现在按真实格式命名，免得产物目录里出现"名叫 bmp 的 TIFF"。
+        OutputFormat.TIFF => ".tif",
         OutputFormat.JPEG_GAINMAP => ".jpg",
         _ => ".bin"
     };

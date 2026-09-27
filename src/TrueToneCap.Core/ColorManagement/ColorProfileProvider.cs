@@ -1499,16 +1499,37 @@ public static partial class ColorProfileProvider
         return "sRGB";
     }
 
-    /// <summary>获取当前所选色彩空间的用户友好名称。</summary>
+    /// <summary>
+    /// 编码入口的"AdobeRGB ⇒ Rec.2020"映射（2026-09-27 用户口径）。
+    /// <para><b>与 <see cref="CollapseSelectableTag"/> 的区别</b>：那个管的是【界面可选项】，
+    /// 把 P3 / DCI_P3 / Adobe 全都并进 BT2020；这里只管一件事实 —— AdobeRGB 作为目标
+    /// 一律按 Rec.2020 交付，其余标签原样通过。DisplayP3 / DCI_P3 因此仍有自己的忠实出路
+    /// （cICP primaries=12、P3 的 ICC），判据表里 p3=12 那条期望也还成立。</para>
+    /// <para>为什么产品路径其实看不到这个映射：UI 的可选项早就是三档（跟随显示器 / Rec.709 / Rec.2020），
+    /// 老配置里的 Adobe 索引也已被 <c>legacyTags</c> 迁移收口。仍然要它，是因为
+    /// ① 判据样张宿主会直接给 <c>EncodingSettings.ColorSpaceTag</c> 赋值（绕过 UI），
+    /// ② JXL 一类编码器被直接调用时不能各写各的版本。以前 JXL 分支自己写的是"退回 sRGB"，
+    /// 于是"Adobe 到底进哪一档"在两处有不同答案 —— 见交接 §56.4 与 §59。</para>
+    /// </summary>
+    public static string MapAdobeTargetToWide(string tag) =>
+        tag == "AdobeRGB" ? "BT2020" : tag;
+
+    /// <summary>获取当前所选色彩空间的用户友好名称。
+    /// <para>2026-09-27 用户口径：可选的两档一律叫 <b>Rec.709 / Rec.2020</b>，不再在同一段话里
+    /// 被写成 "sRGB"、"BT.2020"、"非 sRGB" 三种名字 —— 尤其 "BT.2020 (HDR)" 那种写法是错的：
+    /// Rec.2020 是<b>原色</b>，HDR 是<b>传递函数/动态范围</b>，两件事分属不同维度
+    /// （SDR 广色域走的就是 Rec.2020 原色 + SDR 传递函数）。
+    /// Display P3 / DCI-P3 / Adobe RGB 三行留着：这里也报<b>面板自己的原生色域</b>
+    /// （<c>src.NativeGamutTag</c>），那是实测事实、不是用户可选项。</para></summary>
     public static string GetColorSpaceDisplayName(string tag) => tag switch
     {
-        "System" => "sRGB (跟随系统)",
-        "sRGB" => "sRGB IEC61966-2.1",
+        "System" => "跟随显示器",
+        "sRGB" => "Rec.709",
         "DisplayP3" => "Display P3",
         "DCI_P3" => "DCI-P3",
-        "AdobeRGB" => "Adobe RGB (1998)",
-        "BT2020" => "BT.2020 (HDR)",
-        _ => "sRGB"
+        "AdobeRGB" => "Adobe RGB",
+        "BT2020" => "Rec.2020",
+        _ => "Rec.709"
     };
 
     /// <summary>检测 ICC 是否与标准 sRGB 不同（用于判断是否需要烘焙）。

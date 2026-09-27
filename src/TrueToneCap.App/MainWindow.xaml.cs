@@ -14,6 +14,7 @@ using Microsoft.UI;
 using WinRT.Interop;
 using TrueToneCap.Core.Capture;
 using TrueToneCap.Core.Encoding;
+using TrueToneCap.Core.Settings;   // FormatOrder：FormatIndex 的持久化契约表（界面格式表必须逐项等于它）
 using TrueToneCap.Core.Processing;
 using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Metadata;
@@ -31,7 +32,11 @@ public sealed partial class MainWindow : Window
 {
     private AppSettingsData _settings => AppServices.Settings.Current;
     private TrayIconManager? _trayIcon;
-    private readonly List<(OutputFormat Format, string Label)> _formats;
+    // 顺序就是 AppSettingsData.FormatIndex 的持久化契约（见 Core 的 FormatOrder）。
+    // 2026-09-26：这里【不再携带标签】—— 标签只有 LocaleManager.GetFormatLabel 一个来源。
+    // 过去这张表带一份中文 Label、本地化时又另抄一份 7 项数组，两份都能改、改一份就错位
+    // （详见交接 §54.1：7 个可见项里 5 个"点谁都不是谁"）。
+    private readonly List<OutputFormat> _formats;
     private volatile int _isCapturing; // 0=idle, 1=busy (防重入, 仅保护捕获阶段)
     /// <summary>
     /// 当前这一拍截图的日志关联 ID（2026-09-21 接 OpId 时加）。
@@ -151,7 +156,7 @@ public sealed partial class MainWindow : Window
     private sealed record FormatCapability(
         OutputFormat Format,
         bool SupportsHdr,       // 编码器原生 HDR 支持 (JPEG LI/WebP 不支持)
-        bool SupportsWideGamut, // 能否输出广色域 CICP/ICC (GainMap Base 恒 sRGB)
+        bool SupportsWideGamut, // 能否输出广色域 CICP/ICC (GainMap 见 §45：显式选 BT.2020 时整条增益图搬进 2020)
         bool IccEmbeddable,     // 能否嵌入 ICC 元数据
         // 2026-09-19 清理：原 BitDepths / Chroma 两个数组已删除。二者全仓零读取（纯写不读），
         //   且内容与实测结论冲突：WebP 行写着 ["444","420"]，而有损 WebP 格式定义就是 4:2:0
@@ -165,11 +170,11 @@ public sealed partial class MainWindow : Window
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "✅ 无损格式，支持 HDR (cICP Rec.2100 PQ) + 广色域 ICC。截图首选。"),
         [OutputFormat.JPEG_GAINMAP] = new(OutputFormat.JPEG_GAINMAP,
-            SupportsHdr: true, SupportsWideGamut: false, IccEmbeddable: true,
-            Hint: "✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。Base 恒为 sRGB。"),
+            SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
+            Hint: "✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。目标色域就是【底图】的色彩空间：Rec.709 或显式 Rec.2020（三件一起搬，底图本身仍是 SDR）。"),
         [OutputFormat.JPEG_LI] = new(OutputFormat.JPEG_LI,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
-            Hint: "✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit 不支持 HDR，但支持广色域 (P3/Adobe RGB) ICC 嵌入。"),
+            Hint: "✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；Rec.2020 目标只靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"),
         [OutputFormat.JPEG_XL] = new(OutputFormat.JPEG_XL,
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "✅ 新一代格式，Modular 模式对截图极优。支持 HDR (Rec.2100 PQ) + 广色域。16-bit 走 16-bit PNG 中转（cjxl 无 -b 参数，sBIT=16 声明实际精度）。"),
@@ -181,12 +186,12 @@ public sealed partial class MainWindow : Window
             //   QSV 8-bit（NV12 输入）。HDR 恒 10-bit。
             // · 真精度：>8-bit 只在「源为 Float16 + 编码器支持真 10-bit 输入」时保留源精度，
             //   否则是容器级升位深（交接 §4.3）。
-            Hint: "✅ 先进格式，支持 HDR（PQ）与广色域 SDR（BT.2020/P3 + sRGB TRC，cICP + ICC 双标记）。"
+            Hint: "✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。"
                 + "NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。"
                 + "位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"),
         [OutputFormat.WebP] = new(OutputFormat.WebP,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
-            Hint: "⚠ 仅 8-bit，不支持 HDR (但支持广色域 ICC 嵌入)。适合简单分享场景。"),
+            Hint: "⚠ 仅 8-bit、容器没有 HDR 通道；广色域目标靠 ICC 声明（Rec.709 目标不写声明）。适合简单分享场景。"),
         [OutputFormat.TIFF] = new(OutputFormat.TIFF,
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"),
@@ -202,6 +207,11 @@ public sealed partial class MainWindow : Window
     public MainWindow(bool isAutostart = false)
     {
         this.InitializeComponent();
+
+        // XAML 写死中文的按表翻译要在【可视树真的建起来】之后再扫一次：ApplyLocale() 在构造期跑，
+        // 那时页面还没实化，VisualTreeHelper 走不到 ⇒ 在根元素 Loaded 后补扫一次，
+        // 避免"英文模式静默半套"（扫不到就是扫不到，不能当已经翻译了）。
+        HookLocaleSweep(Content as Microsoft.UI.Xaml.FrameworkElement);
 
         // ═══ 关键修复: _uiReady 在 InitializeComponent 后立即设为 true ═══
         // 但 ApplySettingsToUI 会短暂设为 false 防止事件处理函数覆盖 _settings
@@ -251,18 +261,20 @@ public sealed partial class MainWindow : Window
                 fe.Loaded += (_, _) => FontHelper.ApplyFontToVisualTree(fe, initialFont);
         }
 
+        // 项序 = FormatIndex 的持久化契约；增删或换序必须同步 Core 的 FormatOrder
+        // （那里有旧表→新表的一次性重映射），否则老配置的裸索引会静默指向别的格式。
+        // 2026-09-26：摘掉「JPEG Gain Map (HDR)」，它改成 JPEG LI 面板里的开关（见 GainMapEnabled）。
         _formats =
         [
-            (OutputFormat.PNG, "PNG (无损)"),
-            (OutputFormat.JPEG_GAINMAP, "JPEG Gain Map (HDR)"),
-            (OutputFormat.JPEG_LI, "JPEG LI"),
-            (OutputFormat.JPEG_XL, "JPEG XL"),
-            (OutputFormat.AVIF, "AVIF"),
-            (OutputFormat.WebP, "WebP"),
-            (OutputFormat.TIFF, "TIFF"),
+            OutputFormat.PNG,
+            OutputFormat.JPEG_LI,
+            OutputFormat.JPEG_XL,
+            OutputFormat.AVIF,
+            OutputFormat.WebP,
+            OutputFormat.TIFF,
         ];
 
-        FormatCbo.ItemsSource = _formats.Select(f => f.Label).ToList();
+        RebuildFormatCombo();
         LoadSettings();             // 仅加载配置文件，不做检测
 
         // ═══ 关键修复: ApplySettingsToUI 期间禁止事件覆盖 _settings ═══
@@ -450,11 +462,11 @@ public sealed partial class MainWindow : Window
 
             // 色彩管理不可关 ⇒ 这里只报"会做什么"，不再有开关与"是否可用"的置灰逻辑。
             if (cap.SystemAcm)
-                IccHintTxt.Text = "ACM 已启用 — 像素会映射到所选目标色域（sRGB / BT.2020）。";
+                IccHintTxt.Text = "ACM 已启用 — 像素会映射到所选目标色域（Rec.709 / Rec.2020）。";
             else if (cap.CustomIcc)
                 IccHintTxt.Text = $"检测到校色 ICC → 映射到 {ColorProfileProvider.GetColorSpaceDisplayName(GetSelectedColorSpaceTag())}";
             else
-                IccHintTxt.Text = "未检测到校色 ICC；sRGB 目标不嵌入 ICC，非 sRGB 目标嵌入标准 ICC";
+                IccHintTxt.Text = "未检测到校色 ICC；目标色域即像素被搬进、容器被声明成的那一套原色（逐格式的声明通道见下方「色域映射」）";
 
             UpdateAvifEncoderLabels();
 
@@ -468,21 +480,18 @@ public sealed partial class MainWindow : Window
         // Auto 模式：本机任一硬件 AV1 编码器可用即视为走硬件；手动模式按所选种类判断。
         var kind = AvifEncoderCapabilities.Parse(
             (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto");
-        bool hardware = kind switch
-        {
-            AvifEncoderKind.Nvenc => true,
-            AvifEncoderKind.Qsv => true,
-            // ═══ 2026-09-19（用户决定）：Auto 现在【按色度过滤】⇒ 必须问解析结果 ═══
-            // 请求 422/444 时 Auto 会选 libaom（硬件给不出广色度），此时仍是软件编码。
-            // 这里走 PickAvailableKind 而不是自己写"色度==420 且有硬件"——
-            // 后者会变成 Auto 规则的第二处事实源，改一处漏一处（本节上方那段历史就是这么来的）。
-            AvifEncoderKind.Auto => AvifEncoderSelector.PickAvailableKind(
-                    _settings.ChromaAvif, _settings.BitDepthAvif)
-                is AvifEncoderKind.Nvenc or AvifEncoderKind.Qsv,
-            _ => false,
-        };
-        if (hardware)
-            QualitySld.Minimum = Math.Max(QualitySld.Minimum, 1.0);
+        // ═══ 2026-09-19（用户决定）：Auto 现在【按色度过滤】⇒ 必须问解析结果 ═══
+        // 请求 422/444 时 Auto 会选 libaom（硬件给不出广色度），此时仍是软件编码。
+        // 这里走 PickAvailableKind 而不是自己写"色度==420 且有硬件"——
+        // 后者会变成 Auto 规则的第二处事实源，改一处漏一处（本节上方那段历史就是这么来的）。
+        var resolved = kind == AvifEncoderKind.Auto
+            ? AvifEncoderSelector.PickAvailableKind(_settings.ChromaAvif, _settings.BitDepthAvif)
+            : kind;
+
+        // CRF 下限只有一个事实源：能力表。NvEncoderNative 写 constQP 前问的是同一张表，
+        // 所以"界面划不到 0"与"管线送不出 0"不会各走各的（settings.json 遗留值走后者）。
+        QualitySld.Minimum = Math.Max(QualitySld.Minimum,
+                                      AvifEncoderCapabilities.MinCrf(resolved));
     }
 
     // 注: 设置相关方法（LoadSettings / ApplySettingsToUI / SetComboByTag / SaveSettings /
@@ -511,10 +520,20 @@ public sealed partial class MainWindow : Window
         AppServices.Settings.SaveQuiet();
     }
 
+    /// <summary>
+    /// 质量面板的程序性刷新入口 —— 整段过程<b>不得回写设置</b>（判据见 <see cref="_qualityPanelUpdating"/>）。
+    /// </summary>
     private void UpdateQualityPanel()
     {
+        _qualityPanelUpdating = true;
+        try { UpdateQualityPanelCore(); }
+        finally { _qualityPanelUpdating = false; }
+    }
+
+    private void UpdateQualityPanelCore()
+    {
         if (FormatCbo.SelectedIndex < 0) return;
-        var (format, _) = _formats[FormatCbo.SelectedIndex];
+        var format = _formats[FormatCbo.SelectedIndex];
         var encoder = EncoderFactory.Create(format);
         var (min, max, def, label) = encoder.GetQualityRange();
 
@@ -526,11 +545,17 @@ public sealed partial class MainWindow : Window
         // GainMap 也是 butteraugli 距离 (0.5-3.0, 与 JPEG LI 同类型) → 支持小数步进 + 手动输入
         bool precise = format is OutputFormat.JPEG_LI or OutputFormat.JPEG_XL or OutputFormat.JPEG_GAINMAP;
         QualitySld.StepFrequency = precise ? 0.1 : 1.0;
-        QualitySld.IsEnabled = format != OutputFormat.PNG;
+
+        // 无损格式没有"质量"这个参数（区间退化成一点）⇒ 整行收起，而不是留一根
+        // 划不动的滑块 + 只能填 100 的输入框。判据问 Core 的 QualityIsFixed，
+        // 不在此点名格式：旧写法 `format != OutputFormat.PNG` 就漏掉了同样是 (100,100) 的 TIFF。
+        bool noQualityKnob = encoder.QualityIsFixed;
+        QualityRow.Visibility = noQualityKnob ? Visibility.Collapsed : Visibility.Visible;
+        QualitySld.IsEnabled = !noQualityKnob;
 
         // ── 格式专属提示 (2026-08-08: 能力表驱动) ──
         var cap = GetFormatCap(format);
-        FormatHintTxt.Text = format == OutputFormat.JPEG_GAINMAP
+        FormatHintTxt.Text = CurrentFormat() == OutputFormat.JPEG_GAINMAP
             ? $"✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 {(_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80)} nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 {(_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80)}。"
             : cap.Hint;
 
@@ -544,83 +569,111 @@ public sealed partial class MainWindow : Window
             string fmtHdrWarn;
             if (!cap.SupportsHdr)
             {
-                // 8-bit 不支持 HDR (PQ 传输), 但支持广色域 SDR (ICC 嵌入)
+                // 这个格式没有 HDR 通道 ⇒ 开关置灰。措辞只说【这一档真实能做到什么】：
+                // 可选目标色域 2026-09-19 起只剩 sRGB / BT.2020（P3、Adobe RGB 已从界面移除），
+                // 而"ICC 烘焙开关"2026-09-22 也删了 —— 原先那句还在教用户去开一个不存在的开关、
+                // 选一个选不到的色域。"Gain Map"现在也不是格式而是 JPEG LI 下的开关，不能列进"换格式"的建议里。
                 fmtHdrWarn = _hdrHardwareSupported
-                    ? "\n🔒 当前格式为 8-bit，不支持 HDR 输出 — HDR 开关已禁用。"
-                      + (cap.SupportsWideGamut
-                          ? " 支持广色域 (P3/Adobe RGB) ICC 嵌入：ICC 烘焙开关开启 + 目标色域选 P3/Adobe RGB 时输出广色域 SDR。"
-                          : "")
-                      + " 如需 HDR 请选 PNG/JPEG XL/AVIF/TIFF/Gain Map。"
+                    ? "\n🔒 当前格式没有 HDR 通道（容器写不了 PQ）— HDR 开关已禁用，产物是 8-bit SDR。"
+                      + (cap.SupportsWideGamut ? " 广色域目标仍然生效（这类格式只靠 ICC 声明）。" : "")
+                      + " 要 HDR 请选 PNG / JPEG XL / AVIF / TIFF，或在 JPEG 下打开「附带增益图」。"
                     : "\n🔒 此显示器不支持 HDR — HDR 开关已禁用。";
             }
             else
             {
                 fmtHdrWarn = "";
             }
-            string wideWarn = (cap.SupportsHdr && !cap.SupportsWideGamut && HdrSwitch.IsOn)
-                ? "\nℹ Gain Map 的 Base 恒为 sRGB (增益图为相对编码)，目标色域设置不影响其像素色域。"
-                : "";
-            HdrHintTxt.Text = _hdrSystemHint + fmtHdrWarn + wideWarn;
+            // 原 wideWarn（"GainMap 的 Base 恒为 sRGB，目标色域不影响像素"）已删 —— §45/§46 后该句为假，
+            // 且它是全表唯一的 SupportsHdr && !SupportsWideGamut 组合，条件恒假即死分支。
+            HdrHintTxt.Text = _hdrSystemHint + fmtHdrWarn;
         }
 
         // ── 格式专属选项卡片 ──
         bool isAvif = format == OutputFormat.AVIF;
-        bool isGainMap = format == OutputFormat.JPEG_GAINMAP;
+        // 2026-09-26（用户口径）：GainMap 不再是独立格式，而是 JPEG LI 卡片里的一个开关。
+        // 判据只有一个来源（_settings.GainMapEnabled）；编码侧的格式翻译在 CurrentFormat() 里做，
+        // 两处各判一次就会出现"界面按开关显示、产物却是另一种格式"的对不上账。
+        bool isJpegLi = format == OutputFormat.JPEG_LI;
+        bool gainMapOn = isJpegLi && _settings.GainMapEnabled;
 
-        // ═══ GainMap 色域/HD R 锁定 (2026-08-09) ═══
-        // GainMap 管线恒在 scRGB/sRGB 空间 (Base 恒 sRGB, 增益图是相对编码),
-        // 目标色域选择 (P3/BT.2020) 对 GainMap 无效 → 锁定为 BT.2020。
-        // GainMap 是 Ultra HDR → 锁定 HDR 开启 (不可关)。
-        if (isGainMap)
+        // 开关本身只在 JPEG LI 下出现；增益图专属的两行（说明 + 模式）只在开关打开时出现。
+        // IsChecked 是程序赋值 —— OnGainMapToggled 里靠 _qualityPanelUpdating 同一手法挡住回写。
+        if (GainMapEnableChk is not null)
         {
-            // ═══ 2026-08-16 P2-7 修复: 锁定只作用于 UI, 不写 _settings ═══
-            // 旧实现写 _settings.HdrEnabled=true / _settings.ColorSpaceIndex=5 并持久化,
-            // 切走 GainMap 后不恢复 → 用户 HDR-off 偏好被永久翻转 (状态粘住)。
-            // 现在仅 UI 锁定: IsEnabled=false + IsOn=true; 保存设置走 UI 值,
-            // 切走后 UpdateQualityPanel 恢复真实用户偏好。
+            GainMapEnableChk.Visibility = isJpegLi ? Visibility.Visible : Visibility.Collapsed;
+            GainMapEnableChk.IsChecked = _settings.GainMapEnabled;
+        }
+        bool showGm = gainMapOn;
+        if (GainMapOptionsDesc is not null) GainMapOptionsDesc.Visibility = showGm ? Visibility.Visible : Visibility.Collapsed;
+        if (GainMapModeRow is not null) GainMapModeRow.Visibility = showGm ? Visibility.Visible : Visibility.Collapsed;
+        if (GainMapHintTxt is not null) GainMapHintTxt.Visibility = showGm ? Visibility.Visible : Visibility.Collapsed;
+
+        // ═══ 2026-09-27：这里曾经加过"当前格式没有 HDR 通道 ⇒ 把 Rec.2020 那一档禁选" ═══
+        // 撤掉了，因为实测把前提打掉了：JPEG LI 与 WebP 确实【没有】HDR 通道（SupportsHdr=false，
+        // HDR 开关会落空成 8-bit SDR），但它们都有一条能用的【广色域 SDR】声明通道 ——
+        // 取 artifacts/precision/cicp 那组产品自己产出的样张读字节：
+        //   cc_webp_bt2020.webp  2644 B，ICCP 块在偏移 30，里面 2100 字节 profile（acsp 在 74）
+        //   cc_webp_srgb.webp     524 B，无 ICCP（sRGB 目标本来就不该写，这一格是对照组）
+        //   cc_jpegli_bt2020.jpg 2949 B，APP2/ICC_PROFILE + acsp 在 56
+        //   cc_jpegli_srgb.jpg    833 B，无 ICC
+        // ⇒ 把 Rec.2020 对这两个格式禁掉，砍掉的是"实测成立的能力"，还会与三档策略里
+        //   "广色域面板 ⇒ BT2020 + SDR" 那条已拍板的口径正面冲突（自动档照样会解析成 2020，
+        //   于是变成"界面不让你选、产物却在做"的第三种不一致）。
+        // 描述不清的部分改到文案里去解决（FormatColorFacts 的 JPEG LI / WebP 两行现在明说
+        // "没有 HDR 通道 ≠ 不能声明 Rec.2020 原色"）。
+
+        // ═══ 增益图态的 HDR 锁定 (2026-08-09 起)；色域锁定已于 2026-09-23 解除 ═══
+        // 增益图就是 Ultra HDR ⇒ HDR 开关必须锁住开启（关掉就没有增益图，这个形态不成立）。
+        // 但【色域不再锁定】：JpegGainMapEncoder 真的读 ColorSpaceTag ——
+        //   Rec.709 ⇒ base/增益比/声明三件同在 Rec.709 原色；显式 Rec.2020 ⇒ 整条增益图搬进 2020。
+        //   这正是"色彩空间影响的是底图的色彩空间"，合并成开关后这条语义原样保留。
+        // 锁定仍只作用于 UI、不写 _settings（2026-08-16 P2-7 的教训：状态粘住会永久翻转用户偏好）。
+        if (gainMapOn)
+        {
             HdrSwitch.IsEnabled = false;
             HdrSwitch.IsOn = true;
-            if (ColorCbo is not null)
-            {
-                ColorCbo.IsEnabled = false;
-                // UI 显示 BT.2020 但不改 _settings (GetSelectedColorSpaceTag 读取 UI, 已生效; 保存时由 ApplySettingsToUI 同步)
-                // ⚠ 按 Tag 找格子，不再用硬编码索引：下拉已从 6 项收到 3 项，"索引 5" 在新项序里根本不存在，
-                //   留着就会把锁定态指到别的色域（ApplySettingsToUI 反过来又会把这个格子写回设置）。
-                int bt2020Idx = -1;
-                for (int i = 0; i < ColorCbo.Items.Count; i++)
-                    if (ColorCbo.Items[i] is ComboBoxItem it && it.Tag as string == "BT2020")
-                    {
-                        bt2020Idx = i;
-                        break;
-                    }
-                if (bt2020Idx >= 0 && ColorCbo.SelectedIndex != bt2020Idx)
-                    ColorCbo.SelectedIndex = bt2020Idx;
-            }
-            // 更新提示: 色域锁定说明
+            if (ColorCbo is not null) ColorCbo.IsEnabled = true;
             if (HdrHintTxt is not null)
             {
-                string colorLockHint = "\n🔒 Gain Map 为 Ultra HDR：目标色域恒为 BT.2020 (Base 为 sRGB 兼容层)，HDR 输出已锁定开启。";
-                HdrHintTxt.Text = _hdrSystemHint + colorLockHint;
+                HdrHintTxt.Text = _hdrSystemHint
+                    + "\n🔒 增益图为 Ultra HDR：HDR 输出锁定开启。上面「目标色域」决定底图与增益图共用哪套原色"
+                    + " —— Rec.709 ⇒ 两者同在 Rec.709 原色；Rec.2020 ⇒ 底图、增益比、声明三件同搬 Rec.2020。"
+                    + "底图本身恒为 SDR，HDR 由增益图还原，不写在底图的声明里。";
             }
         }
         else
         {
-            // 非 GainMap 格式: 恢复 HDR 开关和色域选择可用性
             HdrSwitch.IsEnabled = _hdrHardwareSupported && cap.SupportsHdr;
             if (ColorCbo is not null) ColorCbo.IsEnabled = true;
         }
 
-        AvifOptionsCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
-        GainMapOptionsCard.Visibility = isGainMap ? Visibility.Visible : Visibility.Collapsed;
+        // ═══ 色彩页那张卡跟着面板一起刷：HDR 开关刚被上面的格式联动改过（禁用/锁定），
+        // 卡片读的正是编码路径用的同一个谓词，晚一步刷新就会显示"HDR 直通"而产物是 SDR。
+        // 放在这里是【唯一】一处：切格式、切增益图开关、切 HDR、显示器变更都先经过本函数，
+        // 不必在每个事件处理器里各记一遍（历史上漏的就是 OnGainMapToggled —— 开关一开，
+        // 目标行还按 JPEG LI 说话，而产物已经是底图 + 增益图）。═══
+        // ═══ 色彩页那张卡跟着面板一起刷，而且是【唯一】一处刷新点 ═══
+        // 这张卡要说的是"HDR 开关 + 目标色域 + 当前格式 ⇒ 产物长什么样"，而上面刚把 HDR 的
+        // 可用性与增益图锁定的最终状态定下来（置灰、锁开）。放在它前面就会读到被覆盖前的值；
+        // 放进各 handler 则要求每个改这三样控件的入口都记得调用 —— 增益图开关正是这样漏掉过一次。
+        // 卡片读的正是编码路径用的同一个谓词，晚一步刷新就会显示"HDR 直通"而产物是 SDR。
+        RefreshColorMappingUi();
+
         PngOptionsCard.Visibility = format == OutputFormat.PNG ? Visibility.Visible : Visibility.Collapsed;
         JpegXlOptionsCard.Visibility = format == OutputFormat.JPEG_XL ? Visibility.Visible : Visibility.Collapsed;
-        JpegLiOptionsCard.Visibility = format == OutputFormat.JPEG_LI ? Visibility.Visible : Visibility.Collapsed;
+        JpegLiOptionsCard.Visibility = isJpegLi ? Visibility.Visible : Visibility.Collapsed;
         WebPOptionsCard.Visibility = format == OutputFormat.WebP ? Visibility.Visible : Visibility.Collapsed;
         TiffOptionsCard.Visibility = format == OutputFormat.TIFF ? Visibility.Visible : Visibility.Collapsed;
+        // ═══ 2026-09-27 修回归：这一行在 cde6168（0.3.5-beta 发布提交）里被删掉了 ═══
+        // `AvifOptionsCard` 在 XAML 里是 Visibility="Collapsed"，全仓【只有这里】会点亮它，
+        // 于是 AVIF 的「编码器 / 色度采样 / .png 后缀」三行在任何状态下都不再出现，
+        // 只有后来拆出去的 AvifBitDepthCard 还亮着 —— 用户看到的就是"AVIF 没有编码器可选"。
+        // 门禁现在有一条锁：以 Collapsed 起步的 *Card 必须能在代码里找到它的 .Visibility 赋值。
+        AvifOptionsCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
         // P1-3: AVIF 位深选项卡片（与 AvifOptionsCard 联动）
         if (AvifBitDepthCard is not null)
             AvifBitDepthCard.Visibility = isAvif ? Visibility.Visible : Visibility.Collapsed;
-        if (isGainMap)
+        if (gainMapOn && GainMapHintTxt is not null)
         {
             var gmTag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
             GainMapHintTxt.Text = gmTag == "Gray"
@@ -641,19 +694,20 @@ public sealed partial class MainWindow : Window
         }
 
         // Quality 优先使用该格式已保存值（每格式独立，切换格式不互相覆盖）
-        int fmtIdx = FormatCbo.SelectedIndex;
-        double savedQ = _settings.GetQuality(fmtIdx);
+        double savedQ = _settings.GetQuality(CurrentFormat());
         double useQ = (savedQ >= QualitySld.Minimum && savedQ <= QualitySld.Maximum) ? savedQ : def;
         QualitySld.Value = useQ;
         QualityLbl.Text = useQ.ToString("F1");
         QualityTxt.Text = useQ.ToString("F1");
         QualityTxt.Visibility = precise ? Visibility.Visible : Visibility.Collapsed;
-        // 长质量描述放到独立整行（避免被窄列遮挡）
-        QualityDescTxt.Text = encoder.GetQualityDescription((float)useQ);
+        // 长质量描述放到独立整行（避免被窄列遮挡）。写入点只有一个：SetQualityDescription，
+        // 它对无损格式给 range.Label、对有损格式给 GetQualityDescription。
+        SetQualityDescription(encoder, useQ);
         QualityDescTxt.Visibility = Visibility.Visible;
     }
 
-    // ═══ 2026-09-16 重构：单一「AVIF 编码器」下拉（Auto/Avifenc/Qsv/LibAom/SvtAv1/Nvenc）═══
+    // ═══ 2026-09-16 重构：单一「AVIF 编码器」下拉（Auto/Qsv/LibAom/SvtAv1/Nvenc；
+    //     Avifenc 于 2026-09-24 降为内部值，不再是用户可选项）═══
     // Auto 由能力表硬件优先挑选；手动选择尊重用户。原「编码后端 + 软件编码器」两层已合并。
     private void OnAvifEncoderChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -670,6 +724,16 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>更新「AVIF 编码器」下拉项：标记本机可用性，并动态显示该编码器能力（色度/位深）。</summary>
+    /// <summary>
+    /// 编码器下拉的项文字：<b>只有名字</b>，外加"本机不可用"这一个状态标记。
+    /// <para>2026-09-25（用户口径）：原先这里把整张规格表拼进项文字
+    /// （<c>libaom · 420/422/444 / SDR ≤12-bit · HDR 10-bit · 真 10-bit 输入（实测）✓</c>），
+    /// 在窄下拉里必然截断，而且这些信息灰字 <c>AvifCodecHintTxt</c> 本来就按当前所选编码器动态给了一份
+    /// （可用色度 / 可用位深 / 实测 vs 声明 / 真 10-bit 输入 / 不可用原因）
+    /// —— 同一件事写两处就一定会漂，用户在下拉里看到的只是第三份缩写。</para>
+    /// <para>Auto 项刻意跳过：能力表里没有 Auto 这一档，<c>AvifEncoderCapabilities.Caps</c> 查不到时
+    /// 会回落成 libaom 的能力，照名字改会把「自动」变成「libaom」。Auto 的显示名就是 XAML 里的「自动」。</para>
+    /// </summary>
     private void UpdateAvifEncoderLabels()
     {
         if (AvifCodecCbo is null) return;
@@ -677,53 +741,8 @@ public sealed partial class MainWindow : Window
         {
             if (item.Tag as string is not { } tag || tag == "Auto") continue;
             var kind = AvifEncoderCapabilities.Parse(tag);
-            var caps = AvifEncoderCapabilities.Caps(kind);
-            bool ok = AvifEncoderSelector.IsKindAvailable(kind);
-            // ═══ 2026-09-18：色度与位深优先用【实测】值 ═══
-            // 静态表是"文档/既往机型说它能"，实测是"这台机器上真编码出来过"。
-            // 两者不一致时（如本机 NVENC 请求 444 实测只给 420、SvtAv1 声明全色度而实测只有 4:2:0/≤10-bit）
-            // 以实测为准，并显式标注"实测"，避免用户拿声明值当保证。
-            var m = AvifEncoderProbe.Get(kind);
-            string chroma;
-            string mark;
-            if (m.Measured)
-            {
-                var list = new List<string>();
-                if (m.Chroma420) list.Add("420");
-                if (m.Chroma422) list.Add("422");
-                if (m.Chroma444) list.Add("444");
-                chroma = list.Count == 1 ? $"仅 {list[0]}" : string.Join("/", list);
-                mark = "实测";
-            }
-            else
-            {
-                chroma = (caps.Supports444, caps.Supports422) switch
-                {
-                    (true, true) => "420/422/444",
-                    (false, true) => "420/422",
-                    _ => "仅 420",
-                };
-                mark = "声明";
-            }
-            string avail = ok ? "✓" : "(不可用)";
-            // ═══ 2026-09-18 修正：HDR 可用性必须问 SupportsHdrPath，不能按"是否硬件"一刀切 ═══
-            // 上一版对所有硬件写死"HDR 不可用"，但 NVENC 的 HDR 10-bit 直通（PQ 10-bit 输入 +
-            // 容器 colr 声明 PQ）已于 2026-09-18 接通，Core 侧 SupportsHdrPath(Nvenc) 也已是
-            // true（见 CorePipelineTests.Test_AvifCaps_SupportsHdrPath）。若 UI 继续标"不可用"，
-            // 就会出现"下拉写着 HDR 不可用、管线却真的走 NVENC HDR 直通"的自相矛盾。
-            // 现只剩 QSV（NV12 8-bit 输入）不支持 HDR。
-            // SDR 位深同样按能力表（SdrBitDepthFor）显示，不写死"SDR 8-bit" —— 那是 2026-09-17
-            // 已修掉的同类缺陷（标注 < 实际能力）。
-            string hdr = (m.Measured ? m.HdrPath : AvifEncoderCapabilities.SupportsHdrPath(kind))
-                ? "HDR 10-bit" : "HDR 不可用";
-            // 真 10-bit 输入：只有这类后端能保住 Float16 源的精度；其余后端拿到的是 8-bit 像素 +
-            // 容器级升位深（文件写着 10-bit，源精度仍 8-bit）。这是"位深选项是否真有意义"的分水岭，
-            // 必须让用户看得见。
-            string input10 = (m.Measured ? m.True10BitInput : SupportsTrue10BitInput(kind))
-                ? " · 真 10-bit 输入" : "";
-            int sdrDepth = m.Measured ? m.MaxBitDepth : AvifEncoderCapabilities.SdrBitDepthFor(kind);
-            string depth = $"SDR ≤{sdrDepth}-bit · {hdr}{input10}";
-            item.Content = $"{caps.DisplayName} · {chroma} / {depth}（{mark}）{avail}";
+            string name = AvifEncoderCapabilities.Caps(kind).DisplayName;
+            item.Content = AvifEncoderSelector.IsKindAvailable(kind) ? name : $"{name}（本机不可用）";
         }
     }
 
@@ -757,7 +776,7 @@ public sealed partial class MainWindow : Window
     {
         if (!_uiReady || _avifOptionsUpdating) return;
         if (FormatCbo.SelectedIndex < 0 || FormatCbo.SelectedIndex >= _formats.Count) return;
-        if (_formats[FormatCbo.SelectedIndex].Format != OutputFormat.AVIF) return;
+        if (_formats[FormatCbo.SelectedIndex] != OutputFormat.AVIF) return;
 
         _avifOptionsUpdating = true;
         try
@@ -838,7 +857,7 @@ public sealed partial class MainWindow : Window
                 // 不支持 HDR 路径的只剩 QSV（NV12 8-bit 输入），已在下拉中隐藏。
                 bool nvencHdr = kind is AvifEncoderKind.Nvenc or AvifEncoderKind.Auto;
                 AvifCodecHintTxt.Text =
-                    "🔒 HDR 输出位深恒 10-bit（PQ），其余位深已隐藏。"
+                    $"🔒 HDR 至少 10-bit（PQ 的分层要求），该编码器 HDR 可用位深：{depths}；其余档位已隐藏。"
                   + (nvencHdr ? " NVENC 可硬件直通（AV1 仅 4:2:0），失败自动回退 avifenc 软件路径。" : "")
                   + " QSV 不支持 HDR 已隐藏。"
                   + $" 可用色度 {chromas}。";
@@ -871,7 +890,11 @@ public sealed partial class MainWindow : Window
                     ? "（以下为**本机实测**：请求该组合后解析产物确认真的产出）"
                     : "（以下按静态能力表，后台实测完成后会自动收敛）";
                 AvifCodecHintTxt.Text =
-                    $"{caps.DisplayName}：可用色度 {chromas}，可用位深 {depths}。{truth}{src}"
+                    // 软件/硬件 与"只有该编码器才有的限制"（UiNote）原来都塞在下拉项文字里，
+                    // 2026-09-25 起归到这条灰字行 —— 见 UpdateAvifEncoderLabels 的理由。
+                    $"{caps.DisplayName}（{(caps.IsHardware ? "硬件加速" : "软件编码")}）："
+                  + (caps.UiNote.Length > 0 ? caps.UiNote + " " : "")
+                  + $"可用色度 {chromas}，可用位深 {depths}。{truth}{src}"
                   + " 普通 8-bit 截图恒输出 8-bit。"
                   // ═══ "不可用"必须给出可行动的原因 ═══
                   // SVT-AV1 尤其典型：本机内嵌 avifenc 未编译 svt 时，它既不可用、
@@ -920,7 +943,7 @@ public sealed partial class MainWindow : Window
     private void RefreshAvifMeasuredCaps()
     {
         if (FormatCbo.SelectedIndex < 0 || FormatCbo.SelectedIndex >= _formats.Count) return;
-        if (_formats[FormatCbo.SelectedIndex].Format != OutputFormat.AVIF) return;
+        if (_formats[FormatCbo.SelectedIndex] != OutputFormat.AVIF) return;
 
         var kind = AvifEncoderCapabilities.Parse(
             (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto");
@@ -948,12 +971,17 @@ public sealed partial class MainWindow : Window
         var m = AvifEncoderProbe.Get(kind);
         if (hdr)
         {
-            // HDR：恒 10-bit（软件 avifenc --depth 10 硬编码；NVENC HDR 直通同为 10-bit）。
-            // 实测过则再要求：该编码器支持 HDR 路径、且实测确实产得出 10-bit。
+            // HDR：10-bit 是**下限**（PQ 的分层要求），上限按编码器 —— libaom 可选 12-bit，
+            // 硬件（NVENC / SVT）到 10。2026-09-25 前这里写成 `bitDepth == HdrBitDepth`，
+            // 于是能力表明明给 libaom 声明了 12，下拉里 12-bit 却永远被隐藏。
+            // 实测过则再要求：该编码器支持 HDR 路径，且上限取实测与表里的较小者。
+            int ceil = AvifEncoderCapabilities.HdrBitDepthFor(kind);
             if (m.Measured)
-                return bitDepth == AvifEncoderCapabilities.HdrBitDepth
-                    && m.HdrPath && m.MaxBitDepth >= AvifEncoderCapabilities.HdrBitDepth;
-            return bitDepth == AvifEncoderCapabilities.HdrBitDepth;
+                return m.HdrPath
+                    && bitDepth >= AvifEncoderCapabilities.HdrBitDepth
+                    && bitDepth <= Math.Max(AvifEncoderCapabilities.HdrBitDepth,
+                                            Math.Min(ceil, m.MaxBitDepth));
+            return bitDepth >= AvifEncoderCapabilities.HdrBitDepth && bitDepth <= ceil;
         }
         // SDR：实测值优先；否则按能力表（libaom 12、svt/avifenc/NVENC 10、QSV 8）
         if (m.Measured) return bitDepth <= m.MaxBitDepth;
@@ -1000,6 +1028,22 @@ public sealed partial class MainWindow : Window
         return (changed, tag);
     }
 
+    /// <summary>
+    /// 增益图开关 —— 2026-09-26 起 GainMap 唯一的入口（它不再是输出格式下拉里的一项）。
+    /// <para>⚠ 必须挡程序赋值：<c>UpdateQualityPanelCore</c> 每次刷新都会回写 <c>IsChecked</c>，
+    /// 而 WinUI 的 CheckBox 在程序改它时同样抛 Checked/Unchecked。不挡就是 §49 那条缺陷的复现
+    /// —— 程序赋值被当成用户意图写进设置（那次是滑块，这次是复选框，同一个机制）。</para>
+    /// </summary>
+    private void OnGainMapToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_uiReady || _qualityPanelUpdating) return;
+        _settings.GainMapEnabled = GainMapEnableChk.IsChecked == true;
+        AppServices.Settings.SaveQuiet();
+        // HDR 锁定、增益图那两行的可见性、提示文案都随之变化 —— 走同一个面板刷新入口，
+        // 不在这里另写一遍可见性判断（那会变成第二处事实源）。
+        UpdateQualityPanel();
+    }
+
     private void OnGainMapModeChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_uiReady) return;
@@ -1035,17 +1079,34 @@ public sealed partial class MainWindow : Window
 
     private void OnQualityChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
-        if (!_uiReady || FormatCbo.SelectedIndex < 0) return;
-        var (format, _) = _formats[FormatCbo.SelectedIndex];
+        // _qualityPanelUpdating：程序性赋值（启动 / 切格式 / 切 HDR / 切编码器）不是用户意图，
+        // 不回写设置 —— 否则 UpdateQualityPanel 前半段的钳制结果会被后半段当成用户输入读回去。
+        if (!_uiReady || _qualityPanelUpdating || FormatCbo.SelectedIndex < 0) return;
+        var format = _formats[FormatCbo.SelectedIndex];
         var encoder = EncoderFactory.Create(format);
         double val = Math.Round(QualitySld.Value, 1);
         QualityLbl.Text = val.ToString("F1");
         QualityTxt.Text = val.ToString("F1");
-        QualityDescTxt.Text = encoder.GetQualityDescription((float)val);
+        SetQualityDescription(encoder, val);
         // 保存到当前格式的独立质量字段（切换格式不互相覆盖）
-        _settings.SetQuality(FormatCbo.SelectedIndex, val);
+        _settings.SetQuality(CurrentFormat(), val);
         AppServices.Settings.SaveQuiet();
     }
+
+    /// <summary>质量描述行的<b>唯一</b>写入点。</summary>
+    /// <remarks>
+    /// 为什么要有这一个函数：以前 <c>UpdateQualityPanel</c> 与 <c>OnQualityChanged</c> 各写一次，
+    /// 而后者只会写 <c>GetQualityDescription</c> ⇒ 无损格式那句"无损 (固定 100%)"随时可能被
+    /// 一次滑块赋值冲成一个孤零零的"100"。当时它没出事纯靠调用顺序（面板先收起、640 行最后写），
+    /// 而"靠顺序才正确"正是本仓库反复踩过的那类隐性耦合。现在两处都问这同一个函数，
+    /// 且它对同一输入给同一输出 ⇒ 谁后写都一样。
+    /// 无损格式（区间退化成一点，见 <c>ImageEncoder.QualityIsFixed</c>）整行已收起，
+    /// 描述行必须说清"这格式根本没有质量参数"，而不是显示一个动不了的数值。
+    /// </remarks>
+    private void SetQualityDescription(ImageEncoder encoder, double quality)
+        => QualityDescTxt.Text = encoder.QualityIsFixed
+            ? encoder.GetQualityRange().Label
+            : encoder.GetQualityDescription((float)quality);
 
     private void OnQualityTextChanged(object sender, TextChangedEventArgs e)
     {
@@ -1065,7 +1126,7 @@ public sealed partial class MainWindow : Window
             QualityTxt.Text = v.ToString("F1");
             QualitySld.Value = v;
             QualityLbl.Text = v.ToString("F1");
-            _settings.SetQuality(FormatCbo.SelectedIndex, v);
+            _settings.SetQuality(CurrentFormat(), v);
             AppServices.Settings.SaveQuiet();
         }
         else QualityTxt.Text = QualitySld.Value.ToString("F1");
@@ -1078,10 +1139,7 @@ public sealed partial class MainWindow : Window
         if (!_uiReady) return;
         _settings.HdrEnabled = HdrSwitch.IsOn;
 
-        // 选 System 时检测显示器真实色域
-        if (GetSelectedColorSpaceTag() == "System")
-            DetectAndShowSourceGamut();
-        UpdateGamutMappingUI();
+        // 色彩页的卡片由 UpdateQualityPanel 内部统一刷新（它要先看 HDR 被格式联动改成什么状态）
         // HDR 开关影响格式 HDR 联动提示 (GainMap 色域说明) — 刷新当前格式面板
         UpdateQualityPanel();
         // ═══ 2026-09-17：HDR 开关直接决定 AVIF 走哪条编码路径 ═══
@@ -1096,26 +1154,26 @@ public sealed partial class MainWindow : Window
     {
         if (!_uiReady) return;
         var tag = GetSelectedColorSpaceTag();
-        bool hdrOn = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
         bool isSRgb = tag is "System" or "sRGB";
 
-        // 选 System 时检测显示器真实色域
-        if (tag == "System")
-            DetectAndShowSourceGamut();
-
+        // ⚠ 这里只说"ACM 状态 + 要不要搬色"，【不再复述 ICC 嵌不嵌】：
+        //   sRGB 这个目标在几个格式里根本不留声明（JPEG LI/WebP 什么都不写），TIFF 却连 sRGB
+        //   也老实嵌一份 ICC。"声明通道"这类逐格式不同的事实在 Core 的 FormatColorFacts 里只有一份，
+        //   由下方「色域映射」卡片按当前格式印出来。原先这行写死"不嵌入 ICC"，
+        //   于是同一页两张卡对同一枚文件给出两种说法。
         if (_settings.AcmeDetected)
         {
             IccHintTxt.Text = isSRgb
-                ? "ACM 已启用 — 目标 sRGB：像素与声明同为 sRGB，不嵌 ICC（sRGB 是通用默认）。"
-                : $"ACM 已启用 — 把像素从显示器色域映射到 {ColorProfileProvider.GetColorSpaceDisplayName(tag)}。";
+                ? "ACM 已启用 —— 目标 Rec.709：像素与声明同为 Rec.709 原色（它是通用默认色域）。"
+                : $"ACM 已启用 —— 把像素从显示器色域映射到 {ColorProfileProvider.GetColorSpaceDisplayName(tag)}。";
         }
         else
         {
             IccHintTxt.Text = isSRgb
-                ? "目标 sRGB（不嵌入 ICC，sRGB 是通用默认）"
-                : $"目标 {ColorProfileProvider.GetColorSpaceDisplayName(tag)}（将嵌入标准 ICC）";
+                ? "目标 Rec.709（通用默认色域）"
+                : $"目标 {ColorProfileProvider.GetColorSpaceDisplayName(tag)}：像素搬进去，声明与像素同一套原色。";
         }
-        UpdateGamutMappingUI();
+        // 色彩页的卡片同样由 UpdateQualityPanel 统一刷新（见其内部的唯一调用点）
         // 色域变化影响 GainMap 色域说明提示
         UpdateQualityPanel();
         _settings.ColorSpaceIndex = ColorCbo.SelectedIndex;
@@ -1136,15 +1194,15 @@ public sealed partial class MainWindow : Window
         SaveSettingsQuiet();
     }
 
-    // 注: 色彩管理方法（GetDisplayNativeGamut / DetectAndShowSourceGamut /
-    // UpdateGamutMappingUI / GetSelectedColorSpaceTag）已迁移至 MainWindow.ColorManagement.cs
+    // 注: 色彩页的渲染（RefreshColorMappingUi / GetSelectedColorSpaceTag）在 MainWindow.ColorManagement.cs
 
     // ── 编码辅助（仅在最终保存/复制时触发）──
 
     private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        LogService.Info("MainWindow", $"开始截图流程: {w}x{h} 格式={_formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)].Format}");
+        LogService.Info("MainWindow", $"开始截图流程: {w}x{h} 格式={CurrentFormat()}"
+            + (_settings.GainMapEnabled ? "（JPEG + 增益图）" : ""));
 
         // ═══ 2026-08-16 P2-6 修复: 等待旧操作完成 (替代 Cancel+Delay) ═══
         // 新 CTS: 取消旧令牌 (不再共用 token 互相干扰), 等待旧编码任务自然结束。
@@ -1169,7 +1227,8 @@ public sealed partial class MainWindow : Window
         // ⚠ 格式名必须在【UI 线程】上取好再交给 Timer：SetStatus 自己会 DispatcherQueue.TryEnqueue，
         //   但插值表达式是在回调里求值的 —— 原先在后台线程读 FormatCbo.SelectedIndex（XAML 控件），
         //   属于跨线程访问，慢编码（JXL/libaom 4K ≥500ms，正是这个提示要出现的场景）时才走到这条路。
-        string fmtLabel = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)].Label;
+        string fmtLabel = LocaleManager.GetFormatLabel(
+            _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)]);
         var progressTimer = new System.Threading.Timer(_ =>
         {
             SetStatus($"⏳ 正在编码 {fmtLabel} ...");
@@ -1690,7 +1749,7 @@ public sealed partial class MainWindow : Window
         byte[]? iccProfile = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        LogService.Info("MainWindow", $"HDR 编码启动: {w}x{h} 格式={_formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)].Format}");
+        LogService.Info("MainWindow", $"HDR 编码启动: {w}x{h} 格式={CurrentFormat()}");
 
         // ═══ 2026-08-16 P2-6 修复: 等待旧操作完成 (替代 Cancel+Delay) ═══
         _captureCts?.Cancel();
@@ -2381,10 +2440,98 @@ public sealed partial class MainWindow : Window
         //   现已统一由管线从本快照的 Settings.AvifEncoder 解析（§26.4 P1）。
         AppSettingsData Settings);
 
+    /// <summary>
+    /// 当前该编成哪个格式：<b>唯一</b>把"下拉选择 + 增益图开关"翻译成 <see cref="OutputFormat"/> 的地方。
+    /// <para>JPEG LI 且增益图开关打开 ⇒ 内部仍走 <see cref="OutputFormat.JPEG_GAINMAP"/> 那条编码路径
+    /// （base JPEG + 增益图、扩展名 .jpg、强制 HDR）。翻译只允许发生在本函数：
+    /// 若日志、快照、面板各自再判一次开关，就会出现"界面显示 JPEG LI、实际按 GainMap 编"这类对不上账。</para>
+    /// </summary>
+    private OutputFormat CurrentFormat()
+    {
+        var f = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
+        return f == OutputFormat.JPEG_LI && _settings.GainMapEnabled
+            ? OutputFormat.JPEG_GAINMAP : f;
+    }
+
+    /// <summary>
+    /// 格式下拉的<b>唯一</b>构建口：项序、项数、标签全在这里决定一次；
+    /// 构造期与 <c>ApplyLocale()</c> 走的是同一个函数 ⇒ 两条路不可能给出两份清单。
+    /// <para>为什么要有它（2026-09-26，交接 §54.1）：本地化过去自己抄了一份 7 项标签数组去
+    /// 覆盖 <c>ItemsSource</c>，而编码侧按 <c>_formats</c> 解释索引。摘掉增益图那一项之后
+    /// 整列错位，且这条数组在构造期末尾就执行一次 —— 每个用户每次开机看到的都是错标签。</para>
+    /// </summary>
+    private void RebuildFormatCombo()
+    {
+        // ⚠ 换 ItemsSource 会把 SelectedIndex 打回 -1（WinUI 的行为），而本函数每次
+        //    ApplyLocale() 都会跑一次 —— 构造期它排在 ApplySettingsToUI()【之后】，
+        //    于是"刚按设置选好的格式"被抹成空白：2026-09-26 用户报的"默认选项缺失"就是这个。
+        //    所以选中项必须由本函数自己取回来，不能指望调用顺序。
+        int keep = FormatCbo.SelectedIndex;
+        FormatCbo.ItemsSource = _formats
+            .Select(f => LocaleManager.GetFormatLabel(f))
+            .ToList();
+        FormatCbo.SelectedIndex = Math.Clamp(
+            keep < 0 ? FormatOrder.DefaultIndex : keep, 0, FormatOrder.MaxIndex);
+        CheckFormatComboContract();
+    }
+
+    /// <summary>
+    /// 显示层 ↔ 编码层 ↔ 持久化契约的<b>三方一致性自检</b>。
+    /// <para>只在运行时兜底，<b>不静默修复</b>：不一致就往默认日志档留一条 Error（带两边实际读数），
+    /// 因为"悄悄改回来"正是这类缺陷能活很多轮的原因 —— 界面上后来是对的，日志里没人看。</para>
+    /// <para>三格里第 ②③ 格与 UI 实化时机无关，构造期就能判；第 ① 格要等 <c>Items</c> 真的生成，
+    /// 未实化（Count 为 0）时跳过而不报错 —— 否则这个自检自己就是个假红灯源。</para>
+    /// </summary>
+    private void CheckFormatComboContract()
+    {
+        // ② App 的项序必须逐项等于 Core 的顺序表：这两张表一个是界面、一个是 FormatIndex 的
+        //    持久化契约，谁漂了都会在老配置上"静默指向别的格式"（§52 已经栽过一次）。
+        if (_formats.Count != FormatOrder.UiFormats.Length)
+            LogService.Error("MainWindow",
+                $"界面格式数 {_formats.Count} 与 Core FormatOrder.UiFormats "
+                + $"{FormatOrder.UiFormats.Length} 不一致 ⇒ FormatIndex 的解释已开始分叉");
+        else
+            for (int i = 0; i < _formats.Count; i++)
+                if (_formats[i] != FormatOrder.UiFormats[i])
+                    LogService.Error("MainWindow",
+                        $"格式表第 {i} 项分叉：界面是 {_formats[i]}、Core 契约是 {FormatOrder.UiFormats[i]}"
+                        + $" ⇒ 老配置存的 FormatIndex={_settings.FormatIndex} 会按另一张表解释");
+
+        // ③ 配置里的索引落到两张表上必须给出同一个格式（LoadSettings 之后才有意义）
+        var byIndex = FormatOrder.FormatAt(_settings.FormatIndex);
+        var byList = _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)];
+        if (FormatCbo.SelectedIndex >= 0 && byList != byIndex && !(byList == OutputFormat.JPEG_LI && _settings.GainMapEnabled))
+            LogService.Error("MainWindow",
+                $"FormatIndex={_settings.FormatIndex} 按 Core 契约是 {byIndex}、按下拉选中项却是 {byList}"
+                + "（增益图开关打开时 JPEG 这一格会翻译成增益图，属预期，不报）");
+
+        // ① 显示项与 `_formats` 逐项对得上（抓"又冒出一份清单"）
+        var items = FormatCbo.Items;
+        if (items.Count == 0) return;             // 未实化：不据此报错
+        if (items.Count != _formats.Count)
+        {
+            LogService.Error("MainWindow",
+                $"格式下拉项数 {items.Count} 与编码侧 {_formats.Count} 不一致（{string.Join("/", _formats)}）"
+                + " ⇒ 选中项会被解释成别的格式，检查 RebuildFormatCombo 的调用点");
+            return;
+        }
+        for (int i = 0; i < _formats.Count; i++)
+        {
+            var shown = items[i] as string;
+            var want = LocaleManager.GetFormatLabel(_formats[i]);
+            if (shown == want) continue;
+            LogService.Error("MainWindow",
+                $"格式下拉第 {i} 项错位：显示「{shown}」、应为「{want}」（该位置编码为 {_formats[i]}）"
+                + " ⇒ 有第二份格式清单冒出来了");
+        }
+    }
+
     /// <summary>在 UI 线程采集当前编码相关的 UI 状态。仅供 UI 线程调用。</summary>
     private EncodingUiState CaptureEncodingUiState() => new(
-        Format: _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)].Format,
-        HdrEnabled: HdrSwitch.IsOn && HdrSwitch.IsEnabled,
+        Format: CurrentFormat(),
+        // 增益图态必然出 HDR：开关就是"HDR 的 JPEG 载体"，与面板上把 HDR 置灰强制打开是同一口径，
+        // 在这里再兜一次，避免任何没走 UI 那条路径的入口（粘贴/剪贴板另存）漏掉。
+        HdrEnabled: (HdrSwitch.IsOn && HdrSwitch.IsEnabled) || CurrentFormat() == OutputFormat.JPEG_GAINMAP,
         ColorSpaceTag: GetSelectedColorSpaceTag(),
         Quality: (float)QualitySld.Value,
         AvifPngSuffix: AvifPngSuffixChk.IsChecked == true,
@@ -2428,6 +2575,19 @@ public sealed partial class MainWindow : Window
     // ── 快捷键录制 ──
 
     private bool _uiReady; // InitializeComponent 完成后才响应 UI 事件
+
+    /// <summary>
+    /// 质量面板正在被<b>程序</b>刷新（启动、切格式、切 HDR、切编码器）。
+    /// <para>为什么必须有它：<c>RangeBase</c> 在赋 <c>Minimum</c>/<c>Maximum</c> 时会就地钳制
+    /// <c>Value</c> 并抛 <c>ValueChanged</c>，而 <c>OnQualityChanged</c> 把每一次 ValueChanged
+    /// 都当成"用户拖了滑块"去写 <c>_settings.SetQuality(...)</c>。于是
+    /// <c>UpdateQualityPanelCore</c> 后半段"从 _settings 读回用户值"（<c>GetQuality</c>）
+    /// 读到的已经是它自己前半段写进去的钳制结果 —— 实机：存 <c>QualityGainMap=2.0</c>
+    /// （区间 0.5–3.0 的中段，既非端点也越界），启动后界面与文件双双变成 0.5。
+    /// 一个方法的前半段把自己的输入改掉了，这正是"靠调用顺序才正确"的那类隐性耦合。</para>
+    /// <para>与 <c>_avifOptionsUpdating</c> 同一手法：只挡程序赋值，用户拖动时该标志恒为 false。</para>
+    /// </summary>
+    private bool _qualityPanelUpdating;
 
     private void OnOcrEngineChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -2546,9 +2706,9 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(AvifChromaCbo)) _settings.ChromaAvif = tag;
             else if (cb.Name == nameof(ChromaJpegXlCbo)) _settings.ChromaJpegXl = tag;
             else if (cb.Name == nameof(ChromaJpegLiCbo)) _settings.ChromaJpegLi = tag;
-            // 2026-09-19（用户决定）：GainMap 色度默认 420、可手动 444 —— JpegGainMapEncoder 的主路径
-            // 与两条降级旁路现在都读这一个值，实时保存必须写同一个字段（否则又要等全量保存才生效）。
-            else if (cb.Name == nameof(GainMapChromaCbo)) _settings.ChromaGainMap = tag;
+            // 2026-09-26：原 GainMapChromaCbo 分支已删除 —— 增益图并入 JPEG LI 后，
+            //   色度就是上面 ChromaJpegLiCbo 那一条（管线对 JPEG_GAINMAP 也改读 ChromaJpegLi）。
+            //   两个下拉写同一个字段 = 刚被合并掉的那种分裂。
             // 2026-09-19：原 nameof(ChromaWebPCbo) 分支已删除 —— WebP 色度下拉撤掉了
             //   （有损 WebP 恒 4:2:0 由格式定义，cwebp 侧没有色度参数 ⇒ 选了也不生效）。
             else if (cb.Name == nameof(ArchiveModeCbo)) _settings.ArchiveMode = tag;
@@ -2951,12 +3111,8 @@ public sealed partial class MainWindow : Window
             // 重新检测
             await DetectAndApplySystemCapabilitiesAsync();
 
-            // 更新源色域显示
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                DetectAndShowSourceGamut();
-                UpdateGamutMappingUI();
-            });
+            // 源色域与映射说明：一次刷新、一份决定（换屏后光标屏的分类可能整个变档）
+            DispatcherQueue.TryEnqueue(RefreshColorMappingUi);
         }
         catch (Exception ex)
         {

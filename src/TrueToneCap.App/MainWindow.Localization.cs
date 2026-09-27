@@ -24,22 +24,23 @@ public sealed partial class MainWindow : Window
         var l = LocaleManager.CurrentLanguage == AppLanguage.English ? "en" : "zh";
 
         // ── 标签 ──
-        BrandTagline.Text = LocaleManager.CurrentLanguage == AppLanguage.English ? "HDR Screenshot Tool" : "HDR 截图工具";
-
+        // BrandTagline / PageOutputTitle / AvifCodecLabelTxt 这三格原先各自写着
+        // `CurrentLanguage == English ? "English" : "中文"`，和 LocaleManager.ZhToEn 是同一句话的
+        // 第二份真相，而且英文侧与表里不一致（"Output & Color" vs 表里 "Output & Colour"）：
+        // 英文模式下构造期写的是三元那份，扫描器见当前值不在表里就放弃接管 ⇒ 表里那条英文是死文案。
+        // 现在三格只由"表 + 可视树扫描"给（判据的歧义锁也已扩到全部 App 源码，见 §55.6）。
         NavOutput.Content = LocaleManager.NavOutput;
         NavCapture.Content = LocaleManager.NavCapture;
         NavAI.Content = LocaleManager.NavAI;
         NavSystem.Content = LocaleManager.NavSystem;
         NavLog.Content = LocaleManager.NavLog;
 
-        PageOutputTitle.Text = LocaleManager.CurrentLanguage == AppLanguage.English ? "Output & Color" : "输出与色彩";
         BasicOutputTitle.Text = LocaleManager.BasicOutput;
         AvifOptionsTitle.Text = LocaleManager.AvifOptions;
         // ═══ 2026-09-18：「硬件编码」复选框已移除（与编码器下拉语义重复），本地化条目删除 ═══
-        bool en = LocaleManager.CurrentLanguage == AppLanguage.English;
-        if (AvifCodecLabelTxt is not null)
-            AvifCodecLabelTxt.Text = en ? "AVIF encoder" : "AVIF 编码器";
-        GainMapOptionsTitle.Text = LocaleManager.GainMapOptions;
+        // 2026-09-26：GainMapOptionsTitle 已随独立卡片删除（增益图并入 JPEG LI 卡片，
+        // 标题沿用该卡片的「JPEG LI 选项」，说明文字见 GainMapOptionsDesc）。
+        GainMapEnableChk.Content = LocaleManager.GainMapToggle;
         GainMapOptionsDesc.Text = LocaleManager.GainMapDesc;
         GainMapModeLabelTxt.Text = LocaleManager.GainMapModeLabel;
         AvifPngSuffixChk.Content = LocaleManager.AvifPngSuffix;
@@ -119,37 +120,32 @@ public sealed partial class MainWindow : Window
         CaptureBtn.Content = LocaleManager.AreaCapture;
         SaveSettingsBtn.Content = LocaleManager.SaveSettings;
 
-        // ── 格式下拉（重建列表保留选中项） ──
-        int fmtIdx = FormatCbo.SelectedIndex;
-        var fmtLabels = new[]
-        {
-            LocaleManager.FmtPng, LocaleManager.FmtJpegGainMap, LocaleManager.FmtJpegLi,
-            LocaleManager.FmtJpegXl, LocaleManager.FmtAvif, LocaleManager.FmtWebP, LocaleManager.FmtBmp
-        };
-        FormatCbo.ItemsSource = fmtLabels.ToList();
-        FormatCbo.SelectedIndex = Math.Clamp(fmtIdx, 0, fmtLabels.Length - 1);
+        // ── 格式下拉：只调用唯一的构建口，本地化【不】再持有任何清单 ──
+        // 这里过去另抄了一份 7 项标签数组去覆盖 ItemsSource，于是 §52 把增益图从 `_formats`
+        // 摘掉之后整列错位：标签「JPEG Gain Map (HDR)」编 JPEG LI、「JPEG LI」编 JPEG XL、
+        // 「JPEG XL」编 AVIF、「AVIF」编 WebP、「WebP」编 TIFF、末尾「BMP」被钳成 TIFF，
+        // 真正的 TIFF 选不到 —— 7 个可见项里 5 个"点谁都不是谁"，且构造期就生效，不是切语言才犯。
+        // 现在项序/项数/标签全部由 MainWindow.RebuildFormatCombo() 一处决定，
+        // 并在那里自带一次显示层↔编码层的一致性自检（错位会在日志里留 Error）。
+        RebuildFormatCombo();
 
         // ── 硬编码 ComboBox Items：按 Tag 匹配更新 Content ──
         // ═══ 2026-09-16 重构：单一「AVIF 编码器」下拉（原"编码后端"下拉已删除）═══
         // 各项 Content 由 UpdateAvifEncoderLabels() 依据能力表动态生成（含可用性与色度/位深）。
 
         SetComboItemText(AvifChromaCbo, "444", LocaleManager.AvifChroma444);
-        // GainMap 色度（2026-09-19 起为真设置）：标签 + 三档文案都要跟着语言走
-        if (GainMapChromaLabelTxt is not null) GainMapChromaLabelTxt.Text = LocaleManager.ChromaSampling;
-        SetComboItemText(GainMapChromaCbo, "420", LocaleManager.GainMapChroma420);
-        SetComboItemText(GainMapChromaCbo, "422", LocaleManager.GainMapChroma422);
-        SetComboItemText(GainMapChromaCbo, "444", LocaleManager.GainMapChroma444);
+        // 2026-09-26：GainMap 色度的标签与三档文案已随控件一并删除（并入 JPEG LI 后共用那一条下拉）。
         SetComboItemText(AvifChromaCbo, "422", LocaleManager.AvifChroma422);
         SetComboItemText(AvifChromaCbo, "420", LocaleManager.AvifChroma420);
 
         SetComboItemText(GainMapModeCbo, "Rgb", LocaleManager.GmRgb);
         SetComboItemText(GainMapModeCbo, "Gray", LocaleManager.GmGray);
 
+        // 下拉里只剩这三档（2026-09-19 收窄、2026-09-27 改名 Rec.709/Rec.2020）。
+        // DisplayP3 / DCI_P3 / AdobeRGB 那三行 SetComboItemText 已删 —— 它们找的 Tag 在 XAML 里
+        // 早就不存在，SetComboItemText 找不到就静默返回 ⇒ 留着是"看起来还在维护六档"的假象。
         SetComboItemText(ColorCbo, "System", LocaleManager.CsSystem);
         SetComboItemText(ColorCbo, "sRGB", LocaleManager.CsSRgb);
-        SetComboItemText(ColorCbo, "DisplayP3", LocaleManager.CsDisplayP3);
-        SetComboItemText(ColorCbo, "DCI_P3", LocaleManager.CsDciP3);
-        SetComboItemText(ColorCbo, "AdobeRGB", LocaleManager.CsAdobeRgb);
         SetComboItemText(ColorCbo, "BT2020", LocaleManager.CsBT2020);
 
         SetComboItemText(AnimFormatCbo, "GIF", LocaleManager.AnimGif);
@@ -206,9 +202,195 @@ public sealed partial class MainWindow : Window
             SetComboItemText(ArchiveModeCbo, "Day", LocaleManager.ArchiveDay);
         }
 
-        // ── 更新色域映射 UI ──
-        DetectAndShowSourceGamut();
-        UpdateGamutMappingUI();
+        // ── 色域映射卡片（含本文件刚写下的 Localization 文案，必须最后刷一次覆盖）──
+        RefreshColorMappingUi();
+
+        // ── XAML 里写死的中文：按 LocaleManager.ZhToEn 扫一遍可视树（2026-09-26，交接 §55）──
+        // 放在所有显式赋值之后：显式接线的控件已经被正确设置，扫描只负责剩下那批没人接的。
+        ApplyLocaleTreeSafely(Content);
+    }
+
+    /// <summary>
+    /// 可视树扫描的入口，包一层 try：本地化不是正确性路径，
+    /// 任何一颗奇怪的树（null/未实化/自定义控件内部结构）都不该让设置页打不开。
+    /// 但"英文模式一条都没翻到"必须是可见的 —— 那等于英文界面不可信，记 Warn。
+    /// </summary>
+    private static void ApplyLocaleTreeSafely(DependencyObject? root)
+    {
+        int touched;
+        try { touched = ApplyLocaleTree(root); }
+        catch (System.Exception ex)
+        {
+            LogService.Warn("Locale", $"可视树本地化扫描中断（已翻 {LocaleManager.CurrentLanguage} 模式）：{ex.Message}");
+            return;
+        }
+        if (LocaleManager.CurrentLanguage != AppLanguage.English) return;
+        // 树还没实化时"命中 0 处"是必然的，不是信号 —— 构造期那一次扫描按定义扫不到东西，
+        // 每次都记一条 Warn 就等于养出一条没人读的告警。只在 IsLoaded 之后才报。
+        if (root is not Microsoft.UI.Xaml.FrameworkElement fe || !fe.IsLoaded) return;
+        // 英文模式下的两条运行时读数 —— 只记录，不改判决（门禁的静态判据管不到"只有跑起来才知道"的树）：
+        // · 命中 0 处：根不对，此时英文界面不可信；
+        // · 残留 N 处：某个扫得到的控件仍是中文 = 用户看得见的漏翻（对照表缺条目 / 扫描面缺控件）。
+        if (touched == 0 && LocaleManager.ZhToEn.Count > 0)
+            LogService.Warn("Locale",
+                $"英文模式扫描命中 0 处（对照表 {LocaleManager.ZhToEn.Count} 条）"
+                + " ⇒ 页面已实化却一条没翻，英文界面此时不可信");
+
+        int residue = ApplyLocaleCollect(root, onlyResidue: true);
+        if (residue > 0)
+            LogService.Warn("Locale",
+                $"英文模式下仍有 {residue} 处扫得到的控件显示中文 ⇒ 对照表缺条目或扫描面缺控件");
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex s_cjk =
+        new("[\u4e00-\u9fff]", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static int ApplyLocaleCollect(DependencyObject? root, bool onlyResidue)
+    {
+        if (root is null) return 0;
+        int n = 0;
+        if (onlyResidue)
+        {
+            // 必须与 LocalizeElement 用同一个匹配规则：这里原先写的是精确类型相等，
+            // 于是声明在上限类型 FrameworkElement 上的 ToolTip 一格都不算 ⇒
+            // 残留计数恰好漏掉"副窗口 48 处悬停说明"这一整类，报出来的 N 是假的低。
+            foreach (var slot in SweepSurface)
+                if (MatchesSurface(root, slot.Control) && s_cjk.IsMatch(slot.Get(root) ?? "")) { n++; break; }
+        }
+        int children = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < children; i++)
+            n += ApplyLocaleCollect(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i), onlyResidue);
+        return n;
+    }
+
+    /// <summary>每个元素首次见到的"XAML 原文"，按属性名分槽（TextBox 同时有 Header 与 PlaceholderText）。</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+        DependencyObject, System.Collections.Generic.Dictionary<string, string>> s_xamlOriginal = new();
+
+    private static int ApplyLocaleTree(DependencyObject? root)
+    {
+        if (root is null) return 0;
+        int touched = LocalizeElement(root) ? 1 : 0;
+        int n = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < n; i++)
+            touched += ApplyLocaleTree(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i));
+        return touched;
+    }
+
+    /// <summary>
+    /// 扫描面：一行 = （XAML 里出现的控件类型，它承载文字的属性）。运行时扫描和门禁判据
+    /// <c>Test_Xaml_HardcodedChineseIsLocalized</c> 读的就是这同一张表。
+    /// <para>原先这里写的是 <c>switch</c> 类型模式，有两个没人管的坑：
+    /// ① NumberBox 继承 TextBox ⇒ 编译器只能报 CS8510 让我手调臂序；
+    /// ② 表外的控件类型（当时就有 NavigationViewItem，5 个导航项）静默落到 <c>_ =&gt; false</c>，
+    /// 于是"对照表里有译文、扫描器根本不看这个控件"，英文界面留中文而判据照绿。</para>
+    /// <para>改成声明表之后：① 这类坑不存在（没有臂序可言）；② 新控件必须在表里显式加一行才会被扫，
+    /// 漏加的结果是门禁报红，不是静默不翻。匹配规则见 <see cref="MatchesSurface"/>。</para>
+    /// </summary>
+    private static readonly (System.Type Control, string Property,
+        System.Func<DependencyObject, string?> Get, System.Action<DependencyObject, string> Set)[] SweepSurface =
+    {
+        (typeof(TextBlock), nameof(TextBlock.Text),
+            el => ((TextBlock)el).Text, (el, v) => ((TextBlock)el).Text = v),
+        (typeof(CheckBox), "Content",
+            el => ((CheckBox)el).Content as string, (el, v) => ((CheckBox)el).Content = v),
+        (typeof(RadioButton), "Content",
+            el => ((RadioButton)el).Content as string, (el, v) => ((RadioButton)el).Content = v),
+        // 副窗口（标注 / OCR 预览 / 选区覆盖层 / 缩略图 toast / 第三方许可）的按钮正文是
+        // <Button><TextBlock Text="…"/></Button> 这种"裸文字子元素"形态（TextBlock.Text 那行负责），
+        // ToolTip 则全写在 XAML 上 ⇒ 这一项缺了，那几个窗口的提示条英文模式全是中文。
+        // 用 ToolTipService 的附加属性读写：任何 FrameworkElement 都能挂 ToolTip，
+        // 扫的是运行时元素类型，不再区分 ButtonBase 还是别的。
+        (typeof(FrameworkElement), "ToolTipService.ToolTip",
+            el => Microsoft.UI.Xaml.Controls.ToolTipService.GetToolTip(el) as string,
+            (el, v) => Microsoft.UI.Xaml.Controls.ToolTipService.SetToolTip(el, v)),
+        (typeof(Button), "Content",
+            el => ((Button)el).Content as string, (el, v) => ((Button)el).Content = v),
+        (typeof(Microsoft.UI.Xaml.Controls.NavigationViewItem), "Content",
+            el => ((Microsoft.UI.Xaml.Controls.NavigationViewItem)el).Content as string,
+            (el, v) => ((Microsoft.UI.Xaml.Controls.NavigationViewItem)el).Content = v),
+        (typeof(ToggleSwitch), "Header",
+            el => ((ToggleSwitch)el).Header as string, (el, v) => ((ToggleSwitch)el).Header = v),
+        (typeof(TextBox), "Header",
+            el => ((TextBox)el).Header as string, (el, v) => ((TextBox)el).Header = v),
+        (typeof(TextBox), nameof(TextBox.PlaceholderText),
+            el => ((TextBox)el).PlaceholderText, (el, v) => ((TextBox)el).PlaceholderText = v),
+        (typeof(NumberBox), "Header",
+            el => ((NumberBox)el).Header as string, (el, v) => ((NumberBox)el).Header = v),
+        (typeof(AppBarButton), "Label",
+            el => ((AppBarButton)el).Label, (el, v) => ((AppBarButton)el).Label = v),
+    };
+
+    /// <summary>
+    /// 给一个窗口的内容树挂上本地化扫描。XAML 写死的中文只有这一条出路：
+    /// <c>LocaleManager.ZhToEn</c> 有对照 + 控件类型在 <c>SweepSurface</c> 里 ⇒ 英文模式才会变英文。
+    /// <para>构造期 <c>ApplyLocale()</c> 那一次扫描并不可靠 —— 那时可视树尚未实化；
+    /// <c>Loaded</c> 是唯一能确定"元素已生成、属性读得到"的时刻，所以每个窗口都必须挂这一钩。
+    /// 漏挂的窗口在英文模式下整窗留中文（本轮 5 个副窗口就是这么漏的）。</para>
+    /// </summary>
+    internal static void HookLocaleSweep(Microsoft.UI.Xaml.FrameworkElement? root)
+    {
+        if (root is null) return;
+        root.Loaded += (_, _) => ApplyLocaleTreeSafely(root);
+        // 已经过了 Loaded（例如构造完才调用、或页面从未卸载过）：立刻补扫一次，别等下一次 Loaded。
+        if (root.IsLoaded) ApplyLocaleTreeSafely(root);
+    }
+
+    /// <summary>
+    /// 扫描面一条声明是否适用于这个元素。
+    /// <para>XAML 里写的是标签名，运行时元素却是派生类（<c>&lt;Button&gt;</c> 的运行时类型是 Button，
+    /// 不是 FrameworkElement），而附加属性（ToolTipService.ToolTip）按基类链注册 ⇒
+    /// 必须"声明类型能容纳该元素"，不能只看运行时精确类型。只看精确类型时 ToolTip 那条声明
+    /// 一次也不会生效，而判据照样绿 —— 本轮门禁第一次跑出来的读数就是它（副窗口 48 处悬停说明）。</para>
+    /// <para>放宽不带进错误类型：<c>Get/Set</c> 各自强转到自己声明的类型，写错编译期就拦下。
+    /// 真正兜住"界面出现新控件"的是判据那条：XAML 里带中文的标签名必须在扫描面里出现，
+    /// 漏声明就报红，不是静默不翻。</para>
+    /// </summary>
+    private static bool MatchesSurface(DependencyObject el, System.Type declared)
+        => declared.IsAssignableFrom(el.GetType());
+
+    /// <summary>
+    /// 扫描面的 (控件类型, 文字属性) 视图 —— 给门禁判据读，让判据读的是"扫描器实际会看哪些控件"，
+    /// 而不是判据自己另抄一份清单（两份清单会各自漂移，这正是本轮在修的病）。
+    /// <para>返回字符串而不是 <c>Type</c>：测试项目只引用 Core，拿不到 WinUI 投影类型，
+    /// 而 XAML 的标签名本来就是字符串 ⇒ 两侧按类型短名对齐（与 <c>MatchesSurface</c> 读的同一份声明）。</para>
+    /// </summary>
+    internal static IReadOnlyList<(string Control, string Property)> SweepSurfaceNames()
+        => SweepSurface.Select(s => (s.Control.Name, s.Property)).ToList();
+
+    private static bool LocalizeElement(DependencyObject el)
+    {
+        bool touched = false;
+        foreach (var slot in SweepSurface)
+            if (MatchesSurface(el, slot.Control))
+                touched |= Localize(el, slot.Property, () => slot.Get(el), v => slot.Set(el, v));
+        return touched;
+    }
+
+    /// <summary>
+    /// 把 <paramref name="owner"/> 的某个文字属性翻成当前语言。
+    /// <para>只在"这句话确实是 XAML 里写死的那条中文"时接管：动态写入的文字（状态栏、日志行、
+    /// 色域映射卡片那几行）不登记原文，于是永远不会被这张表覆写 —— 否则每次切语言都会把
+    /// "⏳ 正在编码 PNG…"刷回"就绪"。</para>
+    /// </summary>
+    private static bool Localize(DependencyObject owner, string prop,
+        System.Func<string?> get, System.Action<string> set)
+    {
+        var map = s_xamlOriginal.GetOrCreateValue(owner);
+        if (!map.TryGetValue(prop, out var original))
+        {
+            var first = get();
+            if (first is null || !LocaleManager.IsLocalizableLiteral(first)) return false;
+            map[prop] = original = first;
+        }
+        var want = LocaleManager.Tr(original);
+        var now = get();
+        // 当前值仍是"原文 / 本表译文"之一 ⇒ 这句话还归本地化管，可以覆写；
+        // 已经被别的代码改过 ⇒ 放手，那是运行时状态，不是静态文案。
+        if (now != original && now != LocaleManager.EnOf(original)) return false;
+        if (now == want) return false;
+        set(want);
+        return true;
     }
 
     /// <summary>根据 Tag 查找 ComboBoxItem 并更新其文本内容。</summary>

@@ -731,6 +731,13 @@ public sealed unsafe class NvEncoderNative : IDisposable
     private byte[] EncodeRawCore(byte[] pixels, int w, int h, int qp, Guid codec, uint bufferFormat,
                             int outputBitDepth = 8)
     {
+        // CRF 0 = AV1 的 QP0 = 向硬件请求 lossless，而 NVENC 没有这个模式
+        // （本机实测 InitEncoder hr=0x00000008 "Lossless Coding mode not supported"）。
+        // UI 已按 AvifEncoderCapabilities.MinCrf 把滑块下限抬到 1；这里兜的是【绕过 UI 的那条路】：
+        // settings.json 里遗留的 0、或 Auto 在设值之后才解析成硬件 —— 不兜就白吃一次
+        // 驱动失败再退软件，且那次失败还曾被缓存成"整卡不可用"（见同表的 remarks）。
+        qp = Math.Max(qp, AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Nvenc));
+
         var initFn = Marshal.GetDelegateForFunctionPointer<InitEncoderFn>(GetFuncPtr(FnInitializeEncoder));
         var createBufFn = Marshal.GetDelegateForFunctionPointer<CreateBitstreamFn>(GetFuncPtr(FnCreateBitstreamBuffer));
         var encFn = Marshal.GetDelegateForFunctionPointer<EncodePictureFn>(GetFuncPtr(FnEncodePicture));
@@ -823,9 +830,13 @@ public sealed unsafe class NvEncoderNative : IDisposable
                 }
 
                 hr = initFn(_encoder, initBuf);
-                var errDesc = GetLastErrorString();
-                AppendDiag($"[EncodeRaw] InitEncoder hr=0x{hr:X8} (presetCfg=0x{hrPreset:X8}) lastErr={errDesc}");
-                Console.WriteLine($"[NVENC] InitEncoder hr=0x{hr:X8} lastErr={errDesc}");
+                // lastErr 只在【失败】时才读：驱动成功返回后 GetLastError() 的内容不受保证，
+                // 无条件取字符串会把缓冲区里的残留字节当文本读出来（实测成功分支日志里
+                // 出现 lastErr=OT<乱码>）。失败路径仍必须带上它 —— 那是远程诊断 hr 码的唯一线索。
+                string? errDesc = hr == NVENC_SUCCESS ? null : GetLastErrorString();
+                string errSuffix = errDesc is null ? "" : $" lastErr={errDesc}";
+                AppendDiag($"[EncodeRaw] InitEncoder hr=0x{hr:X8} (presetCfg=0x{hrPreset:X8}){errSuffix}");
+                Console.WriteLine($"[NVENC] InitEncoder hr=0x{hr:X8}{errSuffix}");
                 CoreLog.Trace("NVENC", () => $"InitEncoder hr=0x{hr:X8}", LogCategory.Encoding);
                 if (hr != NVENC_SUCCESS)
                     throw new InvalidOperationException(
@@ -1434,6 +1445,8 @@ public sealed unsafe class NvEncoderNative : IDisposable
     private byte[] EncodeRawFromTextureCore(ID3D11Texture2D texture, int w, int h, int qp, Guid codec,
                                        int outputBitDepth = 8)
     {
+        qp = Math.Max(qp, AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Nvenc));   // 同 EncodeRawCore
+
         var initFn = GetFuncDelegate<InitEncoderFn>(GetFuncPtr(FnInitializeEncoder));
         // ⚠ 原实现用 13/15/21，实为 DestroyInputBuffer/DestroyBitstreamBuffer/GetEncodeStats
         var registerResFn = GetFuncDelegate<RegisterResourceFn>(GetFuncPtr(FnRegisterResource));

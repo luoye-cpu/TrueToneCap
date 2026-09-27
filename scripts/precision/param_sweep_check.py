@@ -28,7 +28,12 @@ import sys
 
 import precision_env as pe
 
-TAG_PRIM = {"srgb": "1", "p3": "12", "bt2020": "9", "adobe": None}
+# 2026-09-27（用户口径）：AdobeRGB 作为【目标】一律收口进 Rec.2020
+#（ColorProfileProvider.CollapseSelectableTag，样张宿主也过同一个函数）⇒ 期望码点就是 9。
+# 以前这里是 None，含义是"Adobe 没有 H.273 码点 ⇒ 不许写 cICP、只带 ICC"；
+# 那套口径下七个容器各走各的 Adobe 出路，任何一处单独改映射都会红成"跨容器不一致"。
+# None 这条分支仍保留给"确实无码点可写"的将来情形（见下面 want is None 的处理）。
+TAG_PRIM = {"srgb": "1", "p3": "12", "bt2020": "9", "adobe": "9"}
 # name -> (chroma, depth, tag-key)
 EXPECT = {
     "q_avifsw_10": ("420", 8, "srgb"), "q_avifsw_50": ("420", 8, "srgb"), "q_avifsw_90": ("420", 8, "srgb"),

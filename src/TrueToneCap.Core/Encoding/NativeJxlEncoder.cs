@@ -75,15 +75,35 @@ public static class NativeJxlEncoder
     /// 与 <c>NativeAvifEncoder.BuildCicpArgs</c> 同型，便于单测直接断言映射表。</para>
     /// <para><b>为什么只有 1 与 2 两档</b>：cjxl v0.11.2 的
     /// <c>--resampling=-1|1|2|4|8</c> 里 1 = 1x1（不下采样，即 4:4:4）、2 = 2x2（即 4:2:0），
-    /// <b>没有 4:2:2 的对应值</b>（1x2 / 2x1 未从命令行暴露）。故 "422" 与一切未知值返回空串
-    /// 让编码器自选（-1），而不是挑一个"看着最近"的 —— 4 = 4x4 是比 4:2:0 更狠的降采样，
-    /// 用它冒充 4:2:2 属于新的静默改参数。</para>
+    /// <b>4:2:2 不存在可选路径</b>。原因不是"命令行没暴露"那么轻：JPEG XL 码流<b>有</b>逐轴的
+    /// <c>YCbCrChromaSubsampling</c>（含 <c>Is422()</c> 判据），但编码器只在<b>转码 JPEG</b> 时才写它
+    /// （<c>enc_frame.cc</c>："Chroma subsampling is not supported in VarDCT mode when not
+    /// recompressing JPEGs"）—— 我们的产品路径喂的是 PPM / 16-bit PNG，永远走不到那条分支。
+    /// 所以 "422" 与一切未知值返回空串让编码器自选（-1），而不是挑一个"看着最近"的 ——
+    /// 4 = 4x4 是比 4:2:0 更狠的降采样，用它冒充 4:2:2 属于新的静默改参数。</para>
+    /// <para>⚠ 这一档也不是"色度抽样"：<c>--resampling</c> 是<b>整幅图（含三通道）</b>的盒式降采样、
+    /// 解码时再上采样回原尺寸（<c>encode.h</c> 原话），而界面那一行的标签写的是"色度采样" ——
+    /// 两者的差别已写进 JXL 卡片的灰字说明，别只留在这段注释里。</para>
     /// <para>🔬 实测判据（2026-09-19，内嵌 cjxl v0.11.2，输入 256×256 cs_png_srgb.png，
     /// 参数与 SDR 路径一致 <c>-d 1.0000 -e 9</c>）：不传 879 B、<c>--resampling 1</c> 879 B 且
     /// 与前者<b>逐字节相同</b>、<c>--resampling 2</c> 492 B（空格式与 <c>=2</c> 式产物亦逐字节相同）。
     /// ⇒ 444→1 与编码器自选在常用画质下同解（cjxl 的 -1 = "仅极低画质才降采样"），
     /// 420→2 真实改变产物 —— 修复前该开关改了产物字节完全不变，这一段即为反证。</para>
     /// </summary>
+    /// <summary>
+    /// JPEG XL 真正能表达的色度档位 —— <b>唯一事实源</b>：界面下拉的 Tag、设置读盘的白名单、
+    /// 门禁判据都读这里，不许再各抄一份。
+    /// <para>为什么必须是单源：设置层原来用的是跨格式共享的 <c>FixChroma</c>（放行 444/422/420），
+    /// 而 JXL 下拉只有 444/420 ⇒ 盘上一旦出现 <c>"422"</c>（手改 JSON 或历史配置），
+    /// 按 Tag 选中时找不到项 ⇒ <b>下拉显示空白</b>，且下次保存会被 <c>?? "444"</c> 静默改掉。
+    /// 2026-09-26 用户报的"默认选项缺失"里，格式下拉那一条是同族症状（见 <c>RebuildFormatCombo</c>）。</para>
+    /// </summary>
+    public static readonly string[] ChromaOptions = { "444", "420" };
+
+    /// <summary>色度值归一化：不在 <see cref="ChromaOptions"/> 里的一律回到默认档 4:4:4（不抛、不冒充 4:2:2）。</summary>
+    public static string NormalizeChroma(string? chroma) =>
+        ChromaOptions.Contains((chroma ?? "").Trim()) ? (chroma ?? "").Trim() : ChromaOptions[0];
+
     internal static string BuildResamplingArg(string? chroma) => chroma?.Trim() switch
     {
         "444" => "--resampling 1",
@@ -127,6 +147,12 @@ public static class NativeJxlEncoder
         // 因为不传参 = 由 cjxl 按输入猜，而我们的中转文件（PPM）根本没有可猜的元数据。
         null or "" or "System" or "sRGB" => "sRGB",
         "BT2020" => "RGB_D65_202_Rel_SRG",
+        // 2026-09-27（用户口径）：AdobeRGB 一律收口进 Rec.2020，不再兜到 sRGB。
+        // 与 CollapseSelectableTag（界面只有 Rec.709 / Rec.2020 两档）和 HDR 侧的
+        // HdrDeclarableTag 同向 —— 以前只有这条 SDR 路往反方向收，是同一件事的第三份口径。
+        // 写在这里是防"上游没收口就直接调编码"的旁路：宁可声明成 2020，也不许悄悄写成 sRGB
+        // （那等于把广色域像素报成窄色域，比不声明更糟）。
+        "AdobeRGB" => "RGB_D65_202_Rel_SRG",
         "DisplayP3" or "DCI_P3" => "DisplayP3",
         _ => "sRGB",
     };
@@ -330,11 +356,14 @@ public static class NativeJxlEncoder
     /// 直接存储，不会再做 PQ 转换。因此必须用 16-bit PNG 中间文件（整数，无歧义）。
     /// 不要改用 PFM 浮点容器：PFM 会被 cjxl 当作线性光重新做 PQ 编码，导致双重编码、高光丢失。
     /// </remarks>
-    /// <param name="colorSpaceTag">HDR 色域标签（2026-10-08 修复(P1②)，此前硬编码 Rec2100PQ）。
-    /// cjxl 对 PQ 内容支持的写法为 Rec2100PQ（= BT.2020 primaries + PQ）；
-    /// ⚠ cjxl 不支持 DisplayP3/DCI-P3 primaries 与 PQ 的组合写法（无 Rec2100P3_PQ
-    /// 之类的可解析值），故仅 BT2020 家族使用 Rec2100PQ，其余一律回退 BT2020，
-    /// 由调用处的 ICC/元数据兜底声明实际色域。</param>
+    /// <param name="colorSpaceTag">HDR 色域标签（此前硬编码 Rec2100PQ）。
+    /// cjxl 的 <c>-x color_space=</c> **简写名**确实没有"P3 原色 + PQ"这一枚（无 Rec2100P3_PQ
+    /// 之类可解析值），所以 BT2020 家族走简写名；但"P3+PQ 表达不了"只对简写名成立 ——
+    /// 容器本身表达得了：递一份【PQ 曲线的】ICC，libjxl 会归约成 color fields 的
+    /// Custom 原色 + Transfer=PQ（2026-09-27 实测：随包 cjxl v0.11.2，产物 209 B，
+    /// jxlinfo 读回 <c>Primaries=[Custom red(0.682054,0.319340)…]</c> + <c>Transfer=[PQ]</c>）。
+    /// ⚠ 反过来说，递【SDR 曲线】的 ICC 是有害的：ICC 压过 color fields，PQ 那一维就此丢失
+    ///   （见 <see cref="TrueToneCap.Core.Encoding.JpegXlEncoder"/> HDR 分支同段说明）。</param>
     /// <param name="chroma">设置里的色度 → cjxl 的 <c>--resampling</c>，映射同
     /// <see cref="BuildResamplingArg"/>（默认 444 产出与不传逐字节相同，故既有 HDR 产物不变）。</param>
     public static void EncodeHdr(ushort[] rgba16, int w, int h, string path,
@@ -368,17 +397,18 @@ public static class NativeJxlEncoder
                 iccArg = $"-x icc_pathname=\"{tmpIcc}\"";
             }
 
-            // ═══ 2026-10-08 修复(P1②): color_space 不再硬编码 Rec2100PQ ═══
-            // cjxl 仅支持 Rec2100PQ（BT.2020 + PQ）这一种 PQ 写法；DisplayP3/DCI_P3
-            // 无 PQ 组合值可解析 → 保持 Rec2100PQ（BT2020），真实色域由 ICC 兜底。
-            string csArg = colorSpaceTag is "DisplayP3" or "DCI_P3"
-                ? "Rec2100PQ" // cjxl 不支持 P3+PQ 组合，回退 BT2020（见上方注释）
-                : "Rec2100PQ";
+            // ═══ ICC 与 color fields 在 JXL 里是【二选一】，两个都给时 color fields 会被整个丢弃 ═══
+            // 实测（cjxl v0.11.2，同一输入）：`-x icc_pathname=sRGB.icc -x color_space=Rec2100PQ`
+            // 与反过来写，产物都是 sRGB 声明 —— PQ 没了；cjxl 见到 icc_pathname 就置
+            // kIccIsPrimary，只调 JxlEncoderSetICCProfile，另一个提示根本不进码流（与先后顺序无关）。
+            // 所以下面这行以前是"死参数"：iccArg 在时它不产生任何效果，却让人以为 HDR 声明写的是 PQ。
+            // 现在按编码器自己的规矩来：有可嵌 ICC 就只交 ICC，没有才交 color_space=Rec2100PQ。
+            string colorArg = iccArg.Length > 0 ? iccArg : "-x color_space=Rec2100PQ";
 
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e 9 {iccArg} -x color_space={csArg} --intensity_target={intensityTarget:F0}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e 9 {colorArg} --intensity_target={intensityTarget:F0}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

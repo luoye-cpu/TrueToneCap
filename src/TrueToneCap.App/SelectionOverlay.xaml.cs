@@ -124,6 +124,7 @@ public sealed partial class SelectionOverlay : Window
         _hdrW = hdrW;
         _hdrH = hdrH;
         this.InitializeComponent();
+        MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
 
         var hwnd = WindowNative.GetWindowHandle(this);
         var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);

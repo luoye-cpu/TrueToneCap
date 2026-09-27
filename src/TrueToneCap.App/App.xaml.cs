@@ -352,6 +352,9 @@ public partial class App : Application
             // ⚠️ 必须引用 SettingsService.SettingsPath 这个唯一事实源，不得各自拼路径。
             //    此前本方法注释写着"即 AppContext.BaseDirectory"，代码却拼 LocalApplicationData ——
             //    注释与实现相反，一旦 SettingsService 换路径，主题加载就会静默读不到而回退默认。
+            // 同一条口径：位置存不下时整个程序按默认值运行（见 SettingsService.CanPersist），
+            // 主题也不例外 —— 读一份"改了也存不回去"的文件，只会让人误以为设置生效了。
+            if (!SettingsService.CanPersist) return AppThemeMode.Default;
             var settingsPath = SettingsService.SettingsPath;
             if (File.Exists(settingsPath))
             {

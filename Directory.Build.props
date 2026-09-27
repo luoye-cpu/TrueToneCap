@@ -46,9 +46,9 @@
          此处统一移除空值声明并静态压制该警告，等价于原行为但不再误导。 -->
     <NoWarn>$(NoWarn);MSB3884</NoWarn>
     <!-- ── 版本 (由 Publish.ps1 / CI 通过 -p:Version= 覆盖) ── -->
-    <Version Condition="'$(Version)' == ''">0.3.4-beta</Version>
-    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">0.3.4.0</AssemblyVersion>
-    <FileVersion Condition="'$(FileVersion)' == ''">0.3.4.0</FileVersion>
+    <Version Condition="'$(Version)' == ''">0.3.6-beta</Version>
+    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">0.3.6.0</AssemblyVersion>
+    <FileVersion Condition="'$(FileVersion)' == ''">0.3.6.0</FileVersion>
 
     <!-- ── 包元数据 (合规补齐 2026-09-20) ──
          PackageLicenseExpression 用 SPDX 标识而非 PackageLicenseFile: 仓库根 LICENSE 全文
