@@ -6546,6 +6546,31 @@ primaries 与 PQ 的组合" —— 那只对 `-x color_space=` 的**简写名**�
 * 新主线：`4368eed`(release v0.3.6-beta) → `614a0b1`(v0.3.4-beta) → `0916a2a`(v0.3.3-beta，= `origin/main`)。
   工作树 `git status --porcelain` 为空。`origin/main` 还停在 v0.3.3-beta ⇒ **v0.3.4 之后从未推送过**。
 
+### 63.5 出包与包内容自证（v0.3.6-beta）
+
+* `.\Publish.ps1 -Tag` **exit 0**（`tests/output/publish-036.log`）：内部把 7 个套件全跑了一遍
+  （`RESULT` 行逐条在：869 / 213 / 14 / 4 / 12 / 43 / 210，`failed` 全 0）、`[5.5/6]` 冒烟通过、
+  `[6/6]` 生成 `SHA256SUMS.txt`（607 文件），并创建了标签 `v0.3.6-beta`。
+* `build-info.json` 三个关键字段实测：**`version = 0.3.6-beta`**、
+  **`commitSha = cabf9ea5791fce34ce5089f0ef7439534b4ed314`（= 出包时的 HEAD）**、
+  **`dirtyWorktree = false`** —— 这正是 09-25 那枚"commitSha 与内容不符"的包所缺的三样，这次逐条对上。
+* `scripts\pack.ps1 -PackageDir publish\TrueToneCap-v0.3.6-beta
+  -OutputPath publish\TrueToneCap-v0.3.6-beta-win-x64.7z` ⇒ **121 MB** 正式归档
+  （`-OutputPath` 显式给：不给就按固定名覆盖同版本正式包，是踩过的那条坑）。
+* `scripts\verify-package.ps1 -ExpectedVersion 0.3.6-beta` **exit 0**：608 文件 / 412.3 MB、
+  四个原生工具（`avifenc` / `cjpegli` / `cjxl` / `cwebp`）都能真启动、42 份许可文本齐、
+  无第三方 `.pdb` 残留（自家符号保留 2 个）。
+* 归档哈希自证：`.sha256` 与实算一致 ——
+  `99498a64d912c8ada84572b35e76219e77f355ffb46e418a0f09bf8fe1f967de`，`sha256sum -c` 报 `OK`。
+* ⚠ 输出目录**没有复用** `_scratch\TrueToneCap-v0.3.5-beta-0926-i18n\`：那里面已经有用户数据
+  （今天 03:46 那笔还在往里写 `TrueToneCap.settings.json` 与 `log/app_2026-09-27.log`），
+  而 `-OutputDir` 走的是 `Remove-Item -Recurse` ⇒ 新包另起目录。
+* 标签与提交的关系（免得下次误读）：`v0.3.6-beta` 打在 **`cabf9ea`** 上，就是 `build-info.commitSha`
+  那一笔 ⇒ **包内容与该标签逐字对应**；本节这条出包记录是标签之后的纯文档提交、不进包，
+  要复现这枚包检出 `v0.3.6-beta` 即可。
+* 仍未做：**没有推送**；界面目视与英文模式那条计数（#52）依旧 0 读数。
+
+
 
 
 
