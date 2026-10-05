@@ -123,6 +123,12 @@ public static class ToastService
     }
 
     /// <summary>显示截图成功通知。</summary>
+    /// <remarks>
+    /// 落系统通知中心是设计而非漏改：「可追溯」类事件要留在通知中心，便于事后回看那一张图。
+    /// 这里的"落系统"不等于无视用户 —— 位置已由调用方 MainWindow.ShowSaveToast 判过分流：
+    /// 四角走应用内浮层，只有选了 Windows 自带通知（或浮层创建失败兜底）才会走到这个方法。
+    /// 对照 ShowCaptureDegraded：降级属即时反馈，必须走统一入口，用户选哪就显示在哪。
+    /// </remarks>
     public static void ShowCaptureSuccess(string filePath, long elapsedMs)
     {
         var fileName = Path.GetFileName(filePath);
@@ -134,6 +140,11 @@ public static class ToastService
     }
 
     /// <summary>显示截图失败通知。</summary>
+    /// <remarks>
+    /// 落系统通知中心是设计而非漏改：「可追溯」类事件，失败必须进通知中心供事后回看 ——
+    /// 改成浮层会让它几秒后自动消失，等于把要查账的那一条也一起抹掉。
+    /// 对照 ShowCaptureDegraded：降级属即时反馈，2026-09-16 已迁到统一入口以尊重"通知位置"。
+    /// </remarks>
     public static void ShowCaptureFailed(string reason)
     {
         Show(new Dictionary<string, string>

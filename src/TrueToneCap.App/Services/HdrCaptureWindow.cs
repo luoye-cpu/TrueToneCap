@@ -850,7 +850,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _ctx.RSSetViewport(0, 0, _winW, _winH);
         _ctx.RSSetState(_rsNoCull); // 不剔除 (双保险, VS 绕序已改 CW)
         _ctx.OMSetRenderTargets(_rtv!);
-        // 2026-08-11: IASetInputLayout(null) 与 GpuToneMapper 对齐 (残留 InputLayout 导致 Draw 无输出)
+        // 2026-08-11: IASetInputLayout(null) —— 残留 InputLayout 会让 Draw 无输出（当时的对照对象是
+        // Core 的 GPU 色调映射路径；该类已于 2026-10-01 作为死资产删除，这条结论与本处实现无关）
         _ctx.IASetInputLayout(null);
         _ctx.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleList);
         _ctx.VSSetShader(_vs);
@@ -2121,6 +2122,13 @@ public sealed partial class HdrCaptureWindow : IDisposable
             }
         }
         _selComplete = true; RequestRedraw();
+        // 这条 Info 是给"选区之后按 Ctrl+C / Enter 有没有落地"这类判据当【前提见证】用的：
+        // 2026-09-30 端到端取证里，注入式拖拽三次里两次根本没进入选完状态，而产品在这里一个字都不写，
+        // 于是"Ctrl+C 没反应"分不清是【键没进来】还是【压根没选中】（只能再追一发 Enter 反推）。
+        // 判据读不到自己的前提，就只能在错误上盖结论 —— 这行把它变成可核对的。
+        LogService.Info("HdrCapture",
+            $"选区完成 {Math.Abs(_sx2 - _sx1)}x{Math.Abs(_sy2 - _sy1)} @(窗口内 {Math.Min(_sx1, _sx2)},{Math.Min(_sy1, _sy2)})",
+            LogCategory.Capture);
     }
 
     private void Key(int vk)

@@ -592,6 +592,7 @@ if (args.Length >= 1 && args[0] == "--wg-samples")
     dir = Path.GetFullPath(dir);
     Directory.CreateDirectory(dir);
 
+    int wgMissing = 0;
     foreach (var tag in new[] { "sRGB", "DisplayP3", "BT2020" })
     {
         // PNG 是无损参照（判据以它为准）；AVIF 走软件 libaom，容器才会写 colr(nclx)+iinf；
@@ -600,29 +601,52 @@ if (args.Length >= 1 && args[0] == "--wg-samples")
         {
             (OutputFormat.PNG, "png", 100f), (OutputFormat.AVIF, "avif", 60f),
             (OutputFormat.JPEG_XL, "jxl", 1f), (OutputFormat.TIFF, "tiff", 100f),
+            // ═══ 2026-09-29 审查轮 §13.4：这两列以前根本不在"第三方解码像素"这一层里 ═══
+            // WebP 只有 ICCP 一条声明通道、JPEG LI 与增益图底图共用同一套码流 ⇒ 矩阵或量化单独
+            // 在它们身上走偏时，只比 PNG/AVIF/JXL/TIFF 的这层判据照不出来（09-19 的 TIFF 事故同族）。
+            (OutputFormat.WebP, "webp", 90f), (OutputFormat.JPEG_LI, "jpg", 1f),
         };
-        foreach (var (fmt, ext, q) in jobs)
+        // 位深轴：这层原来只有一档（10-bit）⇒ "位深下拉同时决定做不做矩阵"那一族（09-19 P1-1）
+        // 在 WebP / JPEG LI 上没有对照。8-bit 自成一组（前缀带 d08）⇒ 裁判按 split("_")[0] 分组，
+        // 每组各有自己的 PNG 基准，不会拿 8-bit 去比 10-bit 的基准。
+        foreach (var (cell, depth) in new (string Cell, int Depth)[] { (tag, 10), ($"{tag}d08", 8) })
         {
-            var s = new EncodingSettings
+            foreach (var (fmt, ext, q) in jobs)
             {
-                Format = fmt, Quality = q, OutputBitDepth = 10, HdrOutput = false,
-                ColorSpaceTag = tag, AvifEncoderKind = AvifEncoderKind.LibAom,   // 避开硬件，容器元数据走软件路径
-            };
-            var path = Path.Combine(dir, $"{tag}_{fmt.ToString().ToLowerInvariant()}.{ext}");
-            try
-            {
-                await EncoderFactory.Create(fmt).EncodeAsync(
-                    new HdrFrameData { Pixels = px, Width = imgW, Height = imgH }, s, path);
-                Console.WriteLine($"  ✅ {Path.GetFileName(path),-22} {new FileInfo(path).Length / 1024.0,7:F1} KB");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"  ❌ {Path.GetFileName(path),-22} {ex.GetType().Name}: {ex.Message.Split('\n')[0]}");
+                var s = new EncodingSettings
+                {
+                    Format = fmt, Quality = q, OutputBitDepth = depth, HdrOutput = false,
+                    ColorSpaceTag = tag,
+                    AvifEncoderKind = AvifEncoderKind.LibAom,   // 避开硬件，容器元数据走软件路径
+                };
+                var path = Path.Combine(dir, $"{cell}_{fmt.ToString().ToLowerInvariant()}.{ext}");
+                try
+                {
+                    await EncoderFactory.Create(fmt).EncodeAsync(
+                        new HdrFrameData { Pixels = px, Width = imgW, Height = imgH }, s, path);
+                    Console.WriteLine($"  ✅ {Path.GetFileName(path),-26} {new FileInfo(path).Length / 1024.0,7:F1} KB");
+                }
+                catch (Exception ex)
+                {
+                    wgMissing++;
+                    Console.WriteLine($"  ❌ {Path.GetFileName(path),-26} {ex.GetType().Name}: {ex.Message.Split('\n')[0]}");
+                }
             }
         }
     }
-    Console.WriteLine($"\n✅ 样张已产出 → {dir}\n"
-        + "   下一步: py scripts/precision/wg_compat_check.py（读回元数据与存储像素，再与查看器渲染值比对）");
+    // 少产出一格 = 这一层的覆盖范围悄悄缩水（判据只会看到"少几个文件"而不会红）。
+    // 所以这里必须留非零痕迹，让 [1.7/2] 的 fail-closed 接得住。
+    if (wgMissing > 0)
+    {
+        Console.WriteLine($"\n❌ 有 {wgMissing} 个格子没产出样张 ⇒ 跨容器像素层的覆盖不完整，本轮不算判过");
+        Environment.ExitCode = 1;
+    }
+    else
+    {
+        Console.WriteLine($"\n✅ 样张已产出 → {dir}\n"
+            + "   判据: py scripts/precision/wg_container_roundtrip.py（第三方解码器比像素，已进门禁 [1.7/2]）\n"
+            + "         py scripts/precision/wg_compat_check.py（读回元数据与存储像素，再与查看器渲染值比对）");
+    }
 }
 
 // ═══ 容器结构审计（2026-09-19）═══
@@ -753,6 +777,22 @@ if (args.Length >= 1 && args[0] == "--param-sweep")
     string sdir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
         "..", "..", "..", "..", "..", "artifacts", "precision", "probe", "sweep"));
     Directory.CreateDirectory(sdir);
+    // ═══ 产出前先清干净自己的目录（2026-09-29 实测的必要）═══
+    // 门禁的读法是"文件名前缀命中 = 这一格成功了"（param_sweep_check 判 c_avifsvt_444 的
+    // "按预期失败 / 竟然成功了"就看有没有那个文件）。而这里过去【只覆盖同名文件、从不删旧的】⇒
+    // 上一轮留下的产物会替下一轮作答：本轮把换格式保底的默认值改错的那一次，在目录里多写了一枚
+    // c_avifsvt_444.png，之后即使代码改回来了，那一格仍被上一轮的尸体判成"竟然成功了"。
+    // 陈尸不删，"失败格"的判据就永远可能读到别人的结果 ⇒ 生成者负责让自己目录里只有本次产物。
+    foreach (var stale in Directory.GetFiles(sdir))
+    {
+        try { File.Delete(stale); }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ❌ 清不掉上一轮的样张 {Path.GetFileName(stale)}：{ex.GetType().Name} {ex.Message}");
+            Environment.ExitCode = 1;
+            return;
+        }
+    }
 
     // name, format, ext, avifKind, quality, chroma, depth, tag
     var rows = new (string Name, OutputFormat Fmt, string Ext, AvifEncoderKind Kind, float Q, string Chroma, int Depth, string Tag)[]

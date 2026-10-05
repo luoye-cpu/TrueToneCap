@@ -18,8 +18,8 @@ public sealed class PngEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.PNG;
     public override bool SupportsHdr => true;
-    public override (float, float, float, string) GetQualityRange() => (100f, 100f, 100f, "无损 (固定 100%)");
-    public override string GetQualityDescription(float _) => "无损";
+    public override (float, float, float, QualityScale) GetQualityRange() => (100f, 100f, 100f, QualityScale.LosslessFixed100);
+    public override QualityDesc GetQualityDescription(float _) => new(QualityDescKind.Lossless, 100f);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {
         if (s.HdrOutput)
@@ -114,8 +114,8 @@ public sealed class JpegLiEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.JPEG_LI;
     public override bool SupportsHdr => false;
-    public override (float, float, float, string) GetQualityRange() => (0.5f, 3.0f, 1.0f, "butteraugli 距离 (0.5-3.0)");
-    public override string GetQualityDescription(float q) => $"距离: {q:F1} (越小越清晰)";
+    public override (float, float, float, QualityScale) GetQualityRange() => (0.5f, 3.0f, 1.0f, QualityScale.ButteraugliRange);
+    public override QualityDesc GetQualityDescription(float q) => new(QualityDescKind.DistanceWithNote, q);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {
         // JPEG LI 不支持 HDR，始终降级到 SDR（ToSdrAndDegrade = 同一条浮点链，只是量化到 8-bit）
@@ -127,6 +127,25 @@ public sealed class JpegLiEncoder : ImageEncoder
         await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
     }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
+    {
+        try
+        {
+            await EncodeSdrCoreAsync(px, w, h, s, path, ct);
+        }
+        catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
+        {
+            // ═══ 2026-09-29 用户口径：接上 PNG 保底，且触发必须告诉用户 ═══
+            // 此前这条腿【完全没有】保底（JpegGainMapEncoder.cs 那句"无回退，必须可用"就是这个口径），
+            // 于是 cjpegli 在位但这次编不出来 / 写盘撞共享冲突 ⇒ 图直接丢。
+            // 与 WebP / AVIF 走同一份 FormatHelper.PngLastResort，不在这里再写一遍取声明/登记路径/留痕。
+            FormatHelper.PngLastResort(px, w, h, path, s.ColorSpaceTag, s.IccProfile, ex,
+                who: "JPEG LI",
+                why: $"cjpegli 本次编码或写盘失败（{ex.GetType().Name}）⇒ 回退 PNG",
+                notice: "本机 cjpegli 本次编码失败 ⇒ 本次已改存为 PNG 文件（不是 JPEG LI，像素无损、体积可能更大），色域声明按本次设置一并写入");
+        }
+    }
+
+    private static async Task EncodeSdrCoreAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct)
     {
         await Task.Run(() =>
         {
@@ -147,9 +166,28 @@ public sealed class JpegXlEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.JPEG_XL;
     public override bool SupportsHdr => true;
-    public override (float, float, float, string) GetQualityRange() => (0.1f, 4.0f, 1.0f, "butteraugli 距离 (越小越清晰; 1.0 = 视觉无损)");
-    public override string GetQualityDescription(float q) => q <= 0.1f ? "近无损" : $"距离: {q:F1}";
+    public override (float, float, float, QualityScale) GetQualityRange() => (0.1f, 4.0f, 1.0f, QualityScale.ButteraugliDistanceRange);
+    public override QualityDesc GetQualityDescription(float q) => q <= 0.1f ? new(QualityDescKind.NearLossless, q) : new(QualityDescKind.Distance, q);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
+    {
+        try
+        {
+            await EncodeCoreAsync(f, s, path, ct);
+        }
+        catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
+        {
+            // ═══ 2026-09-29 用户口径：接上 PNG 保底（HDR 与高精度 SDR 两条支都盖）═══
+            // 这条腿原先同样【没有】保底：cjxl 非零退出 / 超时 / 写盘撞共享冲突 ⇒ 直接冒出去。
+            // 保底交回【产品自己的 PNG 编码器】处理（理由见 FormatHelper.PngLastResortHdrFrameAsync）——
+            // 这里的源是 scRGB float 帧，硬压成 8-bit 等于在保底里再偷偷做一次动态范围降级。
+            await FormatHelper.PngLastResortHdrFrameAsync(f, s, path, ex,
+                who: "JPEG XL",
+                why: $"cjxl 本次编码或写盘失败（{ex.GetType().Name}）⇒ 回退 PNG",
+                notice: "本机 cjxl 本次编码失败 ⇒ 本次已改存为 PNG 文件（不是 JPEG XL，HDR 与否与位深按本次设置由 PNG 编码器决定），色域声明一并由它写入");
+        }
+    }
+
+    private async Task EncodeCoreAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct)
     {
         if (s.HdrOutput)
         {
@@ -259,6 +297,22 @@ public sealed class JpegXlEncoder : ImageEncoder
     }
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
+        try
+        {
+            await EncodeSdrCoreAsync(px, w, h, s, path, ct);
+        }
+        catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
+        {
+            // 与 JPEG LI / WebP 同一条保底（byte[] 入口恒 8-bit ⇒ 用非 HDR 那份就够，不引入第二次降级）。
+            FormatHelper.PngLastResort(px, w, h, path, s.ColorSpaceTag, s.IccProfile, ex,
+                who: "JPEG XL",
+                why: $"cjxl（8-bit SDR 入口）本次编码或写盘失败（{ex.GetType().Name}）⇒ 回退 PNG",
+                notice: "本机 cjxl 本次编码失败 ⇒ 本次已改存为 PNG 文件（不是 JPEG XL，像素无损、体积可能更大），色域声明按本次设置一并写入");
+        }
+    }
+
+    private static async Task EncodeSdrCoreAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct)
+    {
         // ═══ 2026-09-17 双路径策略：byte[] 入口恒为 8-bit 源 ⇒ 不升位深 ═══
         if (s.OutputBitDepth > 8) s.OutputBitDepth = 8;
         await Task.Run(() =>
@@ -277,9 +331,28 @@ public sealed class AvifEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.AVIF;
     public override bool SupportsHdr => true;
-    public override (float, float, float, string) GetQualityRange() => (0f, 63f, 15f, "CRF (0=无损, 63=最低; 15 ≈ 视觉无损)");
-    public override string GetQualityDescription(float q) => q <= 0 ? "无损" : $"CRF: {(int)q}";
+    public override (float, float, float, QualityScale) GetQualityRange() => (0f, 63f, 15f, QualityScale.Crf);
+    public override QualityDesc GetQualityDescription(float q) => q <= 0 ? new(QualityDescKind.Lossless, q) : new(QualityDescKind.Crf, q);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
+    {
+        try
+        {
+            await EncodeCoreAsync(f, s, path, ct);
+        }
+        catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
+        {
+            // HDR 那条腿此前【没有任何】保底 —— 硬件链上移到编码器这一层之后必须一起补上，
+            // 否则"关掉开关只影响 SDR 路"就是一种口径分裂。
+            // 走 PNG 编码器本体：请求 ≥10-bit 时产出的是带 PQ 声明的 HDR PNG（动态范围保住），
+            // 请求 8-bit 时 PngEncoder 自己会退回 SDR 并留下第二条留痕（在下面并成一句）。
+            await FormatHelper.PngLastResortHdrFrameAsync(f, s, path, ex,
+                who: "AVIF",
+                why: $"AVIF HDR 编码失败（{ex.GetType().Name}）⇒ 按用户设置回退 PNG",
+                notice: "本机 AVIF HDR 编码本次失败 ⇒ 本次已改存为 PNG 文件（不是 AVIF；HDR 与位深按本次设置由 PNG 编码器决定），色域声明一并由它写入");
+        }
+    }
+
+    private async Task EncodeCoreAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct)
     {
         if (s.HdrOutput)
         {
@@ -431,7 +504,26 @@ public sealed class AvifEncoder : ImageEncoder
         // 旧 AvifBackend（AvifBackendIndex）路径已废弃 —— 该字段在新 UI 中不再写入，
         // 读它只会拿到 settings.json 里的冻结旧值，导致 Auto 行为不确定。
         var be = AvifEncoderSelector.SelectByKind(s.AvifEncoderKind, s.ChromaSubsampling, s.OutputBitDepth);
-        await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct, s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile, s.GpuTexture);
+        try
+        {
+            await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct, s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile, s.GpuTexture);
+        }
+        catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
+        {
+            // ═══ 2026-09-29 审查轮 §13.9 + 用户口径"开关" ═══
+            // 旧写法把"libaom 也失败 ⇒ 退 PNG"挂在【硬件分支的 catch 里】。而 Auto 在没有 AV1 编码
+            // 硬件的机器上（本机之外多数 Intel/AMD 机器）选出来就是 avifenc ⇒ avifenc 一失败图就没了,
+            // 尽管这条函数自己的注释写着"确保截图不丢失"。
+            // 现在硬件链（FallbackToLibAom）只【抛出】，换格式一律落在这一层 ⇒ 用户那个开关在这里生效，
+            // 且这条 catch 同时覆盖"软件后端本身失败"和"硬件→libaom 也失败"两种来路。
+            // ⚠ 取消 / ArgumentException（文件名本身非法）/ AggregateException（保底链自己已经试过 PNG
+            //   且连 PNG 都没写出去，见 PngLastResort 末尾）都从 when 里排除，不再单列两条 `throw;` 分支——
+            //   那两条在本轮把换格式上移之后已经与这里的过滤条件完全重复，留着只会让人以为还有别的链。
+            FormatHelper.PngLastResort(px, w, h, path, s.ColorSpaceTag, s.IccProfile, ex,
+                who: "AVIF",
+                why: $"AVIF 编码失败（{ex.GetType().Name}；硬件链的 PNG 保底已上移到这一层）⇒ 最终回退 PNG",
+                notice: "本机 AVIF 编码后端（avifenc / libaom / 硬件）本次失败 ⇒ 本次已改存为 PNG 文件（不是 AVIF，像素无损、体积更大），色域声明按本次设置一并写入");
+        }
     }
 }
 
@@ -440,8 +532,8 @@ public sealed class WebPEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.WebP;
     public override bool SupportsHdr => false;
-    public override (float, float, float, string) GetQualityRange() => (50f, 100f, 90f, "质量 (50-100; 85+ 视觉无损)");
-    public override string GetQualityDescription(float q) => q >= 100 ? "无损" : $"{(int)q}%";
+    public override (float, float, float, QualityScale) GetQualityRange() => (50f, 100f, 90f, QualityScale.QualityPercent);
+    public override QualityDesc GetQualityDescription(float q) => q >= 100 ? new(QualityDescKind.Lossless, q) : new(QualityDescKind.Percent, q);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {
         // WebP 不支持 HDR，始终降级到 SDR（ToSdrAndDegrade = 同一条浮点链，只是量化到 8-bit）
@@ -464,21 +556,25 @@ public sealed class WebPEncoder : ImageEncoder
                 var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
                 NativeWebPEncoder.Encode(px, w, h, path, s.Quality, s.Quality >= 100, icc);
             }
-            catch (DllNotFoundException)
+            catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException))
             {
-                // libwebp 不可用时回退到 PNG
-                CoreLog.Warn("WebP", "libwebp 不可用，回退 PNG", LogCategory.Encoding);
-                // ═══ 2026-09-19 留痕（只记录，不改行为）═══
-                // 这是三条回退里最隐蔽的一条：连【格式】都换了，产物不再是 WebP 而是 PNG，
-                // 而除文件名外用户查不到任何原因（体积、兼容性、下游按 .webp 处理的行为都变了）。
-                EncoderFallbackNotifier.LastReason =
-                    "本机没有可用的 cwebp（libwebp）⇒ 本次已改存为 PNG 文件（不是 WebP，像素无损、体积更大）";
-                var pngPath = Path.ChangeExtension(path, ".png");
-                var (icc2, cicp) = FormatHelper.GetColorMetadata(s);
-                ManagedPngEncoder.Encode(px, w, h, pngPath, s.OutputBitDepth, icc2, cicp);
-                // ═══ 2026-09-18 P0-D：回退必须登记真实落盘路径，否则上层
-                //     ResolveActualPath 返回不存在的 .webp（同 AVIF 侧 2026-09-15 修复）═══
-                FormatHelper.RecordFallbackPath(path, pngPath);
+                // ═══ 2026-09-29 审查轮 F 批：这里此前只 catch (DllNotFoundException) ═══
+                // 而"回退 PNG"这句 promise 覆盖的是【这次拿不到 WebP 产物】整件事：cwebp 在位但编码失败
+                // （非零退出 / 30 s 超时 / 产物没写出来，见 NativeWebPEncoder.cs:88-92 与
+                // NativeEncoderGuard 那条 result.Success == false）抛的是 InvalidOperationException，
+                // 旧写法让它直接冒出去 ⇒ 图丢、LastReason 仍是 null，而注释与文案都写着"回退 PNG"。
+                // 行为判据：ColorPipelineTests.WebPFallback_WhenBackendFails_StillDeliversPngAndNotice
+                //（独占目标文件真跑一次，修前 4 条红）。
+                // ⚠ ArgumentException 不接：那是 FormatHelper.ValidateNativePath 报"这个文件名本身非法"，
+                //   换个后缀仍然写不出去，兜下去只会把诊断从"路径非法"糊成"保底也失败"。
+                bool missing = ex is DllNotFoundException;
+                FormatHelper.PngLastResort(px, w, h, path, s.ColorSpaceTag, s.IccProfile, ex,
+                    who: "WebP",
+                    why: missing ? "libwebp 不可用，回退 PNG"
+                                 : $"cwebp 本次编码失败（{ex.GetType().Name}），回退 PNG",
+                    notice: missing
+                        ? "本机没有可用的 cwebp（libwebp）⇒ 本次已改存为 PNG 文件（不是 WebP，像素无损、体积更大），色域声明按本次设置一并写入"
+                        : "本机 cwebp 本次编码失败 ⇒ 本次已改存为 PNG 文件（不是 WebP，像素无损、体积更大），色域声明按本次设置一并写入");
             }
         }, ct);
     }
@@ -508,8 +604,8 @@ public sealed class TiffEncoder : ImageEncoder
         return ColorManagement.ColorProfileProvider.GetDefaultSRgbIcc();
     }
     public override bool SupportsHdr => true;
-    public override (float, float, float, string) GetQualityRange() => (100f, 100f, 100f, "无损 (固定)");
-    public override string GetQualityDescription(float _) => "无损";
+    public override (float, float, float, QualityScale) GetQualityRange() => (100f, 100f, 100f, QualityScale.LosslessFixed);
+    public override QualityDesc GetQualityDescription(float _) => new(QualityDescKind.Lossless, 100f);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {
         if (s.HdrOutput)
@@ -1530,25 +1626,14 @@ file static class AvifFallbackHelper
         }
         catch (Exception ex)
         {
-            // libaom 也失败 — 最终回退到 PNG 保底，确保截图不丢失
-            CoreLog.Warn("AVIF", "libaom 回退也失败，最终回退 PNG", ex, LogCategory.Encoding);
-            try
-            {
-                var pngPath = Path.ChangeExtension(path, ".png");
-                ManagedPngEncoder.Encode(bgra, w, h, pngPath, 8);
-                CoreLog.Info("AVIF", $"PNG 保底成功，实际落盘: {pngPath}", LogCategory.Encoding);
-
-                // ═══ 2026-09-15 修复：登记"实际写入路径" ═══
-                // 保底写的是 .png，而调用方持有的仍是原 .avif 路径 —— 该路径指向的文件
-                // 根本不存在，但上层照常返回它，于是 Toast / 剪贴板 / 归档都指向空文件，
-                // 用户看到"✅ 已保存"却找不到图。登记后由 FormatHelper.ResolveActualPath 校正。
-                FormatHelper.RecordFallbackPath(path, pngPath);
-            }
-            catch (Exception pngEx)
-            {
-                CoreLog.Error("AVIF", "PNG 保底也失败，所有 AVIF 编码后端均失败", pngEx, LogCategory.Encoding);
-                throw new AggregateException("所有 AVIF 编码后端均失败", ex, pngEx);
-            }
+            // ═══ 2026-09-29 用户口径"保底要有开关"⇒ 换格式这一步【不在这里】做 ═══
+            // 旧写法在这里直接 PNG 保底。问题是：后端层拿不到 <c>EncodingSettings</c>（接口传的是扁平参数），
+            // 于是"用户是否允许换格式"这个决定在硬件链里【无法表达】——总开关做不了，只能一路兜到底。
+            // 现在这里只把 libaom 的失败原样抛出去，换格式的决定统一交给
+            // <c>AvifEncoder.EncodeSdrAsync</c> / <c>EncodeAsync</c> 那两处带 <c>s.PngFallbackEnabled</c> 的 catch
+            // ⇒ 格式切换这件事从此只发生在"看得见用户设置"的那一层，且全仓只有一处实现。
+            CoreLog.Warn("AVIF", "libaom 回退也失败 ⇒ 交给上层按用户设置决定是否改存 PNG", ex, LogCategory.Encoding);
+            throw;
         }
     }
 }
@@ -1583,6 +1668,96 @@ public static class FormatHelper
             }
         }
         return requestedPath;
+    }
+
+    /// <summary>
+    /// 末端保底（8-bit BGRA 那一腿）：把这张图以【带色域声明】的 PNG 落盘 + 登记实际路径 + 写留痕。
+    /// <para>全仓【换格式】的实现只有两份：这一个（源是量化后的 BGRA）与 <see cref="PngLastResortHdrFrameAsync"/>
+    /// （源是 scRGB float 帧）。CorePipelineTests 钉的是"换后缀只许出现两次"，出现第三处就意味着有人又抄了一份
+    /// 并行保底 —— 2026-09-29 F 批的教训就长这样：WebP 原先自己内联写了整套（取声明 → Encode → 写留痕 → 登记路径），
+    /// 于是"promise 写在文案里、实现却只接住 <c>DllNotFoundException</c>"这种错法没有任何一处会暴露。</para>
+    /// <para>调用点（2026-09-29 实测：SDR 腿 5 处、HDR 腿 3 处）＝ JPEG LI / JPEG XL / AVIF / WebP / 增益图。
+    /// 2026-09-29 之前只有 AVIF 与 WebP 两格，另外三族"后端失败"的结局是图直接丢掉。
+    /// AVIF 那条的【硬件链】不在这儿：它失败后只把后端改成 libaom 并抛出（<c>AvifFallbackHelper.FallbackToLibAom</c>），
+    /// 换不换格式由上面那一层的 catch 决定 —— 后端那一层看不到 <see cref="EncodingSettings.PngFallbackEnabled"/>，
+    /// 在它里面换格式就等于用户那个开关管不住这条路径。</para>
+    /// <para>参数里没有"格式名"这种东西：日志类目 <c>who</c>、日志文案 <c>why</c>、用户可见的 <c>notice</c>
+    /// 都是调用方的事实，只有【怎么落盘】这一段是各条腿共享的机制，所以只有一份。</para>
+    /// </summary>
+    /// <param name="who">日志类目（调用方那一族，如 "AVIF" / "WebP" / "JPEG XL"），保底失败时用它归属到正确的编码族。</param>
+    /// <param name="why">写进 Warn 的原因（后端为什么失败）。</param>
+    /// <param name="notice">写进 <see cref="EncoderFallbackNotifier"/> 的用户可见文案，必须说清换的是【格式】。</param>
+    internal static void PngLastResort(byte[] bgra, int w, int h, string path,
+        string? colorSpaceTag, byte[]? iccProfile, Exception cause, string who, string why, string notice)
+    {
+        CoreLog.Warn(who, why, cause, LogCategory.Encoding);
+        try
+        {
+            var pngPath = Path.ChangeExtension(path, ".png");
+            // 保底 PNG 也必须带色域声明：少了它，产物是"广色域像素 + 零色彩声明"的 PNG，
+            // 查看器一律按 sRGB 解 ⇒ 系统性偏色。取法三处保底同一条，映射逻辑不在这里再写一份。
+            var (pngIcc, pngCicp) = GetColorMetadata(colorSpaceTag, iccProfile);
+            ManagedPngEncoder.Encode(bgra, w, h, pngPath, 8, pngIcc, pngCicp);
+            CoreLog.Info(who, $"PNG 保底成功，实际落盘: {pngPath}", LogCategory.Encoding);
+
+            // 换的是【格式】而不只是参数：只从后缀发现，用户查不到原因（体积/兼容性/下游按原后缀处理都变了）。
+            // 单槽通道不许把【更早那条】吃掉：同一次编码里可能已经写过一条格式内降级（例如"MFT 失败已回退
+            // libaom，会明显变慢"），直接赋值 = 用户只看见换了格式、永远不知道它还绕开过硬件后端。
+            // 与 HDR 那份同样并起来，并另留一行 Warn，保证日志里两条都查得到。
+            // （槽位由上层读完即清，见 CapturePipelineService.NotifyEncoderFallbackIfAny，所以这里读到的是本次的。）
+            var earlier = EncoderFallbackNotifier.LastReason;
+            if (!string.IsNullOrEmpty(earlier))
+                CoreLog.Warn(who, $"保底换格式时覆盖了一条更早的降级留痕，已并入而非丢弃：{earlier}",
+                    LogCategory.Encoding);
+            EncoderFallbackNotifier.LastReason =
+                string.IsNullOrEmpty(earlier) ? notice : $"{notice}｜另外：{earlier}";
+
+            // ═══ 2026-09-15 修复：登记"实际写入路径" ═══
+            // 保底写的是 .png，而调用方持有的仍是原路径 —— 该路径指向的文件
+            // 根本不存在，但上层照常返回它，于是 Toast / 剪贴板 / 归档都指向空文件，
+            // 用户看到"✅ 已保存"却找不到图。登记后由 ResolveActualPath 校正。
+            RecordFallbackPath(path, pngPath);
+        }
+        catch (Exception pngEx)
+        {
+            CoreLog.Error(who, $"{who} 的 PNG 保底也失败 ⇒ 这张图确实丢了", pngEx, LogCategory.Encoding);
+            throw new AggregateException($"{who} 编码与 PNG 保底均失败", cause, pngEx);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="PngLastResort"/> 的 HDR 版本：源是 scRGB float 帧，保底必须走【产品自己的 PNG 编码器】，
+    /// 而不是在这里再算一遍"PQ 该怎么写、cICP 该是哪几个字节"。
+    /// <para>为什么必须另开一条而不是复用 8-bit 那份：JXL / 增益图的 HDR 路给的是 <see cref="HdrFrameData"/>
+    /// 而不是量化后的 BGRA，硬压成 8-bit PNG 等于在保底里再做一次【动态范围】降级，而那句降级
+    /// 早就由 <c>PngEncoder.EncodeAsync</c> 自己管（<c>:30-37</c>：请求 8-bit 时它自己退回 SDR 并留痕）。
+    /// 所以这里只把帧原样交给 PNG 编码器，声明/位深/传递函数一律由它决定 ⇒ 全仓仍只有一处懂"PNG 怎么写"。</para>
+    /// <para>换后缀、登记实际落盘路径、写用户可见留痕这三件事与非 HDR 版同一条纪律。</para>
+    /// </summary>
+    internal static async Task PngLastResortHdrFrameAsync(HdrFrameData f, EncodingSettings s, string path,
+        Exception cause, string who, string why, string notice, CancellationToken ct = default)
+    {
+        CoreLog.Warn(who, why, cause, LogCategory.Encoding);
+        var pngPath = Path.ChangeExtension(path, ".png");
+        // 进保底先把这一槽清掉：下面 PNG 编码器自己写的留痕（例如"请求 8-bit ⇒ HDR 退回 SDR"）
+        // 必须能被认出来是【本次】写的，而不是上一次编码留下的残值 —— 单槽通道只能靠约定清。
+        EncoderFallbackNotifier.LastReason = null;
+        try
+        {
+            await EncoderFactory.Create(OutputFormat.PNG).EncodeAsync(f, s, pngPath, ct);
+            CoreLog.Info(who, $"PNG 保底（HDR 帧）成功，实际落盘: {pngPath}", LogCategory.Encoding);
+            // 两条留痕都要说：换格式是用户【一定】要知道的，而 PNG 编码器内部又改了动态范围
+            // （请求 8-bit ⇒ PQ 装不下 ⇒ 退回 SDR）同样不能吞 —— 单槽通道就把它接在后面并起来。
+            var inner = EncoderFallbackNotifier.LastReason;
+            EncoderFallbackNotifier.LastReason = string.IsNullOrEmpty(inner) ? notice : $"{notice}｜另外：{inner}";
+            RecordFallbackPath(path, pngPath);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception pngEx)
+        {
+            CoreLog.Error(who, $"{who} 的 PNG 保底（HDR 帧）也失败 ⇒ 这张图确实丢了", pngEx, LogCategory.Encoding);
+            throw new AggregateException($"{who} 编码与 PNG 保底均失败", cause, pngEx);
+        }
     }
 
     /// <summary>路径中禁止出现的字符（会破坏命令行引号配对）。</summary>
@@ -1922,12 +2097,20 @@ public static class FormatHelper
 
     /// <summary>根据 EncodingSettings 计算 ICC 和 CICP 元数据。</summary>
     public static (byte[]? icc, byte[]? cicp) GetColorMetadata(EncodingSettings s)
+        => GetColorMetadata(s.ColorSpaceTag, s.IccProfile);
+
+    /// <summary>
+    /// 同一份声明的裸值入口：只吃 <c>colorSpaceTag</c> + <c>iccProfile</c>，
+    /// 给手上没有完整 <see cref="EncodingSettings"/> 的末端保底路径（AVIF 全后端失败 → PNG）复用，
+    /// 免得那条路自己再拼一遍"要不要嵌 ICC / 下发哪组码点"—— 那份逻辑只该有这一处。
+    /// </summary>
+    internal static (byte[]? icc, byte[]? cicp) GetColorMetadata(string? colorSpaceTag, byte[]? iccProfile)
     {
-        bool isSRgb = s.ColorSpaceTag is null or "System" or "sRGB";
-        byte[]? icc = (!isSRgb && IsEmbeddableIcc(s.IccProfile)) ? s.IccProfile : null;
+        bool isSRgb = colorSpaceTag is null or "System" or "sRGB";
+        byte[]? icc = (!isSRgb && IsEmbeddableIcc(iccProfile)) ? iccProfile : null;
         // ═══ AdobeRGB 无标准 CICP primaries code (ITU-T H.273 Table 2) ═══
         // 详见 BuildSdrCicp：误标的 cICP 会覆盖 AdobeRGB iCCP → 色彩丢失，故只靠 ICC 声明。
-        var cicp = BuildSdrCicp(s.ColorSpaceTag);
+        var cicp = BuildSdrCicp(colorSpaceTag);
         return (icc, cicp);
     }
 

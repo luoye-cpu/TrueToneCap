@@ -169,6 +169,7 @@ public static class UsabilityTests
         GainMap_GrayMode();
         GainMap_RgbMode();
         GainMap_QualitySettings();
+        GainMap_OddDimensionGeometry();
 
         // ─── 13. FormatHelper 辅助测试 ───
         Console.WriteLine("\n── 13. FormatHelper ──");
@@ -201,6 +202,10 @@ public static class UsabilityTests
         // ─── 18. 编码器线程安全测试 ───
         Console.WriteLine("\n── 18. 并发安全 ──");
         Concurrent_EncoderFactory();
+
+        // ─── 19. 源码哨兵：通知去向 ───
+        Console.WriteLine("\n── 19. 通知去向哨兵 ──");
+        Toast_TraceabilityIntent();
 
         // ─── 汇总 ───
         sw.Stop();
@@ -569,12 +574,14 @@ public static class UsabilityTests
         try
         {
             var icc = ColorProfileProvider.GetDisplayIccProfile(0);
-            // 契约: 空句柄下要么返回 null（无显示器），要么返回完整 ICC profile。
-            // 不应返回「非空但长度可疑」的残缺数据。
-            if (icc is null)
-                Skip("ColorProfile: GetDisplayIccProfile(0)", "无显示器（环境限制，返回 null 属预期）");
-            else
-                Assert($"ColorProfile: GetDisplayIccProfile(0) 返回完整 ICC ({icc.Length}B)",
+            // 契约: 句柄为 0 时 GetMonitorName 拿不到设备名 ⇒ cacheKey 为空 ⇒ 必须返回 null，
+            // 不许回落成"主显示器的 profile"（那会让编码时把 A 屏的 ICC 盖到 B 屏的像素上）。
+            // 2026-09-28：这一格原本记成 Skip（"无显示器属环境限制"）⇒ 本机接着真 HDR 屏也一次没判过。
+            // null 是**预期值**，预期值就该断言；哪天空句柄开始吐数据，这条要红。
+            Assert("ColorProfile: 空句柄返回 null（不回落成主屏 profile）", icc is null,
+                   icc is null ? "" : $"实际返回 {icc.Length}B");
+            if (icc is not null)
+                Assert($"ColorProfile: 空句柄返回完整 ICC ({icc.Length}B)",
                        icc.Length > 128);
         }
         catch { Assert("ColorProfile: GetDisplayIccProfile(0) 不崩溃", false, "抛出异常"); }
@@ -781,8 +788,10 @@ public static class UsabilityTests
         foreach (var fmt in formats)
         {
             var encoder = EncoderFactory.Create(fmt);
-            var (min, max, def, label) = encoder.GetQualityRange();
-            allOk &= min <= def && def <= max && !string.IsNullOrEmpty(label);
+            var (min, max, def, scale) = encoder.GetQualityRange();
+            // 第 4 项从"中文标签字符串"换成了 QualityScale 枚举（Core 不再产出用户可见文案）
+            // ⇒ 这里能验的只剩"是不是一个已定义的刻度"，标签有没有模板归 CorePipelineTests 那张卡管。
+            allOk &= min <= def && def <= max && Enum.IsDefined(scale);
         }
         Assert($"EncoderFactory: 全部 {formats.Length} 种格式质量范围合法", allOk);
     }
@@ -795,7 +804,7 @@ public static class UsabilityTests
         {
             var encoder = EncoderFactory.Create(fmt);
             var desc = encoder.GetQualityDescription(encoder.GetQualityRange().Default);
-            allOk &= !string.IsNullOrEmpty(desc);
+            allOk &= Enum.IsDefined(desc.Kind);
         }
         Assert($"EncoderFactory: 全部 {formats.Length} 种格式质量描述非空", allOk);
     }
@@ -1683,6 +1692,108 @@ public static class UsabilityTests
             settings.GainMapMode == GainMapMode.Rgb, $"读回 {settings.GainMapMode}");
     }
 
+    /// <summary>截图尺寸不是 4 的整数倍时，增益图/底图各自的尺寸是什么（2026-09-28 审查轮新增）。</summary>
+    /// <remarks>
+    /// 此前门禁对"增益图几何"**零断言**：尺寸这条事实同时写在 `RescaleGainMap` 的向上取整、
+    /// 文档注释的 1921×1081→481×271 和真实产物里，改错了没有任何一处会红。
+    /// 判据钉的是"当前语义 = 向上取整（libultrahdr 是向下取整 `jpegr.cpp:694`）+ 底图尺寸不被偶数化"，
+    /// 两者都合法是因为解码端按**实际比例**重采样（`jpegr.cpp:1673`），且 MPF/XMP 都不写尺寸。
+    /// 边缘那一块半块的**取值**不在这里判（它是内容相关的观感量，见审查报告 §6.10 的外部读数）。
+    /// </remarks>
+    static void GainMap_OddDimensionGeometry()
+    {
+        if (!JpegLiNative.IsAvailable)
+        {
+            Skip("GainMap 奇数尺寸几何", "cjpegli.exe 不可用（本机缺 native 工具）");
+            return;
+        }
+        var cases = new (int W, int H, int MapW, int MapH, string Why)[] {
+            (64, 64, 16, 16, "对照：正好除得尽"),
+            (129, 77, 33, 20, "上下边都是半块"),
+            (1921, 1081, 481, 271, "文档给的例子"),
+            (3, 2, 1, 1, "不足一个 4x4 块"),
+            (1, 1, 1, 1, "退化到单像素"),
+        };
+        foreach (var c in cases)
+        {
+            string name = $"GainMap 几何 {c.W}x{c.H}（{c.W}x{c.H}→底图 {c.W}x{c.H} / 增益图 {c.MapW}x{c.MapH}）";
+            try
+            {
+                int n = c.W * c.H;
+                var bgra = new byte[n * 4];
+                for (int p = 0; p < n; p++)
+                {
+                    int x = p % c.W, y = p / c.W;
+                    // 最右一列 + 最下一行放超纸白内容（255×3 scRGB > SdrWhiteLevel）：
+                    // 增益图里只有边缘那一列/一行非零 ⇒ "半块到底是被平均进去还是被丢掉"可直接读出来
+                    byte v = (byte)((x == c.W - 1 || y == c.H - 1) ? 255 : 100);
+                    bgra[p * 4] = v; bgra[p * 4 + 1] = v; bgra[p * 4 + 2] = v; bgra[p * 4 + 3] = 255;
+                }
+                var hdr = CreateHdrFrame(bgra, c.W, c.H);
+                var encoder = new JpegGainMapEncoder();
+                var settings = new EncodingSettings
+                {
+                    Format = OutputFormat.JPEG_GAINMAP, Quality = 1.0f, HdrOutput = true,
+                    GainMapMode = GainMapMode.Gray,
+                };
+                string path = Path.Combine(OutDir, $"gainmap_geom_{c.W}x{c.H}.jpg");
+                if (File.Exists(path)) File.Delete(path);
+                encoder.EncodeAsync(hdr, settings, path).GetAwaiter().GetResult();
+                var d = File.ReadAllBytes(path);
+
+                int baseW = 0, baseH = 0, mapW = 0, mapH = 0;
+                bool baseOk = TryReadJpegSofDims(d, 0, out baseW, out baseH);
+                int soi2 = IndexOfGainMapSoi(d);
+                bool mapOk = soi2 >= 0 && TryReadJpegSofDims(d, soi2, out mapW, out mapH);
+
+                Assert($"{name} · 底图 SOF 尺寸不被偶数化",
+                    baseOk && baseW == c.W && baseH == c.H,
+                    baseOk ? $"SOF={baseW}x{baseH}，期望 {c.W}x{c.H}" : "没读到底图 SOF");
+                Assert($"{name} · 增益图 SOF 尺寸=向上取整",
+                    mapOk && mapW == c.MapW && mapH == c.MapH,
+                    mapOk ? $"SOF={mapW}x{mapH}，期望 {c.MapW}x{c.MapH}"
+                          : (soi2 < 0 ? "第二个 SOI 不存在（没增益图？）" : "没读到增益图 SOF"));
+            }
+            catch (Exception ex)
+            {
+                Assert(name, false, ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+    }
+
+    /// <summary>从 <paramref name="soi"/>（FFD8 的首字节）起走段链，读第一枚 SOF 的宽高。</summary>
+    static bool TryReadJpegSofDims(byte[] d, int soi, out int w, out int h)
+    {
+        w = h = 0;
+        if (soi < 0 || soi + 2 > d.Length || d[soi] != 0xFF || d[soi + 1] != 0xD8) return false;
+        for (int i = soi + 2; i + 9 < d.Length;)
+        {
+            if (d[i] != 0xFF) { i++; continue; }
+            byte m = d[i + 1];
+            if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }
+            if (m == 0xD9) return false;                       // 走到 EOI 都没碰到 SOF ⇒ 解析失步
+            int len = (d[i + 2] << 8) | d[i + 3];
+            if (m is >= 0xC0 and <= 0xCF and not (0xC4 or 0xC8 or 0xCC))
+            {
+                h = (d[i + 5] << 8) | d[i + 6];                 // SOF: 标记2 + 长度2 + 精度1 + 高2 + 宽2
+                w = (d[i + 7] << 8) | d[i + 8];
+                return w > 0 && h > 0;
+            }
+            if (len < 2) return false;
+            i += 2 + len;
+        }
+        return false;
+    }
+
+    /// <summary>增益图那张 JPEG 的 SOI：Base 的 EOI 与它的 SOI 在封装里紧邻（FFD9 FFD8）。</summary>
+    static int IndexOfGainMapSoi(byte[] d)
+    {
+        for (int i = 2; i + 3 < d.Length; i++)
+            if (d[i] == 0xFF && d[i + 1] == 0xD9 && d[i + 2] == 0xFF && d[i + 3] == 0xD8)
+                return i + 2;                                    // 扫描数据里 FF 必被填充成 FFD9 之外的形态，故这里唯一
+        return -1;
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  13. FormatHelper
     // ═══════════════════════════════════════════════════════════════
@@ -1998,6 +2109,132 @@ public static class UsabilityTests
         {
             Assert("Concurrent: EncoderFactory", false, ex.GetType().Name);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  19. 源码哨兵：通知去向
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>意图注释里的锚点短语 —— 只有这两条可追溯助手的注释会用到它，
+    /// 注释被删（或被改写）时本哨兵就红，理由：这两条走系统通知中心是【设计】，
+    /// 但设计没写在调用点上，读代码的人会把它当成 ShowCaptureDegraded 在 2026-09-16
+    /// 修过的那类遗漏（"原实现只发 Windows 系统通知，用户若在设置里选了四角位置，降级提示仍会忽略它"）。</summary>
+    private const string TraceabilityIntentPhrase = "「可追溯」类事件";
+
+    /// <summary>钉住 ToastService 里"谁该尊重通知位置、谁该进通知中心"这条分界。
+    /// <para>为什么只能钉源码：跑起来要真机桌面 + 真截图 + 人眼去看通知中心，
+    /// headless 门禁一条都判不了 ⇒ 按本仓惯例落为源码哨兵。</para></summary>
+    static void Toast_TraceabilityIntent()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "ToastService.cs"));
+        if (path is null)
+        {
+            // 哨兵找不到被检文件 ⇒ 判红，不 Skip：Skip 等于这条锁从此集体失明
+            Assert("Toast: 定位到 Services/ToastService.cs", false, "哨兵前提失败：源码文件没找到");
+            return;
+        }
+
+        var raw = File.ReadAllText(path).Replace("\r\n", "\n");
+        var body = StripLineComments(raw);   // 判"路由形状"用剥掉注释的正文，免得注释里提一句也算命中
+
+        // ① 对照件：降级提示必须仍走统一入口 —— 它属即时反馈，用户选了四角就该显示在四角
+        var degraded = MethodSegment(body, "public static void ShowCaptureDegraded");
+        Assert("Toast: ShowCaptureDegraded 仍经统一入口 ShowToast(",
+            degraded.Contains("ShowToast("),
+            $"读到 {degraded.Length} 字符的方法段，锚点=ShowToast(（走老 Show(dict) 即红）");
+
+        // ② 且没把系统通道写死 —— 写死等于又把用户的"通知位置"作废，即 09-16 那个 bug 的复现
+        var degradedArgs = ArgsOfCall(degraded, "ShowToast(");
+        Assert("Toast: ShowCaptureDegraded 的 ShowToast 实参不含 ToastChannel.System",
+            degradedArgs.Length > 0 && !degradedArgs.Contains("ToastChannel.System"),
+            $"实参=({degradedArgs})，应为 Overlay/默认通道");
+
+        // ③④ 两条可追溯助手各带一句意图注释（注释没了 → 说明有人把它当漏改，或把它改回尊重位置）
+        foreach (var helper in new[] { "public static void ShowCaptureSuccess", "public static void ShowCaptureFailed" })
+        {
+            var doc = DocAbove(raw, helper);
+            Assert($"Toast: {helper["public static void ".Length..]} 带「可追溯」意图注释",
+                doc.Contains(TraceabilityIntentPhrase),
+                $"应在签名上方紧邻注释里找到「{TraceabilityIntentPhrase}」；实际紧邻注释={(doc.Length > 160 ? doc[..160] + "…" : doc)}");
+        }
+    }
+
+    /// <summary>从测试运行目录向上查找仓库内文件（算法与 CorePipelineTests 的同名助手一致；
+    /// 那一份是本类看不到的 private，故本套件自备一份）。找不到返回 null，由调用方【判红】。</summary>
+    static string? FindRepoFile(string relative)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
+        {
+            var cand = Path.Combine(dir.FullName, relative);
+            if (File.Exists(cand)) return cand;
+        }
+        return null;
+    }
+
+    /// <summary>剥掉整行注释（含 XML doc）后的正文。</summary>
+    static string StripLineComments(string src)
+    {
+        var kept = new List<string>();
+        foreach (var line in src.Replace("\r\n", "\n").Split('\n'))
+        {
+            if (line.TrimStart().StartsWith("//")) continue;
+            kept.Add(line);
+        }
+        return string.Join("\n", kept);
+    }
+
+    /// <summary>取某方法的一段源码：从签名起，到下一条方法签名（\n    public/private static）止。</summary>
+    static string MethodSegment(string body, string signature)
+    {
+        int i = body.IndexOf(signature, StringComparison.Ordinal);
+        if (i < 0) return "";
+        int end = body.Length;
+        foreach (var marker in new[] { "\n    public static", "\n    private static", "\n    internal static" })
+        {
+            int j = body.IndexOf(marker, i + signature.Length, StringComparison.Ordinal);
+            if (j >= 0 && j < end) end = j;
+        }
+        return body[i..end];
+    }
+
+    /// <summary>取 <paramref name="call"/>（含左括号）之后配平的实参串：跳过字符串字面量里的括号，
+    /// 按深度配平。配不上平返回空串 —— 由调用方判红，不静默放过。</summary>
+    static string ArgsOfCall(string segment, string call)
+    {
+        int open = segment.IndexOf(call, StringComparison.Ordinal);
+        if (open < 0) return "";
+        open += call.Length;
+        int depth = 1;
+        bool inStr = false;
+        for (int i = open; i < segment.Length; i++)
+        {
+            char c = segment[i];
+            if (inStr) { if (c == '"') inStr = false; continue; }
+            switch (c)
+            {
+                case '"': inStr = true; break;
+                case '(': depth++; break;
+                case ')':
+                    if (--depth == 0) return segment[open..i];
+                    break;
+            }
+        }
+        return "";
+    }
+
+    /// <summary>取签名上方【紧邻的那一段 /// 注释】—— 只取紧邻，免得把上一个方法的注释算到它头上。</summary>
+    static string DocAbove(string text, string signature)
+    {
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].Contains(signature, StringComparison.Ordinal)) continue;
+            int j = i - 1;
+            while (j >= 0 && lines[j].TrimStart().StartsWith("///")) j--;
+            return string.Join("\n", lines.Skip(j + 1).Take(i - j - 1));
+        }
+        return "";   // 签名都没找到 → 空串 → 调用方判红
     }
 
     // ═══════════════════════════════════════════════════════════════

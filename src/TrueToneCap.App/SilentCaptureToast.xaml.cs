@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/SilentCaptureToast.xaml.cs
 // 应用内通知浮层 —— 支持四角定位（BottomRight / TopRight / TopLeft / BottomLeft / WindowsNotify）
@@ -193,24 +193,28 @@ public sealed partial class SilentCaptureToast : Window
         // 语义图标 + 前景色。Windows 11 通知卡片的图标是**着色的符号**，
         // 而非徽章 —— 语义靠颜色区分：成功绿 / 警告黄 / 错误红 / 信息蓝。
         // 原来所有通知都是同一个绿色对勾，降级/失败也显示成"成功"是明显误导。
-        var (glyph, brushKey) = tone switch
+        var (icon, brushKey) = tone switch
         {
-            ToastTone.Warning => ("\uE7BA", "SystemFillColorCautionBrush"),
-            ToastTone.Error => ("\uE783", "SystemFillColorCriticalBrush"),
-            ToastTone.Info => ("\uE946", "SystemFillColorAttentionBrush"),
-            _ => ("\uE73E", "SystemFillColorSuccessBrush"),
+            ToastTone.Warning => (IconWarning, "SystemFillColorCautionBrush"),
+            ToastTone.Error => (IconError, "SystemFillColorCriticalBrush"),
+            ToastTone.Info => (IconInfo, "SystemFillColorAttentionBrush"),
+            _ => (IconSuccess, "SystemFillColorSuccessBrush"),
         };
 
-        IconGlyph.Glyph = glyph;
+        // 四枚轮廓预置在 XAML 里，这里只切可见性（不共享 Geometry 资源、也不运行时解析路径串）。
+        // 默认全 Collapsed ⇒ 万一上面那个 switch 漏了一档，表现是"没有图标"而不是"错误地显示成功勾"。
+        IconSuccess.Visibility = IconWarning.Visibility = IconError.Visibility = IconInfo.Visibility
+            = Visibility.Collapsed;
+        icon.Visibility = Visibility.Visible;
         try
         {
             if (Application.Current.Resources.TryGetValue(brushKey, out var res) && res is Brush b)
-                IconGlyph.Foreground = b;
+                icon.Foreground = b;
         }
         catch
         {
             // 主题资源缺失时退化为硬编码色，保证始终可见
-            IconGlyph.Foreground = new SolidColorBrush(tone switch
+            icon.Foreground = new SolidColorBrush(tone switch
             {
                 ToastTone.Warning => Microsoft.UI.Colors.Orange,
                 ToastTone.Error => Microsoft.UI.Colors.IndianRed,

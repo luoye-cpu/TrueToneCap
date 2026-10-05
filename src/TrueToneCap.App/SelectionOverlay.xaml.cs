@@ -74,11 +74,6 @@ public sealed partial class SelectionOverlay : Window
     private static partial int SetWindowLongW(nint hWnd, int nIndex, int dwNewLong);
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint hwnd);
-    [LibraryImport("dwmapi.dll")]
-    private static partial int DwmExtendFrameIntoClientArea(nint hwnd, ref MARGINS margins);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MARGINS { public int cxLeftWidth, cxRightWidth, cyTopHeight, cyBottomHeight; }
 
     private static readonly nint HWND_TOPMOST = new(-1);
     private const uint SWP_SHOWWINDOW = 0x0040;
@@ -99,30 +94,28 @@ public sealed partial class SelectionOverlay : Window
     private readonly int _vx, _vy, _vw, _vh;  // 物理像素
     private double _dpiScale = 1.0;
     private bool _bgRendered;
+    // ── 诊断打点（2026-09-30，报告 §23.3）──
+    // 现场：一次捕获流程里 `覆盖层就绪` 打了 30 次，而 `背景渲染` 与 `窗口检测完成` 各只 1 次；
+    // 这与回调开头的 `if (_bgRendered) return;`（且 _bgRendered 全文件无复位）不可能同时成立。
+    // 要么有多个实例各自订阅 Activated，要么守卫读的不是我以为的那个字段 —— 只能把实例号与
+    // 进入次数印出来才能分清。这不是临时脚手架：以后"覆盖层画了却没上来"这一类报障都靠这两个数归属。
+    private static int s_instanceSeq;
+    private readonly int _selfSeq = System.Threading.Interlocked.Increment(ref s_instanceSeq);
+    private int _activateCount;
 
     // ── 选区在覆盖层中的有效像素位置（用于标注画布定位） ──
     private double _selEffX1, _selEffY1, _selEffW, _selEffH;
 
-    // ── HDR 背景窗口（可选，当 HDR 捕获可用时使用） ──
-    private HdrPreviewWindow? _hdrBgWnd;
-    private float[]? _hdrPixels;
-    private int _hdrW, _hdrH;
-
-    /// <summary>SDR 构造：使用桌面 BGRA 像素作为背景。</summary>
+    /// <summary>背景 = 桌面 BGRA 像素，画进覆盖层自己的表面。
+    /// <para>这里【没有】第二条 GPU 供帧路：原先那扇下层供帧窗（连同它的类）于 2026-10-01 删除——
+    /// 标记帧实验（报告 §37.7）量出它呈现的帧从来没上屏（品红 0/6400、三通道中性灰）；
+    /// 而它一旦「报成功」就会关掉这里的 CPU 合成，那正是维护者看到的「预览全白」。</para></summary>
     public SelectionOverlay(byte[] desktopPixels, int vx, int vy, int vw, int vh)
-        : this(desktopPixels, vx, vy, vw, vh, null, 0, 0) { }
-
-    /// <summary>HDR 构造：额外接收 HDR 浮点帧用于 HDR 背景窗口。</summary>
-    public SelectionOverlay(byte[] desktopPixels, int vx, int vy, int vw, int vh,
-        float[]? hdrPixels, int hdrW, int hdrH)
     {
         DesktopPixels = desktopPixels;
         DesktopWidth = vw;
         DesktopHeight = vh;
         _vx = vx; _vy = vy; _vw = vw; _vh = vh;
-        _hdrPixels = hdrPixels;
-        _hdrW = hdrW;
-        _hdrH = hdrH;
         this.InitializeComponent();
         MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
 
@@ -162,103 +155,43 @@ public sealed partial class SelectionOverlay : Window
 
         this.Activated += (_, _) =>
         {
-            // ═══ 2026-09-15 修复：Activated 会重复触发 ═══
-            // 窗口失焦再回来就会再次 Activated。原实现在回调里无条件
-            // `new HdrPreviewWindow(...)` 覆盖 _hdrBgWnd —— 旧窗口及其 D3D 交换链
-            // 从不 Dispose ⇒ 每失焦再激活一次就泄漏一整套 GPU 资源 + 一个原生窗口，
-            // 反复切换后会累积多个全屏窗口并持续占用显存。
-            // 注：_bgRendered 此前【只】保护下面的 CPU 分支，GPU 分支完全没有保护。
+            // ═══ 2026-09-15：Activated 会重复触发（失焦再回来就再派发一次）═══
+            // 当年的形状是"每次激活都新建一整套 GPU 背景资源、旧的从不释放"⇒ 泄漏原生窗口 + 显存。
+            // 那条路径整个没了（GPU 背景分支 2026-10-01 删除，报告 §39），但【入口闩锁】必须留着：
+            // 2026-09-30 实测过"一次捕获叠 30 个全屏窗"的风暴，根因就是闩锁写在回调底部。
+            // 闩锁的位置由 Test_OverlayReentryLatch_SitsBeforeWindowCreation 钉住。
+            int actNo = ++_activateCount;
             if (_bgRendered)
             {
-                // 仍需保持置顶（覆盖层可能被背景窗口盖住）
+                LogService.Info("Overlay", $"Activated #{actNo}（实例#{_selfSeq}）背景已就绪 ⇒ 只重新置顶后返回",
+                    LogCategory.UI);
+                // 仍需保持置顶（可能被别的顶层窗口盖住）
                 _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
                     SWP_SHOWWINDOW | SWP_NOACTIVATE);
                 return;
             }
+            LogService.Info("Overlay", $"Activated #{actNo}（实例#{_selfSeq}）进入背景创建", LogCategory.UI);
+            // ═══ 闩锁必须在【入口】，不能等到底部才置位（2026-09-30 §23.3/§24.4 实测定位）═══
+            // 现场：单实例（打点只有一个实例号），却出现「进入背景创建」×30 +「背景渲染」×1 +
+            // EnumWindows 数到 36 个可见的 HDR Preview 全屏窗。三者只有在"递归"下才自洽：
+            // CreateWindowEx / GPU 呈现这一段会跑嵌套消息泵 ⇒ Activated 在同一次调用里被再次派发，
+            // 每一层进来时 _bgRendered 还是 false（它原先只在最底部置位），于是每层都建一个背景窗；
+            // 最深那一层置位后往外退，其余各层在底部看到 true 就跳过了 CPU 兜底 ⇒ 背景渲染只剩 1。
+            // 后果不是"少画一张图"那么简单：一次捕获叠出几十个 WS_VISIBLE 的窗口，而覆盖层是透明的，
+            // 它下面到底是谁在供帧就此变成不确定的事 —— 用户看到的"界面像旧版"其实是这个。
+            _bgRendered = true;
 
             // 全屏无边框覆盖：覆盖整个虚拟桌面（支持负坐标多屏）
             _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
                 SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
-            // ═══ 创建 GPU 背景窗口 (在覆盖层下方, DWM 透明穿透可见) ═══
-            // 2026-08-09: 统一 HDR(float) 与 SDR(BGRA8) 走 GPU 呈现, 消除 WriteableBitmap CPU 合成
-            // 2026-08-10 保护: ① 改用 GetSharedDevice() 只取缓存设备 — 绝不用 GetOrCreateDevice(光标显示器),
-            //    否则多屏/光标移动时旧设备被 Dispose, WGC 会话挂起 → UI 等 GPU 锁 → 整个应用卡死
-            //    ② 呈现移出 UI 线程 (Task.Run + 3s 超时) — UI 线程绝不等待无限时的 GPU 操作
-            //    ③ 失败回退 CPU 渲染 (RenderDesktopBackground), 覆盖层功能永不因 GPU 问题不可用
-            bool gpuBgOk = false;
-            try
-            {
-                var sharedDevice = AppServices.Wgc?.GetSharedDevice();
-                _hdrBgWnd = new HdrPreviewWindow(sharedDevice, AppServices.Wgc?.D3dContextLock);
-                int bgW = _hdrW > 0 ? _hdrW : vw;
-                int bgH = _hdrH > 0 ? _hdrH : vh;
-                if (_hdrBgWnd.Initialize(vx, vy, bgW, bgH))
-                {
-                    // 呈现放后台线程，UI 线程最多等 3s（正常 <100ms）；锁内部还有 500ms TryEnter 保护
-                    var pixels = _hdrPixels;
-                    int pw = _hdrW, ph = _hdrH;
-                    var bgWnd = _hdrBgWnd;
-                    bool presentOk = false;
-                    try
-                    {
-                        presentOk = Task.Run(() =>
-                        {
-                            if (pixels is not null && pw > 0 && ph > 0)
-                            {
-                                bgWnd.PresentFrame(pixels, pw, ph);
-                                LogService.Info("Overlay", $"GPU 背景窗口 (HDR) 已创建 {pw}x{ph}", LogCategory.Capture);
-                            }
-                            else if (desktopPixels is not null)
-                            {
-                                // 2026-08-11: SDR 数据转 scRGB 线性后走统一 Float16 呈现 —
-                                // DWM 色域感知管线处理，广色域正确性不依赖 ACM
-                                var scrgb = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(desktopPixels, vw, vh);
-                                bgWnd.PresentFrame(scrgb, vw, vh);
-                                LogService.Info("Overlay", $"GPU 背景窗口 (SDR→scRGB) 已创建 {vw}x{vh}", LogCategory.Capture);
-                            }
-                            return true;
-                        }).Wait(3000);
-                    }
-                    catch (Exception ex)
-                    {
-                        LogService.Error("Overlay", $"GPU 呈现异常: {ex.Message}", LogCategory.Capture);
-                    }
-                    if (!presentOk)
-                        LogService.Warn("Overlay", "GPU 呈现超时 (3s)，回退 CPU 渲染", LogCategory.Capture);
-
-                    gpuBgOk = presentOk;
-                    // GPU 背景呈现成功 → 置位，后续 Activated 不再重复创建（见回调开头的保护）
-                    if (presentOk) _bgRendered = true;
-                }
-                else
-                {
-                    _hdrBgWnd.Dispose();
-                    _hdrBgWnd = null;
-                }
-            }
-            catch (Exception ex)
-            {
-                LogService.Error("Overlay", $"GPU 背景创建失败: {ex.Message}", LogCategory.Capture);
-                _hdrBgWnd?.Dispose();
-                _hdrBgWnd = null;
-            }
-
-            // 防御: 背景窗口创建后再置顶覆盖层, 确保覆盖层始终在背景窗口之上接收鼠标事件
-            _ = SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
-                SWP_SHOWWINDOW | SWP_NOACTIVATE);
-
-            // 全透明窗口：margins 全部 -1 使整个客户区透明，
-            // 让下层 HDR 独立窗口的 scRGB 内容可见
-            var margins = new MARGINS { cxLeftWidth = -1, cxRightWidth = -1, cyTopHeight = -1, cyBottomHeight = -1 };
-            _ = DwmExtendFrameIntoClientArea(hwnd, ref margins);
             // 获取 DPI 缩放：主路径 GetDpiForWindow，回落 XamlRoot.RasterizationScale
             uint dpi = GetDpiForWindow(hwnd);
             if (dpi > 0)
                 _dpiScale = dpi / 96.0;
             else
                 _dpiScale = RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
-            LogService.Info("Overlay", $"覆盖层就绪 DPI={dpi} Scale={_dpiScale:F2} GPU背景={gpuBgOk} 虚拟桌面={vw}x{vh}@({vx},{vy})", LogCategory.UI);
+            LogService.Info("Overlay", $"覆盖层就绪 实例#{_selfSeq} 第{actNo}次进入 DPI={dpi} Scale={_dpiScale:F2} 虚拟桌面={vw}x{vh}@({vx},{vy})", LogCategory.UI);
 
             DispatcherQueue.TryEnqueue(() => RootGrid.Focus(FocusState.Keyboard));
 
@@ -266,14 +199,20 @@ public sealed partial class SelectionOverlay : Window
             if (_timeoutTimer is { IsRunning: false } && !_finished)
                 _timeoutTimer.Start();
 
-            if (!_bgRendered)
+            // ⚠ 原先这一整块包在 `if (!_bgRendered)` 里，并在块内才置位——那是防再入的【唯一】保险，
+            //   结果它同时也是"CPU 兜底 + 窗口检测"的开关。闩锁提到入口之后，这里必须改成无条件执行，
+            //   否则 GPU 失败时就再没人画背景、也没人做窗口检测（静默把兜底关死，比原来的风暴更糟）。
             {
-                _bgRendered = true;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                // 2026-08-09: GPU 背景成功时跳过 WriteableBitmap CPU 合成
-                if (!gpuBgOk && desktopPixels is not null)
+                // 这一段【必须无条件执行】——它是兜底画面唯一的供帧者，三条都是量出来的：
+                //   · 2026-09-30 之前它被"GPU 背景成功就跳过"的条件包着 ⇒ 维护者眼里的"预览全白"；
+                //   · 2026-10-01 标记帧实验（报告 §37.7）：下层 GPU 窗整帧涂品红 + 跳过这里的 CPU 画，
+                //     屏幕仍读不到任何品红（0/6400，三通道均值 R129.9 G130.4 B129.9，判据与亮度无关），
+                //     而那扇窗当时报"呈现成功"⇒ 它的帧从来没上屏；整条 GPU 分支随后删除（报告 §39）；
+                //   · 跳掉这里屏幕就退化成 93 种颜色的页面底。
+                if (desktopPixels is not null)
                     RenderDesktopBackground(desktopPixels, vw, vh);
-                LogService.Info("Overlay", $"背景渲染 {sw.ElapsedMilliseconds}ms (GPU={gpuBgOk})", LogCategory.Capture);
+                LogService.Info("Overlay", $"背景渲染 {sw.ElapsedMilliseconds}ms", LogCategory.Capture);
                 DetectAndRenderRegions();
             }
         };
@@ -472,7 +411,7 @@ public sealed partial class SelectionOverlay : Window
 
         DrawSelectionLines(0, 0, effW, effH, $"{_vw} × {_vh}");
 
-        PositionToolbarAt(effW - 460, effH - 55);
+        PositionToolbarAt(effW - ToolbarWidthDip(), effH - ToolbarHeightDip() - 3);
         HintText.Visibility = Visibility.Collapsed;
         RootGrid.Focus(FocusState.Keyboard);
     }
@@ -505,12 +444,38 @@ public sealed partial class SelectionOverlay : Window
         RootGrid.Focus(FocusState.Keyboard);
     }
 
+    /// <summary>工具条实测不到的地板宽/高（DIP）：6 枚按钮 5×140+120 + 5×12 间距 + 16×2 内边距 ≈ 932，高 108px/1.5 = 72。</summary>
+    private const double ToolbarFloorDip = 932;
+    private const double ToolbarFloorHDip = 72;
+
+    /// <summary>
+    /// 工具条的实际宽/高（DIP）。三处钳制原先写死 460 与 50/55，而这条工具条实测约 932×72 DIP
+    /// ⇒ 贴右边缘时 tx 被钳到 effW-460，右端约 470 DIP 溢出屏幕，最后两枚（翻译/取消）连 UIA 都读不到矩形。
+    /// 2026-09-30 用真实拖拽量到（报告 §33.1：贴右下那一臂 6 枚里只有 4 枚有尺寸、第 4 枚被切到 68px）。
+    /// 量不到（未布局/NaN）时向"更宽/更高"退让 —— 钳太紧只是把工具条往左推一点，钳太松是把按钮推出屏幕点不到。
+    /// </summary>
+    private double ToolbarSizeDip(bool width)
+    {
+        try
+        {
+            Toolbar.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            double v = width ? Toolbar.DesiredSize.Width : Toolbar.DesiredSize.Height;
+            double floor = width ? ToolbarFloorDip : ToolbarFloorHDip;
+            if (double.IsFinite(v) && v > floor) return v;
+        }
+        catch { }
+        return width ? ToolbarFloorDip : ToolbarFloorHDip;
+    }
+    private double ToolbarWidthDip() => ToolbarSizeDip(true);
+    private double ToolbarHeightDip() => ToolbarSizeDip(false);
+
     private void PositionToolbarAt(double tx, double ty)
     {
         double scale = GetSafeDpiScale();
         double effW = _vw / scale, effH = _vh / scale;
-        tx = Math.Max(0, Math.Min(tx, effW - 460));
-        ty = Math.Max(0, Math.Min(ty, effH - 50));
+        double tw = ToolbarWidthDip(), th = ToolbarHeightDip();
+        tx = Math.Max(0, Math.Min(tx, effW - tw));
+        ty = Math.Max(0, Math.Min(ty, effH - th));
         Toolbar.Margin = new Thickness(tx, ty, 0, 0);
         Toolbar.Visibility = Visibility.Visible;
     }
@@ -518,9 +483,10 @@ public sealed partial class SelectionOverlay : Window
     private void PositionToolbarNearSelection(double x1, double y1, double x2, double y2)
     {
         double effH = _vh / GetSafeDpiScale();
-        double tx = x2 - 460, ty = y2 + 5;
-        if (ty + 45 > effH) ty = y1 - 50;
-        if (ty < 0) ty = y2 - 50;
+        double tw = ToolbarWidthDip(), th = ToolbarHeightDip();
+        double tx = x2 - tw, ty = y2 + 5;
+        if (ty + th + 5 > effH) ty = y1 - th - 7;
+        if (ty < 0) ty = y2 - th - 7;
         if (tx < 0) tx = x1 + 5;
         PositionToolbarAt(tx, ty);
     }
@@ -547,7 +513,17 @@ public sealed partial class SelectionOverlay : Window
             HideSelectionLines();
             MaskGrid.Visibility = Visibility.Collapsed;
         }
-        catch (Exception ex) { HintText.Text = $"⚠ 背景渲染失败: {ex.Message}"; HintText.Visibility = Visibility.Visible; }
+        catch (Exception ex)
+        {
+            // ⚠ 这里原先只把错误写进 HintText——日志里一个字都不留。
+            //   于是"背景渲染 33ms"照打、判据读到"有结构"，而屏幕上其实没画上任何桌面像素：
+            //   2026-10-01 B 档改完后就是靠这条缺失的留痕卡住归因的（报告 §39）。失败必须落盘。
+            LogService.Error("Overlay",
+                $"背景渲染失败（桌面像素没画进覆盖层）: {ex.GetType().Name}: {ex.Message} " +
+                $"len={bgra?.Length ?? -1} 需要={w}x{h}x4={((long)w * h * 4)}", LogCategory.Capture);
+            HintText.Text = $"⚠ 背景渲染失败: {ex.Message}";
+            HintText.Visibility = Visibility.Visible;
+        }
     }
 
     public byte[]? ExtractRegionPixels(RectInt32 screenRect)
@@ -712,8 +688,10 @@ public sealed partial class SelectionOverlay : Window
         if (_isAnnotating) ExitAnnotationMode();
 
         // 先在后台启动像素提取/合成 (窗口关闭不影响内存中的桌面像素数据)
+        // ⚠ 四个目的地（保存/复制/识字/翻译）都要吃合成后的像素：识字/翻译一旦落回原始桌面像素，
+        //   用户用马赛克盖住的原文会被 OCR 原样读出来。
         Task<byte[]?>? composeTask = null;
-        if (result is ActionResult.Confirm or ActionResult.Copy)
+        if (result is ActionResult.Confirm or ActionResult.Copy or ActionResult.Ocr or ActionResult.Translate)
         {
             composeTask = _annotationManager.Layers.Count > 0
                 ? Task.Run(GetAnnotatedRegionPixels)
@@ -749,11 +727,6 @@ public sealed partial class SelectionOverlay : Window
         _hardWatchdog?.Dispose();
         _hardWatchdog = null;
         DisposeRegionRefreshTimer();
-
-        // 关闭 HDR 背景窗口
-        _hdrBgWnd?.Close();
-        _hdrBgWnd?.Dispose();
-        _hdrBgWnd = null;
 
         // 窗口被系统关闭（Alt+F4 等）时兜底触发 Cancel，保证 MainWindow 防重入锁必然释放
         if (!_finished)
@@ -1182,9 +1155,8 @@ public sealed partial class SelectionOverlay : Window
         try
         {
             var selfHwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-            // 排除覆盖层自身 + 下层 HDR 背景窗口（避免把背景窗口识别为"窗口"）
+            // 排除覆盖层自身（曾经还要排除下层 HDR 背景窗，那条路已删）
             var exclude = new HashSet<nint> { selfHwnd };
-            if (_hdrBgWnd?.Hwnd is nint bgHwnd && bgHwnd != 0) exclude.Add(bgHwnd);
             _detectedRegions = await Task.Run(() =>
                 RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh, exclude));
 
@@ -1218,7 +1190,6 @@ public sealed partial class SelectionOverlay : Window
             {
                 var selfHwnd2 = WinRT.Interop.WindowNative.GetWindowHandle(this);
                 var exclude2 = new HashSet<nint> { selfHwnd2 };
-                if (_hdrBgWnd?.Hwnd is nint bgHwnd2 && bgHwnd2 != 0) exclude2.Add(bgHwnd2);
                 var regions = RegionDetector.DetectAll(DesktopPixels, _vx, _vy, _vw, _vh, exclude2);
                 if (!_selectionComplete && !_isDragging)
                 {

@@ -15,14 +15,17 @@
 > | 文中引用 | 现状 | 现在的承担者 |
 > |---|---|---|
 > | `Directory.Build.targets` | 已改名/拆分 | `Directory.Build.props` + `Directory.Packages.props` |
-> | `Processing/GpuEffectProcessor.cs` | **类已删除** | `Processing/GpuToneMapper.cs`（`ShaderLoader.cs` 注释里仍留着旧类名） |
+> | `Processing/GpuEffectProcessor.cs` | **类已删除** | 一度写成"由 `GpuToneMapper.cs` 承担"——那个类本身也于 2026-10-01 被删（见下三行），实际的 HDR→SDR 只有 `Processing/ToneMapper.cs`（CPU） |
+> | `Processing/GpuToneMapper.cs` | **文件已删除**（2026-10-01） | 实际的 HDR→SDR 只有 `Processing/ToneMapper.cs`（CPU）。本文**所有图与表**（第 1-2 节的管线总览框、第 3.2 节、结构树、生命周期与服务单例表）里凡出现 `GpuToneMapper` 之处，一律读作"曾存在"，不是当前实现 |
+> | `Processing/ShaderLoader.cs` | **文件已删除**（2026-10-01） | 它唯一的调用方就是上面那个类；现在"按名字找字节码"的活路是 `Services/HdrCaptureWindow.cs` 里的 `FindCso` |
+> | `Shaders/ToneMapping.hlsl` | **文件已删除**（2026-10-01） | `ShaderCompiler.cs` 的清单曾写它"✅ 存在，运行时消费"，那句是假的。三张名单（`ShaderCompiler.cs` / `Shaders/*.hlsl` / `App.csproj` 的 CompileShaders Inputs）互相对账 + "每条都要有剥注释后的 `.cso` 消费点"，锁在 `CorePipelineTests.Test_ShaderList_HasNoOrphanEntry` |
 > | `ColorManagement/GamutMapper.cs` | **类已删除** | 色域映射逻辑上移到 App 层（`MainWindow.ColorManagement.cs` 等） |
 > | `Encoding/ManagedJpegEncoder.cs` | **类已删除** | `JpegLiNative.cs`（cjpegli.exe）+ `JpegGainMapEncoder.cs` |
 > | `Encoding/NvencAvifBackend.cs` | 文件删除但**类仍在** | 已合并进 `Encoding/FormatEncoders.cs:385` |
 > | `Shaders/MosaicEffect.hlsl` | **文件已删除** | 马赛克改为 CPU 光栅化（`Services/AnnotationRasterizer.cs`） |
 >
-> **文档原未列出、当前确实存在**（已在下方结构树中补入 `ShaderLoader.cs`、`FormatEncoders.cs`、
-> `OverlayComposite.hlsl`、两个 `.props`；**仍未补入**的有）：
+> **文档原未列出、当前确实存在**（已在下方结构树中补入 `FormatEncoders.cs`、
+> `OverlayComposite.hlsl`、两个 `.props`；`ShaderLoader.cs` 曾补入、2026-10-01 已删除；**仍未补入**的有）：
 > `Encoding/IccStore.cs`、`Encoding/NativeEncoderGuard.cs`、
 > `Encoding/ManagedBmpEncoder.cs`、`Encoding/ManagedTiffEncoder.cs`、
 > `Encoding/AvifHardwareProbe.cs`、`Encoding/GpuCapability.cs`、`src/*/packages.lock.json`。
@@ -154,9 +157,9 @@ TrueToneCap/
     │   ├── Capture/
     │   │   └── DisplayInfo.cs            # 显示器枚举 + HDR 检测
     │   ├── Processing/
-    │   │   ├── GpuToneMapper.cs          # GPU 色调映射（HLSL + D3D11）
-    │   │   ├── ShaderLoader.cs           # CSO 加载（消除 Gpu* 重复加载代码）
-    │   │   ✗ GpuEffectProcessor.cs       # 【已移除】GPU 后处理由 GpuToneMapper.cs 承担
+    │   │   ✗ GpuToneMapper.cs          # 【已删除 2026-10-01】生产零调用，HDR→SDR 只有 ToneMapper（CPU）
+    │   │   ✗ ShaderLoader.cs           # 【已删除 2026-10-01】唯一调用方是上面那个类；活路是 HdrCaptureWindow.FindCso
+    │   │   ✗ GpuEffectProcessor.cs       # 【已移除】GPU 后处理没有接手方（原先写的"由 GpuToneMapper 承担"也已删除）
     │   │   └── ToneMapper.cs             # CPU 色调映射（Reinhard/Hable/ACES）
     │   ├── Encoding/
     │   │   ├── ImageEncoder.cs           # 编码器抽象 + EncodingSettings
@@ -218,7 +221,7 @@ TrueToneCap/
     │   ├── Models/
     │   │   └── CaptureResult.cs          # 捕获结果 DTO
     │   ├── Shaders/
-    │   │   ├── ToneMapping.hlsl          # 色调映射 PS
+    │   │   ✗ ToneMapping.hlsl          # 【已删除 2026-10-01】清单里挂着"运行时消费"而没人加载它
     │   │   ├── FullscreenVS.hlsl         # 全屏三角形 VS
     │   │   ├── OverlayComposite.hlsl     # 覆盖层合成 PS（文档中原本缺失此条）
     │   │   ✗ MosaicEffect.hlsl           # 【已移除】马赛克改由 CPU 光栅化 AnnotationRasterizer.cs
@@ -298,36 +301,32 @@ CaptureMonitorAsync(config)
 
 ---
 
-## 3. GPU 渲染管线 (GpuToneMapper + ToneMapper)
+## 3. 色调映射管线（ToneMapper，CPU；GPU 分支 2026-10-01 已删除）
 
 ### 3.1 着色器
 
 | 文件 | 类型 | 用途 |
 |------|------|------|
-| `FullscreenVS.hlsl` | vs_6_0 | SV_VertexID 全屏三角形（无 VB / IB） |
-| `ToneMapping.hlsl` | ps_6_0 | Reinhard/Hable 色调映射 + sRGB gamma |
-| `OverlayComposite.hlsl` | ps_6_0 | 覆盖层合成（文档原先漏列） |
-| ~~`MosaicEffect.hlsl`~~ | ps_6_0 | **已移除** —— 马赛克改由 CPU 光栅化 |
+| `FullscreenVS.hlsl` | vs_5_0 | SV_VertexID 全屏三角形（无 VB / IB） |
+| `OverlayComposite.hlsl` | ps_5_0 | 覆盖层合成（HDR 窗的 GPU 合成路径） |
+| ~~`ToneMapping.hlsl`~~ | ~~ps_5_0~~ | **已删除（2026-10-01）** —— 唯一加载方 `GpuToneMapper` 自 2026-09-16 起不再构造，属"清单里有、运行时没人加载"的死资产 |
+| ~~`MosaicEffect.hlsl`~~ | — | **已移除** —— 马赛克改由 CPU 光栅化 |
+| ~~`CopyTexture.hlsl`~~ | — | **从未存在** —— 当年 `HdrCaptureWindow` 找不到它会回退去加载 `ToneMapping.hlsl.cso`，而回退来的 PS 从没被 `PSSetShader` 绑定（2026-09-14 核实） |
 
-编译：`CompileShaders.ps1`（需要 Windows SDK dxc.exe）
+编译：`Shaders/CompileShaders.ps1` 用 **fxc**（不是 dxc）产出 SM5.0/DXBC —— dxc 强制 SM6/DXIL，
+D3D11 `CreateShader` 会报 `E_INVALIDARG`；构建期与 `ShaderCompiler.cs` 的 Profile 必须同档（2026-09-14 对齐）。
 
-### 3.2 GpuToneMapper (GPU 路径)
+### 3.2 ~~GpuToneMapper (GPU 路径)~~ —— 已于 2026-10-01 删除
 
-| 属性 | 值 |
-|------|-----|
-| 输入 | float[] HDR scRGB 线性 |
-| 输出 | byte[] BGRA8 SDR sRGB |
-| 着色器加载 | 文件系统 → 嵌入资源双重回退 |
-| 纹理池化 | 输入/输出/staging 按尺寸缓存复用 |
-| 常量缓冲区 | Mode(uint) + Exposure(float) + PaperWhite(float) + MaxNits(float) |
-| 回退 | 着色器缺失或 GPU 失败 → CPU ToneMapper |
-
-流程：
-```
-Float32[] → PixelOps.ConvertHalfToFloatRow → Float16 纹理上传
-  → PS 渲染 (Hable/Reinhard 色调映射 + sRGB gamma)
-  → BGRA8 读回 → byte[]
-```
+这一小节原先描述的是 `Core/Processing/GpuToneMapper.cs`：输入 float[] HDR scRGB 线性、输出 BGRA8、
+`ShaderLoader` 两级回退取字节码、纹理按尺寸池化、常量缓冲区 4 个字段、失败回退 CPU。
+**该类连同 `ShaderLoader.cs` 与 `ToneMapping.hlsl` 一起删除**，理由不是性能选型，是它从没被执行过：
+`AppServices.cs` 在 2026-09-16 就停止构造它并写明"【死代码】…属性全仓没有任何调用者"，
+而"清单写着运行时消费"这句假话一直留在 `ShaderCompiler.cs` 的注释里。
+实际的 HDR→SDR 只有下一小节那条 CPU 路径（`ToneMapper`）。
+今天的锁：`CorePipelineTests.Test_ShaderList_HasNoOrphanEntry`（着色器清单每条都要有剥注释后的消费点，
+且清单/磁盘/csproj Inputs 三张名单互相对账）。要重做 GPU 色调映射，请从
+`Services/HdrCaptureWindow.cs` 的活路（自建交换链 + `FindCso`）起步，别复活"启动时构造、运行中没人读"那个形状。
 
 ### 3.3 CPU ToneMapper (融合内核)
 
@@ -572,7 +571,7 @@ App.OnLaunched
        │   ├─ CapabilityService (单例, HDR/ACM/ICC/编码器检测)
        │   ├─ CapturePipelineService (单例, ICC + 编码调度)
        │   ├─ WgcCaptureService (单例, D3D11 + 会话池, 可选)
-       │   └─ GpuToneMapper (单例, 着色器加载, 可选)
+       │   └─ GpuToneMapper (单例, 着色器加载, 可选)   ← 2026-10-01 已删除，从未被调用
        ├─ WGC/GPU 初始化 (失败不阻塞启动)
        │   ├─ NvencAvifBackend.SetSharedD3DDevice() 共享设备
        │   └─ 日志记录 GPU 色调映射可用性
@@ -592,7 +591,7 @@ App.OnLaunched
 | CapabilityService | 单例 | ❌ |
 | CapturePipelineService | 单例 | ❌ |
 | WgcCaptureService | 单例 | ✅ (初始化失败时) |
-| GpuToneMapper | 单例 | ✅ (着色器缺失时) |
+| ~~GpuToneMapper~~ | ~~单例~~ | — | **2026-10-01 已删除**（从未构造、属性无人读；见第 3.2 节） |
 
 ---
 
@@ -792,7 +791,7 @@ App.OnLaunched
        │   ├─ CapabilityService (单例, HDR/ACM/ICC/编码器检测)
        │   ├─ CapturePipelineService (单例, ICC + 编码调度)
        │   ├─ WgcCaptureService (单例, 可选, D3D11 设备 + 会话池)
-       │   └─ GpuToneMapper (单例, 可选, 着色器加载)
+       │   └─ GpuToneMapper (单例, 可选, 着色器加载)   ← 2026-10-01 已删除，从未被调用
        └─ BuildServiceProvider()
 ```
 

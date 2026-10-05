@@ -499,8 +499,20 @@ if ($SkipTests) {
             #   1) 退出码必须为 0
             #   2) 必须解析到 RESULT 行（passed/failed 两个字段）
             #   3) failed 必须为 0
-            $output = & dotnet run --project $testProject -c $Configuration -- $suite 2>&1 | Out-String
-            $code = $LASTEXITCODE
+            # ⚠ 子进程往 stderr 写"降级留痕"是常态（例：[NativeEncoderGuard] ⚠️ WebP 崩溃隔离
+            #   InvalidOperationException: cwebp 失败 (exit=1)），而 $ErrorActionPreference='Stop'
+            #   配上 2>&1 会把每一行 stderr 变成 ErrorRecord 并【当场抛出】⇒
+            #   10-03 实测：一次 1154 通过 / 0 失败的绿轮被判定为发布失败，包根本没出。
+            #   判据仍然只有那三条（退出码 / 有 RESULT 行 / failed==0），stderr 只作输出不作判决。
+            $eap0 = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $raw = & dotnet run --project $testProject -c $Configuration -- $suite 2>&1
+                $code = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $eap0
+            }
+            $output = ($raw | Out-String)
             Write-Host $output
             $passed = $null; $suiteFailed = $null
             if ($output -match 'RESULT\s+suite=\S+\s+passed=(\d+)\s+failed=(\d+)') {
@@ -526,9 +538,38 @@ if ($SkipTests) {
     $sw.Stop()
 
     # 断言总数下限：防止套件被静默删减（例如误改 gateSuites 列表）后门禁仍然"全绿"
-    if ($failedSuites.Count -eq 0 -and $totalPassed -lt $MinGateAssertions) {
-        Write-Host "   ❌ 断言总数 $totalPassed 低于下限 $MinGateAssertions —— 门禁疑似被静默删减" -ForegroundColor Red
-        $failedSuites += "断言总数 $totalPassed < 下限 $MinGateAssertions"
+    # ⚠ 2026-09-29 审查轮 §11.4：默认值 340 是三年前的手抄快照，真实规模早已 1400+ ⇒ 删掉上千条断言
+    #   这里也不会响（而 verify-publish-gates.ps1 的桩合计 368 恰好"看起来像当前规模"，把这条缺口
+    #   伪装成了已判）。下限改为优先读 scripts\gate-baseline.json 的【总断言】——那份文件由
+    #   verify.ps1 -WriteGateBaseline 从真读数生成，不靠人抄。读不到才退回参数值，并在话里说清用的哪个。
+    $floor = $MinGateAssertions
+    $floorSource = '-MinGateAssertions 参数'
+    $gateBaseline = Join-Path $PSScriptRoot 'scripts\gate-baseline.json'
+    $callerSetFloor = $PSBoundParameters.ContainsKey('MinGateAssertions')
+    if (-not $callerSetFloor -and (Test-Path -LiteralPath $gateBaseline)) {
+        try {
+            $gb = Get-Content -LiteralPath $gateBaseline -Raw | ConvertFrom-Json
+            if ($gb.总断言 -gt 0) {
+                $floor = [int]$gb.总断言
+                $floorSource = "scripts\gate-baseline.json（取数 $($gb.'取数时间')）"
+            }
+        } catch {
+            Write-Host "   ⚠️ 基线文件读不动（$($_.Exception.Message)）⇒ 下限退回 $MinGateAssertions" -ForegroundColor Yellow
+        }
+    } elseif (-not $callerSetFloor) {
+        # 缺文件这一支原先【静默】用 340：一次真实的 1400+ 规模照样"通过"，而上一句注释写的
+        # "读不到才退回参数值，并在话里说清用的哪个"根本没兑现 ⇒ 这里必须当场点名。
+        Write-Host "   ⚠️ 没有 scripts\gate-baseline.json ⇒ 下限退回手抄值 $MinGateAssertions（比真实规模低一个数量级，" -ForegroundColor Yellow
+        Write-Host "      等于这一格没有牙）。修法：跑 scripts\verify.ps1 -WriteGateBaseline 生成基线再来出包" -ForegroundColor Yellow
+    }
+    # 下限与它的来源【无条件】说一次：原先只在"低于下限"的那条红里才打印来源，于是
+    # "这一轮比的其实是手抄的 340"在最需要知道的场合（全绿、照常出包）完全看不见。
+    Write-Host "   ℹ️  断言下限 $floor（来源：$floorSource）· 本轮实测 $totalPassed" -ForegroundColor DarkGray
+    if ($failedSuites.Count -eq 0 -and $totalPassed -lt $floor) {
+        Write-Host "   ❌ 断言总数 $totalPassed 低于下限 $floor —— 门禁疑似被静默删减" -ForegroundColor Red
+        Write-Host "      下限来源：$floorSource" -ForegroundColor Red
+        Write-Host "      确系有意删减：跑 scripts\verify.ps1 -WriteGateBaseline 重生成基线，让改动留在 diff 里" -ForegroundColor Yellow
+        $failedSuites += "断言总数 $totalPassed < 下限 $floor（$floorSource）"
     }
 
     if ($failedSuites.Count -gt 0) {
@@ -621,6 +662,28 @@ if ($thirdPartyPdbs.Count -gt 0) {
     Write-Host "   🧹 剔除第三方私有 PDB: $($thirdPartyPdbs.Count) 个 / $freed MB ($($thirdPartyPdbs.Name -join ', '))"
 }
 Write-Host "   ✅ 保留自家 PDB: $($keptPdbs.Count) 个 ($($keptPdbs.Name -join ', '))"
+
+# ── 剔除维护者自测样张（2026-10-02 可用性审计 F5）────────────────────────────
+# color-samples/ 是 SelfTest.cs:148 写到 AppContext.BaseDirectory 的产物，只有 --selftest
+# 这条命令行入口会生成它（App.xaml.cs:77 跑完即 Environment.Exit）⇒ 用户路径不读它。
+# 它出现在发布目录，是因为有人【在发布目录里跑过自测】：本轮实测到两个 7 024 730 B 的
+# ____DISPLAY5-{System,BT2020}.png，时间戳比发布目录还早三天。
+# 除了占体积，它还把维护者显示器的 sanitized 名字（DISPLAY5）发给用户。
+$sampleDirs = @(Get-ChildItem $OutputDir -Recurse -Directory -Filter "color-samples" -ErrorAction SilentlyContinue)
+if ($sampleDirs.Count -gt 0) {
+    $sFiles = @($sampleDirs | Get-ChildItem -Recurse -File -ErrorAction SilentlyContinue)
+    $sFreed = [math]::Round((($sFiles | Measure-Object -Property Length -Sum).Sum) / 1MB, 2)
+    foreach ($d in $sampleDirs) { Remove-Item $d.FullName -Recurse -Force }
+    Write-Host "   🧹 剔除自测样张目录: $($sampleDirs.Count) 个 / $($sFiles.Count) 文件 / $sFreed MB"
+}
+# 删完必须自己复核：只删不验，下次被改回来也不会红
+$leftover = @(Get-ChildItem $OutputDir -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'color-samples' -or $_.Name -match '^_{2,}DISPLAY' })
+if ($leftover.Count -gt 0) {
+    Write-Host "   ❌ 发布目录仍残留自测样张 $($leftover.Count) 项: $(($leftover | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Red
+    exit 1
+}
+Write-Host "   ✅ 发布目录无自测样张残留"
 
 $buildSize = (Get-ChildItem $OutputDir -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB
 Write-Host "   📦 编译完成: $([math]::Round($buildSize,1)) MB"

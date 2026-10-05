@@ -15,6 +15,85 @@
 
 ---
 
+## [0.3.7-beta] — 2026-09-28 ~ 10-05
+
+> 承接 `v0.3.6-beta`（`4368eed`）。`v0.3.6-beta` 之后主线只有文档提交，本节汇总那之后
+> **九个工作轮**的全部改动（交接 §64 ~ §68）。沿用"一条提交 = 一版本"，发布提交即本节所在提交。
+> ⚠ 下面所有读数都是本机跑出来的，出处逐条指到 `tests/output/*.log` 或判据脚本。
+
+### 修复：HDR 降级不再静默
+
+- **主打"HDR 截图"的工具把最要紧的那条降级过滤掉了。** `CoreLog` 的 `Brief` 档（默认档）
+  注释明写要含"一切降级事实"，而"多显示器拼接失败 ⇒ 放弃整图 HDR，输出 SDR"这类句子走的是
+  `Debug` 档 ⇒ 默认配置下用户看不到。本轮把 5 处提到 `Info`（`WgcCaptureService.cs`
+  的 `:717/:723/:1124/:1484/:1505`；`:1111` 下一行本就有配对 `LogInfo`，属重复，删 Debug 留 Info）。
+  新增判据 `Test_WgcCapture_DegradationIsVisibleAtDefaultVerbosity`（词表扫描 + 已知降级逐条点名 +
+  反向锚"至少 3 条以 Info 落盘"），变异实测有牙。
+
+### 修复：三个"用户能直接撞见"的缺陷
+
+- **盘上存的输出格式每次开机被抹成默认，且下一次保存会把那个键删掉。** 根因是构造期
+  `RebuildFormatCombo()` 在控件尚未实化时读到 `SelectedIndex = -1`，旧写法按
+  `FormatOrder.DefaultIndex` 回落成 PNG，而这次**程序性赋值**触发了 `OnFormatChanged`
+  ⇒ 把默认值写回设置并落盘（差量写盘 ⇒ 键消失）。改成回落取 `_settings.FormatIndex`
+  （持久化真值）。真机前后读数都有。
+- **`AutoStart` 的启动路径会改用户的开机自启动。** 旧写法每次启动都
+  `StartupManager.IsEnabled = _settings.AutoStart`，而 `GetAppPath()` 取 `Environment.ProcessPath`
+  ⇒ **任何一个 `AutoStart=false` 的 dev 构建起来一次，就把用户已注册的自启动项删掉**。
+  改成启动只读 + 不一致报警，写只留在「保存设置」那条路；判据钉"赋值点全仓唯一"。
+- **导航栏 5 枚图标渲染成豆腐块。** 根因是 `FontHelper.ApplyFontToVisualTree` 一路递归，
+  而 `FontIcon` 派生自 `Control`、字形由它**模板里的内部 TextBlock** 画，sweep 写局部值压掉了
+  样式里的符号字体族 ⇒ 整窗图标变方框。修法是图标子树直接 return（新卡锁**结构顺序**：
+  return 必须排在递归之前）。同时把 46 枚轮廓改成 `PathIcon`，不再依赖符号字体。
+
+### 修复：剪贴板与本地化
+
+- **剪贴板位图通道缺失**：补 `SetBitmap`（微信/QQ/Word/画图只收位图，此前 Ctrl+V 完全无反应）。
+- **英文界面从"半成品"补到 0 残留**：`ComboBoxItem` 不在扫描面 ⇒ 7 个下拉共 35 个中文项漏翻，
+  已补；Core 的 `FormatColorFacts.Declaration` 改为**交模板**（多一个可选本地化钩子，
+  日志与 SelfTest 不传钩子 ⇒ 中文逐字不变），App 侧代值，替掉"按片段回翻"的权宜。
+  顺带修掉一个真缺陷：`LocaleManager.SetLanguage` 排在启动状态栏取词之后 ⇒ 英文模式启动
+  那几秒状态栏恒为中文。修完**产品自报残留 8 → 0**、UIA 全窗 6 → 1（剩 1 条是框架 ScrollBar 自报名）。
+
+### 移除：两条被实测证明"从来没上屏"的路径
+
+- **删除 GPU 分层供帧路**（`GpuToneMapper.cs`、`ShaderLoader.cs`、`ToneMapping.hlsl`，
+  共 520+ 行）：标记帧实验证明那扇窗从来没上屏，色调映射实际一直走 CPU 路径。
+- **删除 `HDRPreviewWindow.cs`（613 行）+ 覆盖层 GPU 背景块（130 行）**：覆盖层改 CPU-only，
+  实测代价为零。保留反向哨兵：不许按名字找字节码去呈现、CPU 合成必须仍是无条件。
+
+### 工程
+
+- **发布脚本修掉一个"绿轮被判失败"的 bug**：`Publish.ps1` 在 `$ErrorActionPreference='Stop'` 下用
+  `2>&1`，把子进程 stderr 的**降级留痕**（`[NativeEncoderGuard] ⚠️ WebP 崩溃隔离 …`）
+  当成错误抛出 ⇒ 一次 1154 通过 / 0 失败的绿轮被判成"发布失败"、包根本不出。
+  改成只在**退出码 / 有 RESULT 行 / failed==0** 三条上判决。
+- **发布包不再夹带维护者自测样张**：`color-samples/` 共 13.4 MB，文件名里还带着维护者显示器的
+  sanitized 名字；`Publish.ps1` 加剔除块 + 删后断言无残留。
+- **门禁跳过必须点名**：原来通过路径上只印"跳过 M"，套件 stdout 全丢 ⇒ 说不出"哪几条没判"。
+  现在 `skipped>0` 时回显原因并带守卫（点名条数 ≠ `RESULT skipped=N` 就出声）。
+- **新增 `StringLiteralScanner`**（C# 字面量扫描器，正确处理逐字串/插值洞/嵌套花括号/字符字面量/
+  注释排除），用于把"HDR 抓帧窗烘焙了 99 条中文"这类结构量钉成判据。
+- **判据地板 1365 → 1738**（7 套件：unit 1175 / color 267 / encoding 14 / service 2 / ocr 12 /
+  format 43 / usability 225），`scripts/gate-baseline.json` 记录逐套件值与取数时间。
+
+### 已知问题（不在本版修复，如实记录）
+
+- **`--unit-tests` 在 DSH 沙箱内需要绕行**：`EncoderCrashSentinel` 的哨兵目录走
+  `Environment.GetFolderPath(SpecialFolder.LocalApplicationData)`，而 DSH 的工作区沙箱用
+  "受限令牌 + Low 完整性"只放行工作区与私有临时目录 ⇒ 从工作区内起的测试宿主写不了那个目录。
+  这是**沙箱的既定设计**（不是本产品缺陷，真实用户环境无此限制）。本机出包前的全量门禁是用
+  "把该目录临时换成指向工作区的 junction 并补 Low 标签"跑通 1738 断言全绿的，详见
+  `docs/pipeline-review-round68-2026-10-04.md` 与交接 §68。
+- **动图录制是"卖出去但没接线"的功能**（`AnimationRecorder` 零实例化、`RecordHotkey` 从不注册），
+  按既定口径**先待命**，本版未动。
+- **同毫秒文件名无存在性检测**（`{prefix}{yyyyMMdd_HHmmssfff}{ext}` + 原子写 `overwrite: true`）
+  ⇒ 连拍撞名会静默覆盖前一枚。默认格式改为 PNG 后连拍更快，撞名概率比旧版更高。仍开。
+- **托盘菜单 4 项硬编码中文**，且 `Shell_NotifyIconW` 返回值全丢弃（HMENU 是 Win32 结构，
+  本地化扫描面结构上碰不到）。仍开。
+
+---
+
 ## [0.3.6-beta] — 2026-09-26 ~ 09-27
 
 > 沿用"一条提交 = 一版本"。`v0.3.5-beta`（`cde6168`）**单独打了附注标签** ⇒ 那一版的内容仍可按

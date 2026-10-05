@@ -67,18 +67,29 @@ public static class FormatColorFacts
     /// <summary>
     /// 该格式在当前（目标色域, 是否写 PQ）下<b>真实</b>会写下的色彩声明，一句话。
     /// <para>用于界面与日志；不参与编码判定。</para>
+    /// <para><paramref name="tr"/> 是宿主注入的本地化钩子：Core 不认识 App 的 LocaleManager，
+    /// 而这条文案同时进界面与日志 ⇒ 只能由调用方决定翻不翻。默认<b>原样返回</b>，
+    /// 所以日志、<c>SelfTest</c> 那张表与任何不传钩子的调用方，输出逐字不变；
+    /// 只有「色域映射」卡片传 <c>LocaleManager.Tr</c>。</para>
+    /// <para>带数值的那几条写成 <c>{0}</c> 模板：先翻模板再代值，
+    /// 译文里占位符放哪儿由译者定 —— 否则英文只能按中文语序拼，读不通。</para>
     /// </summary>
     /// <param name="format">已经由"下拉 + 增益图开关"翻译过的格式（<c>JPEG_GAINMAP</c> 是一种格式，不是一面旗）。</param>
     /// <param name="targetTag">收口后的目标标签，只有 <c>sRGB</c> / <c>BT2020</c>。</param>
     /// <param name="writesPq">本次容器到底许不许写 PQ —— 由 <see cref="Delivery"/> 给，不许由调用方猜开关。</param>
-    public static string Declaration(OutputFormat format, string targetTag, bool writesPq)
+    /// <param name="tr">模板 → 当前语言；省略即保持中文原文。</param>
+    public static string Declaration(OutputFormat format, string targetTag, bool writesPq,
+                                     Func<string, string>? tr = null)
     {
+        Func<string, string> T = tr ?? (static s => s);
+        string L(string template, params object[] args) =>
+            args.Length == 0 ? T(template) : string.Format(T(template), args);
         bool wide = targetTag != "sRGB";
         string PngCicp()
         {
             byte[]? c = writesPq ? FormatHelper.BuildHdrCicp(targetTag)
                                  : FormatHelper.BuildSdrCicp(targetTag);
-            return c is null ? "无码点" : $"{c[0]}/{c[1]}/{c[2]}";
+            return c is null ? L("无码点") : $"{c[0]}/{c[1]}/{c[2]}";
         }
         // AVIF 与 PNG 共用 primaries/transfer 常数，matrix 却必须换成 YUV 那一档 ⇒ 不能直接印 BuildXxxCicp。
         string AvifCicp()
@@ -105,48 +116,48 @@ public static class FormatColorFacts
         return format switch
         {
             OutputFormat.PNG =>
-                $"PNG：cICP {PngCicp()}（原色/传输/矩阵），matrix 恒 0(identity) —— PNG 存 RGB 采样，没有 YUV 往返可声明。"
-                + (writesPq ? "HDR 一律不嵌 ICC。"
-                            : wide ? $"{TargetName()} 目标另嵌 iCCP，两条通道同一套原色。"
-                                   : $"{TargetName()} 目标不嵌 ICC（cICP 已足够）。"),
+                L("PNG：cICP {0}（原色/传输/矩阵），matrix 恒 0(identity) —— PNG 存 RGB 采样，没有 YUV 往返可声明。", PngCicp())
+                + (writesPq ? L("HDR 一律不嵌 ICC。")
+                            : wide ? L("{0} 目标另嵌 iCCP，两条通道同一套原色。", TargetName())
+                                   : L("{0} 目标不嵌 ICC（cICP 已足够）。", TargetName())),
 
             OutputFormat.AVIF =>
-                $"AVIF：colr(nclx) {AvifCicp()}，matrix 随三原色取 {MatrixName()} —— 它是 YUV 码流，"
-                + "不能像 PNG 那样写 identity（写 0 时部分解码器自行套错矩阵）。"
-                + (writesPq ? "HDR 不嵌 ICC。" : wide ? $"{TargetName()} 另可嵌 ICC。" : $"{TargetName()} 不嵌 ICC。"),
+                L("AVIF：colr(nclx) {0}，matrix 随三原色取 {1} —— 它是 YUV 码流，", AvifCicp(), MatrixName())
+                + L("不能像 PNG 那样写 identity（写 0 时部分解码器自行套错矩阵）。")
+                + (writesPq ? L("HDR 不嵌 ICC。") : wide ? L("{0} 另可嵌 ICC。", TargetName()) : L("{0} 不嵌 ICC。", TargetName())),
 
             OutputFormat.JPEG_XL =>
-                "JPEG XL：color fields 与 ICC 二选一（同时给时 cjxl 只走 ICC、fields 被丢弃；"
-                + "ICC 能归约成字段就只写字段，归约不了就整份内嵌）。没有 matrix 这一维，"
-                + "且有损产物把像素量化进 XYB —— 声明写的是原图色域，不是码流里的通道值。"
-                + (writesPq ? "HDR 走 Rec.2020 原色 + PQ（cjxl 的枚举名 Rec2100PQ，另带 intensity_target）。"
-                            : wide ? $"{TargetName()} 取到可嵌 ICC 时用 ICC，否则用 color fields。"
-                                   : $"{TargetName()} 走 color fields，不嵌 ICC。"),
+                L("JPEG XL：color fields 与 ICC 二选一（同时给时 cjxl 只走 ICC、fields 被丢弃；")
+                + L("ICC 能归约成字段就只写字段，归约不了就整份内嵌）。没有 matrix 这一维，")
+                + L("且有损产物把像素量化进 XYB —— 声明写的是原图色域，不是码流里的通道值。")
+                + (writesPq ? L("HDR 走 Rec.2020 原色 + PQ（cjxl 的枚举名 Rec2100PQ，另带 intensity_target）。")
+                            : wide ? L("{0} 取到可嵌 ICC 时用 ICC，否则用 color fields。", TargetName())
+                                   : L("{0} 走 color fields，不嵌 ICC。", TargetName())),
 
             OutputFormat.JPEG_LI =>
-                "JPEG：只有 ICC 一条声明通道，没有代码点 —— "
-                + (wide ? $"{TargetName()} 原色嵌 APP2/ICC（实测产物里 ICC_PROFILE 与 acsp 都在）。"
-                        : $"{TargetName()} 目标【什么都不写】，靠 JFIF 默认。")
+                L("JPEG：只有 ICC 一条声明通道，没有代码点 —— ")
+                + (wide ? L("{0} 原色嵌 APP2/ICC（实测产物里 ICC_PROFILE 与 acsp 都在）。", TargetName())
+                        : L("{0} 目标【什么都不写】，靠 JFIF 默认。", TargetName()))
                 // ⚠ 2026-09-27：这句原先容易被读成"这格式不能碰 Rec.2020"。分开说清：
                 //   没有的是 HDR 通道，广色域 SDR 的原色声明是有的（就是上面那条 ICC 通路）。
-                + "容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。",
+                + L("容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。"),
 
             OutputFormat.WebP =>
-                "WebP：同样只有 ICC 一条通道 —— "
-                + (wide ? $"{TargetName()} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。"
-                        : $"{TargetName()} 目标【什么都不写】（实测对照组无 ICCP）。")
-                + "无 HDR 通道 ⇒ HDR 开关落空成 8-bit SDR，但原色声明照常；缺 cwebp.exe 时整份产物会换成 PNG。",
+                L("WebP：同样只有 ICC 一条通道 —— ")
+                + (wide ? L("{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。", TargetName())
+                        : L("{0} 目标【什么都不写】（实测对照组无 ICCP）。", TargetName()))
+                + L("无 HDR 通道 ⇒ HDR 开关落空成 8-bit SDR，但原色声明照常；缺 cwebp.exe 时整份产物会换成 PNG。"),
 
             OutputFormat.TIFF =>
-                "TIFF：没有代码点通道 ⇒ 只靠 ICC，连 Rec.709 也老实嵌一份（不像 JPEG/WebP 能省）。"
-                + (writesPq ? "HDR 用带 PQ TRC 的 ICC 声明。" : "SDR 用标准色域 ICC。"),
+                L("TIFF：没有代码点通道 ⇒ 只靠 ICC，连 Rec.709 也老实嵌一份（不像 JPEG/WebP 能省）。")
+                + (writesPq ? L("HDR 用带 PQ TRC 的 ICC 声明。") : L("SDR 用标准色域 ICC。")),
 
             OutputFormat.JPEG_GAINMAP =>
-                $"JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {TargetName()} ⇒ 底图、增益比、"
-                + "声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由 XMP hdrgm + "
-                + "ISO 21496-1 增益图段承载，容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。",
+                L("JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {0} ⇒ 底图、增益比、", TargetName())
+                + L("声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由 XMP hdrgm + ")
+                + L("ISO 21496-1 增益图段承载，容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。"),
 
-            _ => "未知格式：给不出声明通道。",
+            _ => L("未知格式：给不出声明通道。"),
         };
     }
 }

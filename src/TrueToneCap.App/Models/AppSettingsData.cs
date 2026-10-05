@@ -148,6 +148,21 @@ public sealed class AppSettingsData
     public bool JxlPngSuffix { get; set; }
 
     /// <summary>
+    /// 【换格式保底】总闸（2026-09-29 用户口径：接上 PNG 保底、触发必须告诉用户、并且给保底做一个开关）。
+    /// <para>开着（默认）：某一格式的后端这次编不出来时，把这张图改存为 <b>PNG</b> 并明确提示
+    /// （"不是 AVIF / 不是 JPEG XL…"）。截图工具的失败模式应该是"无损但格式不对"，
+    /// 不是"按下热键什么都没发生"。</para>
+    /// <para>关掉：失败就照原样抛出去 ⇒ 产物**仍然是用户选的格式**，或者根本没有产物。
+    /// 存在的理由很具体：有人按后缀/格式名接下游流程（.avif 目录、按 .webp 处理的脚本），
+    /// 一张躺在 `.avif` 路径记录里的 PNG 对他比丢图更糟。</para>
+    /// <para>它只管【换格式】。同一容器内的后端阶梯（AVIF 硬件→libaom、HDR→同格式 SDR 色调映射、
+    /// 位深/色度协商）不受它影响——那不是换格式，且各有自己的留痕。</para>
+    /// <para>默认值写在这里（属性初始化器）就是唯一事实源：<c>Save()</c> 只写与默认不同的键 ⇒
+    /// 老用户文件里没有这个键 ⇒ 读到 <c>true</c>，行为与升级前一致，不需要迁移代码。</para>
+    /// </summary>
+    public bool PngFallbackEnabled { get; set; } = true;
+
+    /// <summary>
     /// AVIF 编码器 —— **单一**选项，取代原来的"编码后端 + 软件编码器"两层。
     /// <para>取值（见 Core 的 <c>AvifEncoderKind</c>）：
     /// Auto / Qsv / LibAom / SvtAv1 / Nvenc。<c>Avifenc</c> 于 2026-09-24 从界面移除

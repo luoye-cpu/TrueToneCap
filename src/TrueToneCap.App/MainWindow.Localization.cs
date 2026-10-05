@@ -189,9 +189,10 @@ public sealed partial class MainWindow : Window
         SetComboItemText(TargetLangCbo, "en", LocaleManager.TlEnglish);
         SetComboItemText(TargetLangCbo, "ja", LocaleManager.TlJapanese);
 
-        SetComboItemText(OcrLangCbo, "", LocaleManager.OlSystem);
+        // "跟随系统" 这一项在 OcrLanguage 两份列表里都不存在 ⇒ 原先这条 Tag 传空串，
+        // 永远匹配不到任何项（静默死调用）。要支持它得先加语言项，不是先加翻译。
         SetComboItemText(OcrLangCbo, "zh-en", LocaleManager.OlMixed);
-        SetComboItemText(OcrLangCbo, "zh-Hans", LocaleManager.TlChinese);
+        SetComboItemText(OcrLangCbo, "zh-Hans-CN", LocaleManager.TlChinese);   // 原写 "zh-Hans"：两份列表里都没有这个 ID
         SetComboItemText(OcrLangCbo, "en-US", LocaleManager.TlEnglish);
 
         // 归档模式
@@ -201,6 +202,61 @@ public sealed partial class MainWindow : Window
             SetComboItemText(ArchiveModeCbo, "Month", LocaleManager.ArchiveMonth);
             SetComboItemText(ArchiveModeCbo, "Day", LocaleManager.ArchiveDay);
         }
+
+
+        // ── 2026-10-03 英文界面补完 · 第三批：过去一次都没接线的 7 个下拉 ──
+        // BorderColorCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
+        SetComboItemText(BorderColorCbo, "#FF4488FF", LocaleManager.Tr("天蓝"));
+        SetComboItemText(BorderColorCbo, "#FF00FF88", LocaleManager.Tr("翠绿"));
+        SetComboItemText(BorderColorCbo, "#FFFF6644", LocaleManager.Tr("橙红"));
+        SetComboItemText(BorderColorCbo, "#FFFF44AA", LocaleManager.Tr("粉红"));
+        SetComboItemText(BorderColorCbo, "#FFFFCC00", LocaleManager.Tr("金黄"));
+        SetComboItemText(BorderColorCbo, "#FFAA66FF", LocaleManager.Tr("紫色"));
+        SetComboItemText(BorderColorCbo, "#FFFFFFFF", LocaleManager.Tr("纯白"));
+        SetComboItemText(BorderColorCbo, "#FF00FFCC", LocaleManager.Tr("青色"));
+
+        // OverlayColorCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
+        SetComboItemText(OverlayColorCbo, "#80000000", LocaleManager.Tr("灰色半透明"));
+        SetComboItemText(OverlayColorCbo, "#99000000", LocaleManager.Tr("纯黑半透明"));
+        SetComboItemText(OverlayColorCbo, "#991A1A2E", LocaleManager.Tr("深紫半透明"));
+        SetComboItemText(OverlayColorCbo, "#990D1B2A", LocaleManager.Tr("深海蓝"));
+        SetComboItemText(OverlayColorCbo, "#992D2D2D", LocaleManager.Tr("深灰半透明"));
+        SetComboItemText(OverlayColorCbo, "#80FFFFFF", LocaleManager.Tr("白色半透明"));
+        SetComboItemText(OverlayColorCbo, "#99003322", LocaleManager.Tr("深绿半透明"));
+
+        // LogCategoryCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
+        SetComboItemText(LogCategoryCbo, "All", LocaleManager.Tr("全部"));
+        SetComboItemText(LogCategoryCbo, "System", LocaleManager.Tr("⚙️ 系统"));
+        SetComboItemText(LogCategoryCbo, "Capture", LocaleManager.Tr("📷 捕获"));
+        SetComboItemText(LogCategoryCbo, "Encoding", LocaleManager.Tr("💾 编码"));
+        SetComboItemText(LogCategoryCbo, "UI", LocaleManager.Tr("🖥️ 界面"));
+        SetComboItemText(LogCategoryCbo, "Network", LocaleManager.Tr("🌐 网络"));
+
+        // LogFilterCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
+        SetComboItemText(LogFilterCbo, "All", LocaleManager.Tr("全部"));
+        SetComboItemText(LogFilterCbo, "Debug", LocaleManager.Tr("调试"));
+        SetComboItemText(LogFilterCbo, "Info", LocaleManager.Tr("信息"));
+        SetComboItemText(LogFilterCbo, "Warning", LocaleManager.Tr("警告"));
+        SetComboItemText(LogFilterCbo, "Error", LocaleManager.Tr("错误"));
+
+        // LlmProviderCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
+        SetComboItemText(LlmProviderCbo, "GLM", LocaleManager.Tr("智谱 GLM"));
+        SetComboItemText(LlmProviderCbo, "SiliconFlow", LocaleManager.Tr("硅基流动"));
+        SetComboItemText(LlmProviderCbo, "Aliyun", LocaleManager.Tr("阿里云百炼"));
+        SetComboItemText(LlmProviderCbo, "Custom", LocaleManager.Tr("自定义"));
+
+        // TranslationModeCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
+        SetComboItemText(TranslationModeCbo, "Free", LocaleManager.Tr("免费翻译"));
+        SetComboItemText(TranslationModeCbo, "LLM", LocaleManager.Tr("LLM 翻译"));
+        SetComboItemText(TranslationModeCbo, "Vision", LocaleManager.Tr("视觉翻译"));
+
+        // AvifCodecCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
+        SetComboItemText(AvifCodecCbo, "Auto", LocaleManager.Tr("自动"));
+        // Tag="Qsv" 那一项【刻意不在这里翻】：UpdateAvifEncoderLabels() 会按能力表重写每一个
+        // 非 Auto 项的 Content（Auto 被它显式跳过），这里写了也会被盖掉 ⇒ 是死写。
+        // 后端名与"（本机不可用）"后缀改由 CoreAvifBackendTexts + CoreText 在那一处翻。
+        // 11:57 的 UIA 展开读数里这一项因 HDR 不支持被收起（5 项只数到 4），所以静态那关
+        // 与运行时都没暴露它——是读代码读出来的，不是量出来的。
 
         // ── 色域映射卡片（含本文件刚写下的 Localization 文案，必须最后刷一次覆盖）──
         RefreshColorMappingUi();
@@ -236,14 +292,35 @@ public sealed partial class MainWindow : Window
                 $"英文模式扫描命中 0 处（对照表 {LocaleManager.ZhToEn.Count} 条）"
                 + " ⇒ 页面已实化却一条没翻，英文界面此时不可信");
 
+        s_residueNames.Clear();
+        frameworkOwned = 0;
         int residue = ApplyLocaleCollect(root, onlyResidue: true);
         if (residue > 0)
             LogService.Warn("Locale",
-                $"英文模式下仍有 {residue} 处扫得到的控件显示中文 ⇒ 对照表缺条目或扫描面缺控件");
+                $"英文模式下仍有 {residue} 处【我们自己的】控件显示中文 ⇒ 对照表缺条目或扫描面缺控件；"
+                + "残留清单（最多列 8 条）：" + string.Join(" | ", s_residueNames.Take(8)));
+        else if (frameworkOwned > 0)
+            LogService.Info("Locale",
+                $"另有 {frameworkOwned} 处是框架自带、随 OS 显示语言取词（更多/开/关），"
+                + "与本应用的英文设置无关，不计入残留");
     }
 
     private static readonly System.Text.RegularExpressions.Regex s_cjk =
         new("[\u4e00-\u9fff]", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// 框架自带、随 <b>OS 显示语言</b> 取词的控件文字：CommandBar 的溢出按钮「更多」、
+    /// ToggleSwitch 默认的「开 / 关」。全仓 XAML/.cs 里搜不到这三串（15:16 实测），
+    /// 它们是 WinUI 自己资源表里的词 —— 本应用的 AppLanguage 与 OS 显示语言是两件事，
+    /// 所以这几处【不可能】靠对照表清掉。混进残留计数就等于养出一条永远读不到底的告警，
+    /// 故单独计数、单独说明；真漏翻（我们自己的串）才是那条 Warn。
+    /// </summary>
+    private static readonly System.Collections.Generic.HashSet<string> s_frameworkOwnedText =
+        new(System.StringComparer.Ordinal) { "更多", "开", "关" };
+
+    /// <summary>本轮扫到的残留控件身份，只给日志用（不参与判决）。</summary>
+    private static readonly System.Collections.Generic.List<string> s_residueNames = new();
+    private static int frameworkOwned;
 
     private static int ApplyLocaleCollect(DependencyObject? root, bool onlyResidue)
     {
@@ -255,7 +332,17 @@ public sealed partial class MainWindow : Window
             // 于是声明在上限类型 FrameworkElement 上的 ToolTip 一格都不算 ⇒
             // 残留计数恰好漏掉"副窗口 48 处悬停说明"这一整类，报出来的 N 是假的低。
             foreach (var slot in SweepSurface)
-                if (MatchesSurface(root, slot.Control) && s_cjk.IsMatch(slot.Get(root) ?? "")) { n++; break; }
+            {
+                if (!MatchesSurface(root, slot.Control)) continue;
+                var txt = slot.Get(root) ?? "";
+                if (!s_cjk.IsMatch(txt)) continue;
+                if (s_frameworkOwnedText.Contains(txt)) { frameworkOwned++; continue; }
+                n++;
+                // 光报一个 N 没法修：过去每一轮都要再人肉找一遍"到底是哪 5 处"。
+                // 这里顺手把控件类型 + 属性 + 前 40 字带进日志，N 与清单同源于同一张扫描面。
+                s_residueNames.Add($"{root.GetType().Name}.{slot.Property} = 「{(txt.Length > 40 ? txt[..40] + "…" : txt)}」");
+                break;
+            }
         }
         int children = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
         for (int i = 0; i < children; i++)

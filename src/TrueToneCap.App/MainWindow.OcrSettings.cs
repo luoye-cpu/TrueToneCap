@@ -12,6 +12,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TrueToneCap.Core.Services;
+using TrueToneCap.App.Services;   // LocaleManager（OCR 语言提示要接进对照表，2026-10-03）
 
 namespace TrueToneCap.App;
 
@@ -30,8 +31,7 @@ public sealed partial class MainWindow : Window
         OcrLangHintTxt.Visibility = isWindowsOcr ? Visibility.Collapsed : Visibility.Visible;
         OcrLangHintTxt.Text = isWindowsOcr
             ? ""
-            : "ℹ PP-OCRv6 是单模型统一字典（18708 字），不随语言切换。实测中文/英文最准，" +
-              "日文需字高 ≥24px，韩文不支持（会自动改走 Windows OCR 兜底，需系统装韩文语言包）。";
+            : LocaleManager.Tr("ℹ PP-OCRv6 是单模型统一字典（18708 字），不随语言切换。实测中文/英文最准，日文需字高 ≥24px，韩文不支持（会自动改走 Windows OCR 兜底，需系统装韩文语言包）。");
     }
 
     private void UpdateOcrEngineStatus()

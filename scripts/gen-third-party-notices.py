@@ -40,7 +40,7 @@ BUCKET_TITLES = [
     ("models", "OCR 模型与词典"),
 ]
 
-HEADER = """# Third-Party Notices / 第三方许可声明
+HEADER = r"""# Third-Party Notices / 第三方许可声明
 
 > 本文件由 `scripts/gen-third-party-notices.py` 从 `licenses/INDEX.json` +
 > `src/TrueToneCap.Core/Resources/tools-manifest.json` **生成**，请勿手工编辑正文；
@@ -64,6 +64,7 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 | MIT（.NET 运行时及各扩展包） | 复制分发须含版权与许可声明 | 全文随包，含 .NET 自带的 third-party notices |
 | Microsoft OEL / EULA（WindowsAppSDK、DirectML 二进制） | 按各自协议条款允许再分发，并随附 NOTICE | 全文与 NOTICE 随包；DirectML 的 `LICENSE-CODE.txt`(MIT) **不覆盖** `DirectML.dll`，后者受微软 EULA 约束，两者分列 |
 | Windows 运行时投影（WinRT.Runtime.dll / Microsoft.Windows.SDK.NET.dll） | 见下方"未取得全文"一节 | 未闭环 |
+| 界面图标轮廓（派生自系统 Segoe 符号字体） | 见下方"未取得全文"一节 | 未闭环 |
 
 ## ⚠️ 专利授权不在上面这些许可里 —— 需自行确认
 
@@ -89,6 +90,18 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
   在其 NuGet 包内**零许可文件**，nuspec 只有一个 `aka.ms/WinSDKLicenseURL` 短链，
   本环境无法解析。二者由 WindowsAppSDK 携带、受微软 Windows SDK 许可约束；
   在拿到可再分发的明确依据之前，这一项**未闭环**。
+
+- **界面图标轮廓**：本程序的界面图标不是运行时引用系统字体画的，而是**离线把字形轮廓抽出来、
+  以路径数据烘进 `TrueToneCap.dll`**（原因见 `docs/pipeline-and-usability-review-2026-10-01.md` §11-②：
+  本进程解析不出这些符号字体，图标会渲染成方块）。轮廓取自
+  `C:\Windows\Fonts\SegoeIcons.ttf`（Family 名 `Segoe Fluent Icons`）与
+  `C:\Windows\Fonts\segmdl2.ttf`（`Segoe MDL2 Assets`），共 32 条不同轮廓 / 46 处引用。
+  这两个字体文件本身受**微软 Windows 桌面操作系统许可**约束，不属于上面任何一条开源许可，
+  因此上表的 BSD/Apache/MIT 义务**都不覆盖这一项**；而"把字形轮廓派生后再分发"是否被该许可允许，
+  本环境**没有可依据的条文**。在拿到明确依据之前，这一项与 WinRT 投影同样记为**未闭环**，
+  不假装它已经被上面那些许可覆盖。
+  替代路径（若要闭环）：改用 Fluent UI System Icons 等 **MIT 许可的 SVG 几何**，
+  构建期转成路径数据——从此不再派生自微软字体。
 
 其余条目的 `obligationNote` 见下表逐条列出。
 """

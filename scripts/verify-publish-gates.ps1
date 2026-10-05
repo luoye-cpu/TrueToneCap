@@ -60,19 +60,37 @@ function global:dotnet {
         #    于是 B/D 两个"应放行"的场景反而被拦下（回归保护失效）。
         #    故按被调用的套件名输出对应的模拟 RESULT；数字取当前真实门禁规模，
         #    保证合计 ≥ MinGateAssertions(340)。
+        #    故按被调用的套件名输出对应的模拟 RESULT。
+        # ⚠ 2026-09-29 审查轮 §11.4：原先这里的数字是【手抄】的（65/93/14/4/10/30/152，合计 368），
+        #    注释还自称"取当前真实门禁规模"——真实规模早已 1400+，于是这个桩一边过期一边把
+        #    Publish.ps1 那个 MinGateAssertions=340 的低下限"验证通过"了。现在改成读
+        #    scripts\gate-baseline.json（由 verify.ps1 -WriteGateBaseline 生成），读不到才退回手抄值，
+        #    并且话要说在前面：手抄值一生效就说明接线断了。
         if ($global:VG_DotnetRunExit -eq 0) {
             $suite = @($a) | Where-Object { $_ -like '--*-tests' } | Select-Object -First 1
-            $passed = switch ($suite) {
-                '--unit-tests'      { 65 }
-                '--color-tests'     { 93 }
-                '--encoding-tests'  { 14 }
-                '--service-tests'   { 4 }
-                '--ocr-tests'       { 10 }
-                '--format-tests'    { 30 }
-                '--usability-tests' { 152 }
-                default             { 0 }
+            $stubBase = $null
+            try {
+                $bp = Join-Path $PSScriptRoot 'gate-baseline.json'
+                if (Test-Path -LiteralPath $bp) {
+                    $stubBase = Get-Content -LiteralPath $bp -Raw | ConvertFrom-Json
+                }
+            } catch { $stubBase = $null }
+            $stubNum = $null
+            if ($stubBase -and $suite -and $stubBase.各套件.$suite) { $stubNum = [int]$stubBase.各套件.$suite.断言 }
+            if ($null -eq $stubNum) {
+                Write-Output "  ⚠️ 桩读不到 gate-baseline.json 里的 $suite ⇒ 用手抄值（这个数字会漂，见本段注释）"
+                $stubNum = switch ($suite) {
+                    '--unit-tests'      { 65 }
+                    '--color-tests'     { 93 }
+                    '--encoding-tests'  { 14 }
+                    '--service-tests'   { 4 }
+                    '--ocr-tests'       { 10 }
+                    '--format-tests'    { 30 }
+                    '--usability-tests' { 152 }
+                    default             { 0 }
+                }
             }
-            "RESULT suite=$suite passed=$passed failed=0 warnings=0 elapsedMs=- skipped=0"
+            "RESULT suite=$suite passed=$stubNum failed=0 warnings=0 elapsedMs=- skipped=0"
         }
         return
     }

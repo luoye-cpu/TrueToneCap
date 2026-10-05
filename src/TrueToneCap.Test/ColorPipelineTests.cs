@@ -68,6 +68,9 @@ public static class ColorPipelineTests
         Console.WriteLine("\n── 5. 编码文件色彩标记 ──");
         EncodedPng_CicpChunk_Valid();
         EncodedPng_IccpChunk_Valid();
+        AvifPngFallback_KeepsDeclarationAndNotice();
+        WebPFallback_WhenBackendFails_StillDeliversPngAndNotice();
+        JpegLiAndJxl_BackendFailure_NeverClaimsSuccess();
         EncodedPng_HdrCicp_Bt2020Pq();
         EncodedPng_HdrCicp_10BitSbit();
         EncodedJpeg_GainMapMarker();
@@ -514,6 +517,277 @@ public static class ColorPipelineTests
         // sRGB 是隐含默认色域 ⇒ 除 cICP 外不应再嵌 iCCP 与之竞争声明
         // （对照 EncodedPng_IccpChunk_Valid：非 sRGB 才必须有 iCCP）。
         Assert("PNG cICP: sRGB 档不嵌 iCCP", FindPngChunk(chunks, "iCCP") is null);
+    }
+
+    /// <summary>
+    /// AVIF 全后端失败时的 PNG 保底，必须【仍然带上色域声明 + 降级留痕】（2026-09-29 审查轮 §10.3 V11 / §13.7）。
+    /// <para>为什么要真跑一遍：§11.6 量到 <c>[1.7/2]</c> 那 14 条外部判据里【没有任何一条会走保底路径】
+    /// ⇒ 三条"连格式都换了"的保底此前只有读码与文本锁。这条把 WebP/AVIF 那两格之一跑到产物上。</para>
+    /// <para>故障注入用"目标文件被本进程独占"：avifenc 是独立进程，打不开被 <c>FileShare.None</c> 占住的
+    /// <c>shot.avif</c> ⇒ 软件路失败 ⇒ 落进 catch 的 PNG 保底；保底写的是同名 <c>.png</c>，那条路径是空的
+    /// ⇒ 能走完。另一条看着更省事的"喂 avifenc 必败的 <c>--depth 16</c>"已被实测否掉：
+    /// <c>NativeAvifEncoder.GetDepthArg</c>（<c>:245-249</c>）自己先过一道 <c>AvifContainerDepth</c> 钳制 ⇒
+    /// 产品路发不出那个参数（avifenc 1.4.2 确实会在参数期就拒，但那不是产品能走到的形状）。</para>
+    /// </summary>
+    static void AvifPngFallback_KeepsDeclarationAndNotice()
+    {
+        var dir = Path.Combine(OutDir, "avif-fallback");
+        Directory.CreateDirectory(dir);
+        var avifPath = Path.Combine(dir, "shot.avif");
+        var pngPath = Path.ChangeExtension(avifPath, ".png");
+        foreach (var f in new[] { avifPath, pngPath }) if (File.Exists(f)) File.Delete(f);
+
+        var settings = new EncodingSettings
+        {
+            Format = OutputFormat.AVIF, Quality = 60, OutputBitDepth = 8, HdrOutput = false,
+            ColorSpaceTag = "DisplayP3",
+            IccProfile = ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.DisplayP3, "Display P3"),
+            AvifEncoderKind = AvifEncoderKind.LibAom,
+            // 这一格判的就是"保底认不认这个开关"⇒ 必须显式开（EncodingSettings 的初始值是关，
+            // 因为测量宿主默认不许把失败洗成产物；见 ImageEncoder.cs 那段属性注释）。
+            PngFallbackEnabled = true,
+        };
+        EncoderFallbackNotifier.LastReason = null;   // 单槽通道：不把上一拍的残留带进断言
+
+        Exception? thrown = null;
+        try
+        {
+            using (new FileStream(avifPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                try
+                {
+                    EncoderFactory.Create(OutputFormat.AVIF)
+                        .EncodeSdrAsync(GeneratePattern(8, 8), 8, 8, settings, avifPath)
+                        .GetAwaiter().GetResult();
+                }
+                catch (Exception ex) { thrown = ex; }
+            }
+        }
+        catch (Exception ex) { thrown = ex; }   // 独占句柄本身释放失败 ⇒ 也要留痕，不许静默
+
+        var chunks = ReadPngChunks(pngPath);
+        Assert("AVIF 保底：真的落了一枚非空 PNG（没落 = 注入没生效或保底本身坏）",
+            File.Exists(pngPath) && new FileInfo(pngPath).Length > 0,
+            thrown is null ? "avifenc 竟然写成功了 ⇒ 独占没起作用，本条这一轮【没判到东西】"
+                           : $"抛的是 {thrown.GetType().Name}: {thrown.Message.Split('\n')[0]}");
+        Assert("AVIF 保底的 PNG 必须带 iCCP 或 cICP（非 sRGB 目标不许零声明）",
+            FindPngChunk(chunks, "iCCP") is not null || FindPngChunk(chunks, "cICP") is not null,
+            "广色域像素 + 无声明 ⇒ 查看器一律按 sRGB 解，用户拿到系统性偏色的图");
+        Assert("AVIF 保底必须写降级留痕，且说清换的是【格式】",
+            (EncoderFallbackNotifier.LastReason ?? "").Contains("PNG"),
+            $"实得 {EncoderFallbackNotifier.LastReason ?? "<null>"}");
+    }
+
+    /// <summary>
+    /// F 批（2026-09-29）保底矩阵：五格式 × 开关两态，每一格只允许三种结局里的两种合法结局。
+    /// <para>这一条原本的名字与口径是"JPEG LI / JXL / 增益图【没有】保底，只钉不许静默成功"（本轮 §15.3）；
+    /// 用户随后拍板"接上 PNG 保底 + 触发必须告诉用户 + 给保底做开关"⇒ 三条腿都接上了，
+    /// 于是这一格升成一张矩阵：<b>开</b> ⇒ 必须落 PNG、必须写留痕、必须登记实际路径；
+    /// <b>关</b> ⇒ 必须抛、且【一律不落 PNG】（关掉以后还偷偷留一张 PNG，就等于开关没生效）。</para>
+    /// <para>不合法的那一格永远是同一种形状：<b>既不抛、盘上又什么都没有</b> ——
+    /// 编码器接口不返回路径，管线层会拿调用方那个 path 去 Toast「已保存」、塞剪贴板、进归档
+    /// （见 <c>FormatHelper.ResolveActualPath</c>），于是用户按了热键、看到绿勾、盘上什么都没有（§12 那族）。</para>
+    /// <para>注入：对目标文件持 <c>FileShare.None</c> 独占 ⇒ 子进程非零退出 / <c>File.WriteAllBytes</c>
+    /// 撞共享冲突。每格独立目录 ⇒ "关掉开关后不许留 PNG"这句话才不会被上一格的残留喂成假绿。</para>
+    /// </summary>
+    static void JpegLiAndJxl_BackendFailure_NeverClaimsSuccess()
+    {
+        // 每一格的【前提】：那个后端在这台机器上存在。缺了前提，下面那句"注入成立"的读数依然成立
+        // （0 字节壳是夹具自己造的，后端不在位时也没有进程去写它）⇒ 整格会绿着通过，
+        // 却一次都没有判到矩阵要判的那一格："后端在位、而这一次编不出来"。
+        // ⇒ 不在位就逐格记 Skip（进未覆盖台账，一格一条，与十格的格数对得上），不许记 ✅。
+        // WebP 那一格早就有这道前提（见 WebPFallback_WhenBackendFails…），现在五格都有。
+        static (string Probe, bool Present) BackendPresence(OutputFormat f) => f switch
+        {
+            OutputFormat.JPEG_LI or OutputFormat.JPEG_GAINMAP
+                => ("cjpegli（JpegLiNative.IsAvailable）", JpegLiNative.IsAvailable),
+            OutputFormat.JPEG_XL => ("cjxl（NativeJxlEncoder.IsAvailable）", NativeJxlEncoder.IsAvailable),
+            OutputFormat.WebP => ("cwebp（NativeWebPEncoder.IsAvailable）", NativeWebPEncoder.IsAvailable),
+            _ => ("avifenc（NativeAvifEncoder.IsAvailable）", NativeAvifEncoder.IsAvailable),
+        };
+
+        foreach (var fmt in new[] { OutputFormat.JPEG_LI, OutputFormat.JPEG_XL, OutputFormat.JPEG_GAINMAP,
+                                    OutputFormat.WebP, OutputFormat.AVIF })
+        foreach (var allow in new[] { true, false })
+        {
+            var (probe, present) = BackendPresence(fmt);
+            if (!present)
+            {
+                Skip($"{fmt}/保底={(allow ? "开" : "关")}", $"本机取不到 {probe} ⇒ 走不到「后端在位而编码失败」那一支");
+                continue;
+            }
+            var dir = Path.Combine(OutDir, $"fbx-{fmt}-{(allow ? "on" : "off")}");
+            Directory.CreateDirectory(dir);
+            var ext = fmt switch
+            {
+                OutputFormat.JPEG_LI or OutputFormat.JPEG_GAINMAP => ".jpg",
+                OutputFormat.JPEG_XL => ".jxl",
+                OutputFormat.WebP => ".webp",
+                _ => ".avif",
+            };
+            var path = Path.Combine(dir, "shot" + ext);
+            var pngPath = Path.ChangeExtension(path, ".png");
+            // 每格独立目录 + 先清 PNG：这一格判的是【这一次】编不出来的时候做了什么。
+            // 不清的话，上一格（同一 ext 的另一开关态）留下的 shot.png 会把"关掉开关后盘上不该有 PNG"
+            // 直接读成假红，而反过来把"开"格读成假绿的可能也存在。
+            foreach (var f in new[] { path, pngPath }) if (File.Exists(f)) File.Delete(f);
+
+            var settings = new EncodingSettings
+            {
+                Format = fmt, Quality = 1.0f, OutputBitDepth = 8, HdrOutput = false,
+                ColorSpaceTag = "sRGB", ChromaSubsampling = "444",
+                PngFallbackEnabled = allow,
+                AvifEncoderKind = AvifEncoderKind.LibAom,   // 避开硬件：AVIF 那两格要判的是软件后端这条腿
+            };
+            EncoderFallbackNotifier.LastReason = null;
+
+            Exception? thrown = null;
+            try
+            {
+                using (new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    try
+                    {
+                        EncoderFactory.Create(fmt)
+                            .EncodeSdrAsync(GeneratePattern(8, 8), 8, 8, settings, path)
+                            .GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex) { thrown = ex; }
+                }
+            }
+            catch (Exception ex) { thrown = ex; }
+
+            var tag = $"{fmt}/保底={(allow ? "开" : "关")}";
+            // 注入证据：那个文件仍是我创建的 0 字节壳 ⇒ 失败确实是独占造成的，不是编码器自己坏了
+            Assert($"{tag}：注入成立（独占挡住了写入，原路径仍是 0 字节）",
+                File.Exists(path) && new FileInfo(path).Length == 0,
+                File.Exists(path) ? $"{new FileInfo(path).Length} B ⇒ 独占没挡住，这一格没判到东西"
+                                  : "<原路径连壳都没有 ⇒ 夹具坏了>");
+
+            if (allow)
+            {
+                Assert($"{tag}：必须落一枚非空 PNG（接上保底之后，这一格不许再把图丢掉）",
+                    File.Exists(pngPath) && new FileInfo(pngPath).Length > 0,
+                    thrown is null ? "<连原始编码都没失败 ⇒ 注入或格式判断有假>"
+                                   : $"抛的是 {thrown.GetType().Name}: {thrown.Message.Split('\n')[0]}");
+                Assert($"{tag}：触发保底必须留痕，且说清换的是【格式】（用户口径：一定要告诉用户）",
+                    (EncoderFallbackNotifier.LastReason ?? "").Contains("PNG"),
+                    $"实得 {EncoderFallbackNotifier.LastReason ?? "<null>"}");
+                Assert($"{tag}：必须登记实际落盘路径，上层才报得出那张 PNG 而不是空的 .{ext.TrimStart('.')}",
+                    FormatHelper.ResolveActualPath(path) == pngPath,
+                    $"实得 {FormatHelper.ResolveActualPath(path)}");
+            }
+            else
+            {
+                Assert($"{tag}：开关关掉 ⇒ 必须抛（失败要可见，不许静默）", thrown is not null,
+                    "既没抛也没产物 ⇒ 上层拿这个路径报「已保存」；抛都没抛更是直接谎报");
+                Assert($"{tag}：开关关掉 ⇒ 一律不许落 PNG（留了 PNG = 开关没生效）",
+                    !File.Exists(pngPath),
+                    // ⚠ 断言的"失败详情"参数是【无条件求值】的：这里曾经直接 new FileInfo(pngPath).Length，
+                    // 于是在这一格【通过】的时候抛 FileNotFoundException ⇒ 整套件崩、退出码 0xE0434353。
+                    // 详情里凡是要读文件，必须先判存在。
+                    File.Exists(pngPath)
+                        ? $"盘上出现 {new FileInfo(pngPath).Length} B 的 {Path.GetFileName(pngPath)}"
+                        : "<不该走到这一句>");
+                Assert($"{tag}：开关关掉 ⇒ 不留「换过格式」的登记（上层不许被悄悄改路径）",
+                    FormatHelper.ResolveActualPath(path) == path,
+                    $"实得 {FormatHelper.ResolveActualPath(path)}");
+                if (thrown is not null)
+                    Assert($"{tag}：失败原因可归属（异常带类型与信息，日志/界面说得出是哪个后端）",
+                        thrown.GetType().Name != "Exception" && !string.IsNullOrWhiteSpace(thrown.Message),
+                        $"{thrown.GetType().Name} / {thrown.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// F 批（2026-09-29）：WebP 那条"改存 PNG"的保底，此前<strong>只在 cwebp 缺失时兑现</strong>。
+    /// <para>形状与 §13.9 的 AVIF 同一族：<c>WebPEncoder.EncodeSdrAsync</c> 只
+    /// <c>catch (DllNotFoundException)</c>，而 <c>NativeWebPEncoder.Encode</c> 在 cwebp **在位但编码失败**时
+    /// 抛的是 <c>InvalidOperationException</c>（非零退出 / 30 s 超时 / 产物没写出来，见
+    /// <c>NativeWebPEncoder.cs:88-92</c> 与 <c>NativeEncoderGuard</c> 那条 <c>result.Success == false</c>）
+    /// ⇒ 注释与留痕文案都写着"回退 PNG"，实际这条路根本不进保底：图丢、<c>LastReason</c> 仍是 null。</para>
+    /// <para>注入：对目标 <c>shot.webp</c> 持 <c>FileShare.None</c> 独占句柄 ⇒ cwebp 撞共享冲突失败，
+    /// 而保底写的 <c>shot.png</c> 那条路径是空的 ⇒ 只有"保底真的接住了这一类异常"才能落出 PNG。
+    /// ⚠ 前置条件：<c>cwebp</c> 必须在位——它不在位时走的是【另一条】(DllNotFound) 分支，
+    /// 那条本来就会落 PNG，用它来判这一格就是假绿 ⇒ 不在位就 Skip（Skip 进门禁的"未覆盖"台账）。</para>
+    /// </summary>
+    static void WebPFallback_WhenBackendFails_StillDeliversPngAndNotice()
+    {
+        if (!NativeWebPEncoder.IsAvailable)
+        {
+            Skip("WebP 保底：cwebp 在位但编码失败", "本机取不到可用的 cwebp ⇒ 走不到「编码失败」那一支");
+            return;
+        }
+
+        var dir = Path.Combine(OutDir, "webp-fallback");
+        Directory.CreateDirectory(dir);
+        var webpPath = Path.Combine(dir, "shot.webp");
+        var pngPath = Path.ChangeExtension(webpPath, ".png");
+        foreach (var f in new[] { webpPath, pngPath }) if (File.Exists(f)) File.Delete(f);
+
+        var settings = new EncodingSettings
+        {
+            Format = OutputFormat.WebP, Quality = 90, OutputBitDepth = 8, HdrOutput = false,
+            ColorSpaceTag = "DisplayP3",
+            IccProfile = ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.DisplayP3, "Display P3"),
+            PngFallbackEnabled = true,   // 同 AVIF 那格：这一格判的就是"开了保底之后认不认"
+        };
+        EncoderFallbackNotifier.LastReason = null;   // 单槽通道：不把上一拍的残留带进断言
+
+        // ═══ 对照臂：同一份像素、不加独占 ⇒ 必须真落出一枚 WEBP ═══
+        // 第一版没有这一条，它断言的是"cwebp 确实失败了（thrown 非 null）"——而修好之后保底把异常吃掉了,
+        // thrown 变成 null ⇒ 那条前置判据自己红了一格（实测 webp-fallback-after.log 的 ❌）。
+        // "抛没抛"不是注入成立的证据，【独占挡住写入】才是，所以下面量的是那个 .webp 还是 0 字节。
+        var ctlPath = Path.Combine(dir, "control.webp");
+        if (File.Exists(ctlPath)) File.Delete(ctlPath);
+        EncoderFactory.Create(OutputFormat.WebP)
+            .EncodeSdrAsync(GeneratePattern(8, 8), 8, 8, settings, ctlPath)
+            .GetAwaiter().GetResult();
+        var ctlBytes = File.Exists(ctlPath) ? File.ReadAllBytes(ctlPath) : Array.Empty<byte>();
+        Assert("对照臂：不加独占时 cwebp 正常产出 WEBP（这条不成立，下面所有读数都失去基线）",
+            ctlBytes.Length > 12 && ctlBytes[0] == (byte)'R' && ctlBytes[1] == (byte)'I'
+            && ctlBytes[2] == (byte)'F' && ctlBytes[3] == (byte)'F'
+            && ctlBytes[8] == (byte)'W' && ctlBytes[9] == (byte)'E' && ctlBytes[10] == (byte)'B' && ctlBytes[11] == (byte)'P',
+            $"实得 {ctlBytes.Length} B");
+
+        Exception? thrown = null;
+        try
+        {
+            using (new FileStream(webpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                try
+                {
+                    EncoderFactory.Create(OutputFormat.WebP)
+                        .EncodeSdrAsync(GeneratePattern(8, 8), 8, 8, settings, webpPath)
+                        .GetAwaiter().GetResult();
+                }
+                catch (Exception ex) { thrown = ex; }
+            }
+        }
+        catch (Exception ex) { thrown = ex; }   // 独占句柄本身释放失败 ⇒ 也要留痕，不许静默
+
+        // 注入成立的独立证据：那个 .webp 是我用独占创建的【空文件】，cwebp 打不开它 ⇒ 字节数仍为 0。
+        // 与"保底有没有落 PNG"不是同一件事 ⇒ 不会因为保底生效而变成恒真（对照臂 + 这一条一起才是完整判据）。
+        Assert("注入成立：独占确实挡住了 cwebp 的写入（那个 .webp 仍是 0 字节）",
+            File.Exists(webpPath) && new FileInfo(webpPath).Length == 0,
+            $"实得 {(File.Exists(webpPath) ? new FileInfo(webpPath).Length.ToString() : "<不存在>")} B"
+            + "（>0 ⇒ 独占没起作用，这一轮没判到东西；保底若同时也没落 PNG，下面会单独红）");
+
+        var chunks = ReadPngChunks(pngPath);
+        Assert("WebP 保底：cwebp 编码失败时也要落一枚非空 PNG（promise 是「改存 PNG」，不是「抛异常」）",
+            File.Exists(pngPath) && new FileInfo(pngPath).Length > 0,
+            thrown is null ? "<注入没生效>" : $"抛的是 {thrown.GetType().Name}: {thrown.Message.Split('\n')[0]}");
+        Assert("WebP 保底的 PNG 必须带 iCCP 或 cICP（非 sRGB 目标不许零声明）",
+            FindPngChunk(chunks, "iCCP") is not null || FindPngChunk(chunks, "cICP") is not null,
+            "广色域像素 + 无声明 ⇒ 查看器一律按 sRGB 解");
+        Assert("WebP 保底必须写留痕，且说清换的是【格式】",
+            (EncoderFallbackNotifier.LastReason ?? "").Contains("PNG"),
+            $"实得 {EncoderFallbackNotifier.LastReason ?? "<null>"}");
+        // 实际落盘路径必须登记，否则 Toast / 剪贴板 / 归档仍指向那条并不存在的 .webp（同 P0-D）
+        Assert("WebP 保底要登记「实际写入路径」，上层 ResolveActualPath 才校正得回来",
+            FormatHelper.ResolveActualPath(webpPath) == pngPath,
+            $"实得 {FormatHelper.ResolveActualPath(webpPath)}");
     }
 
     static void EncodedPng_IccpChunk_Valid()

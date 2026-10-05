@@ -89,7 +89,9 @@ public static class BitmapPreprocessor
             for (int x = x0; x < x1; x += 2)
             {
                 int off = (y * w + x) * 4;
-                sum += (bgra[off] * 77 + bgra[off + 1] * 150 + bgra[off + 2] * 29) >> 8;
+                // BT.601 权重 R=77/G=150/B=29，而本文件的数组是 BGRA（off=B、off+1=G、off+2=R）。
+                // 本文件所有灰度式都用这一口径，别在别处再写一份。
+                sum += (bgra[off] * 29 + bgra[off + 1] * 150 + bgra[off + 2] * 77) >> 8;
                 count++;
             }
     }
@@ -119,7 +121,7 @@ public static class BitmapPreprocessor
         for (int i = 0; i < pixelCount; i++)
         {
             int off = i * 4;
-            gray[i] = (byte)((bgra[off] * 77 + bgra[off + 1] * 150 + bgra[off + 2] * 29) >> 8);
+            gray[i] = (byte)((bgra[off] * 29 + bgra[off + 1] * 150 + bgra[off + 2] * 77) >> 8);
         }
 
         // ── 动态窗口: 图像越大窗口越大, 限幅 [15, 61] 奇数 ──
@@ -178,7 +180,7 @@ public static class BitmapPreprocessor
         for (int i = 0; i < pixelCount; i++)
         {
             int off = i * 4;
-            byte gray = (byte)((result[off] * 77 + result[off + 1] * 150 + result[off + 2] * 29) >> 8);
+            byte gray = (byte)((result[off] * 29 + result[off + 1] * 150 + result[off + 2] * 77) >> 8);
             if (gray < minVal) minVal = gray;
             if (gray > maxVal) maxVal = gray;
         }
@@ -253,7 +255,7 @@ public static class BitmapPreprocessor
         for (int i = 0; i < pixelCount; i++)
         {
             int off = i * 4;
-            gray[i] = (byte)((bgra[off] * 77 + bgra[off + 1] * 150 + bgra[off + 2] * 29) >> 8);
+            gray[i] = (byte)((bgra[off] * 29 + bgra[off + 1] * 150 + bgra[off + 2] * 77) >> 8);
         }
 
         // 自适应阈值：11x11 窗口局部均值

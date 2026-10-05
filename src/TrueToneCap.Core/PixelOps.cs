@@ -518,6 +518,70 @@ public static class PixelOps
         return linear;
     }
 
+    /// <summary>名义 SDR 参考白 (nits)：HDR 输出下 scRGB 的 1.0 代表的就是这一档亮度。</summary>
+    public const float NominalSdrReferenceWhiteNits = 80f;
+
+    /// <summary>
+    /// BGRA8（SDR 桌面帧）→ 交给 FP16 scRGB 交换链【呈现】用的 float[]。
+    /// <para>与 <see cref="BgraToScrgbLinearFast"/> 的差别就是"呈现契约"那两件事，少一条在真机上都看得见：</para>
+    /// <para>① 参考白：HDR 输出激活时 1.0 = 80 nits（场景参考），而系统 SDR 白点由用户设定（本机实测 120 nits）。
+    /// DirectX Advanced Color 文档明写：自己把 SDR 与 HDR 合成进同一张表面的应用
+    /// "you're responsible for performing the SDR reference white level adjustment yourself"
+    /// ⇒ 必须 ×(SdrWhiteLevel / 80)，否则这里的 SDR 内容会比它周围的桌面暗一档。</para>
+    /// <para>② 非 HDR 输出时 1.0 = 显示器最大白（显示参考），此时【不许】再乘：乘了白点就变成 1.5，
+    /// 而 DWM 对普通屏上的 FP16 scRGB 内容做数值钳位（"everything outside of the [0, 1] numeric range is clipped"）
+    /// ⇒ 白被削成一团白，正是这一路要防的形状。缩放只允许发生在 HDR 输出那一档。</para>
+    /// <para>③ alpha 一律写 1.0：源帧的 A 由 WGC/驱动决定，不参与"这一帧长什么样"；而承载它的窗口是
+    /// AlphaMode.Ignore + flip 模型 + WS_EX_NOREDIRECTIONBITMAP，A=0 在合成里表现成"透出实时桌面"
+    /// —— 那正是 <c>HdrCaptureWindow.cs:332-338</c> 那条注释自己描述过的现象 ⇒ 不赌源 A 一定是 255。</para>
+    /// </summary>
+    /// <param name="sdrWhiteNits">系统当前 SDR 白点(nits)，来自
+    /// <c>DisplayEnumerator.GetSdrWhiteLevel()</c>。≤0 表示读不到 ⇒ 不缩放（回落 1.0），不猜一个值。</param>
+    /// <returns>length == w*h*4 的 scRGB linear 帧；A 恒 1.0；非 HDR 输出档各通道必然 ≤1。</returns>
+    public static float[] BgraToScrgbForDisplay(byte[] bgra, int w, int h, bool hdrOutputActive, int sdrWhiteNits)
+    {
+        ArgumentNullException.ThrowIfNull(bgra);
+        if (w <= 0 || h <= 0)
+            throw new ArgumentOutOfRangeException(nameof(w), $"非法尺寸 {w}x{h}");
+        long need = (long)w * h * 4;
+        if (need > bgra.Length)
+            throw new ArgumentException($"源帧太短: len={bgra.Length} 需要={w}x{h}x4={need}", nameof(bgra));
+
+        // 缩放只在 HDR 输出那一档发生；读不到白点就不动（宁可不 boost，也不把 1.0 推到会被钳位的水位）
+        float scale = hdrOutputActive && sdrWhiteNits > 0
+            ? sdrWhiteNits / NominalSdrReferenceWhiteNits
+            : 1f;
+
+        int pixelCount = w * h;
+        var outPx = new float[pixelCount * 4];
+        var lut = SrgbToLinearLut;
+
+        if (pixelCount >= 50000)
+        {
+            Parallel.For(0, pixelCount, pi =>
+            {
+                int i = pi * 4;
+                outPx[i]     = lut[bgra[i + 2]] * scale;  // R（BGRA: B=idx, G=idx+1, R=idx+2）
+                outPx[i + 1] = lut[bgra[i + 1]] * scale;  // G
+                outPx[i + 2] = lut[bgra[i]] * scale;      // B
+                outPx[i + 3] = 1f;                        // A：呈现不依赖源 alpha
+            });
+        }
+        else
+        {
+            for (int pi = 0; pi < pixelCount; pi++)
+            {
+                int i = pi * 4;
+                outPx[i]     = lut[bgra[i + 2]] * scale;
+                outPx[i + 1] = lut[bgra[i + 1]] * scale;
+                outPx[i + 2] = lut[bgra[i]] * scale;
+                outPx[i + 3] = 1f;
+            }
+        }
+
+        return outPx;
+    }
+
     // ═══════════════════════════════════════════════════════
     //  4. 灰度降采样 (多核并行)
     //     BT.601 加权: Y = 0.299R + 0.587G + 0.114B (定点)

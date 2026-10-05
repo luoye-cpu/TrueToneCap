@@ -36,7 +36,9 @@
 #    见 scripts/precision/README.md 的退出码约定。）
 #
 # 步骤: [1/2] 构建 → [1.5/2] 格式检查(可选) → [1.6/2] 发布门禁回归 → [1.7/2] 外部判据(可选)
-#       → [1.8/2] 色彩管线判据(默认执行，无跳过开关) → [1.9/2] 宿主新鲜度 → [2/2] 逐套件执行
+#       → [1.8/2] 色彩管线判据(默认执行，无跳过开关) → [1.9/2] 宿主新鲜度
+#       → [1.95/2] 闸门接线 → [1.96/2] 日志行格式对撞 → [1.97/2] App 侧进程内设置迁移判据
+#       → [2/2] 逐套件执行
 
 param(
     [string]$Configuration = "Release",
@@ -61,7 +63,11 @@ param(
 
     # 跳过「发布门禁回归」(scripts/verify-publish-gates.ps1)。默认【不跳过】——
     # 该脚本此前没有任何自动调用方，等于回归保护形同虚设。
-    [switch]$SkipPublishGates = $false
+    [switch]$SkipPublishGates = $false,
+
+    # 把本轮各套件的断言/跳过数写成 scripts\gate-baseline.json（判据数量的基线，此后变少即红）。
+    # 只在"确认这一轮是完整且合法的一轮"之后用；刻意删断言时要连同这份文件一起改，让删除留在 diff 里。
+    [switch]$WriteGateBaseline = $false
 )
 
 # -SkipBuild 与 -BuildOnly 同时给是矛盾输入（一个跳构建、一个只要构建），
@@ -112,7 +118,15 @@ if ($SkipBuild) {
     Write-Host "[1/2] 构建 —— 已跳过 (-SkipBuild)"
 } else {
     Write-Host "[1/2] 构建 $slnx ..."
-    & dotnet build $slnx -c $Configuration
+    # ═══ 2026-09-29（批次 E）改成【必然重编】：+13.2 s 换掉一整类假红 ═══
+    # 增量构建下，只改 App 的源码时 MSBuild 正确地跳过 Test/Tools（它们不引用 App），
+    # 于是 [1.9/2] 那条"宿主不得早于任何构建输入"永远满足不了 —— 本轮就是这么废掉两轮的
+    # （round4-e-batch-gate2 / gate4.log，两次都"整解构建 0 个错误"之后照样红）。
+    # 尺子本身没错（错的是"宿主可能旧"这个担心），缺的是让它的口径【可满足】：
+    # --no-incremental 让 MSBuild 用自己的依赖图把所有宿主都重写一遍，实测 13.2 秒
+    # （`Measure-Command`，Release 全解）。此后这条判据只在"真的没重编"（-SkipBuild、
+    # 构建失败、外部产物被人手动挪回来）时红 —— 那才是它想抓的东西。
+    & dotnet build $slnx -c $Configuration --no-incremental
     if ($LASTEXITCODE -ne 0) {
         Write-Host ""
         Write-Host "❌ 构建失败 (退出码 $LASTEXITCODE)" -ForegroundColor Red
@@ -338,10 +352,16 @@ if ($pyExe) {
     if ($probe.Code -eq 0 -and $cand -and (Test-Path $cand -PathType Leaf)) { $ffprobePath = $cand }
 }
 
+# ═══ 本轮"没判上"的清单（2026-09-29 审查轮 §11.4 补）═══
+# 原来这些只打一行黄字，跑到最后一屏时看不到 ⇒ 一台没有 ffprobe 的机器照样能打印
+# "✅ 7 个套件全部通过"，而那 12 条外部判据一条都没判。汇总末尾按这份清单回显，SKIP 才进得了结论行。
+$script:GateGaps = @()
+
 if ($SkipPrecision) {
     Write-Host "[1.7/2] 外部判据 —— ⚠️ 已按 -SkipPrecision 显式跳过" -ForegroundColor Yellow
     Write-Host "   后果：本轮【没有】用外部解码器读回产物 ⇒ '参数写了没人读 / 声明与像素不一致 /" -ForegroundColor Yellow
     Write-Host "          容器实际交付几级 / 跨容器色域声明矛盾' 这四类回归全部未被判定，不是通过。" -ForegroundColor Yellow
+    $script:GateGaps += "[1.7/2] 外部判据整步跳过（-SkipPrecision）⇒ 外部解码器读回一条没判"
 } elseif (-not (Test-Path $precisionScript)) {
     Write-Host "[1.7/2] 外部判据 —— ❌ 未找到 $precisionScript（门禁接线断了）" -ForegroundColor Red
     exit 1
@@ -349,11 +369,13 @@ if ($SkipPrecision) {
     Write-Host "[1.7/2] 外部判据 —— ⚠️ 跳过 (SKIP)" -ForegroundColor Yellow
     Write-Host "   原因: 未找到可用的 python（试过 python / py -3 / python3；WindowsApps 桩会以退出码 49 静默失败）" -ForegroundColor Yellow
     Write-Host "   ⚠️ 本轮【没有】用外部解码器读回产物 ⇒ '参数是否真的进码流'这一类回归未被判定，不是通过" -ForegroundColor DarkGray
+    $script:GateGaps += "[1.7/2] 整步跳过（本机没有可用的 python）⇒ 外部解码器读回一条没判"
 } elseif (-not $ffprobePath) {
     Write-Host "[1.7/2] 外部判据 —— ⚠️ 跳过 (SKIP)" -ForegroundColor Yellow
     Write-Host "   原因: 未探测到 ffprobe（PATH 与 C:\ffmpeg*\bin、C:\Windows\ffmpeg-*\bin 等常见位置都没有；" -ForegroundColor Yellow
     Write-Host "         可用 TTC_FFPROBE 显式指定路径）" -ForegroundColor Yellow
     Write-Host "   ⚠️ 判据只信外部解码器，没有它就没有判据 ⇒ 本类回归未被判定，不是通过" -ForegroundColor DarkGray
+    $script:GateGaps += "[1.7/2] 整步跳过（未探测到 ffprobe）⇒ 外部解码器读回一条没判"
 } else {
     Write-Host "[1.7/2] 外部判据（用外部解码器读回产物，不信本仓库解析器）..."
     Write-Host "   ℹ️  python: $pyExe $($pyPre -join ' ')  |  ffprobe: $ffprobePath" -ForegroundColor DarkGray
@@ -424,6 +446,38 @@ if ($SkipPrecision) {
         if ($kind -eq "ramp") { $dstRamp = $dstK } else { $dstCicp = $dstK }
     }
 
+    # ── 再两组样张：跨容器像素一致(wg) 与 容器自述审计(audit) ──
+    # 这两条问的是【第三方解码器看到的像素】那一层 —— sweep/ramp/cicp 都停在"参数进没进码流 /
+    # 声明成什么色域"上。2026-09-29 审查轮 §11.6 量到 wg_container_roundtrip / audit_roundtrip
+    # 是写好了却没接线的孤儿裁判 ⇒ "外部解码像素"这一层在此之前从未进门禁。
+    # 样张目录 precision_env 自己会找 artifacts\precision\probe\<kind>，所以不再拷第二份
+    # （多拷一份只会多出一个"两份样张哪个是旧的"的问题）。
+    foreach ($gen in @(
+        @{ Kind = "audit"; Mode = "--container-audit" },
+        @{ Kind = "wg";    Mode = "--wg-samples" }
+    )) {
+        $mode = $gen.Mode; $kind = $gen.Kind
+        if ($toolsExe) {
+            $gText = (& $toolsExe.FullName $mode 2>&1 | ForEach-Object { "$_" }) -join "`n"
+            $gCode = $LASTEXITCODE
+        } else {
+            $gText = (& dotnet run --project $toolsProj -c $Configuration -- $mode 2>&1 | ForEach-Object { "$_" }) -join "`n"
+            $gCode = $LASTEXITCODE
+        }
+        if ($gCode -ne 0) {
+            Write-Host "   ❌ $mode 生成样张失败 (退出码 $gCode)" -ForegroundColor Red
+            $gt = ($gText -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 8) -join "`n"
+            if ($gt) { Write-Host $gt -ForegroundColor DarkGray }
+            exit 1
+        }
+        $dirK = Join-Path $RepoRoot "artifacts\precision\probe\$kind"
+        if (-not (Test-Path $dirK) -or -not @(Get-ChildItem $dirK -File -ErrorAction SilentlyContinue).Count) {
+            Write-Host "   ❌ $mode 退出码 0，但 $dirK 里没有样张 —— 判据无从执行（不能当通过）" -ForegroundColor Red
+            exit 1
+        }
+        if ($kind -eq "audit") { $dstAudit = $dirK } else { $dstWg = $dirK }
+    }
+
     $precisionFailed = $false
     $knownPending = @()      # 已知未修、只报告不阻断的判据（收尾时统一点名，不许悄悄吞掉）
     # 每条判据各吃自己那组样张（sweep = 渐变+参数；ramp = 64 级紧邻台阶）：
@@ -450,7 +504,14 @@ if ($SkipPrecision) {
         @{ Script = "icc_readback_matrix.py";      Samples = $dstCicp },
         # 2026-09-20（交接 §32.9-4）：容器 av1C 的颜色记录 vs 码流真身。此前无人核对过 av1C，
         # 于是自研序列头解析器把 profile 0 恒 4:2:0 读成"该读两位"，三份硬件 AVIF 一律标成 4:4:4。
-        @{ Script = "av1c_vs_bitstream.py";        Samples = $dstSweep }
+        @{ Script = "av1c_vs_bitstream.py";        Samples = $dstSweep },
+        # ── 外部解码像素层（2026-09-29 审查轮 §11.6：这两条早就写好了，只是没人接线）──
+        #   · audit_roundtrip          —— 用 ffmpeg/ffprobe（可选 libavif 的 avifdec）读回产品自述的
+        #     容器与精度声明，判"它说的是不是真的"，含 16-bit 不写 sBIT 这类"宣称比交付强"的关注点；
+        #   · wg_container_roundtrip   —— 同一张广色域图在 PNG/TIFF/AVIF/JXL 里被第三方解码成什么像素，
+        #     跨容器必须一致（基准 = 该色域的 PNG）。09-19 的 TIFF 事故就是这一类。
+        @{ Script = "audit_roundtrip.py";          Samples = $dstAudit },
+        @{ Script = "wg_container_roundtrip.py";   Samples = $dstWg }
     )
     foreach ($check in $checks) {
         Write-Host "   ▶ $($check.Script)" -ForegroundColor DarkGray
@@ -462,6 +523,9 @@ if ($SkipPrecision) {
             Write-Host "     ⚠️ 跳过 (SKIP) —— 该脚本自己报的前置条件缺失" -ForegroundColor Yellow
             $why = ($r.Text -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 4) -join "`n"
             if ($why) { Write-Host $why -ForegroundColor Yellow }
+            # SKIP 必须进末屏的"本轮判据未覆盖"清单（2026-09-29 §11.4）：一条没人跑的判据
+            # 与一条根本没写的判据，对使用者来说没有区别；只在中间刷一行黄字等于没说。
+            $script:GateGaps += "[1.7/2] $($check.Script) 跳过 ⇒ 该层本轮未判"
         } elseif ($check.ContainsKey("Known")) {
             Write-Host "     ⚠️ 不通过，但按【已知未修】挂着不阻断（交接 §30.9）" -ForegroundColor Yellow
             $tail = ($r.Text -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 8) -join "`n"
@@ -486,6 +550,7 @@ if ($SkipPrecision) {
     $probeDir = Join-Path $RepoRoot "scripts\probes"
     foreach ($extra in @(
         @{ Script = (Join-Path $RepoRoot "scripts\gen-third-party-notices.py"); Params = @("--check"); What = "许可清单与全文同步" },
+        @{ Script = (Join-Path $RepoRoot "tests\manual\combo_locale_coverage_measure.py"); Params = @("--ceiling", "0", "0"); What = "下拉项本地化覆盖面天花板" },
         @{ Script = (Join-Path $probeDir "icc_profile_id_check.py");            Params = @(); What = "ICC ProfileID 配方实证" },
         @{ Script = (Join-Path $probeDir "icc_selfbuilt_referee.py");           Params = @(); What = "lcms2 读回自产 ICC" }
     )) {
@@ -676,6 +741,7 @@ if (-not $pyExe -and -not $toolsExe2) {
     if ($colorSkipped.Count) {
         Write-Host "   ⚠️ 本轮【没判】的：$($colorSkipped -join '、')（$(3 - $colorSkipped.Count)/3 判了）" -ForegroundColor Yellow
         Write-Host "      这不是通过。补上外部工具（TTC_CJXL / TTC_ULTRAHDR_APP）再跑一遍才算判过。" -ForegroundColor Yellow
+        $script:GateGaps += "[1.8/2] 色彩管线判据没判上：$($colorSkipped -join '、')"
     } else {
         Write-Host "   ✅ 色彩管线判据 3/3 全部判了且通过"
     }
@@ -694,6 +760,8 @@ if (-not $pyExe -and -not $toolsExe2) {
         Write-Host "❌ HDR 位深判红：请求 12-bit 没产出 12-bit 码流（或两次产物逐字节相同 ⇒ 参数没抵达编码器）" -ForegroundColor Red
         exit 1
     }
+    # ④ 此前只处理 fail：跳过时既不进上面的"没判"名单、也不进分母 ⇒ "没判"被读成"判过了"。
+    if ($v -eq "skip") { $script:GateGaps += "[1.8/2]④ --avif-hdr-depth 位深 A/B 没判上（缺外部件）" }
 }
 Write-Host ""
 
@@ -741,9 +809,43 @@ if ($hostsToCheck.Count -gt 0 -and (Test-Path $srcRoot)) {
         if (-not $files) { return $h.LastWriteTime }
         ($files | Measure-Object -Property LastWriteTime -Maximum).Maximum
     }
-    $inputs = Get-ChildItem $srcRoot -Include *.cs, *.xaml -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '\\(obj|bin)\\' }
+    # ═══ 输入面（2026-09-29 审查轮 §11.4 扩）═══
+    # 原来只收 *.cs/*.xaml ⇒ 改 App/Shaders/*.hlsl 的曲线公式、换 Core/Resources 里那四枚
+    # 随包编码器 exe（avifenc/cjxl/cwebp/cjpegli，正是 [1.7/2] 判据的真身）、动 csproj/props
+    # 或 tests/fixtures 的 ICC，宿主都可以是旧的而门禁全绿。判据不看"是不是 C#"，看"是不是构建输入"。
+    $inputInclude = @(
+        '*.cs', '*.xaml', '*.hlsl', '*.csproj', '*.props',
+        '*.manifest', 'Directory.Build.props', 'Directory.Packages.props'
+    )
+    $inputs = @(
+        Get-ChildItem $srcRoot -Include $inputInclude -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\(obj|bin)\\' }
+        # 随包原生编码器：换了它们等于换了被测对象本身，必须进新鲜度面
+        Get-ChildItem (Join-Path $srcRoot "TrueToneCap.Core\Resources") -Include '*.exe' -Recurse -File -ErrorAction SilentlyContinue
+        Get-ChildItem (Join-Path $RepoRoot "tests\fixtures") -Include '*.icc', '*.icm', '*.png' -Recurse -File -ErrorAction SilentlyContinue
+    )
     $newest = $inputs | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    # ═══ 空输入集不许判成"新鲜"═══
+    # 原先的过滤条件写的是 `$newest -and …`：$inputs 一旦为空（srcRoot 挪了、通配没命中、
+    # 递归被 -ErrorAction 吞掉），$newest 就是 null ⇒ 每个宿主都不进 staleHosts ⇒ 打印
+    # "✅ N 个宿主都不早于 0 份构建输入"。这是本仓反复拦的那一类：守卫自己失明时必须是 ❌，不能是 ✅。
+    if ($inputs.Count -eq 0 -or $null -eq $newest) {
+        Write-Host ""
+        Write-Host "❌ 构建输入枚举为空（实得 $($inputs.Count) 份）⇒ 宿主新鲜度这一格【没判】，按失败处理" -ForegroundColor Red
+        Write-Host "   没有『最新的源码』可比，就等于上面所有 RESULT 读数都可能出自旧构建（§11.4 那条『产物是旧的就作废』）" -ForegroundColor Red
+        $script:GateGaps += "[1.9/2] 构建输入枚举为空 ⇒ 宿主新鲜度未判，本轮 RESULT 不可信"
+        if (-not $SkipBuild) { exit 1 }
+        Write-Warning "   本轮带了 -SkipBuild，按参数约定降级为警告（结论仍请自行担保）"
+    }
+    # ═══ 2026-09-29（批次 E）这里曾经改成"按宿主算输入闭包"，实测【撤回】═══════════════════
+    # 动机是真的：只改 App 的源码时，MSBuild 正确地跳过重编 Test/Tools（它们不引用 App），
+    # 于是这两个宿主的目录时间戳永远早于那次编辑 ⇒ 全局口径【必然】假红（本轮 gate2/gate4 两轮
+    # 都是这样废掉的，而且【整解构建照样 0 个错误】—— 上一版报告把这件事记成"我局部构建的错"，
+    # 那只对了一半，见 §14.6）。但我写的闭包版把 Core 漏了：腿 B 只碰 Core 的源码，
+    # Test/Tools 两腿都判绿（`freshness-two-leg2.log`，输入数 13 / 25 恰好等于各自项目自己的
+    # .cs+csproj 数，Core 那 47 份一份没进去）。PowerShell 函数返回 HashSet 会被解流成字符串数组，
+    # 加上 csproj 叶子名在不同目录下不同，两层坑叠在一起就得到一个【安静漏判】的尺子 ——
+    # 比假红危险得多。撤回全局口径，把力气花在"让这条口径必然可满足"：见上面 [1/2] 的 --no-incremental。
     $staleHosts = @($hostsToCheck | Where-Object { $newest -and (& $dirStamp $_) -lt $newest.LastWriteTime })
     if ($staleHosts.Count -gt 0) {
         Write-Host ""
@@ -759,10 +861,219 @@ if ($hostsToCheck.Count -gt 0 -and (Test-Path $srcRoot)) {
         } else {
             exit 1
         }
+    } elseif ($inputs.Count -gt 0) {
+        Write-Host "   ✅ 宿主新鲜度: $($hostsToCheck.Count) 个宿主都不早于 $($inputs.Count) 份构建输入"
     } else {
-        Write-Host "   ✅ 宿主新鲜度: $($hostsToCheck.Count) 个宿主都不早于 $($inputs.Count) 份源码"
+        # 上面已经点过名了，这一句存在的意义是【不许在这里打印 ✅】：$newest 为 null 时
+        # staleHosts 恒空，绿线照打就是"没判"被读成"判过且通过"。
+        Write-Host "   ⏭ 宿主新鲜度：本轮未判（构建输入为空，见上面那条 ❌/警告）" -ForegroundColor Yellow
     }
+} else {
+    # ═══ 整块被跳过也必须是"没判"，不是"判过且通过" ═══
+    # 这一格成立的前提是"找得到宿主 + 找得到 src 目录"，两者任一为空时原先【一个字都不印】就往下走
+    # ⇒ 换台机器/改配置名，§11.4 立起来的这条判据会安静消失，而门禁照样收 ✅。
+    $why = if (-not (Test-Path $srcRoot)) { "找不到构建输入根目录 $srcRoot" }
+           else { "一个宿主 exe 都没定位到（Test=$([bool]$testExe) / Tools=$([bool]$toolsExe)，配置名 $Configuration 对不对？）" }
+    Write-Host "❌ 宿主新鲜度整块未执行 ⇒ 这一格【没判】：$why" -ForegroundColor Red
+    $script:GateGaps += "[1.9/2] 整块跳过（$why）⇒ 宿主新鲜度未判，上面所有 RESULT 可能是旧构建"
+    if (-not $SkipBuild) { exit 1 }
+    Write-Warning "   本轮带了 -SkipBuild，按参数约定降级为警告（结论仍请自行担保）"
 }
+Write-Host ""
+
+# ══════════════════════════════════════════════════════════════
+#  [1.95/2] 闸门接线自检：commit / push 时这两道究竟会不会跑
+# ══════════════════════════════════════════════════════════════
+# 起因（2026-09-29 审查轮 §11.6，当场量到）：README:153-154 与 :335 承诺 pre-commit 挡编译、
+# pre-push 挡测试，而本机 core.hooksPath 指向 .git\hooks（那里只有 Qoder 的 post-* 跟踪钩子），
+# 仓库自带的两个钩子在 scripts\git-hooks 里躺着【一个都不执行】⇒ 除了手工敲这条脚本，
+# 今天没有任何自动闸门。"钩子还在仓里"与"钩子在跑"是两件事，后者必须被判而不是被相信。
+$hooksWant = Join-Path $RepoRoot 'scripts\git-hooks'
+$hooksNow = ''
+try { $hooksNow = (& git -C $RepoRoot config --local --get core.hooksPath 2>$null) | Out-String } catch { }
+$hooksNow = $hooksNow.Trim()
+# ⚠ 先把"实际生效的路径"单独算出来再比较。第一版写成 `(($resolved -or $hooksNow) -ieq $hooksWant)`，
+#   括号把 -or 折成布尔 ⇒ -ieq 左侧变 [bool] ⇒ 右侧字符串被转成 $true ⇒ 非空路径一律判"已接线"，
+#   这把尺子第一次跑就打了 ✅ 而实况是根本没接（本轮自己造的恒真判据，见报告 §12）。
+$hooksEff = $hooksNow
+$resolvedHook = (Resolve-Path -LiteralPath $hooksNow -ErrorAction SilentlyContinue)
+if ($resolvedHook) { $hooksEff = [string]$resolvedHook.Path }
+$hooksWired = ($hooksNow -ne '' -and $hooksEff -ieq $hooksWant -and
+    (Test-Path -LiteralPath (Join-Path $hooksWant 'pre-commit')) -and
+    (Test-Path -LiteralPath (Join-Path $hooksWant 'pre-push')))
+$inCI = ($env:CI -eq 'true' -or $env:GITHUB_ACTIONS -eq 'true')
+if ($hooksWired) {
+    Write-Host "[1.95/2] 闸门接线: ✅ core.hooksPath → scripts\git-hooks（pre-commit / pre-push 会跑）"
+} elseif ($inCI) {
+    Write-Host "[1.95/2] 闸门接线: ℹ️  CI 环境不装本机钩子（跳过这一格，不影响结论）" -ForegroundColor DarkGray
+} else {
+    Write-Host "[1.95/2] 闸门接线: ⚠️  本机钩子【没接】—— commit 不会构建、push 不会跑测试" -ForegroundColor Yellow
+    Write-Host "   当前 core.hooksPath = '$hooksNow'（期望 $hooksWant）" -ForegroundColor Yellow
+    Write-Host "   ⇒ 本轮之外的一切提交/推送都只靠有人手工跑这条脚本；README 的承诺目前不成立" -ForegroundColor Yellow
+    Write-Host "   接法: .\scripts\install-git-hooks.ps1   （只读检查用 -Status；它写 git 配置，需维护者同意）" -ForegroundColor DarkGray
+    $script:GateGaps += "[1.95/2] 提交闸门未接线（core.hooksPath ≠ scripts\git-hooks）⇒ 除手工外无自动判据"
+}
+Write-Host ""
+
+# ══════════════════════════════════════════════════════════════
+#  [1.96/2] 日志行格式对撞：写方(LogService) 与 读方(LogViewer 的 LogParser) 必须仍互认
+# ══════════════════════════════════════════════════════════════
+# 起因（2026-09-29 审查轮 §10.3 V12）：产品 2026-09-21 起给一次操作期间写的行加了 `#opId ` 前缀，
+# 而日志查看器的两条正则要求级别方括号后【紧跟】[分类/Tag] ⇒ 那批行整条判 null、在查看器里
+# 一条都不显示，且不报错。两个进程之间的事实没有编译期耦合，只能靠对撞判。
+# 尺子从源码里现取正则（不抄常数），带一正两负三条臂；读不到 pattern 或臂不对 ⇒ 退非零。
+$logLineProbe = Join-Path $RepoRoot 'scripts\probes\logline_format_check.ps1'
+if (-not (Test-Path -LiteralPath $logLineProbe)) {
+    Write-Host "[1.96/2] 日志行格式对撞 —— ❌ 脚本不在（$logLineProbe，门禁接线断了）" -ForegroundColor Red
+    exit 1
+}
+Write-Host "[1.96/2] 日志行格式对撞（写方 FormattedLine ↔ 读方 LogParser 正则）..."
+$logLineOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $logLineProbe 2>&1
+$logLineCode = $LASTEXITCODE
+($logLineOut | ForEach-Object { "   $_" }) -join "`n" | Write-Host
+if ($logLineCode -ne 0) {
+    Write-Host "❌ 日志行格式两边对不上 ⇒ 日志查看器会静默丢行（排障证据消失），本轮结论作废" -ForegroundColor Red
+    exit 1
+}
+Write-Host "   ✅ 行格式互认（含 #opId 段），两条负样本仍被拒"
+Write-Host ""
+
+# ══════════════════════════════════════════════════════════════
+#  [1.97/2] App 侧进程内判据：TrueToneCap.exe --settings-migration
+# ══════════════════════════════════════════════════════════════
+# 为什么必须补这一格：Test 工程只引用 Core ⇒ 迁移门 / 越界归一回落 / GainMap 重映射这三条
+# 设置侧自检（跑在用户机器上的那一份 App 代码）在上面的 7 个套件里【一条都判不到】，
+# 台账上"App 侧运行时行为 T1=0"记的就是这个洞。而这三条正是 2026-09-16 那次
+# "老文件的 QualityAvif=63 一路活到界面显示 CRF: 63"事故的正主（交接 §49）。
+# 实测成本 265–672ms（tests\output\app-selftest-cost-cell.log 与
+# tests\output\app-selftest-backends-cell.log，均退 0）⇒ 便宜到没有理由不进门禁。
+#
+# 三条纪律都是本仓踩过坑之后定的，不是随手写的：
+#  · --out 指进仓库：这台机器的清理器会秒删 %TEMP% 里新建的文件，证据历史上真丢过；
+#    不给 --out 时 SelfTest 会回落 %TEMP%\TrueToneCap_SelfTest，所以这一格【必传】。
+#  · 跑前拍设置文件 sha256、跑后按原字节还原：SettingsService.Load() 会重写用户那份
+#    TrueToneCap.settings.json（迁移门触发时 Load() 末尾 if (migrated) Save()），
+#    门禁不许为此改动用户机器的设置。
+#  · 超时 ⇒ 记【未判】并红：这道闸门的规矩是"没判上绝不允许落成绿"。
+#
+# ⚠ 用 Start-Process + WaitForExit(ms) 而不是 Invoke-CapturedNative：后者没有超时口径，
+#   一旦进程挂住整条门禁就停在这一格（而且 $ErrorActionPreference=Stop 下 native 的
+#   一行 stderr 会被包成终止性错误 —— 那正是 Invoke-CapturedNative 存在的原因）。
+#   这里既不截断 stderr 也不等不完：Start-Process 自带超时，等不到就 Kill。
+$appBinRoot = Join-Path $RepoRoot "src\TrueToneCap.App\bin"
+$appExe = Get-ChildItem $appBinRoot -Filter "TrueToneCap.exe" -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -split '\\' -contains $Configuration } |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+$appModeOut = Join-Path $RepoRoot "tests\output\app-settings-migration"
+$appModeTimeoutSec = 60
+
+Write-Host "[1.97/2] App 侧设置迁移判据（进程内跑 --settings-migration，判据=退出码）..."
+
+if (-not $appExe) {
+    # 定位不到宿主 = 这一格整块没跑，绝不能当成"没有失败所以通过"（[1.9/2] 同一口径）
+    Write-Host "   ❌ 未找到 TrueToneCap.exe（已搜索 $appBinRoot 下含 '$Configuration' 路径段的全部匹配）" -ForegroundColor Red
+    Write-Host "      ⇒ 这一格【没判】：App 侧三条设置自检从此没有任何自动判据，按失败处理" -ForegroundColor Red
+    $script:GateGaps += "[1.97/2] 未定位到 App 宿主 exe ⇒ --settings-migration 未判"
+    exit 1
+}
+
+$settingsPath = Join-Path $appExe.DirectoryName 'TrueToneCap.settings.json'
+function Get-Sha256OrAbsent([string]$p) {
+    if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } else { 'ABSENT' }
+}
+# 轮前的原件按【字节】留着：还原只信原字节，不信"看起来一样"
+$settingsBytes = if (Test-Path -LiteralPath $settingsPath) { [IO.File]::ReadAllBytes($settingsPath) } else { $null }
+$settingsSha0 = Get-Sha256OrAbsent $settingsPath
+
+# ⚠ 2026-10-05：这一格的 Start-Process 必须带输出重定向，否则在本机【会挂住整条门禁】。
+#   实测（round69）：不带 -RedirectStandardOutput/Error 时，WaitForExit(60000) 永不返回 ——
+#   进程其实起来了（stderr 能看到它的 libpng 告警），但 GUI 子系统的宿主没有人接管它的
+#   标准句柄，父进程的等待就悬在那里；带上重定向后同一调用 230 ms 返回、rc=0。
+#   注意 $appModeTimeoutSec 那道超时【兜不住】它：WaitForExit(ms) 对这种情况不生效，
+#   所以这不是"超时会 Kill"能覆盖的，必须从起进程那一行解决。
+try {
+    New-Item -ItemType Directory -Force -Path $appModeOut | Out-Null
+} catch {
+    Write-Host "   ❌ --out 目录建不出来（$appModeOut：$($_.Exception.Message)）⇒ 这一格没判，按失败处理" -ForegroundColor Red
+    $script:GateGaps += "[1.97/2] --out 目录创建失败 ⇒ --settings-migration 未判"
+    exit 1
+}
+$progressFile = Join-Path $appModeOut 'progress.txt'
+# SelfTest 的 progress 是 AppendAllText：不清就分不清哪几行是本轮的
+if (Test-Path -LiteralPath $progressFile) { Remove-Item -LiteralPath $progressFile -Force }
+
+$appCode = $null
+$appTimedOut = $false
+$appSw = [Diagnostics.Stopwatch]::StartNew()
+try {
+    $appProc = Start-Process -FilePath $appExe.FullName `
+        -ArgumentList @('--settings-migration', '--out', $appModeOut) `
+        -PassThru -WorkingDirectory $appExe.DirectoryName `
+        -RedirectStandardOutput (Join-Path $appModeOut 'stdout.txt') `
+        -RedirectStandardError (Join-Path $appModeOut 'stderr.txt')
+    if (-not $appProc.WaitForExit($appModeTimeoutSec * 1000)) {
+        $appTimedOut = $true
+        try { $appProc.Kill() } catch { }
+    } else {
+        $appCode = $appProc.ExitCode
+    }
+} catch {
+    Write-Host "   ❌ 起进程/等待失败：$($_.Exception.Message)" -ForegroundColor Red
+}
+$appSw.Stop()
+
+# ── 无论这一格判成什么，先把用户那份设置按原字节还原，再谈结论 ──
+$settingsSha1 = Get-Sha256OrAbsent $settingsPath
+$settingsChanged = ($settingsSha1 -ne $settingsSha0)
+if ($null -ne $settingsBytes) {
+    if ($settingsChanged) {
+        [IO.File]::WriteAllBytes($settingsPath, $settingsBytes)
+        $settingsSha1 = Get-Sha256OrAbsent $settingsPath
+        $restored = if ($settingsSha1 -eq $settingsSha0) { "与轮前逐字相同 ✓" } else { "★ 与轮前不同：立即人工核对" }
+        Write-Host "   ℹ️  设置文件被这一轮重写 ⇒ 已按原字节还原（前 $($settingsSha0.Substring(0,12))… 现 $($settingsSha1.Substring(0,12))…）$restored" -ForegroundColor Yellow
+        if ($settingsSha1 -ne $settingsSha0) {
+            # 还原不成功就是门禁改了用户机器的设置 —— 这一格不许带着副作用收场
+            Write-Host "      $settingsPath 现在既不是轮前那份、也没被恢复：立即人工核对" -ForegroundColor Red
+            exit 1
+        }
+    } else {
+        Write-Host "   ℹ️  设置文件本轮【未改动】（sha256 $($settingsSha0.Substring(0, 12))…）" -ForegroundColor DarkGray
+    }
+} elseif (Test-Path -LiteralPath $settingsPath) {
+    Remove-Item -LiteralPath $settingsPath -Force
+    Write-Host "   ⚠️  轮前没有 $settingsPath，这一轮生成了 ⇒ 已删除，恢复'本来就没有'的状态" -ForegroundColor Yellow
+} else {
+    Write-Host "   ℹ️  轮前没有设置文件、本轮也没生成 ⇒ 无东西可还原" -ForegroundColor DarkGray
+}
+
+if ($appTimedOut) {
+    Write-Host "   ❌ ${appModeTimeoutSec}s 未退出 ⇒ 记【未判】（实测正常成本不到 1 秒），不记绿" -ForegroundColor Red
+    $script:GateGaps += "[1.97/2] --settings-migration 超时 ${appModeTimeoutSec}s 未退出 ⇒ 未判"
+    exit 1
+}
+if ($null -eq $appCode) {
+    Write-Host "   ❌ 拿不到退出码（进程没起来）⇒ 这一格【没判】，按失败处理" -ForegroundColor Red
+    $script:GateGaps += "[1.97/2] --settings-migration 进程未启动 ⇒ 未判"
+    exit 1
+}
+if ($appCode -ne 0) {
+    Write-Host "   ❌ --settings-migration 退出码 $appCode（$($appSw.ElapsedMilliseconds)ms）⇒ App 侧三条设置自检至少一条判红" -ForegroundColor Red
+    if (Test-Path -LiteralPath $progressFile) {
+        foreach ($l in (Get-Content -LiteralPath $progressFile -Encoding UTF8 | Select-Object -Last 6)) {
+            Write-Host ("      " + $l.Substring(0, [Math]::Min(200, $l.Length))) -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "      ⚠ 没有 progress.txt（$progressFile）⇒ 连一步都没落盘，读数不可信" -ForegroundColor Yellow
+    }
+    exit 1
+}
+# 退出码 0 却一条 progress 都没写 = 这一格其实没跑起来（同 [2/2] 那条"退 0 但无 RESULT"的口径）
+if (-not (Test-Path -LiteralPath $progressFile)) {
+    Write-Host "   ❌ 退出码 0 但没有 progress.txt ⇒ 判为失败（很可能一步都没跑）：$progressFile" -ForegroundColor Red
+    exit 1
+}
+Write-Host "   ✅ App 侧设置迁移: 退出码 0（$($appSw.ElapsedMilliseconds)ms，上限 ${appModeTimeoutSec}s）｜ $($appExe.Name)｜--out 落 $appModeOut"
 Write-Host ""
 
 # ══════════════════════════════════════════════════════════════
@@ -811,6 +1122,16 @@ foreach ($suite in $suites) {
     if ($code -eq 0 -and $passed -ne $null) {
         $s = if ($skipped -gt 0) { "，跳过 $skipped" } else { "" }
         Write-Host "     ✅ 通过 ($passed 断言$s)"
+        # 跳过必须点名。只报"N 处没判"等于说不出内容 —— 2026-09-27 审查 N6：
+        # 通过路径原本把套件 stdout 整段丢弃，四条 SKIP 是查不到是谁的。
+        if ($skipped -gt 0) {
+            $skipLines = @($output -split "`n" | Where-Object { $_ -match '跳过:' })
+            # 套件自己那行已经带了 ⏭ / ⚠️ 标记 —— 这里只缩进，不再叠一层，否则审计日志里是"⏭ ⏭ …"
+            foreach ($l in $skipLines) { Write-Host ("       " + $l.Trim()) -ForegroundColor DarkYellow }
+            if ($skipLines.Count -ne $skipped) {
+                Write-Host "       ⚠️ RESULT 报 skipped=$skipped，但只点名到 $($skipLines.Count) 条 ⇒ 有跳过项没写原因" -ForegroundColor Yellow
+            }
+        }
     } elseif ($code -eq 0 -and $passed -eq $null) {
         Write-Host "     ❌ 退出码 0，但未解析到 RESULT 行 —— 判为失败（很可能零断言执行）" -ForegroundColor Red
         $tail = ($output -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 8) -join "`n"
@@ -847,14 +1168,115 @@ Write-Host "══════════════════════�
 # （后者此前被当作"通过"，是完整的假绿灯路径 —— 典型诱因是套件名拼错）
 $failedSuites = @($results | Where-Object { $_.Exit -ne 0 -or $_.NoResult })
 $totalPassed = ($results | Where-Object { $_.Passed -ne $null } | Measure-Object -Property Passed -Sum).Sum
-if ($failedSuites.Count -eq 0) {
-    Write-Host "  ✅ $($results.Count) 个套件全部通过 — 共 $totalPassed 断言 ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)"
+
+# ═══ 断言总数对基线（2026-09-29 审查轮 §11.4）═══
+# Publish.ps1 里那个 MinGateAssertions=340 对真实 1379 ⇒ 删掉上千条断言两处都照样绿。
+# 基线不再手抄：用 -WriteGateBaseline 从一轮真读数生成，此后任何"某套件变少"都要红并点名。
+$baselinePath = Join-Path $RepoRoot 'scripts\gate-baseline.json'
+if ($WriteGateBaseline -and $failedSuites.Count -eq 0) {
+    $doc = [ordered]@{
+        取数时间 = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        总断言   = $totalPassed
+        各套件   = [ordered]@{}
+    }
+    foreach ($r in $results) {
+        if ($null -ne $r.Passed) {
+            $n = $r.Suite
+            $doc.各套件.$n = [ordered]@{ 断言 = $r.Passed; 跳过 = $r.Skipped }
+        }
+    }
+    $noteKey = '_说明'
+    $doc.各套件.$noteKey = '用 scripts\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里'
+    $doc | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $baselinePath -Encoding UTF8
+    Write-Host "  ℹ️  基线已写入 $baselinePath（本轮总断言 $totalPassed）" -ForegroundColor DarkGray
+} elseif ($WriteGateBaseline) {
+    # ⚠ 本轮有套件失败 ⇒【拒绝写基线】。2026-09-29 实测踩过：一次 --unit-tests 红 1 条的轮次照样带了
+    #   -WriteGateBaseline，于是把"通过 899"记成了地板 —— 地板从那一刻起就比真实规模低，
+    #   而这正是这条机制存在的理由（"断言变少要红"）。宁可让人重跑一次绿轮，也不能记错地板。
+    Write-Host "  ❌ 带了 -WriteGateBaseline 但本轮有套件失败 ⇒ 拒绝写基线（否则把失败读数记成地板）" -ForegroundColor Red
+}
+
+$baselineFail = $false
+$baselineJustWritten = $false
+if ($WriteGateBaseline -and $failedSuites.Count -eq 0) { $baselineJustWritten = $true }
+if ((Test-Path -LiteralPath $baselinePath) -and -not $baselineJustWritten) {
+    try {
+        $base = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json
+        $ranByName = @{}
+        foreach ($r in $results) { $ranByName[$r.Suite] = $r }
+        # ═══ 反向比对：基线里有、本轮【没跑】的套件必须点名 ═══
+        # 下面那个 foreach 只遍历"本轮跑了的"套件 ⇒ 把一条套件从 $suites 里摘掉（或把它改名）
+        # 在这把尺子上是不可见的：断言不会变少，只是那一行读数消失了，门禁全绿。
+        # 摘掉一整条判据比重删一条断言的破坏力大得多，却没被任何一处观测到。
+        foreach ($p in @($base.各套件.PSObject.Properties)) {
+            if ($p.Name -eq '_说明') { continue }
+            if (-not $ranByName.ContainsKey($p.Name)) {
+                Write-Host "  ❌ 基线里的 $($p.Name) 本轮没有跑 ⇒ 套件被摘掉/改名/构建没产出，这一格【没判】" -ForegroundColor Red
+                $baselineFail = $true
+            }
+        }
+        foreach ($r in $results) {
+            if ($null -eq $r.Passed) { continue }
+            $n = $r.Suite
+            $b = $base.各套件.$n
+            if ($null -eq $b) {
+                Write-Host "  ℹ️  $($r.Suite) 不在基线里（新套件或本轮才启用）⇒ 未比对" -ForegroundColor DarkGray
+                $script:GateGaps += "$($r.Suite) 不在基线里 ⇒ 它的断言规模本轮无对照（跑一次 -WriteGateBaseline 收编）"
+                continue
+            }
+            if ($r.Passed -lt $b.断言) {
+                Write-Host "  ❌ $($r.Suite) 断言数从基线 $($b.断言) 掉到 $($r.Passed)（少 $($b.断言 - $r.Passed) 条）" -ForegroundColor Red
+                Write-Host "     ⇒ 有断言被删/被静默跳过。确系有意就改 scripts\gate-baseline.json 并重跑，别让它悄悄少" -ForegroundColor Red
+                $baselineFail = $true
+            }
+            if ($r.Skipped -gt $b.跳过) {
+                Write-Host "  ⚠️ $($r.Suite) 跳过数从基线 $($b.跳过) 涨到 $($r.Skipped) ⇒ 本轮有东西没判" -ForegroundColor Yellow
+                $script:GateGaps += "$($r.Suite) 跳过 $($r.Skipped) 条（基线 $($b.跳过)）"
+            }
+        }
+        # 总数也要比：逐套件都比过之后总数当然相等；但"跑了没进基线的套件"会让总数【高于】基线，
+        # 那也不是判据变多的信号 ⇒ 只在低于时红（套件被整条摘掉那一类由上面的反向比对兜住）。
+        if ($base.总断言 -and $totalPassed -lt $base.总断言) {
+            Write-Host "  ❌ 总断言从基线 $($base.总断言) 掉到 $totalPassed ⇒ 与逐套件读数至少有一处不一致，本轮不作数" -ForegroundColor Red
+            $baselineFail = $true
+        }
+    } catch {
+        Write-Host "  ❌ 基线文件读不动（$($_.Exception.Message)）⇒ 这一格没判，按失败处理" -ForegroundColor Red
+        $baselineFail = $true
+    }
+} elseif ($baselineJustWritten) {
+    # 写基线的那一轮拿本轮读数和【本轮读数】比，恒等 ⇒ 那是自我确认，不是判据。
+    # 明说一句，免得"带了 -WriteGateBaseline 的一轮全绿"被当成"基线比对通过"。
+    Write-Host "  ℹ️  本轮就是基线的来源 ⇒ 断言规模这一格是自比（恒等），下一轮起才由它拦" -ForegroundColor DarkGray
+    $script:GateGaps += "[地板] 本轮写了 gate-baseline.json ⇒ 断言规模比对在本轮是自我比对，无对照价值"
+} elseif (-not $WriteGateBaseline) {
+    # 基线缺失必须拦，不能默默过去：否则"没有比过"会被读成"比对通过"
+    Write-Host "  ❌ 没有 scripts\gate-baseline.json ⇒ 断言总数这一格【没判】。先跑一次 -WriteGateBaseline" -ForegroundColor Red
+    $baselineFail = $true
+}
+
+if ($script:GateGaps.Count -gt 0) {
+    Write-Host "─────────────── 本轮判据未覆盖（不是通过，是没判）───────────────" -ForegroundColor Yellow
+    foreach ($g in $script:GateGaps) { Write-Host "  ⏭  $g" -ForegroundColor Yellow }
+    Write-Host "  合计 $($script:GateGaps.Count) 处；这些格子本轮无结论，换机/补件后要重跑" -ForegroundColor Yellow
+    Write-Host "══════════════════════════════════════════════════"
+}
+
+if ($failedSuites.Count -eq 0 -and -not $baselineFail) {
+    # 结论行必须带上"未判"的条数：只报 ✅ 的话，上面那串 ⏭ 台账在滚屏里等于没写，
+    # 换机器的人会把"没判"读成"判过且通过"（本仓 §11.6 立的那条：汇总数要与点名条数相等）。
+    $gapTail = if ($script:GateGaps.Count -gt 0) { "｜另有 $($script:GateGaps.Count) 处未判（见上⏭清单，这些格子本轮无结论）" } else { "｜无未判格子" }
+    Write-Host "  ✅ $($results.Count) 个套件全部通过 — 共 $totalPassed 断言 ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)$gapTail"
     Write-Host "══════════════════════════════════════════════════"
     Write-Host ""
     exit 0
 }
 
-Write-Host "  ❌ $($failedSuites.Count)/$($results.Count) 个套件失败 — 共 $totalPassed 断言通过 ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)"
+if ($failedSuites.Count -eq 0 -and $baselineFail) {
+    Write-Host "  ❌ 套件全绿，但【断言数量对不上基线】⇒ 这一轮不作数（有判据被删或被静默跳过）" -ForegroundColor Red
+} else {
+    Write-Host "  ❌ $($failedSuites.Count)/$($results.Count) 个套件失败 — 共 $totalPassed 断言通过 ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)"
+}
 foreach ($f in $failedSuites) {
     $why = if ($f.NoResult -and $f.Exit -eq 0) { "零断言执行（未解析到 RESULT 行）" } else { "退出码 $($f.Exit)" }
     Write-Host "     · $($f.Suite)  ($why)" -ForegroundColor Red

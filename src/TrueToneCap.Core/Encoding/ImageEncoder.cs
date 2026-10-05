@@ -75,6 +75,28 @@ public sealed class EncodingSettings
     /// 支持 GPU 直通的编码器（目前 NVENC AVIF）使用此纹理直接编码，
     /// 跳过 GPU→CPU 回读再上传的往返开销。</summary>
     public ID3D11Texture2D? GpuTexture { get; set; }
+
+    /// <summary>
+    /// 【换格式保底】的总闸：本次编码后端失败时，允不允许把这张图改存成 PNG（而不是什么都不落）。
+    /// <para>产品默认是【开】（截图工具的失败模式应该是"无损但格式不对"，不是"按下热键什么都没发生"），
+    /// 但那个"开"是由 <c>CapturePipelineService.BuildEncodingSettings</c> 从设置快照带进来的 ——
+    /// <b>本属性的初始值刻意是 <c>false</c></b>：任何直接 <c>new EncodingSettings</c> 的调用方
+    /// （<c>--param-sweep</c> / <c>--selftest</c> / <c>--container-audit</c> / 各外部裁判脚本 / 单测夹具）
+    /// 要的是"我让它编什么格式、失败就必须是失败"。保底一旦在测量路径上生效，就会把"编码器不行"
+    /// 洗成"产物存在"，而这类判据的读法普遍是"有没有那个文件"。
+    /// 实测证据（2026-09-29）：把初始值定成 <c>true</c> 之后，<c>param_sweep_check.py</c> 的
+    /// <c>c_avifsvt_444</c> 那一格从"按预期失败（SVT 仅 4:2:0，未静默降级）"立刻翻成
+    /// "竟然成功了 —— SVT 能力表需要重测"，而真因只是保底在扫参目录里多写了一枚
+    /// <c>c_avifsvt_444.png</c>（裁判按名字前缀找文件，命中了它）。</para>
+    /// <para>关掉之后失败照原样抛出去（产品界面走 <c>ShowCaptureFailed</c> 那条），产物**仍然是用户选的
+    /// 格式**或者根本没有产物；不会再看一眼后缀却发现"我要 JPEG XL、盘上躺着 PNG"。</para>
+    /// <para>它只管【换格式】这一件事。格式内部的后端阶梯（AVIF 硬件 → libaom、HDR → 同格式 SDR 色调映射、
+    /// 位深/色度协商）不归它管，那些是同一个容器内的参数降级，另有各自的留痕通道
+    /// （<see cref="EncoderFallbackNotifier"/>）。</para>
+    /// <para>用户侧的事实源是 <c>AppSettingsData.PngFallbackEnabled</c>（默认 true，设置页那个勾）；
+    /// 把它写进本属性的只有管线那一处，见 CorePipelineTests 的"开关写者只许一处"。</para>
+    /// </summary>
+    public bool PngFallbackEnabled { get; set; }
 }
 
 public enum OutputFormat { PNG, JPEG_LI, JPEG_XL, AVIF, WebP, TIFF, JPEG_GAINMAP }
@@ -104,6 +126,42 @@ public sealed class HdrFrameData
     public ID3D11Texture2D? GpuTexture { get; init; }
 }
 
+/// <summary>
+/// 质量轴是哪一种刻度。<b>刻意是枚举而不是字符串</b>。
+/// <para>过去这里返回的是中文成品串（<c>"质量 (50-100; 85+ 视觉无损)"</c> 之类），
+/// 而本地化表（<c>LocaleManager.ZhToEn</c>）只存在于 App 那一层 ⇒ App 只能在显示点
+/// 往回翻一个【下层生成的用户可见文案】；<c>$"距离: {q:F1}"</c> 那种带数值的整串
+/// 更是永远精确匹配不上，只能按片段换。Core 只说"是哪一种刻度"，
+/// 措辞与数值格式化归 App（<c>MainWindow.QualityLabels</c>）。
+/// 反向哨兵：<c>Test_QualityTexts_CoreStringsAreAllCovered</c> 会扫这两个方法的函数体，
+/// 再出现中文字面量就红。</para>
+/// </summary>
+public enum QualityScale
+{
+    LosslessFixed100,
+    LosslessFixed,
+    QualityPercent,
+    Crf,
+    ButteraugliRange,
+    ButteraugliDistanceRange,
+}
+
+/// <summary>当前质量值怎么读：<b>类型 + 数值</b>，同样不含任何用户可见措辞。</summary>
+public enum QualityDescKind
+{
+    Lossless,
+    NearLossless,
+    Distance,
+    DistanceWithNote,
+    Crf,
+    Percent,
+    PlainNumber,
+}
+
+/// <summary>一次质量读数的中性结果。<see cref="QualityDescKind"/> 说明怎么读，
+/// <see cref="Value"/> 原样带过去，格式化与措辞由 App 决定（这样中文模式可以逐字复刻旧输出）。</summary>
+public readonly record struct QualityDesc(QualityDescKind Kind, float Value);
+
 public abstract class ImageEncoder
 {
     public abstract OutputFormat Format { get; }
@@ -112,7 +170,7 @@ public abstract class ImageEncoder
         string outputPath, CancellationToken ct = default);
     public abstract Task EncodeSdrAsync(byte[] sdrPixels, int width, int height,
         EncodingSettings settings, string outputPath, CancellationToken ct = default);
-    public abstract (float Min, float Max, float Default, string Label) GetQualityRange();
+    public abstract (float Min, float Max, float Default, QualityScale Scale) GetQualityRange();
 
     /// <summary>该格式<b>有没有可调的质量参数</b>（区间退化成一个点 ⇒ 没有）。</summary>
     /// <remarks>
@@ -125,7 +183,7 @@ public abstract class ImageEncoder
     /// </remarks>
     public bool QualityIsFixed => GetQualityRange() is (var min, var max, _, _) && max <= min;
 
-    public virtual string GetQualityDescription(float quality) => quality.ToString("F0");
+    public virtual QualityDesc GetQualityDescription(float quality) => new(QualityDescKind.PlainNumber, quality);
 }
 
 /// <summary>AVIF 编码器抽象接口。</summary>

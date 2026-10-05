@@ -112,6 +112,32 @@ if (args.Contains("--all"))
 }
 
 // ═══════════════════════════════════════
+//  诊断模式：把两条预览路径的【数据差】打成 CSV（2026-09-30，报告 §24）
+//  不是套件 ⇒ 不产生 RESULT 行、不进断言地板，也不会被门禁当成"跑过了什么"。
+//  要回答的问题：同一帧 SDR 桌面，走 SelectionOverlay 的两条背景路线差在哪
+//    路线 A（GPU）：PixelOps.BgraToScrgbLinearFast → R16G16B16A16_Float 交换链 → DWM
+//    路线 B（CPU 兜底）：原始 BGRA8 直接进 WriteableBitmap → WinUI 按 sRGB 解 → DWM
+//  这里只出【产品自己算出来的数】：每个 8-bit 码点的线性值，再叠一次 Half16 往返
+//  （交换链真实的存储精度）。对照曲线由 scripts/precision/scrgb_path_compare.py 独立实现，
+//  两边不一致才算测出东西——拿同一个实现比自己是恒等式。
+// ═══════════════════════════════════════
+if (args.Contains("--scrgb-compare"))
+{
+    Console.WriteLine("code,bgra_identity,fast_linear,half16_roundtrip");
+    for (int c = 0; c <= 255; c++)
+    {
+        // 中性灰阶：R=G=B=c。两条路只差在编码/位深，不需要彩色
+        var bgra = new byte[4] { (byte)c, (byte)c, (byte)c, 255 };
+        var lin = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(bgra, 1, 1);
+        // 交换链是 Float16：过一遍 Half 才是屏幕真正拿到的数
+        // （ConvertFloatToHalfRow 与 BCL Half 已由 --unit-tests 那条"逐元素等于 BCL 参照"钉成同值）
+        var rt = (float)(Half)(lin[0]);
+        Console.WriteLine($"{c},{c / 255.0:R},{lin[0]:R},{rt:R}");
+    }
+    return 0;
+}
+
+// ═══════════════════════════════════════
 //  显式求助 → 0；未知/无参数 → 1（不得伪装成通过）
 // ═══════════════════════════════════════
 if (args.Contains("--help") || args.Contains("-h"))
@@ -137,10 +163,11 @@ static void PrintUsage()
     Console.WriteLine("  --color-tests      色彩管线精度测试");
     Console.WriteLine("  --encoding-tests   编码管线集成测试");
     Console.WriteLine("  --usability-tests  综合可用性测试");
-    Console.WriteLine("  --service-tests    基础设施服务测试 (ShaderLoader, NativeLibraryResolver)");
+    Console.WriteLine("  --service-tests    基础设施服务测试 (NativeLibraryResolver)");
     Console.WriteLine("  --ocr-tests        OCR 服务测试 (BitmapPreprocessor, LLM 提供商/模型清单闭合)");
     Console.WriteLine("  --format-tests     输出结构合法性测试 (TIFF IFD / AVIF box)");
     Console.WriteLine("  --wgc-avif-tests   WGC 真实捕获 + AVIF 各后端编码验证 (需桌面会话)");
+    Console.WriteLine("  --scrgb-compare    诊断：把两条预览路径的数据差打成 CSV 到 stdout（非套件，不产 RESULT）");
     Console.WriteLine("  --all              全部测试 (含全部 8 个套件; WGC 以子进程隔离运行)");
     Console.WriteLine("  --help / -h        显示本帮助\n");
 }

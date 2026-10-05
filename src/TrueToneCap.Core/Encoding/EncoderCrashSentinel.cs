@@ -13,11 +13,14 @@
 //
 // ── 思路 ──
 // 既然无法在崩溃【当时】做点什么，就把判断推迟到崩溃【之后】：
-//   1. 进入原生编码前写哨兵（记录后端名 + 时间）
+//   1. 进入原生编码前写哨兵（记录后端名 + 写入进程的 PID + 时间）
 //   2. 正常返回后清除哨兵
 //   3. 若进程在编码途中死亡 → 哨兵必然残留
 //   4. 下次启动读到残留哨兵 → 判定"上次是在这个后端崩的" → 自动禁用该后端，
 //      回退到软件编码（avifenc / libaom），从而不再重复崩溃
+//
+// 第 1 步里的 PID 不是可选项：同一进程内两次并发 Arm 时，后来者读到的那个在途文件
+// 与"上次进程崩了留下的文件"长得一模一样，只能靠 PID（以及本进程自己的在途计数）分开。
 //
 // 这不是"修复崩溃"，而是把不可恢复的硬崩溃降级为可自愈的软件路径。
 // 用户在设置里应能看到"硬件编码已因上次崩溃而停用"，并可手动重置（ClearAll）。
@@ -43,7 +46,8 @@ public static class EncoderCrashSentinel
     //  更糟的是两个后端互相覆盖同一个哨兵文件，崩溃后读出的"归属后端"可能张冠李戴 ——
     //  明明是 NVENC 崩了，却因为 QSV 晚一步写文件而把 QSV 禁用。
     //  现改为【按后端一计数、一文件】：文件名含后端名（encoder-crash.&lt;backend&gt;.sentinel），
-    //  Arm/Disarm 各自只动自己后端的文件，互不干扰；IsBlocked 也按文件名+首行双重校验。
+    //  Arm/Disarm 各自只动自己后端的文件，互不干扰；IsBlocked 除文件名+首行外，还核对 PID 与本进程在途计数
+    //  （2026-09-27：同进程里后 Arm 的那个，不再把前一个仍在原生调用中的在途文件读成"上次进程崩了"）。
     //  各计数只存在于进程内，进程崩溃时自然丢失（哨兵随之残留），这正是期望行为。
     /// </summary>
     private static readonly ConcurrentDictionary<string, int> s_armCounts = new(StringComparer.OrdinalIgnoreCase);
@@ -53,8 +57,10 @@ public static class EncoderCrashSentinel
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TrueToneCap");
 
-    /// <summary>指定后端的哨兵文件路径（2026-09-18：文件名含后端名，各后端互不覆盖）。</summary>
-    private static string SentinelPathFor(string backend)
+    /// <summary>指定后端的哨兵文件路径（2026-09-18：文件名含后端名，各后端互不覆盖）。
+    /// <para>internal 而不是 private：用例要能就地伪造一份"别的进程留下的"哨兵文件，
+    /// 而不必把这条路径的拼法在测试里再抄一遍（抄一遍就意味着它可以悄悄跟实现分叉）。</para></summary>
+    internal static string SentinelPathFor(string backend)
     {
         // 文件名安全化：后端名只含字母数字，但防御性替换一遍
         var safe = string.Join("_", backend.Split(Path.GetInvalidFileNameChars()));
@@ -74,6 +80,11 @@ public static class EncoderCrashSentinel
     /// 若真的每次都崩，行为就是"每次启动崩一次→当次禁用"，仍然不会再连续闪退。
     /// 手动复位入口 <see cref="ClearAll"/> 保留，但 2026-09-18 起界面上已无"硬件编码"复选框
     /// （用户指令移除），所以不能把恢复寄托在它身上。</para>
+    /// <para>═══ 2026-09-27：只认【别的进程】留下的哨兵 ═══
+    /// 文件是【本进程】写的（PID 相同）、或本进程仍有该后端的调用在途（Arm 计数 &gt; 0）时，
+    /// 它的存在只说明"有人正在原生编码"，不说明"上次崩了"。这两种情况返回 false 并且
+    /// <b>不删文件</b> —— 旧实现没有这层区分，于是第二个并发编码会把第一个仍在原生调用中的
+    /// 保护文件删掉，还顺手弹一条假的"上次 NVENC 导致进程崩溃"。</para>
     /// </summary>
     public static bool IsBlocked(string backend)
     {
@@ -84,14 +95,27 @@ public static class EncoderCrashSentinel
                 if (s_consumedThisSession.Contains(backend)) return true;
                 var p = SentinelPathFor(backend);
                 if (!File.Exists(p)) return false;
-                // 首行是后端名，次行是时间戳（供人工排查）。
+                // 首行是后端名，次行是写入进程的 PID，第三行是时间戳（供人工排查）。
                 // 首行与请求的后端名双重校验：旧版单文件残留时首行可能是别的后端，
                 // 此时不能凭文件存在就误判，也不能替别人消费掉哨兵。
-                using var reader = new StreamReader(p);
-                var first = reader.ReadLine();
+                // ⚠ 必须先用完再关掉 reader 才去删：Windows 上 File.Delete 打不开着的文件，
+                //   旧写法把 `using var reader` 和删除放在同一作用域 ⇒ 删除恒定抛、又被下面的
+                //   catch{} 吞掉 ⇒ "读后即消费"其实一次也没消费掉文件，下次启动照样看到残留，
+                //   正是 2026-09-20 注释声称修掉的"一次偶发崩溃把硬件永久关掉"。
+                //   这条是 2026-09-29 新增的"消费后文件必须消失"断言抓出来的，不是读代码读出来的。
+                string? first, second;
+                using (var reader = new StreamReader(p))
+                {
+                    first = reader.ReadLine();
+                    second = reader.ReadLine();
+                }
                 if (string.IsNullOrWhiteSpace(first)
                     || !string.Equals(first.Trim(), backend, StringComparison.OrdinalIgnoreCase))
                     return false;
+
+                if (InFlightByThisProcess(backend, second))
+                    return false;   // 在途而非残留：这个文件归那个还没返回的调用负责清，这里不许动
+
                 s_consumedThisSession.Add(backend);
                 try { File.Delete(p); } catch { /* 删不掉只影响下次的重试机会，不影响本会话判定 */ }
                 return true;
@@ -101,6 +125,23 @@ public static class EncoderCrashSentinel
                 return false;
             }
         }
+    }
+
+    /// <summary>哨兵是否出自【本进程】、且那次调用还没返回 —— 两种信号任一成立即算在途。
+    /// <para>两条都要：PID 相同只说明"文件是本进程写的"，而本进程也可能早已 Disarm 完；
+    /// 计数 &gt; 0 则直接说明该后端还有一次原生调用没回来。同进程内并发 Arm 共用同一个文件路径，
+    /// 后 Arm 者只是把内容重写一遍（PID 不变），所以两者合起来才足以断定"在途"。</para>
+    /// <para>PID 行缺失或不是整数（2026-09-27 之前的两行旧格式）⇒ 判为"不是本进程"，仍走读后即消费：
+    /// 宁可少一次在途保护，也不让旧格式残留卡在下次启动。</para>
+    /// <para>没覆盖的：两路 TrueToneCap 实例并发编码时彼此看到的都是"别的 PID"，仍会被当成崩过残留 ——
+    /// 那是跨进程归属，需要文件锁或实例标识，不在这次范围内。</para></summary>
+    private static bool InFlightByThisProcess(string backend, string? pidLine)
+    {
+        if (s_armCounts.TryGetValue(backend, out int inflight) && inflight > 0)
+            return true;
+
+        return int.TryParse(pidLine?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int writerPid)
+            && writerPid == Environment.ProcessId;
     }
 
     /// <summary>进入原生编码【之前】调用：标记"正在用该后端编码"。</summary>
@@ -116,6 +157,8 @@ public static class EncoderCrashSentinel
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
                 File.WriteAllText(p,
                     backend + Environment.NewLine +
+                    // PID 行：让 IsBlocked 能把"本进程还在途"与"上次进程崩溃残留"分开
+                    Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + Environment.NewLine +
                     DateTimeOffset.Now.ToString("o", CultureInfo.InvariantCulture));
             }
             catch

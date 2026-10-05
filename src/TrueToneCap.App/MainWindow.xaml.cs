@@ -186,9 +186,7 @@ public sealed partial class MainWindow : Window
             //   QSV 8-bit（NV12 输入）。HDR 恒 10-bit。
             // · 真精度：>8-bit 只在「源为 Float16 + 编码器支持真 10-bit 输入」时保留源精度，
             //   否则是容器级升位深（交接 §4.3）。
-            Hint: "✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。"
-                + "NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。"
-                + "位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"),
+            Hint: "✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"),
         [OutputFormat.WebP] = new(OutputFormat.WebP,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "⚠ 仅 8-bit、容器没有 HDR 通道；广色域目标靠 ICC 声明（Rec.709 目标不写声明）。适合简单分享场景。"),
@@ -287,7 +285,14 @@ public sealed partial class MainWindow : Window
         SyncWindowTheme();
         UpdateQualityPanel();
 
-        SetStatus("能力检测中...");
+        // ── 应用初始语言：必须排在【任何一句界面文字被取出来】之前 ──
+        // 原先它在下面 OCR 初始化之后才跑，于是 :288 那句 SetStatus 取到的是
+        // LocaleManager.CapabilityDetect 的【中文那一支】，之后再没人重刷 ⇒
+        // 英文模式下状态栏启动那几秒一直是「能力检测中...」（15:23 UIA 实测抓到）。
+        // 挪到这里即可：LocaleManager.LanguageChanged 全仓零订阅，早发一次没有副作用。
+        LocaleManager.SetLanguage(_settings.Language == "en" ? AppLanguage.English : AppLanguage.Chinese);
+
+        SetStatus(LocaleManager.CapabilityDetect);   // 原先直写中文，绕过了表里已有的一条
 
         _trayIcon = new TrayIconManager(this);
         _trayIcon.OnCaptureHotkey = () => DispatcherQueue.TryEnqueue(() => StartSelectionCapture());
@@ -302,9 +307,23 @@ public sealed partial class MainWindow : Window
         // ── 子类化窗口过程以处理托盘消息 ──
         SubclassWindowForTray(hwnd);
 
-        // 开机自启动状态同步
-        try { StartupManager.IsEnabled = _settings.AutoStart; }
-        catch (Exception ex) { System.Diagnostics.Trace.WriteLine($"[MainWindow] 开机启动注册失败: {ex.Message}"); }
+        // 开机自启动：这里【只读不写】。
+        // 旧写法是启动时 StartupManager.IsEnabled = _settings.AutoStart —— 那是一次注册表【写】，
+        // 而 GetAppPath() 取 Environment.ProcessPath，于是"最后启动过的那个 exe"就成了自启动项：
+        //   · AutoStart=false 的任何一个 dev 构建起来一次，就把用户已注册的自启动【删掉】；
+        //   · AutoStart=true 时则把它改指到那个构建的输出目录（10-02 实测就是这样被改的）。
+        // 写这件事只该发生在用户真的动过那个开关之后 —— 那一条在 SyncStartupAndHotkey() 里，
+        // 由「保存设置」触发且失败会显式告知。启动路径改成只做一致性检查并报警。
+        try
+        {
+            bool registered = StartupManager.IsEnabled;
+            if (registered != _settings.AutoStart)
+                LogService.Warn("Startup",
+                    $"开机自启动的实际状态（{(registered ? "已注册" : "未注册")}）与设置里的 "
+                    + $"AutoStart={_settings.AutoStart} 不一致；本进程不自动改写注册表"
+                    + "（否则会随最后启动的那个构建漂移），请在设置页按一次「保存设置」以对齐");
+        }
+        catch (Exception ex) { LogService.Warn("Startup", $"读取开机自启动状态失败: {ex.Message}"); }
 
         // ── 开机静默启动：直接缩小到托盘，不显示窗口 ──
         if (isAutostart)
@@ -343,10 +362,6 @@ public sealed partial class MainWindow : Window
             LogService.Warn("MainWindow", $"OCR 初始化失败: {ex.Message}", LogCategory.OCR);
         }
 
-        // ── 应用初始语言 ──
-        var initLang = _settings.Language == "en" ? AppLanguage.English : AppLanguage.Chinese;
-        LocaleManager.SetLanguage(initLang);
-
         // ═══ _uiReady 在 ApplySettingsToUI 之后已置为 true ═══
 
         // ── 订阅实时日志事件 ──
@@ -364,7 +379,7 @@ public sealed partial class MainWindow : Window
         {
             await Task.Delay(300);
             await DetectAndApplySystemCapabilitiesAsync();
-            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
+            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = LocaleManager.Ready);
         }
         catch (Exception ex)
         {
@@ -438,21 +453,21 @@ public sealed partial class MainWindow : Window
             if (cap.SupportsHdr)
             {
                 hdrText = cap.SystemHdr
-                    ? $"✅ HDR 已启用 ({cap.DisplayBitDepth}-bit)"
-                    : $"⚠ HDR 硬件支持但未开启（Windows 显示设置中未开启 HDR）";
+                    ? Trf("✅ HDR 已启用（{0}-bit）", cap.DisplayBitDepth)
+                    : LocaleManager.Tr("⚠ HDR 硬件支持但未开启（Windows 显示设置中未开启 HDR）");
             }
             else
             {
-                hdrText = "⚠ 此显示器不支持 HDR";
+                hdrText = LocaleManager.Tr("⚠ 此显示器不支持 HDR");
             }
-            var acmText = cap.SystemAcm ? " | ACM 已启用（系统管理显示器色彩）" : "";
+            var acmText = cap.SystemAcm ? LocaleManager.Tr(" | ACM 已启用（系统管理显示器色彩）") : "";
             // 显示系统 SDR 白点 (GainMap 亮度基准) — 帮助用户匹配第三方查看器
             string sdrWhiteText = cap.DisplayPaperWhiteNits > 0
-                ? $" | SDR 白点 {cap.DisplayPaperWhiteNits} nits"
+                ? Trf(" | SDR 白点 {0} nits", cap.DisplayPaperWhiteNits)
                 : "";
             // 显示 HDR 峰值亮度 (GainMap headroom 依据, DXGI MaxLuminance)
             string maxNitsText = cap.DisplayMaxNits > 0 && cap.SupportsHdr
-                ? $" | 峰值 {cap.DisplayMaxNits} nits"
+                ? Trf(" | 峰值 {0} nits", cap.DisplayMaxNits)
                 : "";
             HdrHintTxt.Text = hdrText + acmText + sdrWhiteText + maxNitsText;
             _hdrSystemHint = hdrText + acmText + sdrWhiteText + maxNitsText; // 供格式 HDR 联动拼接
@@ -462,11 +477,11 @@ public sealed partial class MainWindow : Window
 
             // 色彩管理不可关 ⇒ 这里只报"会做什么"，不再有开关与"是否可用"的置灰逻辑。
             if (cap.SystemAcm)
-                IccHintTxt.Text = "ACM 已启用 — 像素会映射到所选目标色域（Rec.709 / Rec.2020）。";
+                IccHintTxt.Text = LocaleManager.Tr("ACM 已启用 — 像素会映射到所选目标色域（Rec.709 / Rec.2020）。");
             else if (cap.CustomIcc)
-                IccHintTxt.Text = $"检测到校色 ICC → 映射到 {ColorProfileProvider.GetColorSpaceDisplayName(GetSelectedColorSpaceTag())}";
+                IccHintTxt.Text = Trf("检测到校色 ICC → 映射到 {0}", ColorProfileProvider.GetColorSpaceDisplayName(GetSelectedColorSpaceTag()));
             else
-                IccHintTxt.Text = "未检测到校色 ICC；目标色域即像素被搬进、容器被声明成的那一套原色（逐格式的声明通道见下方「色域映射」）";
+                IccHintTxt.Text = LocaleManager.Tr("未检测到校色 ICC；目标色域即像素被搬进、容器被声明成的那一套原色（逐格式的声明通道见下方「色域映射」）");
 
             UpdateAvifEncoderLabels();
 
@@ -535,9 +550,9 @@ public sealed partial class MainWindow : Window
         if (FormatCbo.SelectedIndex < 0) return;
         var format = _formats[FormatCbo.SelectedIndex];
         var encoder = EncoderFactory.Create(format);
-        var (min, max, def, label) = encoder.GetQualityRange();
+        var (min, max, def, scale) = encoder.GetQualityRange();
 
-        QualityLabel.Text = label;
+        QualityLabel.Text = ScaleText(scale);
         QualitySld.Minimum = min;
         QualitySld.Maximum = max;
         QualitySld.SmallChange = 0.1;
@@ -555,9 +570,14 @@ public sealed partial class MainWindow : Window
 
         // ── 格式专属提示 (2026-08-08: 能力表驱动) ──
         var cap = GetFormatCap(format);
+        // 翻译只能发生在这里，不能发生在 s_formatCaps 的声明处：那张表是 static readonly
+        // + 编译期常量，在声明处翻会把语言冻结在类型初始化那一刻，而它与 SetLanguage() 的先后没有保证。
+        // Tr() 未命中就原样返回 ⇒ 中文模式下这两条与改动前逐字相同。
+        int sdrWhite = _settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80;
         FormatHintTxt.Text = CurrentFormat() == OutputFormat.JPEG_GAINMAP
-            ? $"✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 {(_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80)} nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 {(_settings.SystemSdrWhiteLevel > 0 ? _settings.SystemSdrWhiteLevel : 80)}。"
-            : cap.Hint;
+            ? LocaleManager.Tr("✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 ") + sdrWhite
+              + LocaleManager.Tr(" nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 ") + sdrWhite + "。"
+            : LocaleManager.Tr(cap.Hint);
 
         // ── HDR 能力联动 (2026-08-08: 格式能力表驱动) ──
         // 系统 HDR 状态提示 + 格式不支持 HDR 时的降级警告 + GainMap 色域说明
@@ -742,7 +762,11 @@ public sealed partial class MainWindow : Window
             if (item.Tag as string is not { } tag || tag == "Auto") continue;
             var kind = AvifEncoderCapabilities.Parse(tag);
             string name = AvifEncoderCapabilities.Caps(kind).DisplayName;
-            item.Content = AvifEncoderSelector.IsKindAvailable(kind) ? name : $"{name}（本机不可用）";
+            // 名字与状态后缀都是中文成品串（前者来自 Core 的能力表）⇒ 英文模式下要过一层 CoreText，
+            // 否则英文界面会出现 "libaom（本机不可用）" 这种半中半英。中文模式原样返回。
+            item.Content = CoreText(name, CoreAvifBackendTexts)
+                + (AvifEncoderSelector.IsKindAvailable(kind)
+                    ? "" : CoreText("（本机不可用）", CoreAvifBackendTexts));
         }
     }
 
@@ -1093,6 +1117,124 @@ public sealed partial class MainWindow : Window
         AppServices.Settings.SaveQuiet();
     }
 
+    /// <summary>
+    /// 质量文案的<b>措辞与数值格式化在 App 这一层</b>。Core 只回答"是哪一种刻度 / 是哪一类读数"
+    /// （<see cref="QualityScale"/> 与 <see cref="QualityDesc"/>），不再吐中文成品串。
+    /// <para>为什么要有这一处：本地化表（<see cref="LocaleManager.ZhToEn"/>）只存在于 App，
+    /// 而过去 Core 直接把 "质量 (50-100; 85+ 视觉无损)"、<c>距离: {q:F1}</c> 这类用户可见文案
+    /// 拼好再交给界面 ⇒ App 只能往回翻，带数值的那两条连整串匹配都做不到、只能按片段换。
+    /// 反向哨兵 <c>Test_QualityTexts_CoreStringsAreAllCovered</c> 现在扫的是
+    /// Core 那两个方法的函数体：再出现中文字面量就红并点名。</para>
+    /// <para>中文模式与改造前<b>逐字相同</b>：数值仍用 CurrentCulture 格式化、精度仍是 F1/F0、
+    /// <c>(int)</c> 截断位置也没变。刻意没顺手换成 InvariantCulture——那会改动中文模式的输出，
+    /// 是另一件事，不混在这次里做。</para>
+    /// </summary>
+    private static readonly IReadOnlyDictionary<QualityScale, string> ScaleLabels =
+        new Dictionary<QualityScale, string>
+    {
+        [QualityScale.LosslessFixed100] = "无损 (固定 100%)",
+        [QualityScale.LosslessFixed] = "无损 (固定)",
+        [QualityScale.QualityPercent] = "质量 (50-100; 85+ 视觉无损)",
+        [QualityScale.Crf] = "CRF (0=无损, 63=最低; 15 ≈ 视觉无损)",
+        [QualityScale.ButteraugliRange] = "butteraugli 距离 (0.5-3.0)",
+        [QualityScale.ButteraugliDistanceRange] = "butteraugli 距离 (越小越清晰; 1.0 = 视觉无损)",
+    };
+
+    /// <summary>
+    /// Core 的 FormatColorFacts.Declaration 产出的、<b>App 会往回翻</b>的声明通道文案。
+    /// 逐字抄自 <c>FormatEncoders</c> 同目录下的 <c>FormatColorFacts.cs</c>；译文在
+    /// <see cref="LocaleManager.ZhToEn"/>。两边一一对由
+    /// <c>Test_QualityTexts_CoreStringsAreAllCovered</c> 的第三段钉住：Core 新增一句中文
+    /// 而这里没跟，判据就红并点名。带 <c>{0}</c> 的是模板 —— 先翻模板再代值。
+    /// </summary>
+    private static readonly string[] CoreColorFactsTexts =
+    {
+        "PNG：cICP {0}（原色/传输/矩阵），matrix 恒 0(identity) —— PNG 存 RGB 采样，没有 YUV 往返可声明。",
+        "HDR 一律不嵌 ICC。",
+        "{0} 目标另嵌 iCCP，两条通道同一套原色。",
+        "{0} 目标不嵌 ICC（cICP 已足够）。",
+        "AVIF：colr(nclx) {0}，matrix 随三原色取 {1} —— 它是 YUV 码流，",
+        "不能像 PNG 那样写 identity（写 0 时部分解码器自行套错矩阵）。",
+        "HDR 不嵌 ICC。",
+        "{0} 另可嵌 ICC。",
+        "{0} 不嵌 ICC。",
+        "JPEG XL：color fields 与 ICC 二选一（同时给时 cjxl 只走 ICC、fields 被丢弃；",
+        "ICC 能归约成字段就只写字段，归约不了就整份内嵌）。没有 matrix 这一维，",
+        "且有损产物把像素量化进 XYB —— 声明写的是原图色域，不是码流里的通道值。",
+        "HDR 走 Rec.2020 原色 + PQ（cjxl 的枚举名 Rec2100PQ，另带 intensity_target）。",
+        "{0} 取到可嵌 ICC 时用 ICC，否则用 color fields。",
+        "{0} 走 color fields，不嵌 ICC。",
+        "JPEG：只有 ICC 一条声明通道，没有代码点 —— ",
+        "{0} 原色嵌 APP2/ICC（实测产物里 ICC_PROFILE 与 acsp 都在）。",
+        "{0} 目标【什么都不写】，靠 JFIF 默认。",
+        "容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。",
+        "WebP：同样只有 ICC 一条通道 —— ",
+        "{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。",
+        "{0} 目标【什么都不写】（实测对照组无 ICCP）。",
+        "无 HDR 通道 ⇒ HDR 开关落空成 8-bit SDR，但原色声明照常；缺 cwebp.exe 时整份产物会换成 PNG。",
+        "TIFF：没有代码点通道 ⇒ 只靠 ICC，连 Rec.709 也老实嵌一份（不像 JPEG/WebP 能省）。",
+        "HDR 用带 PQ TRC 的 ICC 声明。",
+        "SDR 用标准色域 ICC。",
+        "JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {0} ⇒ 底图、增益比、",
+        "声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由 XMP hdrgm + ",
+        "ISO 21496-1 增益图段承载，容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。",
+        "无码点",
+        "未知格式：给不出声明通道。",
+    };
+
+    /// <summary>滑块上方那一行的质量轴标签。</summary>
+    private static string ScaleText(QualityScale scale)
+        => ScaleLabels.TryGetValue(scale, out var zh) ? LocaleManager.Tr(zh) : scale.ToString();
+
+    /// <summary>质量描述那一行的短句。Kind 落到没模板的成员时返回枚举名：界面会露出一个怪词，
+    /// 但那条判据先一步红，不留"看着像英文"的静默回落。</summary>
+    private static string QualityText(QualityDesc d) => d.Kind switch
+    {
+        QualityDescKind.Lossless => LocaleManager.Tr("无损"),
+        QualityDescKind.NearLossless => LocaleManager.Tr("近无损"),
+        QualityDescKind.Distance => LocaleManager.Tr("距离: ") + d.Value.ToString("F1"),
+        QualityDescKind.DistanceWithNote => LocaleManager.Tr("距离: ") + d.Value.ToString("F1")
+            + LocaleManager.Tr(" (越小越清晰)"),
+        QualityDescKind.Crf => "CRF: " + ((int)d.Value).ToString(),
+        QualityDescKind.Percent => ((int)d.Value).ToString() + "%",
+        QualityDescKind.PlainNumber => d.Value.ToString("F0"),
+        _ => d.Kind.ToString(),
+    };
+
+    /// <summary>
+    /// AVIF「编码器」下拉的项文字来自 <c>AvifEncoderCapabilities.Caps(kind).DisplayName</c>，
+    /// 那是 Core 能力表里的<b>中文成品串</b>（<c>Intel QSV / 系统 MFT</c>、
+    /// <c>avifenc（软件 · 由 avifenc 自选编码器）</c>），而 <c>UpdateAvifEncoderLabels</c>
+    /// 还会往名字后面拼一个中文状态后缀「（本机不可用）」。
+    /// 这份清单就是"App 会翻哪些后端名/后缀"，由
+    /// <c>Test_QualityTexts_CoreStringsAreAllCovered</c> 的第二段枚举钉住。
+    /// </summary>
+    private static readonly string[] CoreAvifBackendTexts =
+    {
+        "avifenc（软件 · 由 avifenc 自选编码器）",
+        "Intel QSV / 系统 MFT",
+        "（本机不可用）",
+    };
+
+    /// <summary>
+    /// Core 产出的中文成品串 → 当前语言。两条通道：整串精确匹配，或按 <paramref name="known"/>
+    /// 里的已知片段换（Core 用 $"" 拼出来的那种带数值的，整串永远匹配不上）。
+    /// <para>换完还剩中文 ⇒ 出现了清单没覆盖的新文案，宁可退回整句中文也不给半中半英；
+    /// 漏了哪一条由 <c>Test_QualityTexts_CoreStringsAreAllCovered</c> 报，不靠这里兜。</para>
+    /// </summary>
+    private static string CoreText(string fromCore, string[] known)
+    {
+        if (string.IsNullOrEmpty(fromCore) || LocaleManager.CurrentLanguage != AppLanguage.English)
+            return fromCore;
+        var exact = LocaleManager.Tr(fromCore);
+        if (!string.Equals(exact, fromCore, StringComparison.Ordinal)) return exact;
+        var s = fromCore;
+        foreach (var frag in known)
+            if (s.Contains(frag, StringComparison.Ordinal))
+                s = s.Replace(frag, LocaleManager.Tr(frag), StringComparison.Ordinal);
+        return s.Any(c => c >= 0x4E00 && c <= 0x9FFF) ? fromCore : s;
+    }
+
     /// <summary>质量描述行的<b>唯一</b>写入点。</summary>
     /// <remarks>
     /// 为什么要有这一个函数：以前 <c>UpdateQualityPanel</c> 与 <c>OnQualityChanged</c> 各写一次，
@@ -1105,8 +1247,8 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private void SetQualityDescription(ImageEncoder encoder, double quality)
         => QualityDescTxt.Text = encoder.QualityIsFixed
-            ? encoder.GetQualityRange().Label
-            : encoder.GetQualityDescription((float)quality);
+            ? ScaleText(encoder.GetQualityRange().Scale)
+            : QualityText(encoder.GetQualityDescription((float)quality));
 
     private void OnQualityTextChanged(object sender, TextChangedEventArgs e)
     {
@@ -1183,7 +1325,11 @@ public sealed partial class MainWindow : Window
     private void OnOverlayColorChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_uiReady) return;
-        _settings.OverlayColor = (OverlayColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#99001833";
+        // 这个字段有【两个写者】：这里，和 MainWindow.Settings.cs 的整表保存。10-01 那次只改了
+        // 后者，这一处仍留着 ?? 兜底 ⇒ 盘上至今是那个不在 7 个选项里的脏值（下拉靠补项才显示出来）。
+        // 同一个处方重下一遍：没有选中项就保留盘上原值，不许把写死的颜色再生产一次。
+        if (OverlayColorCbo.SelectedItem is ComboBoxItem overlayColorItem)
+            _settings.OverlayColor = (string)overlayColorItem.Tag;
         SaveSettingsQuiet();
     }
 
@@ -1330,6 +1476,10 @@ public sealed partial class MainWindow : Window
             if (_wgcService is null)
             {
                 LogService.Error("SilentCapture", "WGC 捕获服务未初始化");
+                // 热键按下去必须有回响：原先只写日志 ⇒ 用户以为"截图了但没找到文件"。
+                // 文案与另两根入口（选区/整屏）用的是同一句，不新开一条界面中文。
+                SetStatus("❌ 捕获服务未初始化");
+                ToastService.ShowCaptureFailed("捕获服务未初始化");
                 return;
             }
 
@@ -1458,6 +1608,9 @@ public sealed partial class MainWindow : Window
                 if (sdrPixels is null)
                 {
                     LogService.Warn("SilentCapture", "SDR 像素数据为空，跳过保存");
+                    // 与 ExecuteEncodeSaveAsync 里同一失败用的是同一句文案，不新开界面中文
+                    SetStatus("❌ 像素数据无效");
+                    ToastService.ShowCaptureFailed("像素数据无效");
                     return;
                 }
                 LogService.Info("SilentCapture", $"SDR 帧捕获成功: {fw}x{fh}");
@@ -1483,6 +1636,10 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             LogService.Error("SilentCapture", $"无感截图编码失败: {ex.Message}", ex);
+            // 与选区那根的失败分支同形（状态栏 ❌ + 失败通知）。
+            // SetStatus 内部已 DispatcherQueue.TryEnqueue ⇒ 后台线程直接调即可，不必再自己 marshal。
+            SetStatus($"❌ 保存失败: {ex.Message}");
+            ToastService.ShowCaptureFailed(ex.Message);
         }
         finally
         {
@@ -1508,6 +1665,17 @@ public sealed partial class MainWindow : Window
         if (!enabled) return;
 
         var position = _settings.ToastPosition;
+
+        // 「截图后右下角缩略图预览」这个开关过去【没有任何消费者】：取消勾选之后，
+        // 右下角那块带「打开文件夹」按钮的自定义浮层照样弹 —— 界面写着它管这件事，实际没人读它。
+        // 它管的就是下面这段自定义浮层，所以关掉时退回 Windows 自带通知：
+        // 用户仍然知道截图成功，只是不要那块浮层。（不是"什么都不发"——那会把
+        // ToastOnCapture 的语义一起吃掉，那是另一个开关。）
+        if (!_settings.ShowPreview && position != "WindowsNotify")
+        {
+            ToastService.ShowCaptureSuccess(filePath, elapsedMs);
+            return;
+        }
 
         // Windows 自带通知：不创建自定义窗口，直接走 Windows 通知
         if (position == "WindowsNotify")
@@ -1851,7 +2019,13 @@ public sealed partial class MainWindow : Window
         if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0)
         {
             LogService.Warn("MainWindow", "截图已在进行中，忽略重复触发");
-            ToastService.ShowCaptureFailed("上一次截图仍在处理中，请稍候");
+            // 这一发【没有失败】——它是被上面那道防重入闸拦下的。原先借 ShowCaptureFailed 的通道，
+            // 标题写死 "❌ 截图失败" ⇒ 用户看到一条红色失败通知，通知正文却写着"请稍候"，
+            // 标题与正文互相打脸（2026-09-30 造 GPU 失败腿时从日志里撞见同一毫秒的
+            // 「忽略重复触发」+「已提交系统通知: ❌ 截图失败」，才注意到这条）。
+            // 改走统一入口 + Info 色：措辞与语义对齐，且尊重用户设的"通知位置"
+            // （ShowCaptureFailed 走的是老的 Show(dict) 直发系统通知，会忽略该设置——那是另一条账，见报告 §28）。
+            ToastService.ShowToast("⏳ 截图进行中", "上一次截图仍在处理中，请稍候", ToastTone.Info);
             return;
         }
 
@@ -1943,35 +2117,89 @@ public sealed partial class MainWindow : Window
             sw.Stop();
             LogService.Info("MainWindow", $"阶段1 WGC捕获完成: {captureResult.Width}x{captureResult.Height} {sw.ElapsedMilliseconds}ms");
 
-            // ── 诊断开关: TTC_FORCE_SDR=1 强制走 SDR 预览路径 (SelectionOverlay), 用于测试/排查 ──
+            // ── 诊断开关: TTC_FORCE_SDR=1 只用 SDR(BGRA) 帧做预览 ──
+            // 2026-09-30 起这个开关的语义收窄了一档：它过去同时改变了【界面】（把用户从
+            // HdrCaptureWindow 换到 SelectionOverlay 那套），那正是"跑诊断时屏幕上跳出一张旧界面"
+            // 的来源，也让工具条几何一类的判据在两套装束间不可比。现在选区界面只有一条，
+            // 这个开关只决定像素源：置 null ⇒ 走 BGRA→scRGB 那条呈现帧。
             bool forceSdr = Environment.GetEnvironmentVariable("TTC_FORCE_SDR") == "1";
             if (forceSdr)
             {
-                LogService.Warn("MainWindow", "诊断开关 TTC_FORCE_SDR=1: 强制走 SDR 预览路径");
+                LogService.Warn("MainWindow", "诊断开关 TTC_FORCE_SDR=1: 预览只用 SDR(BGRA) 帧", LogCategory.Capture);
                 hdrDesktopPixels = null;
             }
 
             // 阶段2: 截图预览窗口
             sw.Restart();
 
-            bool hasHdr = hdrDesktopPixels is not null;
-
-            // ═══ HDR 路径：全 D3D11 原生窗口（scRGB 正确显示）═══
-            if (hasHdr)
+            // ═══ 选区预览只有一张界面：HdrCaptureWindow（2026-09-30 用户口径"以 HDR 下的界面为准，
+            // SDR 与 HDR 的用户体验统一"）═══
+            // 原先 hasHdr==false 会另开一套 WinUI 覆盖层（SelectionOverlay）。那套覆盖层【没有任何
+            // 让窗变透明的机制】（全 App 工程里 SystemBackdrop 只在 SilentCaptureToast 出现过一次），
+            // 而 GPU 供帧用的是另一扇被压在它下面的窗 ⇒ "GPU 成功"这一档真正画出来的是不透明页底色
+            // （维护者肉眼看到的"全白"），反倒是失败时那段会亲手把像素画进可见表面的 CPU 兜底有画面。
+            // 统一到这张自绘 D3D 窗以后，"画面从哪儿来"两条路变成同一件事，工具条钳制也一并换成
+            // 按实测宽度算的那份（原先覆盖层写死 460，而它自己的工具条实测约 932 DIP ⇒ 贴右边缘必然溢出屏幕）。
+            //
+            // 帧来源仍分两档，界面只有一条：
+            //   · HDR 帧：WGC 的 Float16 场景参考数据（1.0 = 名义 80 nits，抬到系统白点是 OS 那一层做的）；
+            //   · SDR 帧：BGRA→scRGB，参考白与 alpha 由 PixelOps.BgraToScrgbForDisplay 负责 ——
+            //     乘白点只允许发生在"HDR 输出正激活"那一档（普通屏上 DWM 对 FP16 scRGB 做数值钳位，
+            //     "everything outside of the [0, 1] numeric range is clipped"，乘了就把白削成一团白），
+            //     且 A 一律写 1：这张窗是 AlphaMode.Ignore + flip + WS_EX_NOREDIRECTIONBITMAP，
+            //     而源帧的 A 由驱动决定，不参与"这一帧长什么样"。
+            bool hdrFrame = hdrDesktopPixels is not null;
+            var (sysHdrNow, _, _) = CapabilityService.DetectDisplayState();
+            int sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
+            float[]? presentFrame = hdrFrame
+                ? hdrDesktopPixels
+                : desktopPixels is not null
+                    ? TrueToneCap.Core.PixelOps.BgraToScrgbForDisplay(
+                          desktopPixels, hdrW, hdrH, hdrOutputActive: sysHdrNow, sdrWhiteNits: sdrWhiteNits)
+                    : null;
+            LogService.Info("MainWindow",
+                $"预览帧来源={(hdrFrame ? "HDR(Float16)" : "SDR(BGRA→scRGB)")} " +
+                $"HDR输出={sysHdrNow} SDR白点={sdrWhiteNits}nits " +
+                $"呈现缩放={(hdrFrame ? "n/a(OS 抬)"
+                    : sysHdrNow && sdrWhiteNits > 0 ? $"{sdrWhiteNits / 80f:0.###}" : "1(不乘)")}",
+                LogCategory.Capture);
+            if (presentFrame is null)
             {
-                StatusTxt.Text = "🖥️ HDR 预览";
+                // 两档帧都没有 ⇒ 不只是"这次没截成"，必须留痕（老代码在这里只改一句状态串，日志一个字没有）
+                LogService.Warn("MainWindow", "预览无可用帧（HDR 与桌面像素均为空）⇒ 本次选区中止", LogCategory.Capture);
+                SetStatus("❌ 桌面像素数据为空");
+                return;
+            }
+
+            {
+                StatusTxt.Text = LocaleManager.SelectionPreview;
                 // 独立 D3D11 设备：渲染线程独占 context，不与 WGC 共享设备竞争
                 using var hdrWnd = new Services.HdrCaptureWindow();
                 _activeHdrWindow = hdrWnd; // 注册：应用退出时强制关闭
-                LogService.Info("MainWindow", "HDR 预览窗口初始化...");
+                LogService.Info("MainWindow", "预览窗口初始化...");
                 bool initOk = hdrWnd.Initialize(vx, vy, vw, vh);
-                LogService.Info("MainWindow", $"HDR 预览窗口初始化 {(initOk ? "成功" : $"失败: {hdrWnd.LastError}")}");
+                LogService.Info("MainWindow", $"预览窗口初始化 {(initOk ? "成功" : $"失败: {hdrWnd.LastError}")}");
+
+                // ═══ 诊断开关 TTC_FORCE_LEGACY_OVERLAY=1：把"兜底"那条路变成可达路 ═══
+                // 2026-09-30 把 SDR 预览统一到这张自绘窗之后，`SelectionOverlay` 只剩"预览窗初始化失败"
+                // 这一个入口，而全 App 没有任何开关能造出这个失败（明细报告 §35.5）⇒ 那 1662 + 613 行
+                // 在正常构建里根本到不了，于是"兜底到底能不能用"这类判断只能去引**改道前的历史二进制**，
+                // 那批读数又恰好全带 TTC_FORCE_SDR=1（同一个会话里连"预览帧来源"这行都没有）。
+                // 这个开关不改动任何默认行为：只有显式置 1 才主动关掉刚建好的预览窗去走兜底，
+                // 目的是让那条路可以被主动进入、被取证，而不是靠猜。
+                if (initOk && Environment.GetEnvironmentVariable("TTC_FORCE_LEGACY_OVERLAY") == "1")
+                {
+                    LogService.Warn("MainWindow",
+                        "诊断开关 TTC_FORCE_LEGACY_OVERLAY=1: 主动关闭已建好的预览窗 ⇒ 改走兜底覆盖层（正常构建不会到这里）",
+                        LogCategory.Capture);
+                    hdrWnd.Close();        // 正常收尾路径就是 Close() → using 作用域 Dispose()，两步都幂等
+                    _activeHdrWindow = null;
+                    initOk = false;
+                }
 
                 if (initOk)
                 {
-                    if (hdrDesktopPixels is null) return;
-
-                    hdrWnd.LoadFrame(hdrDesktopPixels, hdrW, hdrH);
+                    hdrWnd.LoadFrame(presentFrame, hdrW, hdrH);
                     hdrWnd.Render();
 
                     // 等待用户操作
@@ -1984,7 +2212,7 @@ public sealed partial class MainWindow : Window
                     if (action == HdrCaptureAction.Cancel)
                     {
                         if (!_isExiting)
-                            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
+                            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = LocaleManager.Ready);
                         return;
                     }
 
@@ -2022,13 +2250,14 @@ public sealed partial class MainWindow : Window
                             break;
                         case HdrCaptureAction.Ocr:
                             LogService.Info("MainWindow", "HDR 选区 OCR 识别");
-                            if (sdrRegion is not null)
-                                await CaptureAndOcrFromPixelsAsync(sdrRegion, rw, rh);
+                            // 与保存/复制共用同一份合成结果：识字不许绕过标注去读原始桌面像素
+                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx3)
+                                await CaptureAndOcrFromPixelsAsync(outPx3, rw, rh);
                             break;
                         case HdrCaptureAction.Translate:
                             LogService.Info("MainWindow", "HDR 选区翻译");
-                            if (sdrRegion is not null)
-                                await CaptureAndTranslateFromPixelsAsync(sdrRegion, rw, rh);
+                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx4)
+                                await CaptureAndTranslateFromPixelsAsync(outPx4, rw, rh);
                             break;
                     }
 
@@ -2038,14 +2267,21 @@ public sealed partial class MainWindow : Window
 
                     return;
                 }
-                // HDR 窗口初始化失败 → 回退到 SDR 路径。
+                // 预览窗初始化失败 → 回退到旧版 WinUI 覆盖层（最后兜底，不再是静默降级）。
                 // 原因必须内联在这一条：上一行那条带堆栈的是 Info，Brief 档不落盘，
                 // 若这里只写"见紧邻日志"，用户手上的 log 文件里就没有原因了。取首行 = 异常类型+消息。
+                var fallbackReason = (hdrWnd.LastError ?? "未知原因").Split('\n')[0].Trim();
                 LogService.Warn("MainWindow",
-                    $"HDR 窗口失败，回退 SDR：{(hdrWnd.LastError ?? "未知原因").Split('\n')[0].Trim()}",
-                    LogCategory.Capture);
-                // 释放 HDR 像素引用，防止内存泄漏
-                hdrDesktopPixels = null;
+                    $"预览窗失败，回退旧版覆盖层：{fallbackReason}", LogCategory.Capture);
+                // 2026-09-30：这条以前只有 log —— 用户按了键，屏幕上一张"长得不一样的"界面出来了，
+                // 却没有任何一句话告诉他"这不是平时那张"（报告 §33.3 记的就是这个空档）。
+                // 走统一入口 + Overlay 通道（与 ShowCaptureDegraded 同形），文案按语言取。
+                ToastService.ShowToast(LocaleManager.PreviewFallbackTitle,
+                    $"{LocaleManager.PreviewFallbackHint}：{fallbackReason}",
+                    ToastTone.Warning, ToastChannel.Overlay);
+                // 这里原先还有一句 `hdrDesktopPixels = null;`，注释写"以免下面误判成还有 HDR 路可走"。
+                // 2026-10-01 复核：这一支之后全文再无读取（最近的读点在 :2063，在它上面）⇒ 那是句死赋值，
+                // 注释描述的防护并不存在。删赋值留此说明（报告 §40 采纳项 2）。
             }
 
             // ═══ SDR 路径：SelectionOverlay（WinUI 3）═══
@@ -2073,7 +2309,7 @@ public sealed partial class MainWindow : Window
                     if (action == SelectionOverlay.ActionResult.Cancel)
                     {
                         if (!_isExiting)
-                            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "就绪");
+                            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = LocaleManager.Ready);
                         return;
                     }
 
@@ -2470,8 +2706,15 @@ public sealed partial class MainWindow : Window
         FormatCbo.ItemsSource = _formats
             .Select(f => LocaleManager.GetFormatLabel(f))
             .ToList();
+        // keep<0 的回落必须取 _settings.FormatIndex，不能取 DefaultIndex：
+        // 构造期第一次调用（LoadSettings 之前）控件尚未实化，SelectedIndex 就是 -1，
+        // 那时盘上读进来的用户选择还在 _settings 里 ⇒ 拿 DefaultIndex 会把它抹成 PNG；
+        // 而下面这一次赋值会触发 OnFormatChanged（此刻 _uiReady 已是 true），
+        // 于是"界面显示 PNG"之外还会连带 `_settings.FormatIndex = 0` + SaveQuiet() 写盘
+        // —— 用户选的格式不仅下次开机失效，连文件里那个键都被删掉（2026-10-01 实机量到：
+        // 产品自己写入 FormatIndex=3，重启后界面回到 PNG，再保存后键整个消失）。
         FormatCbo.SelectedIndex = Math.Clamp(
-            keep < 0 ? FormatOrder.DefaultIndex : keep, 0, FormatOrder.MaxIndex);
+            keep < 0 ? _settings.FormatIndex : keep, 0, FormatOrder.MaxIndex);
         CheckFormatComboContract();
     }
 
@@ -2682,6 +2925,7 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(AutoStartChk)) _settings.AutoStart = cb.IsChecked == true;
             else if (cb.Name == nameof(MinimizeTrayChk)) _settings.MinimizeToTray = cb.IsChecked == true;
             else if (cb.Name == nameof(UiAnimationsChk)) _settings.EnableUiAnimations = cb.IsChecked == true;
+            else if (cb.Name == nameof(PngFallbackChk)) _settings.PngFallbackEnabled = cb.IsChecked == true;
             else if (cb.Name == nameof(PreviewChk)) _settings.ShowPreview = cb.IsChecked == true;
         }
         try { SaveSettingsQuiet(); } catch { }
@@ -3066,13 +3310,40 @@ public sealed partial class MainWindow : Window
         return CallWindowProcW(_originalWndProc, hWnd, msg, wParam, lParam);
     }
 
+    /// <summary>
+    /// Win32 <c>FLASHWINFO</c> 的逐字镜像。<b>首字段必须是 cbSize</b>，且要等于结构体大小。
+    /// <para>这里原先漏了 cbSize，直接从 hWnd 开始 ⇒ 整块自 offset 0 错位：系统把句柄低位
+    /// 当成 cbSize、把它自己 offset 8 处的 hwnd 读成我写的 dwFlags/uCount、
+    /// 把它 offset 16 处的 dwFlags 读成 0（= FLASHW_STOP，"停止闪烁"），
+    /// 并按 32 字节去读一个 24 字节的结构 ⇒ 越界多读 8 字节。
+    /// 结果是 FlashWindowEx 在任何机器上都必返 FALSE，而 FALSE 被 `_ =` 吞掉
+    /// ——这条改动此前被记成"本机不可验"，实际是【改动本身无效】，与硬件无关。</para>
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FlashWinInfo
+    {
+        public uint cbSize;
+        public nint hWnd;
+        public uint dwFlags;
+        public uint uCount;
+        public uint dwTimeout;
+    }
+
+    private const uint FLASHW_ALL = 3, FLASHW_TIMERNOFG = 12;
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool FlashWindowEx(ref FlashWinInfo pwfi);
+
     /// <summary>响应第二个实例的激活广播：恢复并前置主窗口。
     /// 在窗口过程（UI 线程）中执行，可直接操作 WinUI 控件。</summary>
     private void ActivateFromOtherInstance()
     {
         try
         {
-            LogService.Debug("MainWindow", "收到单实例激活广播");
+            // 这行原本是 Debug ⇒ 默认 Brief 档根本不落盘，"广播没收到"与"收到了但被前台锁拒绝"
+            // 这两种故障在日志里长得一模一样。要判 F3 必须先能区分它们。
+            LogService.Info("MainWindow", "收到单实例激活广播");
             DispatcherQueue.TryEnqueue(() =>
             {
                 // 最小化/隐藏时先恢复
@@ -3082,6 +3353,23 @@ public sealed partial class MainWindow : Window
                 AppWindow.Show();
                 AppWindow.MoveInZOrderAtTop();
                 this.Activate();
+                // 即使发送侧已经 AllowSetForegroundWindow，系统仍可能拒绝后台进程的前台切换。
+                // 闪任务栏是文档允许的兜底：抢不到前台时至少让用户知道该点哪里 ——
+                // "没抢到"和"什么都没发生"对用户是两回事。
+                var fhwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+                var fi = new FlashWinInfo
+                {
+                    cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<FlashWinInfo>(),
+                    hWnd = fhwnd,
+                    dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG,
+                    uCount = 0,          // 带 FLASHW_TIMERNOFG 时系统忽略 uCount
+                    dwTimeout = 0,       // 0 ⇒ 用光标闪烁频率
+                };
+                // 返回值必须落盘：它就是"这处改动到底生效没有"的唯一焦点无关读数。
+                // 修结构体之前它恒为 False（且没人看），修之后应当为 True。
+                var flashed = FlashWindowEx(ref fi);
+                LogService.Info("MainWindow",
+                    $"FlashWindowEx ok={flashed} cbSize={fi.cbSize} hwnd=0x{fhwnd:X}");
             });
         }
         catch (Exception ex)
@@ -3323,8 +3611,23 @@ public static class FontHelper
     public static void ApplyFontToVisualTree(DependencyObject? parent, string fontFamily)
     {
         if (parent is null) return;
-        // 为 Control / TextBlock 等支持 FontFamily 的元素设置字体
-        if (parent is Microsoft.UI.Xaml.Controls.Control ctrl)
+        // ⚠ 图标整棵子树都不进 —— 这是报告 §11-② 追了三天的根因，10-03 用三臂实测定死。
+        //   FontIcon / SymbolIcon 派生自 Control，而字形是靠它【模板里那个内部 TextBlock】画的；
+        //   这条 sweep 跑在 Loaded 上、写局部值（优先级高于样式），一路递归下去就把那个
+        //   TextBlock 的字体换成界面字体（默认回退链 Microsoft YaHei, Segoe UI, sans-serif，
+        //   里面没有 PUA 码位）⇒ 整窗图标全成豆腐块。
+        //   三臂读数（同一枚 FontIcon，Segoe Fluent Icons U+E713）：
+        //     ① 无守卫 → 方框            font-probe-before.png
+        //     ② 只跳过 IconElement 本身、仍往下递归 → 仍是方框   font-probe-after.png
+        //        那一臂同时量到图标自己的 FontFamily.Source 已经是 "Segoe Fluent Icons"
+        //        （日志 FontProbe 14:10:26）⇒ 属性值没被改，坏在渲染它的那个内部 TextBlock。
+        //        只看①②会把根因判错；是②这个"修了但没修对"的读数指到了模板内部。
+        //     ③ 整棵子树 return → 真齿轮  font-probe-subtree.png
+        //   这也解释了为什么 8 种 XAML 字体寻址全部失败：寻址写的是图标那一层，
+        //   而每一臂都被 sweep 递归压到了里面那一层 TextBlock 上。
+        if (parent is Microsoft.UI.Xaml.Controls.IconElement)
+            return;   // 连子树一起跳过：只跳过 IconElement 本身等于没修
+        else if (parent is Microsoft.UI.Xaml.Controls.Control ctrl)
             ctrl.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(fontFamily);
         else if (parent is TextBlock tb)
             tb.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(fontFamily);

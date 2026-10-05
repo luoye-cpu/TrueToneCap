@@ -21,7 +21,10 @@ public static partial class HotkeyManager
     private const uint WM_HOTKEY = 0x0312;
     private const uint MOD_ALT = 1, MOD_CONTROL = 2, MOD_SHIFT = 4, MOD_WIN = 8, MOD_NOREPEAT = 0x4000;
 
-    [LibraryImport("user32.dll")]
+    // ⚠ SetLastError=true 不是装饰：下面 TryRegisterId 里那句 `冲突: … (err=…)` 读的就是它。
+    //   没开这个标志时 Marshal.GetLastWin32Error() 拿不到本次调用的错误码，实测恒打 err=0
+    //   ⇒ 排查的人分不清是"被别的程序占了"(1410) 还是"参数不合法"(87)，而这正是热键问题唯一的关键分叉。
+    [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool RegisterHotKey(nint h, int id, uint mods, uint vk);
     [LibraryImport("user32.dll")]

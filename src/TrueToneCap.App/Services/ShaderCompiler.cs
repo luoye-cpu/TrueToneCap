@@ -18,10 +18,19 @@ public static class ShaderCompiler
     //    · 源文件存在但列表没有 → 运行时不会自动补编译（csproj 构建期可能已编译，易产生"本地能跑、别人跑不了"）
     //    · 列表有但源文件不存在 → 每次启动打一条 Debug 日志后跳过（静默降级，很难发现）
     //
-    //    当前状态（与 src/TrueToneCap.App/Shaders/ 实际文件逐个核对）：
-    //      ToneMapping.hlsl       ✅ 存在，运行时消费
-    //      OverlayComposite.hlsl  ✅ 存在，运行时消费（HdrCaptureWindow GPU 合成）
-    //      FullscreenVS.hlsl      ✅ 存在，运行时消费
+    //    当前状态（与 src/TrueToneCap.App/Shaders/ 实际文件逐个核对，2026-10-01）：
+    //      OverlayComposite.hlsl  ✅ 存在，运行时消费（HdrCaptureWindow 的 GPU 合成，FindCso 按名字取字节码）
+    //      FullscreenVS.hlsl      ✅ 存在，运行时消费（同上）
+    //
+    //    已移除的条目（第二批，2026-10-01）：
+    //      ToneMapping.hlsl       这一格此前写的是"✅ 存在，运行时消费"——**那句是假的**。它唯一的加载方
+    //                             是 Core 的 GpuToneMapper（ShaderLoader.Load("ToneMapping.hlsl.cso")），
+    //                             而 GpuToneMapper 自 2026-09-16 起不再构造（AppServices.cs 当时自己写明
+    //                             "【死代码】…属性全仓没有任何调用者"），实际的 HDR→SDR 一直是
+    //                             Core/ToneMapper.cs 的 CPU 路径。资产 + GpuToneMapper + ShaderLoader 一并删除。
+    //                             留锁：CorePipelineTests.Test_ShaderList_HasNoOrphanEntry —— 清单每条都要有
+    //                             "剥掉整行注释后仍按名字找 .cso"的消费点，且清单/磁盘/csproj Inputs 三张名单互相对账。
+    //                             （注释本身不算消费方，就是这类注释把"没人加载"洗白了十年份的量级。）
     //
     //    已移除的条目（2026-09-14，源文件本就不存在，留着只会让清单与实际不一致）：
     //      CopyTexture.hlsl       HdrCaptureWindow.cs 会查找 CopyTexture.hlsl.cso，
@@ -40,7 +49,6 @@ public static class ShaderCompiler
         //    一旦本文件真的触发编译（data/Shaders 下 .cso 缺失且找到 dxc），
         //    会产出 D3D11 根本加载不了的 SM6 着色器，且只在 Debug 输出里留一行失败日志。
         //    2026-09-14 修正为 fxc + SM5.0，与构建期对齐。
-        new("ToneMapping.hlsl", "ps_5_0"),
         new("OverlayComposite.hlsl", "ps_5_0"),
         new("FullscreenVS.hlsl", "vs_5_0"),
     ];
