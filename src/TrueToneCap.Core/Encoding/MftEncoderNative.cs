@@ -3,6 +3,8 @@
 // TrueToneCap.Core/Encoding/MftEncoderNative.cs
 // Windows Media Foundation MFT 编码器 — 系统内置 AV1/HEVC 硬件编码器（非 Intel QSV 专属）
 // Windows 11 24H2+ 内置 AV1/HEVC MFT
+// ⚠ 上面两行说的是 Windows 那边有这个东西，不代表本文件已经用上它 —— 本类的 Encode 路径当前不可达，
+//   逐条说明见下方 2026-09-27 那段更正，别把这里当成"硬件 AV1 已在跑"。
 //
 // ═══ 2026-09-19：本路径是 QsvEncoderNative（oneVPL/MFX P/Invoke）的替代者，那条路的教训移到这里 ═══
 // 那条路留下的唯一价值是一条判据：**自造第三方原生结构体布局 = 静默失败**。
@@ -10,19 +12,49 @@
 // 全部凭猜测重写，忽略官方结构里的 reserved[] 前置字段与 union 布局 ⇒ 参数落进保留区，
 // MFXVideoENCODE_Init 收到的 CodecId ≈ 0；另有 TargetKbps 用 ushort 承载 4K 码率必然溢出、
 // EncodeFrameAsync 缺 drain 循环。这类错误不报错、不改返回值，只能靠"读回产物"才发现。
-// ⇒ 本文件因此只走微软自己导出的扁平函数（MFCreate* / MFSet* / IMFTransform_*）+ 官方 GUID，
+// ⇒ 本文件的初衷是不造结构体、只走微软自己导出的扁平函数（MFCreate* / MFSet*）+ 官方 GUID，
 //   不手写任何第三方结构体字段布局；新增属性请用 MFSet* 配官方 GUID 常量，别在此处造结构体。
-//   "QSV" 这个名字依然成立：Intel 显卡上 MFT 会把 AV1 编码调度到 Quick Sync。
+//   "QSV" 这个名字说的是设计意图：Intel 显卡上 MFT 会把 AV1 编码调度到 Quick Sync。
+//
+// ═══ 2026-09-27 更正本文件的自述：Encode 那条路【当前不可达】 ═══
+// 原先此处写的是"本文件因此只走微软自己导出的扁平函数（MFCreate* / MFSet* / IMFTransform_*）"——
+// 三类里有一类整个是错的，还有一类没核对过。逐条说清：
+//  · 确实是 DLL 的扁平导出、可按 LibraryImport 直接调的：
+//    MFCreateMediaType / MFCreateSample / MFCreateMemoryBuffer（文档给了 Mfplat.dll），
+//    加上 ole32.dll 的 CoCreateInstance。
+//  · MFSetGUID / MFSetUINT32 / MFSetUINT64：文档把它们列为 mfapi.h 的属性辅助函数，实现是转调
+//    IMFAttributes 的 COM 方法 ⇒ 到底有没有同名导出符号，本机没有导出清单可查，这里只标【待核】，
+//    不替它们断言"能跑通"。
+//  · 其实是 COM vtable 方法、却被 [LibraryImport("mfplat.dll")] 当成扁平导出声明的：
+//    IMFTransform_SetInputType / _SetOutputType / _ProcessInput / _ProcessOutput / _ProcessMessage
+//    （对应 IMFTransform 接口的五个方法），同族的 MFMapLock / MFUnlock / MFSampleGetBufferByIndex
+//    （对应 IMFMediaBuffer::Lock、IMFMediaBuffer::Unlock、IMFSample::GetBufferByIndex）也一样。
+//    mfplat 不导出这些名字 ⇒ 首次调用解析不到入口点就抛 EntryPointNotFoundException
+//    （DllNotFoundException 之类同样在这一层），它是托管异常 ⇒ 被 MftAvifEncode 的失败分支当成
+//    "MFT 后端本次失败"吞掉、回退 libaom，界面上只留一条降级说明。
+//  · 后果：今天没有任何产物经过这条 Encode。而本机连构造函数都过不去（CoCreateInstance 拿不到
+//    AV1 MFT ⇒ "MFT 编码器创建失败: 0x…"），于是"互操作声明写错了"与"本机没注册这个编码器"
+//    读出来是同一句话 —— 这正是本轮要消灭的形状，所以此处只改文案、不改调用方式。
+//  · 要接对就把那五个方法改走真正的 COM 互操作（[ComImport]/[Interface] 的 IMFTransform 声明，
+//    或按 vtable 偏移取函数指针），并在【装了 AV1 MFT 的机器】上以产物字节为准验证；本机验不了。
+//  · CLSID_AV1EncMFT / CLSID_HEVCEncMFT 这两枚值未对权威头/注册表核对过，本机也无从证伪 ——
+//    只登记为待核，不在这里替它们下结论。同族待核的还有 MFSampleAddBuffer
+//    （IMFSample::AddBuffer 同样是 COM 方法，按扁平导出声明存疑；手头没有 mfplat 导出清单，故不下判定）。
 
 using System.Runtime.InteropServices;
 using Vortice.Direct3D11;
 
 namespace TrueToneCap.Core.Encoding;
 
-/// <summary>Media Foundation MFT 编码器 — 使用系统内置硬件编码器 (Intel QSV / NVIDIA / AMD)。</summary>
+/// <summary>Media Foundation MFT 编码器 — 目标是使用系统内置硬件编码器 (Intel QSV / NVIDIA / AMD)。
+/// <para>⚠ 别把这段读成"它在用"：本类的 Encode 路径当前不可达（那五个 IMFTransform_* 是 COM vtable
+/// 方法却按 mfplat 扁平导出声明，见文件头 2026-09-27 更正）。上面的说法描述的是设计意图，
+/// 不是已经成立的行为。</para></summary>
 public sealed unsafe partial class MftEncoderNative : IDisposable
 {
     // ── MFT CLSIDs ──
+    // ⚠ 这两枚 CLSID 没有对权威头文件/注册表核对过，本机（没注册 AV1 MFT）也无从证伪 ——
+    //   这里只登记"未核对"，既不断言它对，也不断言它错。接对 COM 互操作那天要一并核对。
     private static readonly Guid CLSID_AV1EncMFT = new(0x7A5E5A7B, 0x7B3F, 0x4C8E, 0x9F, 0x8A, 0x73, 0x7B, 0x6E, 0x4C, 0x6E, 0x7A);
     private static readonly Guid CLSID_HEVCEncMFT = new(0xACCC0B8B, 0x6E3F, 0x4B4A, 0x9E, 0xC0, 0x86, 0x6B, 0x9D, 0x4F, 0xA5, 0x7E);
     private static readonly Guid MF_MT_FRAME_SIZE = new(0x1652C33D, 0xD6B2, 0x4012, 0xB8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xA3, 0x7D);
@@ -66,7 +98,9 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
         }
     }
 
-    /// <summary>检测系统 MFT 编码器是否可用。</summary>
+    /// <summary>探的是"系统里注册了 AV1 编码 MFT 没有"（CoCreateInstance 能不能拿到实例）。
+    /// <para>⚠ 别把 true 读成"这条编码路能用"：本类的 Encode 还卡在 IMFTransform_* 的互操作声明上
+    /// （见文件头 2026-09-27 更正），探得到实例也照样编不出东西 —— 这两件事不能混着报。</para></summary>
     public static bool IsAv1MftAvailable
     {
         get
@@ -122,6 +156,8 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
         // 改掉说法，并在能力表的 Qsv 显示名里如实标注"固定 10 Mbps 码率，质量滑块不适用"。
         // 何时该改成按 crf 推导：先把 crf 透传进来（构造函数或 Encode 形参），再按
         // NativeAvifEncoder.CrfToQuality 那条线性关系折算目标码率；接通后同步删掉显示名里的限制。
+        // ⚠ 2026-09-27：上面这段"质量滑块在这条路上不生效"说的是接线意图 —— 本文件头写明的那五个
+        //   vtable 声明还没修好，调用根本走不到这里，所以它从来没有在产物上被证实过，别当实测结论引用。
         MFSetUINT32(outType, MF_MT_AVG_BITRATE, 10_000_000);
 
         SetOutputType(0, outType, 0);
@@ -217,17 +253,22 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
     }
 
     // ═══════════ COM 互操作 ═══════════
+    // 下面这组声明分三类，别当成一类（逐条依据见文件头 2026-09-27 更正）：
+    //   · 无标记的：DLL 真导出的扁平函数，能按 LibraryImport 调；
+    //   · 标【待核】的：MFSet* 在 SDK 头里是转调 IMFAttributes 的辅助函数，有没有同名导出符号本机无从核对；
+    //   · 打了 ✗ 的：根本不是扁平导出，而是 COM 接口上的 vtable 方法 —— 用 [LibraryImport] 声明它们，
+    //     首次调用就会在解析入口点时失败，永远到不了原生代码（接法见文件头）。
     [LibraryImport("ole32.dll")] private static partial int CoCreateInstance(ref Guid clsid, nint outer, uint ctx, ref Guid iid, out nint ppv);
     [LibraryImport("mfplat.dll")] private static partial int MFCreateMediaType(nint* ppType);
-    [LibraryImport("mfplat.dll")] private static partial int MFSetGUID(nint type, Guid key, Guid val);
-    [LibraryImport("mfplat.dll")] private static partial int MFSetUINT64(nint type, Guid key, ulong val);
-    [LibraryImport("mfplat.dll")] private static partial int MFSetUINT32(nint type, Guid key, uint val);
+    [LibraryImport("mfplat.dll")] private static partial int MFSetGUID(nint type, Guid key, Guid val);       // 待核：mfapi.h 的属性辅助函数，实现是转调 IMFAttributes::SetGUID
+    [LibraryImport("mfplat.dll")] private static partial int MFSetUINT64(nint type, Guid key, ulong val);    // 待核：同上（IMFAttributes::SetUINT64）
+    [LibraryImport("mfplat.dll")] private static partial int MFSetUINT32(nint type, Guid key, uint val);     // 待核：同上（IMFAttributes::SetUINT32）
     [LibraryImport("mfplat.dll")] private static partial int MFCreateSample(nint* ppSample);
     [LibraryImport("mfplat.dll")] private static partial int MFCreateMemoryBuffer(uint cbMax, nint* ppBuf);
-    [LibraryImport("mfplat.dll")] private static partial int MFMapLock(nint buf, nint* ppData, uint* pcbMax, uint* pcbCur);
-    [LibraryImport("mfplat.dll")] private static partial int MFUnlock(nint buf);
-    [LibraryImport("mfplat.dll")] private static partial int MFSampleAddBuffer(nint sample, nint buf);
-    [LibraryImport("mfplat.dll")] private static partial int MFSampleGetBufferByIndex(nint sample, uint idx, nint* ppBuf);
+    [LibraryImport("mfplat.dll")] private static partial int MFMapLock(nint buf, nint* ppData, uint* pcbMax, uint* pcbCur);   // ✗ 非导出：IMFMediaBuffer::Lock（vtable）
+    [LibraryImport("mfplat.dll")] private static partial int MFUnlock(nint buf);                                              // ✗ 非导出：IMFMediaBuffer::Unlock（vtable）
+    [LibraryImport("mfplat.dll")] private static partial int MFSampleAddBuffer(nint sample, nint buf);                         // ✗ 存疑待核：IMFSample::AddBuffer 也是 vtable 方法，手头无 mfplat 导出清单可判
+    [LibraryImport("mfplat.dll")] private static partial int MFSampleGetBufferByIndex(nint sample, uint idx, nint* ppBuf);     // ✗ 非导出：IMFSample::GetBufferByIndex（vtable）
 
     private void SetInputType(uint idx, nint type, uint flags) { IMFTransform_SetInputType(_mft, idx, type, flags); }
     private void SetOutputType(uint idx, nint type, uint flags) { IMFTransform_SetOutputType(_mft, idx, type, flags); }
@@ -236,12 +277,17 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
     { uint s = 0; int hr = IMFTransform_ProcessOutput(_mft, flags, count, samples, &s); status = s; return hr; }
     private int ProcessMessage(uint msg, nint param) { return IMFTransform_ProcessMessage(_mft, msg, param); }
 
-    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_SetInputType(nint mft, uint idx, nint type, uint flags);
-    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_SetOutputType(nint mft, uint idx, nint type, uint flags);
-    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessInput(nint mft, uint idx, nint sample, uint flags);
-    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessOutput(nint mft, uint flags, uint count, nint samples, uint* pStatus);
-    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessMessage(nint mft, uint msg, nint param);
+    // ↓ 以下五个是 IMFTransform 接口的 COM vtable 方法，mfplat.dll 不导出同名符号 ⇒
+    //   以 [LibraryImport("mfplat.dll")] 声明它们，ConfigureMft/Encode/GetOutput 里的每一次调用
+    //   都在解析入口点时就失败（托管异常，不是原生崩溃），这条路今天一个像素也没编过。
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_SetInputType(nint mft, uint idx, nint type, uint flags);      // ✗ vtable：IMFTransform::SetInputType
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_SetOutputType(nint mft, uint idx, nint type, uint flags);     // ✗ vtable：IMFTransform::SetOutputType
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessInput(nint mft, uint idx, nint sample, uint flags);    // ✗ vtable：IMFTransform::ProcessInput
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessOutput(nint mft, uint flags, uint count, nint samples, uint* pStatus); // ✗ vtable：IMFTransform::ProcessOutput
+    [LibraryImport("mfplat.dll")] private static partial int IMFTransform_ProcessMessage(nint mft, uint msg, nint param);               // ✗ vtable：IMFTransform::ProcessMessage
 
+    // 空接口：只贡献 GUID 给 CoCreateInstance 当 iid 用，一个方法都没承载 ⇒
+    // 上面那五个扁平声明与它毫无关系，接对 vtable 互操作时方法应当由它来声明。
     [Guid("bf94c121-5b05-4e6f-8000-ba598961414d")]
     private interface IMFTransform { }
 

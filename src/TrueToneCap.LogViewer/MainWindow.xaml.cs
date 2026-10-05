@@ -242,10 +242,14 @@ public sealed partial class MainWindow : Window
         var q = SearchTxt.Text;
         if (q.Length > 0)
         {
+            // 窗口名与实例号也进搜索面：搜"实例#2"就能把一个覆盖层实例的行单独拎出来，
+            // 这是这两个计数器唯一能被用起来的地方（否则"一个实例反复进"与"多个实例并存"分不开）。
             if (!e.Message.Contains(q, StringComparison.OrdinalIgnoreCase) &&
                 !e.Tag.Contains(q, StringComparison.OrdinalIgnoreCase) &&
                 !e.Caller.Contains(q, StringComparison.OrdinalIgnoreCase) &&
-                !e.Category.Contains(q, StringComparison.OrdinalIgnoreCase))
+                !e.Category.Contains(q, StringComparison.OrdinalIgnoreCase) &&
+                !e.WindowName.Contains(q, StringComparison.OrdinalIgnoreCase) &&
+                !e.InstanceDisplay.Contains(q, StringComparison.OrdinalIgnoreCase))
                 return false;
         }
         return true;

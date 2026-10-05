@@ -12,7 +12,8 @@
 //   2. 色调映射曲线 (SegmentedReinhard 亮度缩放保持色相)
 //   3. sRGB gamma 编码
 // ACES 已移除 (2026-08-08): 生产恒用分段 Reinhard, 无激活路径。可行性见 docs/architecture-design.md
-// GPU 路径见 GpuToneMapper.cs (HLSL + D3D11)
+// GPU 路径（GpuToneMapper.cs）已于 2026-10-01 删除：它唯一的着色器资产无人加载、
+// 属性无人读取，实际的 HDR→SDR 一直走本文件的 CPU 实现。
 
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;

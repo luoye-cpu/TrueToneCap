@@ -98,6 +98,8 @@ official_models/
 # 而"父目录一旦被排除，其中的文件无法再反选纳入"是 git 的固定语义 ⇒ 下面的 ! 会全部失效。
 tests/manual/*
 !tests/manual/publish-probes/
+# 2026-09-30：把 T3 取证 harness 纳入版本控制（理由见下条注释；本轮 7+2 个 cell 全在这里）
+!tests/manual/safety/
 !tests/manual/cse-probe/
 tests/manual/cse-probe/*
 !tests/manual/cse-probe/Program.cs
@@ -204,3 +206,16 @@ nvoff.exe
 
 # ── 外部判据脚本的样张产物（scripts/precision/，每次重新生成，不入库）──
 artifacts/
+
+# 最后一条才生效：git 是"后写的规则覆盖先写的"，上面反选目录时这些补丁被一起放开了
+# 会话级 WIP 补丁不是判据，别跟着取证脚本一起进仓。
+# ⚠ git 的 # 只在【行首】才是注释：把说明写在模式同一行，整段会被当成模式的一部分而永不命中
+#   （2026-09-30 就是这么写坏过一次，改到行尾无效、挪到上一行才生效）。
+tests/manual/safety/*.patch
+# 同一族的另一半：safety/ 下的子目录全是 harness 的 --out 落点（每次重跑重新生成）
+# 与一份源文件快照，属"运行产物"、与 tests/output/ 同类，不是判据。
+# restore/ 那 7 个 .cs 尤其不能进：门禁的新鲜度面只枚举 src/ 与 tests/fixtures，摸不到这里，
+# 所以危害不在判据上 —— 是这份 09-29 的旧副本两次把"全仓只有两处命中"这类陈述拖成要加限定句
+# （见 docs/pipeline-and-usability-review-2026-09-27.md :1302 与 :1458）。副本在仓里，检索就永不安生。
+# ⚠ 这条排除的是目录本身 ⇒ 将来要纳入 safety/ 下某个子目录，得先改这条再反选。
+tests/manual/safety/*/

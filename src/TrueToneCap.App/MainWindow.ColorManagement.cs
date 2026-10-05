@@ -14,6 +14,7 @@ using Microsoft.UI.Xaml.Controls;
 using TrueToneCap.Core.Capture;
 using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Encoding;
+using TrueToneCap.App.Services;   // LocaleManager（色域映射卡的中文要接进对照表，2026-10-03）
 
 namespace TrueToneCap.App;
 
@@ -41,14 +42,14 @@ public sealed partial class MainWindow : Window
         SourceGamutTxt.Text = DescribeSourceDisplay(decision);
         TargetGamutTxt.Text = DescribeTargetGamut(decision, ui.Format);
         MappingArrow.Text = !ui.HdrEnabled
-            ? (decision.NeedsMapping ? "→ 色域映射到" : "→ 直通（同色域）")
+            ? (decision.NeedsMapping ? LocaleManager.Tr("→ 色域映射到") : LocaleManager.Tr("→ 直通（同色域）"))
             : delivery switch
             {
-                HdrDelivery.PqContainer => "→ HDR 直通（容器写 PQ）",
-                HdrDelivery.GainMap => "→ 增益图（SDR 底图 + gain map）",
-                HdrDelivery.BlockedByDisplay => "→ 色调映射为 SDR（屏幕证据不授权 HDR 声称）",
-                HdrDelivery.BlockedBySrgbTarget => "→ 色调映射为 SDR（sRGB 容器装不下 PQ）",
-                _ => "→ 色调映射为 SDR（此格式没有 HDR 通道）",
+                HdrDelivery.PqContainer => LocaleManager.Tr("→ HDR 直通（容器写 PQ）"),
+                HdrDelivery.GainMap => LocaleManager.Tr("→ 增益图（SDR 底图 + gain map）"),
+                HdrDelivery.BlockedByDisplay => LocaleManager.Tr("→ 色调映射为 SDR（屏幕证据不授权 HDR 声称）"),
+                HdrDelivery.BlockedBySrgbTarget => LocaleManager.Tr("→ 色调映射为 SDR（sRGB 容器装不下 PQ）"),
+                _ => LocaleManager.Tr("→ 色调映射为 SDR（此格式没有 HDR 通道）"),
             };
         GamutMapHintTxt.Text = BuildGamutHint(ui.Format, decision, delivery, writesPq);
     }
@@ -58,20 +59,20 @@ public sealed partial class MainWindow : Window
     {
         var src = d.Source;
         if (src is null)
-            return "读不到被截屏的逐屏证据 ⇒ 不授权广色域/HDR 声称（仍放行 Float16 源）";
+            return LocaleManager.Tr("读不到被截屏的逐屏证据 ⇒ 不授权广色域/HDR 声称（仍放行 Float16 源）");
 
         string bits = $"{src.BitsPerColor}-bit";
         string native = src.NativeGamutKnown
             ? ColorProfileProvider.GetColorSpaceDisplayName(src.NativeGamutTag)
-            : "EDID 未读到原色（不猜）";
+            : LocaleManager.Tr("EDID 未读到原色（不猜）");
         return d.ScreenClass switch
         {
-            DisplayEnumerator.DisplayColorClass.Hdr => $"HDR（{bits}，PQ，面板原生 {native}）",
+            DisplayEnumerator.DisplayColorClass.Hdr => Trf("HDR（{0}，PQ，面板原生 {1}）", bits, native),
             DisplayEnumerator.DisplayColorClass.WideGamutSdr =>
-                $"SDR 广色域（{native}，{bits}，ACM）"
-                + (src.SupportsHdr && !src.IsHdr ? " —— 面板支持 HDR，系统未开启" : ""),
-            DisplayEnumerator.DisplayColorClass.NarrowSdr => $"SDR sRGB（{bits}）",
-            _ => $"逐屏证据不足（{bits}）⇒ 不授权广色域/HDR 声称",
+                Trf("SDR 广色域（{0}，{1}，ACM）", native, bits)
+                + (src.SupportsHdr && !src.IsHdr ? LocaleManager.Tr(" —— 面板支持 HDR，系统未开启") : ""),
+            DisplayEnumerator.DisplayColorClass.NarrowSdr => Trf("SDR sRGB（{0}）", bits),
+            _ => Trf("逐屏证据不足（{0}）⇒ 不授权广色域/HDR 声称", bits),
         };
     }
 
@@ -81,7 +82,7 @@ public sealed partial class MainWindow : Window
     private static string DescribeTargetGamut(ColorDecision d, OutputFormat format)
     {
         string name = ColorProfileProvider.GetColorSpaceDisplayName(d.TargetTag);
-        return format == OutputFormat.JPEG_GAINMAP ? $"{name}（底图色域）" : name;
+        return format == OutputFormat.JPEG_GAINMAP ? Trf("{0}（底图色域）", name) : name;
     }
 
     /// <summary>灰字那一行：管线在干什么 + 这个格式能把声明写成什么 + 有没有被收口。</summary>
@@ -91,26 +92,26 @@ public sealed partial class MainWindow : Window
         var parts = new System.Collections.Generic.List<string>();
         parts.Add(delivery switch
         {
-            HdrDelivery.PqContainer => "WGC Float16 → 色域矩阵 → PQ ST.2084。",
+            HdrDelivery.PqContainer => LocaleManager.Tr("WGC Float16 → 色域矩阵 → PQ ST.2084。"),
             HdrDelivery.GainMap =>
-                "WGC Float16 → 分段 Reinhard 出 SDR 底图，另算一张增益图；HDR 在增益图里，不在容器声明里。",
+                LocaleManager.Tr("WGC Float16 → 分段 Reinhard 出 SDR 底图，另算一张增益图；HDR 在增益图里，不在容器声明里。"),
             HdrDelivery.BlockedByDisplay =>
-                "本次按 SDR 色调映射：HDR 开关仍按你的设置保留，只是这块屏的逐屏证据不足以声明 PQ。",
+                LocaleManager.Tr("本次按 SDR 色调映射：HDR 开关仍按你的设置保留，只是这块屏的逐屏证据不足以声明 PQ。"),
             HdrDelivery.BlockedBySrgbTarget =>
-                "本次按 SDR 色调映射：目标被解析/收口成 Rec.709，而 PQ 只能与 Rec.2020 原色一起声明。",
+                LocaleManager.Tr("本次按 SDR 色调映射：目标被解析/收口成 Rec.709，而 PQ 只能与 Rec.2020 原色一起声明。"),
             HdrDelivery.BlockedByFormat =>
-                "本次按 SDR 色调映射：这个格式的容器没有 HDR 通道（HDR 开关会落空，产物是 8-bit SDR）。",
+                LocaleManager.Tr("本次按 SDR 色调映射：这个格式的容器没有 HDR 通道（HDR 开关会落空，产物是 8-bit SDR）。"),
             _ => d.NeedsMapping
                 ? (d.ExtendedRangeAuthorized
-                    ? "WGC Float16 捕获完整广色域 → 3×3 矩阵搬到目标 → 分段 Reinhard → SDR 输出。"
-                    : "8-bit 源 → ICC/矩阵搬到目标 → SDR 输出。")
-                : "源与目标同一套原色 ⇒ 矩阵是恒等变换，本次不跑搬色。",
+                    ? LocaleManager.Tr("WGC Float16 捕获完整广色域 → 3×3 矩阵搬到目标 → 分段 Reinhard → SDR 输出。")
+                    : LocaleManager.Tr("8-bit 源 → ICC/矩阵搬到目标 → SDR 输出。"))
+                : LocaleManager.Tr("源与目标同一套原色 ⇒ 矩阵是恒等变换，本次不跑搬色。"),
         });
-        parts.Add(FormatColorFacts.Declaration(format, d.TargetTag, writesPq));
+        parts.Add(FormatColorFacts.Declaration(format, d.TargetTag, writesPq, LocaleManager.Tr));
         if (d.GamutClamped)
-            parts.Add($"⚠ 广色域声明已被逐屏证据收口为 Rec.709 ⇒ {d.Evidence}");
+            parts.Add(Trf("⚠ 广色域声明已被逐屏证据收口为 Rec.709 ⇒ {0}", d.Evidence));
         if (d.HdrClamped)
-            parts.Add($"⚠ HDR 声称已被收口 ⇒ {d.Evidence}");
+            parts.Add(Trf("⚠ HDR 声称已被收口 ⇒ {0}", d.Evidence));
         return string.Join(" ", parts);
     }
 
@@ -132,5 +133,22 @@ public sealed partial class MainWindow : Window
         }
         catch { }
         return "System";
+    }
+
+    /// <summary>
+    /// 带占位符的中文模板 → 当前语言：先整串查表，再按位置把 {0}/{1}… 换成值。
+    /// <para>中文模式 <c>LocaleManager.Tr</c> 未命中即原样返回模板，替换后与改造前的
+    /// <c>$"…"</c> 逐字相同。值的字符串化刻意用不带格式参数的 <c>ToString()</c>，
+    /// 与 <c>$"…{n}…"</c> 走同一个文化口径——换成 InvariantCulture 就会改动中文模式的输出。</para>
+    /// <para>刻意不用 <c>string.Format</c>：译文里只要出现一个裸 <c>{</c> 就抛异常，
+    /// 而对照表是给人改文案的地方，不该埋这种雷。</para>
+    /// </summary>
+    private static string Trf(string template, params object?[] values)
+    {
+        var s = LocaleManager.Tr(template);
+        for (int i = 0; i < values.Length; i++)
+            // ToString() 不带格式参数 = 与改造前 $"…{int}…" 同一个文化口径，逐字相同
+            s = s.Replace("{" + i + "}", values[i]?.ToString() ?? "", StringComparison.Ordinal);
+        return s;
     }
 }

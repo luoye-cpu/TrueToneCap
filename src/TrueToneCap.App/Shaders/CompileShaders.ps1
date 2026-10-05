@@ -66,7 +66,6 @@ Write-Host "使用编译器: $fxc"
 
 # 着色器列表 (SM5.0: vs_5_0 / ps_5_0)
 $shaders = @(
-    @{ Input = "ToneMapping.hlsl";      Entry = "main"; Profile = "ps_5_0" },
     @{ Input = "FullscreenVS.hlsl";     Entry = "main"; Profile = "vs_5_0" },
     @{ Input = "OverlayComposite.hlsl"; Entry = "main"; Profile = "ps_5_0" }
 )

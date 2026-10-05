@@ -778,7 +778,24 @@ public class TranslationService
             .GetProperty("content")
             .GetString();
 
-        return content?.Trim() ?? text;
+        return RequireTranslatedContent(content);
+    }
+
+    /// <summary>
+    /// HTTP 200 而 content 为 JSON null / 空串 / 全空白 ⇒ 这次【没有译文】，不是"低质译文"。
+    /// <para>原写法 <c>content?.Trim() ?? text</c> 会把用户自己送出去的源文本原样当作译文返回：
+    /// 界面上看到的"那句英文没被翻译"就是它本身，日志里零痕迹 —— 比报错更坏，因为它长得像成功。
+    /// 返回空串也只是换一种静默，所以这里抛异常交给 <see cref="TranslateAsync"/> 既有的
+    /// <c>catch (Exception)</c>：换下一个后端，并由 <see cref="ClassifyLlmFailure"/> 把这条事实
+    /// 写进 _lastBackendNote 与 Warn 日志（该 catch 无类型过滤，任何异常都不会冒到界面变成原始异常文本）。</para>
+    /// </summary>
+    internal static string RequireTranslatedContent(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            throw new InvalidOperationException(
+                "端点回了 HTTP 200，但 choices[0].message.content 是空的（JSON null 或空白）⇒ 这次没有返回译文");
+
+        return content.Trim();
     }
 
     // ═══════════════════════════════════════

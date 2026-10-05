@@ -73,6 +73,10 @@ def md5(path: str) -> str:
 
 
 def run(exe: str, *args: str, cwd: str | None = None):
+    # ⚠ 本机实测（2026-09-29 审查轮 §12.8）：把 build\lib\Release 追加进子进程 PATH 并【不能】
+    #   救活 jxlinfo —— 它仍退 0xC0000135 (STATUS_DLL_NOT_FOUND)，缺的是这套构建里的其他依赖。
+    #   所以这条外部判据目前在本机一格都没判（下面的能力探测会诚实报 SKIP，不是假绿）。
+    #   同题判据在 [1.8/2] 的 C# 侧 --jxl-color-product 仍在判。别在这里加"看起来能用"的 PATH 补丁。
     p = subprocess.run([exe, *args], capture_output=True, text=True, cwd=cwd,
                        encoding="utf-8", errors="replace")
     return p.returncode, (p.stdout or "") + (p.stderr or "")

@@ -78,9 +78,47 @@ public sealed class SettingsService
     /// <summary>当前设置实例（内存中）。</summary>
     public AppSettingsData Current { get; private set; } = new();
 
+    /// <summary>本次 <see cref="Load"/> 是否真的从盘上读到了设置（凭据字段也刚从凭据库回填）。</summary>
+    /// <remarks>
+    /// 文件缺失或反序列化失败时 <c>Current = new()</c>，凭据字段是空的 —— 那来自<b>读失败</b>，
+    /// 不是<b>用户清空</b>。不区分二者的话，本会话内任何一次 <c>Save()</c> 都会走
+    /// <c>SaveSecret</c> 的空值分支，把 secrets.bin（在 %LOCALAPPDATA%，与同目录的 settings.json
+    /// 是两个文件 —— 前者还在、后者丢了是完全可能的状态）里的 API Key/AppSecret 永久删掉且无备份。
+    /// </remarks>
+    private bool _loadedFromDisk;
+
+    /// <summary>
+    /// 本会话是否成功<b>写过</b>那份设置（与 <see cref="_loadedFromDisk"/> 一样按"当前内存里这份可不可信"
+    /// 说话，只是来源相反：一个来自读，一个来自写）。
+    /// <para>为什么要分开：新装机首启时根本没有 settings.json，<c>Load()</c> 走 else 分支 ⇒
+    /// <see cref="_loadedFromDisk"/> 整会话为假。用户在这一次会话里先填 API Key、再清空，
+    /// 清空那次 <c>Save()</c> 会走 <c>SaveSecret</c> 的"不许删"分支，只留一条 Warn：
+    /// SecretStore 里那条凭据活了下来，而界面上已经显示为空 —— 下次启动 <c>Load()</c> 又把它回填出来，
+    /// 用户视角是"我删掉的密钥自己回来了"。写成功之后，"字段为空"就只剩"用户清空"一种来源了。</para>
+    /// <para><see cref="Load"/> 开头一并复位：读失败会把 <c>Current</c> 换成默认值表，
+    /// 之前那次写的可信度随之作废，此时又得回到"空值不许删凭据"。</para>
+    /// </summary>
+    private bool _savedToDisk;
+
+    /// <summary>凭据字段为空可不可以当成"用户要删这条凭据"（读进来过 或 本会话写成功过，二者之一）。</summary>
+    private bool SecretClearanceIsUserIntent => _loadedFromDisk || _savedToDisk;
+
+    /// <summary>
+    /// 上一次 <see cref="Load"/> 是否真的把盘上那份读了进来（<b>读失败与文件不存在是两种情况，
+    /// 都必须能被区分</b>）。
+    /// <para>2026-09-29 实测撞出来的需要：审计卡当时只按"文件在不在"说话，于是一份<b>语法坏掉</b>的
+    /// settings.json 被报成"喂给管线的是你磁盘上那份"，而实况是 catch 之后用的默认值表 ——
+    /// 排查的人会拿这句话当凭据，它就必须在事实相反时说"我用的是默认值"。
+    /// 日志里那条 Warn（"设置加载失败，使用默认值"）一直都在，但卡片是给维护者当场读的那份凭据。</para>
+    /// </summary>
+    internal bool LastLoadCameFromDisk => _loadedFromDisk;
+
     /// <summary>从磁盘加载设置。文件不存在或损坏时返回默认值。</summary>
     public AppSettingsData Load()
     {
+        // 先按"不可信"起算：只有走完整条读盘+归一+迁移重写的路径才置 true（见 _loadedFromDisk）
+        _loadedFromDisk = false;
+        _savedToDisk = false;   // 见 _savedToDisk：读失败把 Current 换成默认值表，之前那次写的可信度随之作废
         try
         {
             if (!CanPersist)
@@ -116,11 +154,20 @@ public sealed class SettingsService
                 Current.LlmApiKey = SecretStore.Get(SecretStore.LlmApiKeyName) ?? "";
                 Current.YoudaoAppSecret = SecretStore.Get(SecretStore.YoudaoAppSecretName) ?? "";
 
-                // 若发生迁移，立即重写 settings.json 以清除其中的明文
-                if (migrated) Save();
-
                 LogService.Info("SettingsService", $"设置已从 {SettingsPath} 加载");
                 Normalize(Current);
+
+                // 若发生迁移，立即重写 settings.json 以清除其中的明文。
+                // ⚠ 必须排在 Normalize 之后：写在前面会把【未归一的越界值】钉回盘上，而 Save() 顺手
+                //   盖的 SettingsRevision/GainMapMerged 章又让迁移门永不再开 ⇒ 盘上坏值就此固化，
+                //   只有内存里那份是归一的（任何绕过 Load() 的直接反序列化会读到越界值）。
+                //   清除明文的时效不受影响：SecretStore.Set 已在 MigratePlaintextApiKey 里当场完成，
+                //   这里只是把带明文的那份文件重写掉，仍在同一次 Load() 返回之前。
+                if (migrated) Save();
+
+                // 走到这里 ⇒ 盘上那份确实读成功了，凭据字段也是刚从凭据库回填的。
+                // 此后 Current 里的空凭据只可能来自"用户在设置页清空"，才允许 Save 去删凭据库。
+                _loadedFromDisk = true;
             }
             else
             {
@@ -146,8 +193,9 @@ public sealed class SettingsService
             Directory.CreateDirectory(dir);
 
         // 敏感字段不写入 JSON（[JsonIgnore]），改存加密凭据库
-        SaveSecret(SecretStore.LlmApiKeyName, Current.LlmApiKey);
-        SaveSecret(SecretStore.YoudaoAppSecretName, Current.YoudaoAppSecret);
+        // "空值 = 用户要删这条凭据"这个前提，只在本次内存里这份可信时成立（见 SecretClearanceIsUserIntent）
+        SaveSecret(SecretStore.LlmApiKeyName, Current.LlmApiKey, SecretClearanceIsUserIntent);
+        SaveSecret(SecretStore.YoudaoAppSecretName, Current.YoudaoAppSecret, SecretClearanceIsUserIntent);
 
         // 使用源生成器序列化（AOT 兼容）
         // ═══ 2026-09-24：只写【与当前默认不同】的键 ═══
@@ -182,6 +230,10 @@ public sealed class SettingsService
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             throw;
         }
+
+        // 写盘成功 ⇒ 内存里这份从此与盘上一致：凭据字段为空只可能是"用户在设置页清空"，
+        // 不再可能是"读盘失败回落默认"。这正是新装机那一格（见 _savedToDisk）。
+        _savedToDisk = true;
 
         LogService.Info("SettingsService", $"设置已保存到 {SettingsPath}");
     }
@@ -227,9 +279,15 @@ public sealed class SettingsService
         LogService.Error("SettingsService", msg);
     }
 
+    // ⚠ 这句原先写死"设置目录不可写"，而它管不住【文件被标只读】那一臂：CanPersistSettings 有两种
+    //   false（目录写不进 / 那份文件带 ReadOnly 位，见 Core 的 SettingsWriteProbe），而真实世界里
+    //   后者更常见（用户自己勾了只读、同步盘占位、从只读介质拷出来）。把成因写死 = 排查的人照着
+    //   "去改目录权限"忙一场，而问题根本不在那儿。2026-09-30 用只读文件跑这一格时当场读到这句假话。
     private static void LogPersistBlocked() => LogOnce(
-        $"设置目录不可写 ⇒ 不读取也不保存 {SettingsPath}，本次运行按【默认值表】；"
-        + "要让设置留住，请把程序放在可写目录（或以可写权限运行）");
+        $"设置存不下来 ⇒ 不读取也不保存 {SettingsPath}，本次运行按【默认值表】；"
+        + "两种成因都走这里：① 这个目录真的写不进（装进 Program Files 又没提权、只读介质、被策略拦写）；"
+        + "② 目录可写，但那份设置文件被标了只读。分不清就在同目录随手新建一个文件试试。"
+        + "要让设置留住：①换可写目录或以可写权限运行；②摘掉该文件的只读位");
 
     /// <summary>
     /// 迁移旧版 AVIF「编码后端 + 软件编码器」两层设置到单一的 <c>AvifEncoder</c>。
@@ -276,21 +334,34 @@ public sealed class SettingsService
         }
     }
 
-    /// <summary>把单个敏感字段写入加密凭据库；值为空时删除对应条目。
+    /// <summary>把单个敏感字段写入加密凭据库；值为空<b>且这份空值可归因为用户清空</b>时才删除对应条目。
     /// <para>
     /// ⚠ 失败必须与"设置保存"隔离：加密存储可能因 DPAPI 不可用、磁盘满、
     /// 权限不足等原因失败。若让它抛出，会连带导致全部非敏感设置（格式/质量/热键…）
     /// 都保存不了。故此处只记录日志，保证用户其余设置不受影响。
     /// </para>
+    /// <para>
+    /// <c>allowDelete</c>（由 <see cref="SecretClearanceIsUserIntent"/> 给出）：设置文件缺失或损坏时
+    /// <c>Current</c> 的凭据字段是读失败留下的空值，与"用户在设置页亲手清空"在数据上无法区分 ——
+    /// 无条件走删除分支，就等于用一次坏文件无备份地毁掉 secrets.bin 里的凭据。非空值不受此限制
+    /// （写入不会丢东西）。可信有两个来源：刚从盘上读进来，<b>或本会话已成功写过一次设置</b>
+    /// （后者管的是新装机那一格，见 <see cref="_savedToDisk"/>）。
+    /// </para>
     /// </summary>
-    private static void SaveSecret(string name, string value)
+    private static void SaveSecret(string name, string value, bool allowDelete)
     {
         try
         {
             if (!string.IsNullOrEmpty(value))
                 SecretStore.Set(name, value);
-            else
+            else if (allowDelete)
                 SecretStore.Delete(name);
+            else
+                LogService.Warn("SettingsService",
+                    $"本次未清除已保存的凭据（{name}）：这里的空值还不能当成用户清空的意思"
+                    + "（要等本次读取确认成功、或本会话已成功写过设置，才允许删凭据库，删掉就没有备份了）。"
+                    + "⚠ 别按字面读成设置加载失败：迁移触发时 Load() 内部的这次 Save() 也走这一支，"
+                    + "那次读取其实是成功的，只是标志要到 Load() 末尾才抬。");
         }
         catch (Exception ex)
         {
@@ -307,9 +378,14 @@ public sealed class SettingsService
     /// 故在加载时就地修正，让内存中的值始终是合法的。
     ///
     /// 区间与各 <c>Quality*</c> 字段注释保持一致；修正只发生在越界时，
-    /// 合法的用户自定义值（哪怕是最差档）一律保留。
+    /// 合法的用户自定义值（哪怕是最差档）一律保留。字符串型枚举例外：合法但拼法与界面 Tag
+    /// 不一致（大小写）时被【改写成 Tag 的拼法】而非回落默认，理由见 <see cref="FitTag"/>。
+    /// <para><c>internal</c> 而非 <c>private</c>：与 <see cref="MigrateStaleDefaults"/> 同一纪律——
+    /// 自检必须<b>直接调用这条分支</b>（见 <c>SelfTest.RunNormalizeGateCheck</c>）。走 <c>Load()</c>
+    /// 的话就要把夹具写进产品同目录那份 settings.json（本仓的设置只认同目录一个答案），
+    /// 为了测试去改用户机器上的设置是不可接受的。</para>
     /// </summary>
-    private static void Normalize(AppSettingsData s)
+    internal static void Normalize(AppSettingsData s)
     {
         // ── 每格式质量（min, max, default）──
         // 区间与各编码器的 GetQualityRange() 逐一对齐。
@@ -334,27 +410,42 @@ public sealed class SettingsService
         // （用显式比较而不是 `is < 0 or > Max` 模式：关系模式要求右侧是编译期常量。）
         if (s.FormatIndex < 0 || s.FormatIndex > TrueToneCap.Core.Settings.FormatOrder.MaxIndex)
             s.FormatIndex = TrueToneCap.Core.Settings.FormatOrder.DefaultIndex;
+        // ⚠ 这个上界是**旧 6 项色域表**的最后一项（BT2020），不是当前界面那 3 项：
+        //   老文件里的 3/4/5（DCI_P3/AdobeRGB/BT2020）必须活着交给 MainWindow.Settings.cs 的
+        //   legacyTags→currentTags 迁移按【标签】收口，这里越界判它 = 静默把用户的 Rec.2020
+        //   换成"跟随显示器"。表长在 CorePipelineTests 的"上界==legacyTags.Length-1"里对撞，
+        //   --settings-migration 的 NORMALIZE 自检另有 5→5 那一臂（本机老文件实测就是 5）。
         if (s.ColorSpaceIndex is < 0 or > 5) s.ColorSpaceIndex = 0;    // 默认 System
 
         // ── 枚举型字符串：非法值会让 SetComboByTag 匹配不到 → 控件停留在 XAML 默认项，
         //    与 _settings 不一致，表现为"改了设置却没保存" ──
-        if (!IsOneOf(s.ThemeMode, "Default", "Light", "Dark", "OLED")) s.ThemeMode = "Default";
-        if (!IsOneOf(s.Language, "zh", "en")) s.Language = "zh";
+        // ⚠ 参数表 = MainWindow.xaml 里那张 ComboBoxItem Tag 表，一字不差（含大小写）；
+        //   这条等式由 CorePipelineTests 的「设置白名单 == XAML Tag」逐轴对撞，7 个轴全在内。
+        //   默认值一律取 CreateDefaults()，与上面质量轴同一条纪律（不得再写字面量）。
+        FitTag(s.ThemeMode, v => s.ThemeMode = v, dft.ThemeMode, "Default", "Light", "Dark", "OLED");
+        FitTag(s.Language, v => s.Language = v, dft.Language, "zh", "en");
         // ═══ 2026-09-15 修复：白名单与 XAML 实际 Tag 不一致 ═══
         // 原白名单为 "Windows"/"Acme"，而 MainWindow.xaml:325-327 的 ComboBoxItem Tag
         // 实为 "OnnxGpu"/"OnnxCpu"/"WindowsOcr" ⇒ 用户选"Windows OCR"存下的 "WindowsOcr"
         // 恒不合法，每次启动被改回 "OnnxGpu"，表现为"选了却没保存、下拉框还停在第一项"。
         // "Acme" 全仓仅此一处（占位残留），一并移除。
-        if (!IsOneOf(s.OcrEngineMode, "OnnxCpu", "OnnxGpu", "WindowsOcr")) s.OcrEngineMode = "OnnxGpu";
-        if (!IsOneOf(s.GainMapMode, "Gray", "RGB")) s.GainMapMode = "Gray";
-        if (!IsOneOf(s.ArchiveMode, "Day", "Week", "Month", "Year")) s.ArchiveMode = "Month";
+        FitTag(s.OcrEngineMode, v => s.OcrEngineMode = v, dft.OcrEngineMode, "OnnxCpu", "OnnxGpu", "WindowsOcr");
+        // ═══ 2026-09-29（批次 E）：XAML 挂的是 Tag="Rgb"，白名单当年写成 "RGB" ═══
+        // 旧写法把 "RGB" 当成合法值放行 ⇒ 编码按 Rgb 走、界面按 == 匹配不到 ⇒ 下拉空白，
+        // 且下一次保存被 `?? "Gray"` 兜底把用户的 RGB 增益静默翻成灰度。现在按 Tag 拼法放行，
+        // 大小写变体（"rgb"/"RGB"）由 FitTag 改写成 "Rgb" 而不是回落默认 —— 意图保住，拼法对齐。
+        FitTag(s.GainMapMode, v => s.GainMapMode = v, dft.GainMapMode, "Gray", "Rgb");
+        // ⚠ 2026-09-29 摘掉 "Week"：界面从来没有这一项（Tag 表只有 Year/Month/Day），
+        //   归档路径 GetArchivePath 也没有按周的规则（落到 _ ⇒ yyyy-MM，与 Month 同）。
+        //   放行它 = 白名单里多一个"选不到、也没有行为"的值，手改配置的人只会看到空白下拉。
+        FitTag(s.ArchiveMode, v => s.ArchiveMode = v, dft.ArchiveMode, "Day", "Month", "Year");
         // ═══ 2026-09-16 修复：白名单漏了 "WindowsNotify" ═══
         // XAML（MainWindow.xaml:485 起）有 5 个选项，其中包含 "WindowsNotify"，
         // 但白名单只列了 4 个 ⇒ 用户选"Windows 系统通知"后，每次启动都被改回右下角，
         // 且下拉框停在第 4 项，用户完全无法察觉（与 OcrEngineMode 同型的缺陷）。
         // 另：MainWindow.xaml.cs 的 ShowCaptureToast 依赖该值判断是否走系统通知。
-        if (!IsOneOf(s.ToastPosition, "TopLeft", "TopRight", "BottomLeft", "BottomRight", "WindowsNotify"))
-            s.ToastPosition = "BottomRight";
+        FitTag(s.ToastPosition, v => s.ToastPosition = v, dft.ToastPosition,
+            "TopLeft", "TopRight", "BottomLeft", "BottomRight", "WindowsNotify");
         // AVIF 编码器（单一选项）。未知值一律回退 Auto。
         // ═══ 2026-09-24：界面摘掉 "Avifenc" 档，旧值显式迁到 LibAom ═══
         // "Avifenc" 只是"不传 --codec"，而内嵌这份 avifenc 的默认 codec 就是 aom
@@ -365,15 +456,17 @@ public sealed class SettingsService
         //   编码器"翻转成硬件路径 —— 与迁移前行为不同，正是本仓库反复踩的"迁移改变语义"。
         //   AvifEncoderKind.Avifenc 本身保留：管线层在"硬件不支持 HDR 路径"时仍改写为它
         //   （见 CapturePipelineService），它只是不再是用户可选项。
-        if (s.AvifEncoder == "Avifenc")
+        // 比较必须 IgnoreCase：下面那行 FitTag 认大小写变体（"auto"/"AVIFENC" 都算数），这道门若按精确
+        // 大小写比对，手写成 "avifenc" 的那份就【逃过迁移】、直接被白名单回落成 Auto ⇒ 优先走硬件，
+        // 正是上面 ⚠ 禁止的那个翻转。两道工具的口径必须同向，否则"随手写小写"反而比写大写更糟。
+        if (string.Equals(s.AvifEncoder, "Avifenc", StringComparison.OrdinalIgnoreCase))
         {
             s.AvifEncoder = "LibAom";
             LogService.Info("SettingsService",
                 "AVIF 编码器设置迁移：Avifenc → LibAom（旧档已从界面移除；二者对内嵌 avifenc 同义，"
                 + "且 LibAom 显式传 --codec aom 更确定。没有落到 Auto，因为 Auto 会优先走硬件）");
         }
-        if (!IsOneOf(s.AvifEncoder, "Auto", "Qsv", "LibAom", "SvtAv1", "Nvenc"))
-            s.AvifEncoder = "Auto";
+        FitTag(s.AvifEncoder, v => s.AvifEncoder = v, dft.AvifEncoder, "Auto", "Qsv", "LibAom", "SvtAv1", "Nvenc");
 
         // ── 色度采样：仅这几个合法值 ──
         NormalizeChroma(s);
@@ -484,12 +577,23 @@ public sealed class SettingsService
             set(def);
     }
 
-    private static bool IsOneOf(string? v, params string[] allowed)
+    /// <summary>
+    /// 字符串型设置：只放行界面上真实存在的 <c>ComboBoxItem Tag</c>，并把<strong>大小写变体改写成 Tag
+    /// 的确切拼法</strong>，匹配不到才回落默认。
+    /// <para>为什么"校验通过"这一步还不够：白名单历来用 <c>OrdinalIgnoreCase</c> 比对，而把值回填进
+    /// 下拉框的 <c>SetComboByTag</c> 写的是 <code>(string)item.Tag == tag</code>（区分大小写）。
+    /// 于是盘上的 <c>"rgb"</c> / <c>"Dark"</c> 一类变体能活着穿过校验、编码路径也确实按它走，界面那一侧
+    /// 却匹配不到任何项 ⇒ 下拉显示空白并留一条 Warn，而用户下一次保存<b>任何</b>设置时该字段被
+    /// <code>?? 默认</code> 兜底静默翻转成另一档 —— 与 2026-09-15（"Windows"）、2026-09-16（漏
+    /// "WindowsNotify"）两次缺陷同一个形状，只是发生在大小写上，所以那两次的修法都防不住它。</para>
+    /// <para>空值保持原纪律：不改写，交由下游按默认处理。</para>
+    /// </summary>
+    private static void FitTag(string current, Action<string> set, string def, params string[] tags)
     {
-        if (string.IsNullOrEmpty(v)) return true;   // 空值交由下游按默认处理，不强行改
-        foreach (var a in allowed)
-            if (string.Equals(v, a, StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
+        if (string.IsNullOrEmpty(current)) return;
+        foreach (var t in tags)
+            if (string.Equals(current, t, StringComparison.OrdinalIgnoreCase)) { set(t); return; }
+        set(def);
     }
 
     private static void NormalizeChroma(AppSettingsData s)

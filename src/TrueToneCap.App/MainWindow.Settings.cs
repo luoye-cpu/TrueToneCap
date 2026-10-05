@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/MainWindow.Settings.cs
 // MainWindow 的"设置加载/应用/保存"职责（partial class 拆分）
@@ -127,6 +127,8 @@ public sealed partial class MainWindow : Window
         PreviewChk.IsChecked = _settings.ShowPreview;
         MinimizeTrayChk.IsChecked = _settings.MinimizeToTray;
         UiAnimationsChk.IsChecked = _settings.EnableUiAnimations;
+        // 换格式保底开关（2026-09-29）：默认勾上 = 与这次改动之前的行为一致
+        PngFallbackChk.IsChecked = _settings.PngFallbackEnabled;
         ToastCaptureChk.IsChecked = _settings.ToastOnCapture;
         ToastSilentChk.IsChecked = _settings.ToastOnSilentCapture;
         ToastRecordChk.IsChecked = _settings.ToastOnRecording;
@@ -199,14 +201,39 @@ public sealed partial class MainWindow : Window
 
     private static void SetComboByTag(ComboBox cbo, string tag)
     {
-        foreach (ComboBoxItem item in cbo.Items)
-        { if ((string)item.Tag == tag) { item.IsSelected = true; return; } }
+        // 0 个选项的下拉不是"值域漂移"：OcrLangCbo 在 ONNX 引擎下本来就没有可选项
+        // （PopulateOcrLanguages 会 Clear）。以前这种也照报一条 Warn ⇒ 真漂移（OverlayColor）
+        // 被固定噪声埋掉，两条警告混在一起没人分得清哪条要修。
+        if (cbo.Items.Count == 0) return;
+
+        // 大小写与校验侧同一把尺：Normalize/IsOneOf 用的是 OrdinalIgnoreCase，这里若区分大小写，
+        // 白名单写 "RGB" 而 XAML 挂 "Rgb" 时值能一路活到界面、下拉却匹配不到任何项
+        // （CorePipelineTests 那条"白名单 vs Tag"的判据注释里记的就是这个形状）。
+        // ⚠ 选中一律走【控件级 SelectedIndex】，不要 item.IsSelected = true：
+        //   11:18 实机量到，OverlayColorCbo 在启动时所在的页还没实化，对未实化的容器写
+        //   IsSelected 是空操作 ⇒ 补进去的那一项在树里（8 项、含原值）却"选中=无"，界面仍是空白。
+        //   这与本轮那条格式 P1 同一族：控件级状态在实化前后语义不同。
+        for (int i = 0; i < cbo.Items.Count; i++)
+        {
+            if (cbo.Items[i] is ComboBoxItem item
+                && string.Equals((string)item.Tag, tag, StringComparison.OrdinalIgnoreCase))
+            { cbo.SelectedIndex = i; return; }
+        }
         // 找不到匹配项 ⇒ 下拉会是空白（没有任何选中项），而且下一次保存会把它静默改成
         // 兜底值（各字段的 `?? "444"` 那类）。这条 Warn 就是让"配置里的值域 > 界面项"
         // 这种漂移变得看得见：2026-09-26 的默认值缺失就是靠空白暴露的。
         LogService.Warn("Settings",
             $"设置值「{tag}」在下拉 {cbo.Name ?? cbo.GetType().Name} 的 {cbo.Items.Count} 个选项里没有对应项"
-            + " ⇒ 该下拉将显示为空白，且保存时会被兜底值覆盖");
+            + " ⇒ 已按原值补一项显示并保留（2026-10-01 起不再留空白、也不再被兜底值覆盖），但值域漂移要核对");
+        // 未匹配时不许留空白。空白的那一瞬就是保存侧 `?? 字面量` 把用户存的值改掉的时机
+        // ——报告 §3 那条 P1 的完整形状：界面显示默认 ⇒ 写回默认 ⇒ 差量写盘把那个键删了。
+        // 把"盘上那个值"本身补成一项并选中 ⇒ 界面显示的就是实际生效的，保存也不会换掉它。
+        // Content 只用原始值本身（一串 #AARRGGBB / 语言码），不新增中文串 ⇒ 不碰翻译表那条生路。
+        if (!string.IsNullOrEmpty(tag))
+        {
+            cbo.Items.Add(new ComboBoxItem { Tag = tag, Content = tag });
+            cbo.SelectedIndex = cbo.Items.Count - 1;
+        }
     }
 
     /// <summary>
@@ -254,11 +281,16 @@ public sealed partial class MainWindow : Window
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.MinimizeToTray = MinimizeTrayChk.IsChecked == true;
             _settings.EnableUiAnimations = UiAnimationsChk.IsChecked == true;
+            _settings.PngFallbackEnabled = PngFallbackChk.IsChecked == true;
             _settings.ToastOnCapture = ToastCaptureChk.IsChecked == true;
             _settings.ToastOnSilentCapture = ToastSilentChk.IsChecked == true;
             _settings.ToastOnRecording = ToastRecordChk.IsChecked == true;
             _settings.ToastPosition = (ToastPositionCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "BottomRight";
-            _settings.OverlayColor = (OverlayColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#99001833";
+            // 2026-10-01：没有选中项时【保留盘上原值】，不写兜底。原兜底字面量 "#99001833" 既不在下拉的
+            // 7 个选项里、也与 AppSettingsData.OverlayColor 的默认 #80000000 不同向 —— 它自己就是
+            // "存进去就再也显示不出来"的那个值（本机盘上正是它）。配合 SetComboByTag 补项，这条路不再改用户数据。
+            if (OverlayColorCbo.SelectedItem is ComboBoxItem overlayColorItem)
+                _settings.OverlayColor = (string)overlayColorItem.Tag;
             _settings.BorderColor = (BorderColorCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "#FF4488FF";
             _settings.AvifPngSuffix = AvifPngSuffixChk.IsChecked == true;
             _settings.JxlPngSuffix = JxlPngSuffixChk.IsChecked == true;
@@ -317,7 +349,10 @@ public sealed partial class MainWindow : Window
             _settings.AllowUnofficialTranslateEndpoints = UnofficialGoogleChk.IsChecked == true;
             _settings.LogVerbosity = (LogVerbosityCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Brief";
             _settings.TargetLanguage = (TargetLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
-            _settings.OcrLanguage = (OcrLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+            // 同上：OcrLangCbo 在 ONNX 引擎下是空的（没有可选项），旧写法每次保存都把用户存过的语言抹成 ""
+            // ⇒ 切回 Windows OCR 时只能落回列表第一项，"我明明选过繁体中文"这件事没有任何线索。
+            if (OcrLangCbo.SelectedItem is ComboBoxItem ocrLangItem)
+                _settings.OcrLanguage = (string)ocrLangItem.Tag;
 
             // OutputBitDepth 从每格式位深映射（SaveSettings 中的 BitDepth 已更新）
             // ⚠ 按【格式枚举】取，不按 FormatIndex 取：索引表 2026-09-26 少了一项（GainMap 并入 JPEG LI），

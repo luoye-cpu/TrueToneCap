@@ -45,13 +45,34 @@ public sealed class JpegGainMapEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.JPEG_GAINMAP;
     public override bool SupportsHdr => true;
-    public override (float, float, float, string) GetQualityRange() => (0.5f, 3.0f, 1.0f, "butteraugli 距离 (0.5-3.0)");
-    public override string GetQualityDescription(float q) => $"距离: {q:F1}";
+    public override (float, float, float, QualityScale) GetQualityRange() => (0.5f, 3.0f, 1.0f, QualityScale.ButteraugliRange);
+    public override QualityDesc GetQualityDescription(float q) => new(QualityDescKind.Distance, q);
 
     // ── 编码入口 ──
 
     public override async Task EncodeAsync(HdrFrameData frame, EncodingSettings settings,
         string outputPath, CancellationToken ct = default)
+    {
+        try
+        {
+            await EncodeCoreAsync(frame, settings, outputPath, ct);
+        }
+        catch (Exception ex) when (settings.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
+        {
+            // ═══ 2026-09-29 用户口径：接上 PNG 保底，且触发必须告诉用户 ═══
+            // 这一族原先的口径写在下面那句注释里（"无回退，必须可用"）—— 现在的口径是【有回退】，
+            // 注释已同步改掉，不留一条会说谎的旧口径。
+            // 保底走 PNG 编码器本体（不是在这里手写一遍 PNG），于是 HDR/位深/色域声明与平时完全同源；
+            // 若因为请求 8-bit 而同时把 HDR 退回 SDR，那条留痕会被并进同一句提示里。
+            await FormatHelper.PngLastResortHdrFrameAsync(frame, settings, outputPath, ex,
+                who: "GainMap",
+                why: $"增益图编码或写盘失败（{ex.GetType().Name}）⇒ 回退 PNG",
+                notice: "本机增益图（cjpegli / libultrahdr）本次编码失败 ⇒ 本次已改存为 PNG 文件（不是带增益图的 JPEG，因此这张【没有】HDR 增益层），色域声明由 PNG 编码器按本次设置写入");
+        }
+    }
+
+    private async Task EncodeCoreAsync(HdrFrameData frame, EncodingSettings settings,
+        string outputPath, CancellationToken ct)
     {
         // ═══ 2026-09-17 双路径策略：GainMap 基于 JPEG，容器恒 8-bit ⇒ 诚实降 8 ═══
         settings.OutputBitDepth = 8;
@@ -144,7 +165,27 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     public override async Task EncodeSdrAsync(byte[] sdrPixels, int width, int height,
         EncodingSettings settings, string outputPath, CancellationToken ct = default)
     {
-        // GainMap SDR 回退: 通过 jpegli 输出标准 JPEG（无回退，必须可用）
+        try
+        {
+            await EncodeSdrCoreAsync(sdrPixels, width, height, settings, outputPath, ct);
+        }
+        catch (Exception ex) when (settings.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
+        {
+            // 2026-09-29 口径变更：这里原注释写的是"无回退，必须可用"，即 cjpegli 一挂这张图就丢。
+            // 用户口径改为【接上 PNG 保底 + 触发必须告知】⇒ 旧注释一起改掉，不留会说谎的旧口径。
+            // 8-bit BGRA 源 ⇒ 用与非 HDR 那份保底（同 WebP / AVIF / JPEG LI / JXL 的 byte[] 入口）。
+            FormatHelper.PngLastResort(sdrPixels, width, height, outputPath,
+                settings.ColorSpaceTag, settings.IccProfile, ex,
+                who: "GainMap",
+                why: $"增益图的 base JPEG 编码或写盘失败（{ex.GetType().Name}）⇒ 回退 PNG",
+                notice: "本机增益图（cjpegli）本次编码失败 ⇒ 本次已改存为 PNG 文件（不是带增益图的 JPEG），色域声明按本次设置一并写入");
+        }
+    }
+
+    private static async Task EncodeSdrCoreAsync(byte[] sdrPixels, int width, int height,
+        EncodingSettings settings, string outputPath, CancellationToken ct)
+    {
+        // GainMap 的 SDR 入口: 通过 jpegli 输出标准 JPEG（无增益图；2026-09-29 起外层有 PNG 保底）
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();

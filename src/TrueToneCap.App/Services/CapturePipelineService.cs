@@ -225,6 +225,10 @@ public sealed class CapturePipelineService
             AvifEncoderKind = avifKind,
             AvifPngSuffix = s.AvifPngSuffix,
             JxlPngSuffix = s.JxlPngSuffix,
+            // 换格式保底的开关（2026-09-29 用户口径）。唯一写者就是这里 —— MainWindow 那份
+            // BuildEncodingSettings 委托本方法之后再覆盖自己的 UI 特有位，【不】再覆盖这个字段，
+            // 免得"开关"长出两个事实源（AvifPngSuffix 那种控件+快照双写就是前车之鉴）。
+            PngFallbackEnabled = s.PngFallbackEnabled,
             ChromaSubsampling = chroma,
             OutputBitDepth = bitDepth,
             GainMapMode = s.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
@@ -603,13 +607,23 @@ public sealed class CapturePipelineService
             await encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct);
         }, ct);
         }
-        finally { PowerManager.AllowSleep(); }
+        finally
+        {
+            PowerManager.AllowSleep();
+            // ═══ 消费降级留痕必须排在 finally（2026-09-30 任务 #10，报告 §17.6 第 5 条）═══
+            // 原先这一句只写在成功路径末尾 ⇒ 编码整条失败时那次原因留在单槽里，
+            // 下一次【成功】的截图会把它当成自己的降级弹出来 —— 本文件下面那句注释
+            // （"不清空会把上一次的原因报到下一次截图上"）警告过的正是这件事，但清槽只做了一半路径。
+            // 被取消的那一次不再弹提示（用户知道自己在取消），照样清槽 + 落日志：事实不许泄漏到下一张。
+            // ⚠ 这条口径刚被变异 W2 验过：把这一句挪回成功路径，CorePipelineTests 那条
+            //   "两条编码腿都在 finally 里消费"当场红（实得 1）。
+            NotifyEncoderFallbackIfAny(quiet: ct.IsCancellationRequested);
+        }
 
         // 同上：校正末端保底（如 AVIF → PNG）后的真实落盘路径
         var actualPath = FormatHelper.ResolveActualPath(path);
         var fileSize = File.Exists(actualPath) ? new FileInfo(actualPath).Length : 0;
         LogService.Info("Pipeline", $"编码完成: {Path.GetFileName(actualPath)} ({fileSize / 1024.0:F1} KB)");
-        NotifyEncoderFallbackIfAny();
         return actualPath;
     }
 
@@ -713,14 +727,18 @@ public sealed class CapturePipelineService
             }
         }, ct);
         }
-        finally { PowerManager.AllowSleep(); }
+        finally
+        {
+            PowerManager.AllowSleep();
+            // 与 SDR 那条腿同一个口径：消费必须在 finally（见上面那段注释），两条腿不许只有一条记得清槽。
+            NotifyEncoderFallbackIfAny(quiet: ct.IsCancellationRequested);
+        }
 
         // 同上：校正末端保底（如 AVIF → PNG）后的真实落盘路径
         var actualPath = FormatHelper.ResolveActualPath(path);
         var fileSize = File.Exists(actualPath) ? new FileInfo(actualPath).Length : 0;
         LogService.Info("Pipeline",
             $"HDR 编码完成: {Path.GetFileName(actualPath)} ({fileSize / 1024.0:F1} KB) 总耗时={swTotal.ElapsedMilliseconds}ms | 内存(终) {MemText()}");
-        NotifyEncoderFallbackIfAny();
         return actualPath;
     }
 
@@ -736,10 +754,14 @@ public sealed class CapturePipelineService
     /// avifenc 拒位深→按 8-bit 重试），给出一次性提示。
     /// <para>4K AVIF：硬件约 0.12s vs 软件约 22s（约 180 倍）。原实现全程只有 Debug.WriteLine，
     /// Release 下完全无声 —— 用户只会觉得"软件变慢了"，既不知道原因，也不知道能否恢复。
-    /// 这里复用已有的 ShowCaptureDegraded 通道（原本用于捕获降级）。</para>
-    /// 每会话只提示一次：连续截图时反复弹窗是干扰，不是帮助。
+    /// <para>这里复用已有的 ShowCaptureDegraded 通道（原本用于捕获降级）。</para>
+    /// 去重只按【文案内容】：连续截图时同一种降级不重复弹，换了种类的降级必须再弹一次
+    /// （原先那句"每会话只提示一次"是旧实现 <c>s_hwFallbackNotified</c> 的说法，已废，见上面那段）。
     /// </summary>
-    private static void NotifyEncoderFallbackIfAny()
+    /// <param name="quiet">true = 只落日志、不弹提示（本次是被用户取消的那一次）。
+    /// <b>不许</b>因为安静就不清槽，也不许占用去重名额：清槽管的是"上一次的原因泄漏到下一张"，
+    /// 而这一次没弹，下一次同样的降级仍然要弹得出来。</param>
+    private static void NotifyEncoderFallbackIfAny(bool quiet = false)
     {
         // ═══ 2026-09-19（全编码器审计）：两条通道都要读，且读一次即清空 ═══
         //   · NvencAvifBackend.LastFallbackReason —— NVENC 专用（硬件→软件）
@@ -747,6 +769,8 @@ public sealed class CapturePipelineService
         //     avifenc 拒位深→按 8-bit 重试。这三处原先只有 Debug.WriteLine，Release 下完全无声。
         // 不清空会把上一次的原因报到下一次截图上；两条都有原因时，被展示的那条之外
         // 另一条仍要进日志，否则只剩一个原因可见。
+        // ⚠ 这一句现在由两条编码腿的 finally 各调一次（2026-09-30 任务 #10）：失败路径同样要消费，
+        //   否则那次原因会躺在单槽里，被下一次【成功】的截图认领。
         var hw = NvencAvifBackend.LastFallbackReason;
         NvencAvifBackend.LastFallbackReason = null;
         var gen = EncoderFallbackNotifier.LastReason;
@@ -757,6 +781,7 @@ public sealed class CapturePipelineService
         if (string.IsNullOrEmpty(reason)) return;
 
         LogService.Warn("Pipeline", reason);          // UI 日志面板可见
+        if (quiet) return;                            // 取消的那一次：事实进日志，不再弹给用户
         // 与上面 4 处位深/色度协商共用同一条规则：只有"和上一条弹过的文案完全相同"才压，
         // 换了种类的降级必须再告诉用户一次 —— 降级不许静默。
         if (s_lastDegradedToast == reason) return;

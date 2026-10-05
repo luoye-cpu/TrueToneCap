@@ -62,7 +62,8 @@ public static class SelfTest
         bool displayAudit = !selfTest && !probeOnly
             && args.Any(a => string.Equals(a, "--display-audit", StringComparison.OrdinalIgnoreCase)
                           || string.Equals(a, "--display-audit-emit", StringComparison.OrdinalIgnoreCase));
-        // --settings-migration：只跑默认值迁移门自检（毫秒级，随手复验 §49 用；--selftest 里也带）
+        // --settings-migration：只跑设置侧三条自检（默认值交还门 / 越界归一回落 / GainMap 重映射；
+        // 毫秒级，随手复验 §49 用；--selftest 里也带）
         bool settingsGate = !selfTest && !probeOnly && !displayAudit
             && args.Any(a => string.Equals(a, "--settings-migration", StringComparison.OrdinalIgnoreCase));
         if (!selfTest && !probeOnly && !displayAudit && !settingsGate)
@@ -103,11 +104,12 @@ public static class SelfTest
         if (settingsGate)
         {
             Directory.CreateDirectory(outDir);
-            // 两条设置迁移自检一起跑：都是毫秒级、都不依赖环境，分开看没有意义
+            // 三条设置侧自检一起跑：都是毫秒级、都不依赖环境，分开看没有意义
             ExitCode = Task.Run(() =>
             {
                 int bad = 0;
                 if (RunSettingsMigrationCheck(outDir).Status == "fail") bad++;
+                if (RunNormalizeGateCheck(outDir).Status == "fail") bad++;
                 if (RunGainMapMergeCheck(outDir).Status == "fail") bad++;
                 return bad > 0 ? 1 : 0;
             }).GetAwaiter().GetResult();
@@ -198,10 +200,15 @@ public static class SelfTest
     /// <param name="emitSamples">逐屏再各落两枚真 PNG（下拉=跟随显示器 / Rec.2020）并<b>从盘上读回</b>
     /// 它的 cICP/iCCP。§41 那轮的教训是"决定层对了"推不出"产物对了"，而副屏的末端读数过去只能靠
     /// 人肉截屏（还得挪光标）。开了这一档，两块的两种下拉各有一枚文件可验。</param>
+    /// <returns>0 = 卡片写出且【管线落点】三类直通无分叉；非 0 = 写盘失败或落点分叉（分叉条数逐条印在卡片末尾）。
+    /// 2026-09-28（批次 B）之前本函数只在写盘失败时退非零 ⇒ "✗ 判定与落点分叉"是一行只能给人眼读的装饰。</returns>
     /// </summary>
     private static int RunDisplayAudit(string auditPath, bool emitSamples = false)
     {
         var sb = new StringBuilder();
+        // 批次 B（2026-09-28 审查轮）：审计卡过去只【印】"✗ 判定与落点分叉"，进程仍然退 0 ⇒
+        // 这条最要紧的分叉只有人眼读到卡片才算判过。现在攒进清单，末尾据此定退出码。
+        var landingFailures = new List<string>();
         var state = CapabilityService.DetectDisplayState();
         sb.AppendLine($"=== TrueToneCap 显示器色域/精度审计  {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
         sb.AppendLine($"系统级：HDR 当前启用={Yes(state.hdr)}  HDR 硬件支持={Yes(state.supportsHdr)}  ACM(注册表)={Yes(state.acm)}");
@@ -213,6 +220,124 @@ public static class SelfTest
 
         var src = TrueToneCap.Core.Capture.DisplayEnumerator.SelectHdrSourceDisplay(displays, state.acm);
         sb.AppendLine($"多屏拼接的 HDR 源 → {(src is null ? "(无) 本次按全 SDR 拼接" : $"{src.Name} 0x{src.MonitorHandle:X}")}");
+        sb.AppendLine();
+
+        // ═══ 落点·全局（这一段与"哪块屏"无关 ⇒ 排在逐屏循环【之外】，整轮只跑一次）═══
+        // 台账 §17.6 第 1 条。它原先长在下面那个逐屏循环里面，两笔代价都只在多屏那天显现：
+        // ① 同一句分叉按屏数吹成 N 条 ⇒ 卡片末尾"判红 N 条"的那个 N 不是缺陷数；
+        // ② 这里的 Load() 不是纯读 —— 迁移门触发时它末尾会 Save()、MigratePlaintextApiKey 还会写
+        //    SecretStore，而审计跑在单实例锁之前 ⇒ 每块屏就把"可能改盘"的动作重复一遍。
+        // 留在循环里的只有那 4 条格式探针：它们的期望值要按 d.IsHdr 降档，那才是真·屏相关。
+        CapturePipelineService? probePipeline = null;
+        AppSettingsData? snap = null;
+        var dflt = new AppSettingsData();   // 只用来做差分对照，不是喂给管线的那份
+        try
+        {
+            // 审计跑在单实例锁之前 ⇒ AppServices 还没初始化，这里直接造一条管线。
+            // ═══ 批次 B（2026-09-28 审查轮）：原先喂的是 new AppSettingsData() 默认快照 ⇒
+            // "用户亲手选的增益档/质量档有没有落到 EncodingSettings"这一格从来没被判过，
+            // 卡片上只有 HdrOutput 一个布尔。现在读真正被产品读的那一份
+            // （SettingsService.SettingsPath 只有一个答案：软件同目录）。
+            // ⚠ 与这条探针自己的旧注释相反：Load() 确实【会读】那个文件，且当同目录尚无文件
+            //   而旧位置有时，它会搬一份过来（SettingsService.MigrateFromLegacyLocation）⇒
+            //   所以这里把"读没读到、能不能持久化、来源是哪条路径"原样印在卡片上。
+            // ⚠ 而且它不只读：迁移门触发时 Load() 末尾会 if (migrated) Save() ⇒ 重写那份文件
+            //   （盖 SettingsRevision/GainMapMerged 章、清掉明文 Key、按修订号交还默认质量档），
+            //   MigratePlaintextApiKey 还会写 SecretStore。审计又跑在单实例锁之前，所以第二个
+            //   实例也会走这条路。⇒ 任何拿 --display-audit 取证的脚本必须跑前拍 settings.json 的
+            //   sha1、跑后核指纹（tests/manual/safety/audit-case.ps1 正是这么做的，交接报告 §14.1
+            //   v6proof 那格量到的 sha1 变化就是这条写路的实测证据）。
+            probePipeline = new CapturePipelineService(new SettingsService());
+            var settingsSource = new SettingsService();
+            bool fileExistedBefore = File.Exists(SettingsService.SettingsPath);
+            snap = settingsSource.Load();
+            sb.AppendLine("管线落点·全局(真调 BuildEncodingSettings；这一段与屏无关，整轮只跑一次):");
+            sb.AppendLine($"  设置来源 {SettingsService.SettingsPath}  " +
+                          $"文件本来就在={(fileExistedBefore ? "是" : "否")}  可持久化={SettingsService.CanPersist}  " +
+                          $"实际读进来={(settingsSource.LastLoadCameFromDisk ? "是" : "否")}  ⇒ 喂给管线的是" +
+                          // "文件在"不等于"读到了"：JSON 语法坏掉时 Load() 走 catch 用默认值表，
+                          // 这里若只按文件在出话，卡片就在最关键的一句上说反话（2026-09-29 实测撞到）。
+                          (!settingsSource.LastLoadCameFromDisk
+                                ? (fileExistedBefore
+                                    ? "默认值表（★ 文件在但没读进来 —— 语法/权限/反序列化失败，看日志那条 Warn）"
+                                    : "默认值表（文件不存在）")
+                                : "你磁盘上那份"));
+            // ═══ 换格式保底开关（2026-09-29 用户口径）═══
+            // 这一行是"关掉之后确实关掉了吗"的【真身读数】：Core 侧那 10 格矩阵判的是
+            // 编码器认不认这个布尔，这里判的是"设置里那个勾有没有抵达 EncodingSettings"。
+            // 探针只取布尔本身 ⇒ 不需要屏幕色彩决定（decisionOrNull=null 时管线自己构造）。
+            // ⚠ 原先只拿 snap 自己的值比 ⇒ 那是【单向锁】：EncodingSettings.PngFallbackEnabled
+            //   的默认是【假】，用户关着开关时把管线里那行接线删掉，两侧也都是假 ⇒ 卡片照样
+            //   "一致 ✓"，这一格在最该判的关态没有牙（增益档同病：默认 Gray，设成 Gray 时那句
+            //   镜像期望式恒绿）。⇒ 两个方向都跑：另造一份把这两格取反的快照（只在内存里，不写盘），
+            //   要求落点等于取反后的值。删掉接线后无论盘上是什么值都必红。
+            var flipped = snap.Snapshot();
+            flipped.PngFallbackEnabled = !snap.PngFallbackEnabled;
+            flipped.GainMapMode = snap.GainMapMode == "Gray" ? "Rgb" : "Gray";
+            var probeEs = probePipeline.BuildEncodingSettings(
+                OutputFormat.PNG, false, null, snap, null, state.acm, null);
+            var probeEsFlipped = probePipeline.BuildEncodingSettings(
+                OutputFormat.PNG, false, null, flipped, null, state.acm, null);
+            bool fbConsistent = snap.PngFallbackEnabled == probeEs.PngFallbackEnabled
+                && flipped.PngFallbackEnabled == probeEsFlipped.PngFallbackEnabled;
+            var wantGmFlipped = flipped.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb;
+            bool gmConsistent = probeEsFlipped.GainMapMode == wantGmFlipped;
+            sb.AppendLine($"  换格式保底（设置项 PngFallbackEnabled）= {snap.PngFallbackEnabled}" +
+                          $" ⇒ 抵达编码设置 EncodingSettings.PngFallbackEnabled = {probeEs.PngFallbackEnabled}" +
+                          $"；反向 {flipped.PngFallbackEnabled} ⇒ {probeEsFlipped.PngFallbackEnabled}" +
+                          $" {(fbConsistent ? "（两个方向都跟得上 ✓）" : "（★ 至少一个方向丢了：开关在管线上不生效）")}");
+            if (!fbConsistent)
+                landingFailures.Add(
+                    "全局·保底开关: 设置 " + $"{snap.PngFallbackEnabled}/{flipped.PngFallbackEnabled}" +
+                    $" 抵达编码设置 {probeEs.PngFallbackEnabled}/{probeEsFlipped.PngFallbackEnabled}");
+            if (!gmConsistent)
+                landingFailures.Add(
+                    $"全局·增益档反向: 设置 GainMapMode=\"{flipped.GainMapMode}\" 落点={probeEsFlipped.GainMapMode}" +
+                    "（正向随每条格式探针判，这一格补的是反方向）");
+            if (Math.Abs(snap.GetQuality(OutputFormat.JPEG_XL) - dflt.GetQuality(OutputFormat.JPEG_XL)) < 1e-6 &&
+                snap.GainMapMode == dflt.GainMapMode &&
+                snap.ChromaJpegLi == dflt.ChromaJpegLi &&
+                snap.BitDepthJpegXl == dflt.BitDepthJpegXl)
+                sb.AppendLine("  ⚠ 你这份设置与默认值在【这几根轴】上完全相同 ⇒ 下面逐屏那几条差分读数不判别，" +
+                              "只证明默认值走得通；要判「用户所选有没有落地」得先改一格再跑");
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"  管线落点·全局: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        // ═══ 呈现帧契约（2026-09-30 改道：SDR 与 HDR 用同一张预览窗，这一段读的就是"那张窗上该看见什么"）═══
+        // 为什么放在审计里而不是只靠 Test 工程那 18 条：Test 判的是 Core 里的纯函数，
+        // 而"App 侧到底把哪个 HDR 输出状态、哪个系统白点喂进了这个函数"是接线问题，
+        // 只有产品自己这一份进程内的读数能证明它。夹具用 256 级灰阶（alpha 故意一半 0 一半 255），
+        // 所以这行同时是"参考白乘没乘"和"信不信源 alpha"两件事的实机证据。
+        try
+        {
+            var ramp = new byte[256 * 4];
+            for (int k = 0; k < 256; k++)
+            {
+                ramp[k * 4] = (byte)k; ramp[k * 4 + 1] = (byte)k; ramp[k * 4 + 2] = (byte)k;
+                ramp[k * 4 + 3] = (byte)((k % 2 == 0) ? 0 : 255);
+            }
+            int whiteNits = TrueToneCap.Core.Capture.DisplayEnumerator.GetSdrWhiteLevel();
+            var pres = TrueToneCap.Core.PixelOps.BgraToScrgbForDisplay(ramp, 256, 1, state.hdr, whiteNits);
+            float maxV = 0f; int aBad = 0;
+            for (int k = 0; k < 256; k++) { if (pres[k * 4] > maxV) maxV = pres[k * 4]; if (pres[k * 4 + 3] != 1f) aBad++; }
+            float scale = state.hdr && whiteNits > 0
+                ? whiteNits / TrueToneCap.Core.PixelOps.NominalSdrReferenceWhiteNits : 1f;
+            string rangeVerdict = !state.hdr
+                ? (maxV <= 1.000001f ? "（非 HDR 输出：值域未越 1 ⇒ 不会被 DWM 数值钳白）"
+                                     : "（★ 非 HDR 输出却越 1 ⇒ 会被钳白，这一档不该乘白点）")
+                : (pres[255 * 4] > 1f ? "（HDR 输出：白已抬到系统白点之上 ✓）"
+                                      : "（★ HDR 输出但白没抬起来 ⇒ 白点没乘或读不到）");
+            sb.AppendLine($"呈现帧契约: HDR输出={state.hdr} 系统SDR白点={whiteNits}nits 缩放=×{scale:0.###} " +
+                          $"码点255→{pres[255 * 4]:0.####} 整条max={maxV:0.####} A≠1的格数={aBad} {rangeVerdict}");
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"呈现帧契约: 读数失败 {ex.GetType().Name}: {ex.Message}");
+        }
+
         sb.AppendLine();
 
         var wgc = new WgcCaptureService();
@@ -295,11 +420,11 @@ public static class SelfTest
                 // 而这条判据要的是"审计跑起来不会往用户桌面弹框"。
                 try
                 {
-                    // 审计跑在单实例锁之前 ⇒ AppServices 还没初始化，这里直接造一条管线。
-                    // 传一个独立的 SettingsService：BuildEncodingSettings 只用传进去的【快照】，
-                    // 不读 _settings.Current（那是 §11.3 快照纪律的要求）⇒ 这条探针碰不到设置文件。
-                    var probePipeline = new CapturePipelineService(new SettingsService());
-                    var snap = new AppSettingsData();   // 默认设置快照；本判据只看 HDR 落点，不看质量档
+                    // 与屏无关的那一段（设置读没读进来 / 保底开关两个方向 / 增益档反向 / 与默认值同轴的警告）
+                    // 已挪到逐屏循环【之前】，整轮只跑一次 ⇒ 这里只剩屏相关的那 4 条格式探针。
+                    // 全局段没建成 = 这 4 条【没跑】，必须明说：走下面那个 catch 留痕，不许静默跳过。
+                    if (probePipeline is null || snap is null)
+                        throw new InvalidOperationException("全局落点段没建成 ⇒ 本屏这 4 条格式探针【没跑】，不算通过");
                     sb.AppendLine("  管线落点(真调 BuildEncodingSettings; 交付形态 ⇒ 写进编码设置的布尔):");
                     var probes = new (string Label, OutputFormat Fmt, string Tag, bool WantHdr)[]
                     {
@@ -314,13 +439,39 @@ public static class SelfTest
                         var dcd = TrueToneCap.Core.Capture.ColorDecision.Build(d, p.Tag, true, state.acm);
                         var es = probePipeline.BuildEncodingSettings(
                             p.Fmt, true, null, snap, p.Tag, state.acm, dcd);
+                        var es0 = probePipeline.BuildEncodingSettings(
+                            p.Fmt, true, null, dflt, p.Tag, state.acm, dcd);
                         var del = FormatColorFacts.Delivery(dcd, p.Fmt);
                         // HDR 屏之外的一切都拿不到写 PQ 的授权 ⇒ 期望值随屏幕降一档（不许把"屏不授权"读成判据失败）
                         bool expect = hdrScreen ? p.WantHdr : false;
                         bool ok = es.HdrOutput == expect;
                         sb.AppendLine($"    {p.Label,-24} 分类={dcd.ScreenClass} 形态={del,-20} " +
-                                      $"HdrOutput={es.HdrOutput} 色域={es.ColorSpaceTag} ⇒ 期望 {expect} " +
+                                      $"HdrOutput={es.HdrOutput} 色域={es.ColorSpaceTag} " +
+                                      $"色度={es.ChromaSubsampling} 位深={es.OutputBitDepth} " +
+                                      $"增益档={es.GainMapMode} 质量={es.Quality:0.###} ⇒ 期望 {expect} " +
                                       $"{(ok ? "✓" : "✗ 判定与落点分叉")}");
+                        if (!ok)
+                            landingFailures.Add(
+                                $"{d.Name}·{p.Label}: 交付形态说 {del} 而落点 HdrOutput={es.HdrOutput}，期望 {expect}");
+
+                        // 用户所选有没有落地：只判【不需要再抄一张格式↔字段键表】的两条直通规则。
+                        // ① 增益档直通（Core 侧那句 `s.GainMapMode == "Gray" ? Gray : Rgb` 的镜像，
+                        //    它是字符串→枚举的唯一一步，不是按格式分支的表）；
+                        // ② 质量差分：两份快照的该格式质量【本来不同】时，落点必须不同
+                        //    （用产品自己的 GetQuality(f) 取值 ⇒ 不复制键表，改表也不会在这里过期）。
+                        var wantGm = snap.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb;
+                        if (es.GainMapMode != wantGm)
+                            landingFailures.Add(
+                                $"{d.Name}·{p.Label}: 设置里 GainMapMode=\"{snap.GainMapMode}\" 而落点={es.GainMapMode}");
+                        double qSnap = snap.GetQuality(p.Fmt), qDflt = dflt.GetQuality(p.Fmt);
+                        if (Math.Abs(qSnap - qDflt) > 1e-6 &&
+                            Math.Abs(es.Quality - es0.Quality) <= 1e-6)
+                            landingFailures.Add(
+                                $"{d.Name}·{p.Label}: 质量 {qDflt}→{qSnap} 换了设置，落点却仍是 {es.Quality:0.###}（没落地）");
+                        sb.AppendLine($"      └ 差分(默认⇒你的): 质量 {es0.Quality:0.###}→{es.Quality:0.###} " +
+                                      $"色度 {es0.ChromaSubsampling}→{es.ChromaSubsampling} " +
+                                      $"位深 {es0.OutputBitDepth}→{es.OutputBitDepth} " +
+                                      $"增益档 {es0.GainMapMode}→{es.GainMapMode}");
                     }
                 }
                 catch (Exception ex)
@@ -356,13 +507,16 @@ public static class SelfTest
                                       (cap.DegradationWarning is null ? "" : $"  ⚠降级:{cap.DegradationWarning}"));
                         if (cap.HdrPixels is { Length: > 0 } px)
                         {
-                            var st = AnalyzeHdrFloat(px, cap.Width, cap.Height);
-                            sb.AppendLine($"  内容实测(声明域外的东西到底有没有): float min={F(st.Min)} max={F(st.Max)} " +
-                                          $">1.0 占 {F(st.Above1Pct)}%  <0 占 {F(st.Below0Pct)}%  抽样 {st.Pixels} px");
-                            sb.AppendLine("  读法: >1.0 占比要落在 " +
+                            var st = AnalyzeHdrFloat(px, cap.Width, cap.Height, PaperWhiteScrgb());
+                            sb.AppendLine($"  内容实测(声明域外的东西到底有没有): float min={F(st.Min)} max={F(st.Max)} 纸白={F(st.PaperWhite)} " +
+                                          $">纸白 占 {F(st.AboveWhitePct)}%（判据用这条）  >1.0 占 {F(st.Above1Pct)}%（旧锚点，只留作对照）  <0 占 {F(st.Below0Pct)}%  抽样 {st.Pixels} px");
+                            sb.AppendLine("  读法: 【>纸白】占比要落在 " +
                                           $"{HeadroomMinPct:0.##}%~{HeadroomMaxPct:0}% 才算'SDR 白之上确有头部余量'" +
-                                          "（与高精度源探针同一条判据）；占比更高更可能是 SDR 白点被缩放上移" +
-                                          "（系统 SdrWhiteLevel>80nits 时纸白本身就 >1.0），不是扩展范围；");
+                                          "（与高精度源探针同一条判据）。⚠ 2026-09-28 批次 D 之前这里锚的是 >1.0：" +
+                                          "本机纸白 120 nits ⇒ SDR 内容本身就压在 1.5 上，>1.0 占比量的是【桌面有多亮】" +
+                                          "（本机一周内五次读到 1.5% / 61% / 74% / 87% / 92%，全部与精度无关）；");
+                            sb.AppendLine("        纸白由 DisplayEnumerator.GetSdrWhiteLevel() 现读，整格尺子的 LSB 也按它缩放" +
+                                          "⇒ 8-bit 内容被抬到该白点后仍会被认成 8-bit（否则这条会读成\"偏离整格\"=假绿）；");
                             sb.AppendLine("        占比≈0 且 max≈1.0 ⇒ 这一帧的亮度仍在 SDR 盒子里 —— 广色域与否要看" +
                                           "上面 DISPLAYCONFIG 的合成模式与 EDID 原色，不能从亮度占比反推。");
                         }
@@ -389,6 +543,16 @@ public static class SelfTest
             try { wgc.Dispose(); } catch { }
         }
 
+        // 落点判决写进卡片本身，并且据此定退出码：审计此前"印了 ✗ 仍退 0"，
+        // 分叉只能靠人读到那一行 ⇒ 无头复跑等于没判。
+        if (landingFailures.Count > 0)
+        {
+            sb.AppendLine($"══ 管线落点判红 {landingFailures.Count} 条 ══");
+            foreach (var f in landingFailures) sb.AppendLine($"  ✗ {f}");
+        }
+        else
+            sb.AppendLine("管线落点：HdrOutput / 增益档直通 / 质量差分 三类一致，0 条分叉");
+
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(auditPath)!);
@@ -400,6 +564,12 @@ public static class SelfTest
         {
             Console.WriteLine($"[display-audit] ❌ 写文件失败: {ex.Message}");
             Console.WriteLine(sb);
+            return 1;
+        }
+        if (landingFailures.Count > 0)
+        {
+            Console.WriteLine($"[display-audit] ❌ 管线落点分叉 {landingFailures.Count} 条 ⇒ 退出码非零"
+                              + $"（卡片: {auditPath}）");
             return 1;
         }
         return 0;
@@ -453,6 +623,19 @@ public static class SelfTest
 
         var entries = new List<string>();     // 每个检查项一条 JSON 对象（编码用例 + 高精度源探针）
         int failed = 0;
+        // ═══ 分类计数：最后一行要把 ok / skip / missingBackend / fail 拆开打印 ═══
+        // 只报 failed 的话，读日志的人看不出"这台机器没有编码器"与"产品坏了"是不是同一回事。
+        int okCount = 0, skipCount = 0, missingCount = 0, failCount = 0;
+        void Tally(string st)
+        {
+            switch (st)
+            {
+                case "ok": okCount++; break;
+                case "skip": skipCount++; break;
+                case "missingBackend": missingCount++; break;
+                default: failCount++; break;   // fail 与 fallback（后者按既有口径同样计失败）
+            }
+        }
         for (int i = 0; i < cases.Length; i++)
         {
             var c = cases[i];
@@ -513,14 +696,18 @@ public static class SelfTest
                 var root = ex;
                 while (root.InnerException is not null) root = root.InnerException;
                 detail = root.GetType().Name + ": " + root.Message;
-                // 明确是"本机没装这个 native 工具"→ 属环境限制，记为 skip 而非失败。
-                // 开发态 bin 下 native/ 为空是已知状态（发布包才会带上），
-                // 此时把这些算成失败会让自测在本机永远红，失去意义。
-                status = IsNativeMissing(root) ? "skip" : "fail";
+                // ═══ 2026-09-30：同一个根因（后端可执行文件不在位）过去在【一次自测里】被分成两类结局 ═══
+                // InvalidOperationException 的 cjxl/cjpegli 走 IsNativeMissing ⇒ skip，而 DllNotFoundException
+                // 的 avifenc/cwebp ⇒ fail，于是"开发态构建没带工具"这一种情形报出 failed=2、退出码 1，
+                // 读退出码的人分不清"产品坏了"与"这台机器/这份构建没有编码器"。缺失现在单独成第三类
+                // missingBackend（不计入 failed），真失败一律照旧计。
+                status = BackendToolMissing(c.Fmt, root) ? "missingBackend"
+                     : IsNativeMissing(root) ? "skip" : "fail";
             }
 
             // fallback 同样计为失败：发布包不该缺 native 而悄悄降级成 PNG
             if (status is "fail" or "fallback") failed++;
+            Tally(status);
 
             Progress(outDir, $"{c.Fmt} {status} {sw.ElapsedMilliseconds}ms {detail}");
 
@@ -532,22 +719,31 @@ public static class SelfTest
         // 是"用户看到的默认档从哪来"——门死了，后面所有"默认值合适吗"的讨论都无意义。═══
         var sm = RunSettingsMigrationCheck(outDir);
         if (sm.Status == "fail") failed++;
+        Tally(sm.Status);
         entries.Add(JsonEntry("SETTINGS_MIGRATION", sm.Note, sm.Status, sm.Ms, 0, sm.Detail, sm.JsonExtra));
+
+        var ng = RunNormalizeGateCheck(outDir);
+        if (ng.Status == "fail") failed++;
+        Tally(ng.Status);
+        entries.Add(JsonEntry("NORMALIZE", ng.Note, ng.Status, ng.Ms, 0, ng.Detail, ng.JsonExtra));
 
         var gmm = RunGainMapMergeCheck(outDir);
         if (gmm.Status == "fail") failed++;
+        Tally(gmm.Status);
         entries.Add(JsonEntry("GAINMAP_MIGRATION", gmm.Note, gmm.Status, gmm.Ms, 0, gmm.Detail, gmm.JsonExtra));
 
         // ═══ 判据自检（合成帧）排在探针【前面】：尺子先自证，再谈读数。═══
         // 它不依赖显示器/GPU/桌面 ⇒ 没有 HDR 屏、探针只能 SKIP 的机器，也仍然能证明判据是活的。
         var judge = RunHdrJudgeCheck(outDir);
         if (judge.Status == "fail") failed++;
+        Tally(judge.Status);
         entries.Add(JsonEntry("HDR_JUDGE", judge.Note, judge.Status, judge.Ms, 0, judge.Detail, judge.JsonExtra));
 
         // ═══ 高精度源探针（§28 "源精度由显示器能力决定"的端到端判据）═══
         // 与编码用例同一套 status 词表（ok / fail / skip）与退出码约定：skip 不计失败。
         var probe = RunHdrSourceProbe(outDir);
         if (probe.Status == "fail") failed++;
+        Tally(probe.Status);
         entries.Add(JsonEntry("HDR_SOURCE", probe.Note, probe.Status, probe.Ms, 0, probe.Detail, probe.JsonExtra));
 
         var sb = new StringBuilder();
@@ -558,15 +754,33 @@ public static class SelfTest
         for (int i = 0; i < entries.Count; i++)
             sb.AppendLine(entries[i] + (i < entries.Count - 1 ? "," : ""));
         sb.AppendLine("  ],");
-        sb.AppendLine($"  \"failed\": {failed}");
+        sb.AppendLine($"  \"failed\": {failed},");
+        // 分账：missingBackend 单独一条，读 JSON 的人不必逐条数 status 就知道"这台机器缺几枚工具"
+        sb.AppendLine($"  \"counts\": {{ \"ok\": {okCount}, \"skip\": {skipCount}, " +
+                      $"\"missingBackend\": {missingCount}, \"fail\": {failCount} }}");
         sb.AppendLine("}");
 
         var jsonPath = Path.Combine(outDir, "selftest.json");
         File.WriteAllText(jsonPath, sb.ToString());
-        Progress(outDir, $"json-written failed={failed}");
+        // ⚠ `failed=` 这个键名不能改、也不能挪位置：外部工具就 grep 这一段
+        Progress(outDir, $"json-written failed={failed} ok={okCount} skip={skipCount} " +
+                         $"missingBackend={missingCount} fail={failCount}");
 
-        int total = cases.Length + 4;   // +4 = 迁移门自检 + 增益图重映射自检 + 判据自检 + 高精度源探针
+        // entries.Count 而不是 cases.Length + 4：非编码用例实际是【5】条（迁移门 / 归一 /
+        // 增益图重映射 / 判据自检 / 源探针），旧算式少算一格 ⇒ 分母 10、实际 11 项读数。
+        int total = entries.Count;
         Console.WriteLine($"[selftest] 结果: {total - failed}/{total} 通过 → {jsonPath}");
+        Console.WriteLine($"[selftest] 分类: ok={okCount} skip={skipCount} missingBackend={missingCount} " +
+                          $"fail={failCount}（计入 failed 的只有 fail ⇒ 退出码 {(failed > 0 ? 1 : 0)}；" +
+                          $"共 {total} 项读数）");
+        if (failCount != failed || okCount + skipCount + missingCount + failCount != total)
+        {
+            // 分类计数与既有 failed 必须自洽，否则这里新增的是第二把尺子而不是同一把：
+            // 汇总数与点名条数不等 ⇒ 有一条 status 没进 tally，立刻点名。
+            Progress(outDir, $"★ 分账不自洽: ok+skip+missingBackend+fail={okCount + skipCount + missingCount + failCount} " +
+                             $"而读数={total}；fail={failCount} 而 failed={failed} ⇒ 分类计数不可信");
+            Console.WriteLine($"[selftest] ★ 分账不自洽（fail={failCount} vs failed={failed}）⇒ 上面的分类计数不可信");
+        }
         Progress(outDir, "returning");
         return failed > 0 ? 1 : 0;
     }
@@ -600,6 +814,40 @@ public static class SelfTest
             || m.Contains("PATH", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// 该格式的<b>外部编码工具在本机是否不在位</b> —— 第三类结局 <c>missingBackend</c> 的判据。
+    /// <para>为什么不匹配异常文案：四条抛出点写的都是 <c>if (!XxxNative.IsAvailable) throw …</c>，
+    /// 所以"探针说没工具"与"这条异常是缺失造成的"本是同一个条件 —— 直接问探针，既不看文案
+    /// （旧 <see cref="IsNativeMissing"/> 那套 substring 匹配保留作次级出口，只在探针说"工具在位"
+    /// 时按老口径记 skip），也不会因为某句中文改了措辞就静默失去分辨力。</para>
+    /// <para>两个条件都要，缺一会判反：
+    /// ① 根异常属"模块/可执行文件不在位"这一族（2026-09-30 实测量到的形态：cjxl/cjpegli 抛
+    /// <see cref="InvalidOperationException"/>、avifenc/cwebp 抛 <see cref="DllNotFoundException"/>）；
+    /// 其余异常（IO / 参数 / 取消）与"没带工具"无关，一律留在 fail 里。
+    /// ② 该格式的那枚外部工具确实探不到。AVIF 只问 avifenc 一条，不再顺带探 NVENC/MFT：
+    /// 探针自己会建 D3D 设备与 NVENC 会话（不缓存、且 P/Invoke 层崩溃在 .NET 上不可捕获，
+    /// 见 NativeEncoderGuard），自测不该为分类再去付一次会话创建。已知代价写清楚 ——
+    /// 开发态【没带 avifenc】的构建里，若硬件后端在位而这一次编码失败，硬件链会落到
+    /// libaom 这条最后兜底路并抛出"avifenc 不可用"，于是这一格记 missingBackend 而不是 fail
+    /// （异常原文照旧逐行印在 progress.txt 里，没有被吞）。发布包恒带 avifenc ⇒ 探针为真 ⇒
+    /// 任何硬件失败仍按 fail 计，所以被让出去的只有"这台机器根本没带软件编码器"这一种情形。</para>
+    /// <para>成本：编码失败前，抛出点已经把对应探针跑过一遍并缓存（<c>NativeXxxEncoder._available</c>），
+    /// 这里读到的是缓存，不额外起子进程。</para>
+    /// </summary>
+    private static bool BackendToolMissing(OutputFormat fmt, Exception root)
+    {
+        if (root is not (DllNotFoundException or InvalidOperationException or EntryPointNotFoundException))
+            return false;
+        return fmt switch
+        {
+            OutputFormat.JPEG_LI or OutputFormat.JPEG_GAINMAP => !JpegLiNative.IsAvailable,
+            OutputFormat.JPEG_XL => !NativeJxlEncoder.IsAvailable,
+            OutputFormat.WebP => !NativeWebPEncoder.IsAvailable,
+            OutputFormat.AVIF => !NativeAvifEncoder.IsAvailable,
+            _ => false,   // PNG / TIFF 是托管编码器，没有"外部工具缺失"这一说
+        };
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     //  高精度源探针 —— §28「源精度由显示器能力决定」的端到端行为判据
     // ══════════════════════════════════════════════════════════════════════
@@ -610,10 +858,10 @@ public static class SelfTest
     //
     // 三条判据互相独立，数字全部进报告：
     //  (a) HdrPixels is not null —— Float16 会话真建起来、真成了帧、尺寸与 SDR 一致；
-    //  (b) 整格占比 —— float 值离 1/256 整格有多远（真 8-bit 源几乎全落在整格上）；
+    //  (b) 整格占比 —— float 值离【本帧纸白下的 8-bit 整格】(1/(255×纸白)) 有多远（真 8-bit 源几乎全落在整格上）；
     //  (c) 中性像素去重量级数 —— 给 (b) 兜底，见 AnalyzeHdrFloat 的注释。
     //
-    // 判据自己也要有证据（RunHdrJudgeCheck）：两帧【合成】台阶帧跑同一条 JudgeHdrFloat，
+    // 判据自己也要有证据（RunHdrJudgeCheck）：四帧【合成】台阶帧（纸白 1.0 与 1.5 各一对）跑同一条 JudgeHdrFloat，
     // 要求 256 级判 FAIL、1024 级判 PASS。这条自检今天抓到两个死缺陷 —— NeutralN 从未 ++、
     // 整格容差 0.6 > 0.5 使判据恒真 —— 两者都无法靠"真机跑一次"发现。
 
@@ -716,7 +964,7 @@ public static class SelfTest
             }
 
             // ── 4. 判据 (b)(c) ──
-            var st = AnalyzeHdrFloat(cap.HdrPixels!, cap.Width, cap.Height);
+            var st = AnalyzeHdrFloat(cap.HdrPixels!, cap.Width, cap.Height, PaperWhiteScrgb());
             // 读数与结论分家：结论是纯函数 JudgeHdrFloat —— 合成帧自检走【同一条】判定分支，
             // 这样才能证明"这把尺子会红"，而不是只证明"这次量出来是好的"。
             string numbers = st.NumbersText;
@@ -728,7 +976,8 @@ public static class SelfTest
                 $"\n      \"gridPctRaw\": {F(st.GridRawPct)}, \"gridPctSrgbDecoded\": {F(st.GridEncPct)}, \"gridPctUsed\": {F(st.GridPct)}, " +
                 $"\n      \"neutralPixels\": {st.NeutralN}, \"neutralLevels\": {st.NeutralLevels}, \"neutralLevelsSaturated\": {Bool(st.LevelsSaturated)}, " +
                 $"\n      \"contentLevels\": {st.ContentLevels}, \"contentLevelsSaturated\": {Bool(st.ContentSaturated)}, " +
-                $"\n      \"floatMin\": {F(st.Min)}, \"floatMax\": {F(st.Max)}, \"aboveOnePct\": {F(st.Above1Pct)}, \"belowZeroPct\": {F(st.Below0Pct)}";
+                $"\n      \"floatMin\": {F(st.Min)}, \"floatMax\": {F(st.Max)}, \"paperWhite\": {F(st.PaperWhite)}, " +
+                $"\"aboveOnePct\": {F(st.Above1Pct)}, \"aboveWhitePct\": {F(st.AboveWhitePct)}, \"belowZeroPct\": {F(st.Below0Pct)}";
             return Probe(status, sw, outDir, $"{head} | {numbers} | {verdict} {thresholds}", extra);
         }
         catch (Exception ex)
@@ -776,17 +1025,21 @@ public static class SelfTest
 
     /// <summary>阈值原文（报告里复述，便于跨机器比较）。</summary>
     private static string HdrJudgeThresholds =>
-        $"（阈值: 整格≥{GridLockedPct:F0}%且中性级数≤{NeutralLevelsFail}且无 >1.0 样本⇒FAIL；" +
-        $"整格≤{GridFreePct:F0}%且(中性级数≥{NeutralLevelsPass} 或 >1.0 占 {F(HeadroomMinPct)}%–{F(HeadroomMaxPct)}%)⇒PASS；其余⇒SKIP）";
+        $"（阈值: 整格≥{GridLockedPct:F0}%且中性级数≤{NeutralLevelsFail}且无 >纸白 样本⇒FAIL；" +
+        $"整格≤{GridFreePct:F0}%且(中性级数≥{NeutralLevelsPass} 或 >纸白 占 {F(HeadroomMinPct)}%–{F(HeadroomMaxPct)}%)⇒PASS；其余⇒SKIP）";
 
     /// <summary>把实测数字变成结论 —— 纯函数，真机探针与合成帧自检走的是这一条分支。</summary>
     private static (string Status, string Verdict) JudgeHdrFloat(HdrFloatStats st)
     {
-        // 头部余量：8-bit [0,1] 帧在结构上给不出 >1.0 的值（色域矩阵的行和为 1、元素非负，
-        // 也造不出 >1 或 <0），所以"确实有样本亮过 SDR 白"是与 gamma/矩阵无关的独立证据。
-        // 上限 50% 用来排除另一种解释：帧的参考白点被缩放上移（那时几乎整屏都 >1）。
-        bool headroom = st.Above1Pct >= HeadroomMinPct && st.Above1Pct <= HeadroomMaxPct;
-        bool fitsSdrBox = st.Above1Pct < 0.01 && st.Below0Pct < 0.01;
+        // 头部余量：8-bit 帧在结构上给不出"越出自己台阶"的值（色域矩阵行和为 1、元素非负，也造不出 <0），
+        // 所以"确实有样本亮过【本帧的纸白】"是与 gamma/矩阵无关的独立证据。
+        // ⚠ 2026-09-28 批次 D：这条以前锚在 1.0 上，而 1.0 只在"纸白 = 80 nits"那一块屏上才等于 SDR 白；
+        //   本机 120 nits ⇒ SDR 内容整体压在 1.5，">1.0 占比"量的是桌面有多亮（一周内读到 1.5%–92%），
+        //   既让这一支恒假，又让下面 fitsSdrBox 恒假 ⇒ FAIL 那一支永远打不出来。现在两条都用 st.PaperWhite。
+        // 上限 50% 的剩余用途不是排"白点缩放"（缩放已被锚处理），而是【怀疑锚自己】：
+        // 过半像素都在纸白之上，更可能是纸白取错了屏 / 整帧本来就是 HDR 场景，那时"头部余量"这个说法失去意义。
+        bool headroom = st.AboveWhitePct >= HeadroomMinPct && st.AboveWhitePct <= HeadroomMaxPct;
+        bool fitsSdrBox = st.AboveWhitePct < 0.01 && st.Below0Pct < 0.01;
 
         if (st.Pixels < MinSampledPixels || st.NeutralN < MinNeutralPixels)
             return ("skip", $"SKIP: 样本不足（抽样需 ≥{MinSampledPixels} px 且中性像素需 ≥{MinNeutralPixels} 个）⇒ 级数统计没有意义，不判 PASS");
@@ -838,6 +1091,14 @@ public static class SelfTest
         return (px, w, h);
     }
 
+    /// <summary>把整帧 RGB 抬到指定纸白（α 不动）—— 模拟 DWM 把 SDR 内容合成进 HDR 桌面。</summary>
+    private static (float[] Px, int W, int H) Scaled((float[] Px, int W, int H) f, float k)
+    {
+        var px = (float[])f.Px.Clone();
+        for (int i = 0; i + 3 < px.Length; i += 4) { px[i] *= k; px[i + 1] *= k; px[i + 2] *= k; }
+        return (px, f.W, f.H);
+    }
+
     /// <summary>
     /// 判据自检：256 级台阶帧【必须】判 FAIL（它就是"升位深式假高精度"的样子），
     /// 1024 级台阶帧【必须】判 PASS。跑不通就说明判据是死的 —— 此时 HDR_SOURCE 的读数一律作废。
@@ -851,15 +1112,31 @@ public static class SelfTest
         var s10 = AnalyzeHdrFloat(f10.Px, f10.W, f10.H);
         var (st8, v8) = JudgeHdrFloat(s8);
         var (st10, v10) = JudgeHdrFloat(s10);
+
+        // ═══ 批次 D（2026-09-28）：同一对台阶帧抬到"这一档纸白"再判一遍 ═══
+        // 台阶帧默认纸白 = 1.0，等于只在"SdrWhiteLevel 恰好 80 nits"那种屏上自证。而本机纸白 120 nits，
+        // DWM 把 SDR 内容整体抬到 1.5 ⇒ 一份货真价实的 8-bit 内容，在写死 1/255 的整格尺子上只剩约一半
+        // 落格、且 ">1.0 占比" 落进头部余量区间 ⇒ 旧判据会把它读成 **PASS**（假绿，正是 §28 要抓的形状）。
+        // 这里把"旧锚点判成什么"一并量出来，而不是只在注释里说：夹具本身即证据。
+        const float FixtureWhite = 1.5f;          // 120 nits / 80
+        var g8 = Scaled(f8, FixtureWhite);
+        var g10 = Scaled(f10, FixtureWhite);
+        var t8 = AnalyzeHdrFloat(g8.Px, g8.W, g8.H, FixtureWhite);
+        var t10 = AnalyzeHdrFloat(g10.Px, g10.W, g10.H, FixtureWhite);
+        var (st8w, v8w) = JudgeHdrFloat(t8);
+        var (st10w, v10w) = JudgeHdrFloat(t10);
+        string oldAnchor8 = JudgeHdrFloat(AnalyzeHdrFloat(g8.Px, g8.W, g8.H)).Status;   // 纸白仍按 1.0 判
         sw.Stop();
 
-        bool ok = st8 == "fail" && st10 == "ok";
+        bool ok = st8 == "fail" && st10 == "ok" && st8w == "fail" && st10w == "ok";
         string status = ok ? "ok" : "fail";
         string detail =
             $"256 级台阶帧（应 FAIL）→ 实判 {st8.ToUpperInvariant()}：整格 {F(s8.GridPct)}%、中性级数 {s8.LevelsText}、中性像素 {s8.NeutralN} | " +
-            $"1024 级台阶帧（应 PASS）→ 实判 {st10.ToUpperInvariant()}：整格 {F(s10.GridPct)}%、中性级数 {s10.LevelsText}、中性像素 {s10.NeutralN}" +
-            (ok ? " ⇒ 判据会红也会绿，HDR_SOURCE 的读数可信"
-                : $" ⇒ 判据自身失效（{v8} / {v10}）⇒ 本次 HDR_SOURCE 读数一律作废");
+            $"1024 级台阶帧（应 PASS）→ 实判 {st10.ToUpperInvariant()}：整格 {F(s10.GridPct)}%、中性级数 {s10.LevelsText}、中性像素 {s10.NeutralN} | " +
+            $"纸白 {F(FixtureWhite)} 同一对（8bit 应 FAIL / 10bit 应 PASS）→ 实判 {st8w.ToUpperInvariant()} / {st10w.ToUpperInvariant()}" +
+            $"：整格 {F(t8.GridPct)}%、>纸白 {F(t8.AboveWhitePct)}%，而【旧锚点(纸白按 1.0)】把这份 8-bit 判成 {oldAnchor8.ToUpperInvariant()}" +
+            (ok ? " ⇒ 判据会红也会绿，且在纸白≠80nits 的屏上仍然有牙，HDR_SOURCE 的读数可信"
+                : $" ⇒ 判据自身失效（{v8} / {v10} / {v8w} / {v10w}）⇒ 本次 HDR_SOURCE 读数一律作废");
 
         // 与探针同一出口纪律：既落 progress.txt 也打控制台 —— "没打印就等于没跑"不成立。
         Progress(outDir, $"HDR_JUDGE {status} {sw.ElapsedMilliseconds}ms {detail}");
@@ -867,6 +1144,8 @@ public static class SelfTest
 
         return (JudgeNote, status, detail, sw.ElapsedMilliseconds,
             $",\n      \"latticePct8bit\": {F(s8.GridPct)}, \"latticePct10bit\": {F(s10.GridPct)}, " +
+            $"\n      \"fixturePaperWhite\": {F(FixtureWhite)}, \"verdict8bitAtWhite\": \"{st8w}\", " +
+            $"\"verdict8bitAtWhiteOldAnchor\": \"{oldAnchor8}\", \"latticePct8bitAtWhite\": {F(t8.GridPct)}, " +
             $"\n      \"levels8bit\": {s8.LevelsText}, \"levels10bit\": {s10.LevelsText}, \"neutralPixels8bit\": {s8.NeutralN}");
     }
 
@@ -950,6 +1229,197 @@ public static class SelfTest
     }
 
     /// <summary>
+    /// 越界 / 非法设置值的归一回落自检（2026-09-29 审查批次 E）。
+    /// <para>为什么必须真调一次：B 域台账（本轮批次 C 的 L5 那份）是<b>读码</b>得出的，而这张表里
+    /// 两类回落的方向恰好相反 —— 质量越界<b>交还默认</b>（AVIF <c>999</c> ⇒ 15，<b>不是</b>钳到区间
+    /// 端点 63），位深越界<b>就近收敛</b>（AVIF <c>16</c> ⇒ 12，<b>不是</b>回落 8）。把其中一类的方向
+    /// 写反，读码时没人会发现，产物却每一张都偏 ⇒ 在这里把"越界前 → 实得"逐轴打到进程输出上。</para>
+    /// <para>三条臂各管一件事，缺一条就有能蒙过去的错法：
+    /// ① <b>越界臂</b>钉回落目标；
+    /// ② <b>合法非默认臂</b>钉"回落不是无条件的"——若有人把这段写成"一律回默认"，只有这一臂会红；
+    /// ③ <b>大小写臂</b>钉"改写成界面 Tag 的确切拼法"而不是回落默认——本轮 <c>FitTag</c> 修复
+    /// （旧白名单写 "RGB"、XAML 挂 "Rgb"，而回填下拉用 <c>==</c> 比）的直接产物。</para>
+    /// <para>期望值一律写字面量，不从被测代码的常数推导（同 SETTINGS_MIGRATION 那条反例的纪律）。
+    /// 唯一例外是 <c>FormatIndex</c> 的回落落点：那张顺序表本身就是持久化契约（Core 的
+    /// <c>FormatOrder</c> 另有逐格对撞），这里钉的是"越界必须落在 PNG 那一项"。</para>
+    /// <para>只能在 App 进程内跑：理由与 <see cref="RunSettingsMigrationCheck"/> 同——Test 工程只引用
+    /// Core，够不到 <c>AppSettingsData</c>；而把夹具写进盘上那份 settings.json 借 <c>Load()</c> 触发，
+    /// 等于为了测试改用户机器上的设置。</para>
+    /// </summary>
+    private static (string Note, string Status, string Detail, long Ms, string JsonExtra)
+        RunNormalizeGateCheck(string outDir)
+    {
+        const string Note = "越界设置的归一回落（Normalize 分支直调）";
+        var sw = Stopwatch.StartNew();
+        var ctx = AppJsonContext.Default;
+
+        var got = new List<string>();
+        int bad = 0;
+        void Expect(string arm, string label, string input, string? actual, string want)
+        {
+            bool ok = actual == want;
+            if (!ok) bad++;
+            got.Add($"{arm}·{label} {input}→{actual ?? "<null>"}" + (ok ? "" : $"（期望 {want}）❌"));
+        }
+
+        // ── 臂①：越界值必须回落。质量轴交还默认，位深轴就近收敛，字符串轴回落默认 ──
+        var oob = SettingsOrNull(ctx, Json(
+            ("SettingsRevision", "2"),
+            ("QualityPng", "50"), ("QualityGainMap", "99"), ("QualityJpegLi", "0.1"), ("QualityJpegXl", "9"),
+            ("QualityAvif", "999"), ("QualityWebp", "3"), ("QualityTiff", "0"),
+            ("FormatIndex", "99"), ("ColorSpaceIndex", "6"),
+            ("BitDepthPng", "17"), ("BitDepthJpegLi", "10"), ("BitDepthJpegXl", "12"), ("BitDepthAvif", "16"),
+            ("BitDepthWebP", "10"), ("BitDepthTiff", "10"), ("BitDepthGainMap", "12"),
+            ("ChromaAvif", "\"999\""), ("ChromaJpegXl", "\"422\""), ("ChromaJpegLi", "\"42\""), ("ChromaGainMap", "\"0\""),
+            ("ThemeMode", "\"neon\""), ("Language", "\"fr\""), ("OcrEngineMode", "\"DirectX\""),
+            ("GainMapMode", "\"Mono\""), ("ArchiveMode", "\"Week\""), ("ToastPosition", "\"Middle\""),
+            ("AvifEncoder", "\"Nvidia\"")));
+        if (oob is null) return (Note, "fail", "反序列化越界夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+        SettingsService.Normalize(oob);
+        Expect("越界", "QualityPng", "50", F(oob.QualityPng), "100.00");
+        Expect("越界", "QualityGainMap", "99", F(oob.QualityGainMap), "1.00");
+        Expect("越界", "QualityJpegLi", "0.1", F(oob.QualityJpegLi), "1.00");
+        Expect("越界", "QualityJpegXl", "9", F(oob.QualityJpegXl), "1.00");
+        // 这条是整张表最容易读反的一格：CRF 区间是 0–63，越界**不钳到 63**，而是交还默认 15
+        Expect("越界", "QualityAvif", "999", F(oob.QualityAvif), "15.00");
+        Expect("越界", "QualityWebp", "3", F(oob.QualityWebp), "90.00");
+        Expect("越界", "QualityTiff", "0", F(oob.QualityTiff), "100.00");
+        Expect("越界", "FormatIndex", "99", oob.FormatIndex.ToString(), "0");   // 落点 = PNG
+        Expect("越界", "ColorSpaceIndex", "6", oob.ColorSpaceIndex.ToString(), "0");
+        Expect("越界", "BitDepthPng", "17", oob.BitDepthPng.ToString(), "8");
+        Expect("越界", "BitDepthJpegLi", "10", oob.BitDepthJpegLi.ToString(), "8");   // 编码器无位深概念
+        Expect("越界", "BitDepthJpegXl", "12", oob.BitDepthJpegXl.ToString(), "10");  // JXL 只认 8/10/16
+        Expect("越界", "BitDepthAvif", "16", oob.BitDepthAvif.ToString(), "12");      // 就近收敛，不回落 8
+        Expect("越界", "BitDepthWebP", "10", oob.BitDepthWebP.ToString(), "8");
+        Expect("越界", "BitDepthTiff", "10", oob.BitDepthTiff.ToString(), "16");      // >8 一律保精度到 16
+        Expect("越界", "BitDepthGainMap", "12", oob.BitDepthGainMap.ToString(), "8");
+        Expect("越界", "ChromaAvif", "999", oob.ChromaAvif, "420");
+        Expect("越界", "ChromaJpegXl", "422", oob.ChromaJpegXl, "444");  // JXL 值域不含 422 ⇒ 走自己的表
+        Expect("越界", "ChromaJpegLi", "42", oob.ChromaJpegLi, "420");
+        Expect("越界", "ChromaGainMap", "0", oob.ChromaGainMap, "420");
+        Expect("越界", "ThemeMode", "neon", oob.ThemeMode, "Default");
+        Expect("越界", "Language", "fr", oob.Language, "zh");
+        Expect("越界", "OcrEngineMode", "DirectX", oob.OcrEngineMode, "OnnxGpu");
+        Expect("越界", "GainMapMode", "Mono", oob.GainMapMode, "Gray");
+        Expect("越界", "ArchiveMode", "Week", oob.ArchiveMode, "Month");  // 界面从来没有这一项（2026-09-29 摘掉）
+        Expect("越界", "ToastPosition", "Middle", oob.ToastPosition, "BottomRight");
+        Expect("越界", "AvifEncoder", "Nvidia", oob.AvifEncoder, "Auto");
+
+        // ── 臂②：合法但非默认的值必须原样活着（否则"一律回默认"的错法也能过检）──
+        var keep = SettingsOrNull(ctx, Json(
+            ("SettingsRevision", "2"),
+            ("QualityAvif", "20"), ("QualityWebp", "50"), ("QualityJpegLi", "2.5"), ("QualityJpegXl", "4"),
+            ("FormatIndex", "3"), ("ColorSpaceIndex", "3"),
+            ("BitDepthPng", "10"), ("BitDepthAvif", "10"), ("BitDepthJpegXl", "16"), ("BitDepthTiff", "8"),
+            ("ChromaAvif", "\"422\""), ("ChromaJpegXl", "\"420\""), ("ChromaJpegLi", "\"444\""),
+            ("ThemeMode", "\"OLED\""), ("OcrEngineMode", "\"WindowsOcr\""), ("GainMapMode", "\"Rgb\""),
+            ("ArchiveMode", "\"Day\""), ("ToastPosition", "\"WindowsNotify\""), ("AvifEncoder", "\"SvtAv1\"")));
+        if (keep is null) return (Note, "fail", "反序列化合法夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+        SettingsService.Normalize(keep);
+        Expect("合法", "QualityAvif", "20", F(keep.QualityAvif), "20.00");
+        Expect("合法", "QualityWebp", "50", F(keep.QualityWebp), "50.00");   // 区间下界也属于"用户所选"
+        Expect("合法", "QualityJpegLi", "2.5", F(keep.QualityJpegLi), "2.50");
+        Expect("合法", "QualityJpegXl", "4", F(keep.QualityJpegXl), "4.00");
+        Expect("合法", "FormatIndex", "3", keep.FormatIndex.ToString(), "3");
+        // 旧 6 项色域表里的 3=DCI_P3 / 5=BT2020：这里必须【活着交给界面】，由 MainWindow 的
+        // legacyTags→currentTags 迁移按标签收口。Normalize 把它们改成 0 反而是错的
+        // （等于绕过那条迁移、把用户挑好的 Rec.2020 静默换成"跟随显示器"）。
+        // 本机实测老文件里就是 5 ⇒ 这一臂不是假想输入。
+        Expect("合法", "ColorSpaceIndex(旧表 3)", "3", keep.ColorSpaceIndex.ToString(), "3");
+        Expect("合法", "BitDepthPng", "10", keep.BitDepthPng.ToString(), "10");
+        Expect("合法", "BitDepthAvif", "10", keep.BitDepthAvif.ToString(), "10");
+        Expect("合法", "BitDepthJpegXl", "16", keep.BitDepthJpegXl.ToString(), "16");
+        Expect("合法", "BitDepthTiff", "8", keep.BitDepthTiff.ToString(), "8");
+        Expect("合法", "ChromaAvif", "422", keep.ChromaAvif, "422");         // AVIF 下拉确有 4:2:2 项
+        Expect("合法", "ChromaJpegXl", "420", keep.ChromaJpegXl, "420");
+        Expect("合法", "ChromaJpegLi", "444", keep.ChromaJpegLi, "444");
+        Expect("合法", "ThemeMode", "OLED", keep.ThemeMode, "OLED");
+        Expect("合法", "OcrEngineMode", "WindowsOcr", keep.OcrEngineMode, "WindowsOcr");
+        Expect("合法", "GainMapMode", "Rgb", keep.GainMapMode, "Rgb");
+        Expect("合法", "ArchiveMode", "Day", keep.ArchiveMode, "Day");
+        Expect("合法", "ToastPosition", "WindowsNotify", keep.ToastPosition, "WindowsNotify");
+        Expect("合法", "AvifEncoder", "SvtAv1", keep.AvifEncoder, "SvtAv1");
+
+        // ── 臂③：大小写变体必须改写成界面 Tag 的拼法（既不原样留着，也不回落默认）──
+        // 原样留着 = 本轮修掉的缺陷（SetComboByTag 用 == 匹配 ⇒ 下拉空白 + 下次保存静默翻转）；
+        // 回落默认 = 另一种错法（把"用户想要 RGB 增益"读成"没设过"）。两个方向同时钉死才叫补牙。
+        // 小写与大写各一枚夹具：FitTag 的匹配循环按 tags 顺序取第一个 IgnoreCase 命中，
+        // 只测一侧会放过"只在某一种大小写下才改写"的错法。
+        var cased = SettingsOrNull(ctx, Json(
+            ("SettingsRevision", "2"),
+            ("ThemeMode", "\"dark\""), ("OcrEngineMode", "\"windowsocr\""), ("GainMapMode", "\"rgb\""),
+            ("ArchiveMode", "\"month\""), ("ToastPosition", "\"bottomleft\""), ("AvifEncoder", "\"libaom\"")));
+        if (cased is null) return (Note, "fail", "反序列化大小写夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+        SettingsService.Normalize(cased);
+        Expect("小写", "ThemeMode", "dark", cased.ThemeMode, "Dark");
+        Expect("小写", "OcrEngineMode", "windowsocr", cased.OcrEngineMode, "WindowsOcr");
+        Expect("小写", "GainMapMode", "rgb", cased.GainMapMode, "Rgb");
+        Expect("小写", "ArchiveMode", "month", cased.ArchiveMode, "Month");
+        Expect("小写", "ToastPosition", "bottomleft", cased.ToastPosition, "BottomLeft");
+        Expect("小写", "AvifEncoder", "libaom", cased.AvifEncoder, "LibAom");
+
+        // 全大写这一支正是旧白名单放行过的那一串（"RGB"）：改写成 Tag，而不是回落默认
+        var upper = SettingsOrNull(ctx, Json(
+            ("SettingsRevision", "2"),
+            ("ThemeMode", "\"LIGHT\""), ("GainMapMode", "\"RGB\""), ("ArchiveMode", "\"YEAR\""),
+            ("ToastPosition", "\"TOPRIGHT\"")));
+        if (upper is null) return (Note, "fail", "反序列化全大写夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+        SettingsService.Normalize(upper);
+        Expect("大写", "ThemeMode", "LIGHT", upper.ThemeMode, "Light");
+        Expect("大写", "GainMapMode", "RGB", upper.GainMapMode, "Rgb");
+        Expect("大写", "ArchiveMode", "YEAR", upper.ArchiveMode, "Year");
+        Expect("大写", "ToastPosition", "TOPRIGHT", upper.ToastPosition, "TopRight");
+
+        // 旧档 "Avifenc"（精确大小写）必须显式迁到 LibAom，不能被白名单回落顺手改成 Auto：
+        // Auto 优先走硬件，那会把"用户选了软件编码器"翻转成硬件路径。
+        var legacy = SettingsOrNull(ctx, """{"SettingsRevision":2,"AvifEncoder":"Avifenc"}""");
+        if (legacy is null) return (Note, "fail", "反序列化 Avifenc 夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+        SettingsService.Normalize(legacy);
+        Expect("迁移", "AvifEncoder", "Avifenc", legacy.AvifEncoder, "LibAom");
+
+        // 同一道迁移门的大小写臂。写它的理由不是"多一格 coverage"，而是两道工具口径必须同向：
+        // FitTag 按 IgnoreCase 认得 "avifenc"，而迁移门原先按精确大小写比 ⇒ 小写那份【逃过迁移】，
+        // 直接被白名单回落成 Auto = 优先走硬件，正是上面那句 ⚠ 禁止的翻转。旧码这一臂必红。
+        var legacyLower = SettingsOrNull(ctx, """{"SettingsRevision":2,"AvifEncoder":"avifenc"}""");
+        if (legacyLower is null) return (Note, "fail", "反序列化 avifenc 小写夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+        SettingsService.Normalize(legacyLower);
+        Expect("迁移", "AvifEncoder(小写逃过迁移门)", "avifenc", legacyLower.AvifEncoder, "LibAom");
+
+        // 色域上界单独一枚夹具：本机老文件实测就是 5（旧 6 项表的最后一项 BT2020）。
+        // 上界写死的字面量若比 legacyTags 表长小一格（把 5 写成 4），5 会被判越界 ⇒ 静默变 0=跟随显示器，
+        // 用户挑的 Rec.2020 蒸发且界面上看不出来。文本侧另有 CorePipelineTests 那条"上界==表长-1"对撞，
+        // 这一臂管的是【真跑一遍仍然是那个结果】。
+        var csIdx = SettingsOrNull(ctx, Json(("SettingsRevision", "2"), ("ColorSpaceIndex", "5")));
+        if (csIdx is null) return (Note, "fail", "反序列化色域上界夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
+        SettingsService.Normalize(csIdx);
+        Expect("合法", "ColorSpaceIndex(旧表 5=BT2020)", "5", csIdx.ColorSpaceIndex.ToString(), "5");
+
+        sw.Stop();
+        bool ok = bad == 0;
+        string status = ok ? "ok" : "fail";
+        string detail = $"{got.Count} 轴读毕，{(ok ? "全部符合期望" : $"{bad} 条不符")}：" + string.Join(" | ", got);
+        Progress(outDir, $"NORMALIZE {status} {sw.ElapsedMilliseconds}ms {detail}");
+        Console.WriteLine($"[selftest] NORMALIZE {status} {detail}");
+        return (Note, status, detail, sw.ElapsedMilliseconds,
+            $",\n      \"arms\": {got.Count}, \"mismatched\": {bad}");
+    }
+
+    /// <summary>反序列化夹具；源生成上下文对非法 JSON 返回 null 而不是抛，调用方按 fail 处理。</summary>
+    private static AppSettingsData? SettingsOrNull(AppJsonContext ctx, string json)
+        => JsonSerializer.Deserialize(json, ctx.AppSettingsData);
+
+    /// <summary>
+    /// 用 (键, JSON 字面量) 拼一份最小 settings.json 夹具。值已经是字面量（字符串自带引号），
+    /// 这里不做任何类型推断 —— "422" 这类看着像数字的色度串必须保持带引号。
+    /// </summary>
+    private static string Json(params (string Key, string Value)[] pairs)
+    {
+        if (pairs.Length == 0)
+            throw new ArgumentException("夹具为空：Normalize 会被喂一份全默认对象，越界臂就此变成空转");
+        return "{" + string.Join(",", pairs.Select(p => $"\"{p.Key}\":{p.Value}")) + "}";
+    }
+
+    /// <summary>
     /// 「GainMap 并入 JPEG LI」的一次性重映射自检（2026-09-26 用户口径）。
     /// <para>为什么必须行为级跑：这条改动的风险全在<b>裸索引</b>上 —— 旧表 1=GainMap、新表 1=JPEG LI，
     /// 而越界钳制对两者都不触发。重映射表本身在 Core（门禁已逐格对撞），但
@@ -1024,9 +1494,26 @@ public static class SelfTest
     /// 合成本来不止 256 级的流 —— 这时"交付给下游的流精度 >8-bit"依然为真，但"面板真给了
     /// 10-bit 内容"未被证明。本探针测的是前者。
     /// </remarks>
-    private static HdrFloatStats AnalyzeHdrFloat(float[] px, int w, int h)
+    /// <summary>本帧的 SDR 白点落在 scRGB 的哪个位置：纸白 nits / 80（1.0 = 80 nits 是 scRGB 的定义）。</summary>
+    /// <remarks>读不到纸白时返回 1.0 ⇒ 判据退化回"以 1.0 为白点"的老写法，不引入新失败。
+    /// 地板 max(nits, 80) 与 <c>JpegGainMapEncoder.ComputeWhitePoint</c> 同一条（那边是产品亮度基准，
+    /// 这里只是把同一把尺借给探针，别再长第三份）。本机实测 120 nits ⇒ 1.5。</remarks>
+    private static float PaperWhiteScrgb()
     {
-        const float Lsb = 1f / 255f;
+        int nits = TrueToneCap.Core.Capture.DisplayEnumerator.GetSdrWhiteLevel();
+        return nits > 0 ? Math.Max(nits, 80) / 80f : 1f;
+    }
+
+    private static HdrFloatStats AnalyzeHdrFloat(float[] px, int w, int h, float paperWhite = 1f)
+    {
+        // ═══ 2026-09-28 批次 D：这个 LSB 与下面的 SDR 窗口都必须随【帧自己的纸白】走 ═══
+        // "8-bit 假设"的正确表述是：帧 = (8-bit 台阶) × 该屏的 SDR 白点。本机纸白 120 nits ⇒ 白点在 1.5，
+        // 于是 DWM 合成出来的 SDR 内容台阶间距是 1.5/255 而不是 1/255。写死 1/255 的后果不是判不出红，
+        // 而是【把假高精度读成绿】：一份 8-bit 内容被抬到 1.5 白点后，在 1/255 的尺子上只有约一半落在整格上
+        // ⇒ "明显偏离整格"，同时 >1.0 占比落进头部余量区间 ⇒ 两条证据同时"支持"它。
+        // paperWhite=1 时本函数与改前逐位相同（LSB、窗口、越界阈值全退化回原式），所以老读数不受影响。
+        float pw = paperWhite > 0f ? paperWhite : 1f;
+        float Lsb = pw / 255f;
         // ═══ 2026-09-19 判据自检抓到的缺陷：容差必须【小于 0.5 LSB8】═══
         // q = v/Lsb 后测的是 |q − round(q)|，而这个量【恒 ≤ 0.5】（round 的定义）。旧值 0.6f
         // 让"落在 1/256 整格上"成为恒真式 ⇒ 判据 (b) 永为 100% ⇒ 依赖它的两条分支全废
@@ -1035,13 +1522,13 @@ public static class SelfTest
         // 0.25 = FP16 噪声上界的两倍：FP16 在 1.0 附近相对精度 2^-11 ⇒ 绝对噪声 ≤0.124 LSB8，
         // 真在整格上的值仍算"在"，被矩阵/合成洗开的值才判"不在"。
         const float GridTolLsb = 0.25f;
-        const float NeutralTol = 0.75f * Lsb;  // R≈G≈B 的判定窗口
+        float NeutralTol = 0.75f * Lsb;  // R≈G≈B 的判定窗口（跟着纸白缩放：8-bit 的量化噪声也按同一比例放大）
         const int LevelCap = 8192;             // 级数去重上限（到顶记为"≥8192"）
 
         int total = Math.Min(w * h, px.Length / 4);
         int stride = Math.Max(1, total / 200_000);   // 最多约 20 万像素，4K 屏也不会失控
 
-        int pixels = 0, gridN = 0, chan = 0, snapRaw = 0, snapEnc = 0, neutral = 0, above1 = 0, below0 = 0;
+        int pixels = 0, gridN = 0, chan = 0, snapRaw = 0, snapEnc = 0, neutral = 0, above1 = 0, aboveWhite = 0, below0 = 0;
         float min = float.MaxValue, max = float.MinValue;
         var levels = new HashSet<int>();
         var inRangeLevels = new HashSet<int>();
@@ -1073,9 +1560,12 @@ public static class SelfTest
                 chan++;
                 if (v < min) min = v;
                 if (v > max) max = v;
-                if (v > 1f + Lsb) above1++;
+                // above1 的容差【钉死成旧写法的 1/255】：它现在只是对照读数，
+                // 若跟着 pw 缩放，就不再是旧锚点、而是新尺子量出来的旧阈值了。
+                if (v > 1f + 1f / 255f) above1++;
+                if (v > pw + Lsb) aboveWhite++;
                 else if (v < -Lsb) below0++;
-                if (v < 0f || v > 1f) continue;   // 整格占比只在 SDR 范围内统计（越界本身就是扩展范围的证据）
+                if (v < 0f || v > pw) continue;   // 整格占比只在 SDR 范围内统计（越界本身就是扩展范围的证据）
 
                 gridN++;
                 // 画面自身的丰富度：整格占比要能否证"精度止步于 8-bit"，前提是这一帧里
@@ -1084,8 +1574,10 @@ public static class SelfTest
                 else contentSaturated = true;
                 float q = v / Lsb;
                 if (MathF.Abs(q - MathF.Round(q)) <= GridTolLsb) snapRaw++;
-                // 反解到编码域：与生产 8-bit 量化同一张表，避免"自己写第二份实现自证"
-                float e = TrueToneCap.Core.Processing.ToneMapper.LinearToSrgbLut(v) / Lsb;
+                // 反解到编码域：与生产 8-bit 量化同一张表，避免"自己写第二份实现自证"。
+                // ⚠ 必须先除以纸白再查表：LUT 的定义域是"编码值 0..1"，纸白 1.5 的帧里 v 可以到 1.5，
+                //   直接喂进去等于查表越界（今天靠上面那行 `v > 1f` 的窗口挡住了，窗口一放宽就必须自己钉住）。
+                float e = TrueToneCap.Core.Processing.ToneMapper.LinearToSrgbLut(v / pw) * 255f;
                 if (MathF.Abs(e - MathF.Round(e)) <= GridTolLsb) snapEnc++;
             }
         }
@@ -1095,7 +1587,7 @@ public static class SelfTest
             gridN == 0 ? 100.0 : 100.0 * snapEnc / gridN,
             neutral, levels.Count, saturated,
             inRangeLevels.Count, contentSaturated,
-            chan == 0 ? 0f : min, chan == 0 ? 0f : max, above1, below0);
+            chan == 0 ? 0f : min, chan == 0 ? 0f : max, above1, aboveWhite, below0, pw);
     }
 
     /// <summary>高精度源探针的实测数字（占比一律 0–100）。</summary>
@@ -1104,20 +1596,22 @@ public static class SelfTest
         double GridRawPct, double GridEncPct,
         int NeutralN, int NeutralLevels, bool LevelsSaturated,
         int ContentLevels, bool ContentSaturated,
-        float Min, float Max, int Above1, int Below0)
+        float Min, float Max, int Above1, int AboveWhite, int Below0, float PaperWhite)
     {
         /// <summary>整格占比取两域中较大者：任一域能证明"落在整格上"，就认为 8-bit 假设没被推翻。</summary>
         public double GridPct => Math.Max(GridRawPct, GridEncPct);
         public string GridDomain => GridEncPct >= GridRawPct ? "sRGB反解域" : "raw域";
         public double Above1Pct => ChanValues == 0 ? 0 : 100.0 * Above1 / ChanValues;
+        /// <summary>越出【本帧纸白】的占比 —— 判据用它，不用 Above1Pct（纸白不在 1.0 的屏上后者量的是桌面亮度）。</summary>
+        public double AboveWhitePct => ChanValues == 0 ? 0 : 100.0 * AboveWhite / ChanValues;
         public double Below0Pct => ChanValues == 0 ? 0 : 100.0 * Below0 / ChanValues;
         public string LevelsText => LevelsSaturated ? $"≥{NeutralLevels}" : NeutralLevels.ToString(CultureInfo.InvariantCulture);
         public string ContentText => ContentSaturated ? $"≥{ContentLevels}" : ContentLevels.ToString(CultureInfo.InvariantCulture);
         /// <summary>全部实测数字，一条打印出来 —— 结论只由 JudgeHdrFloat 从这些数字推出，不含别的输入。</summary>
         public string NumbersText =>
             $"抽样 {Pixels} px（{ChanValues} 个通道值）| float min={F(Min)} max={F(Max)} " +
-            $"越出 SDR 范围: >1.0 占 {F(Above1Pct)}%  <0 占 {F(Below0Pct)}% | " +
-            $"落在 1/256 整格上的比例: raw 域 {F(GridRawPct)}%、线性→sRGB 反解后 {F(GridEncPct)}% " +
+            $"越出 SDR 范围: >1.0 占 {F(Above1Pct)}%  >纸白({F(PaperWhite)}) 占 {F(AboveWhitePct)}%  <0 占 {F(Below0Pct)}% | " +
+            $"落在本帧 8-bit 整格(1/(255×纸白))上的比例: raw 域 {F(GridRawPct)}%、线性→sRGB 反解后 {F(GridEncPct)}% " +
             $"→ 采用{GridDomain} {F(GridPct)}%（[0,1] 内 {GridN} 个通道值、{ContentText} 种不同值参与）| " +
             $"中性像素 {NeutralN} 个 → 去重量级 {LevelsText}";
     }

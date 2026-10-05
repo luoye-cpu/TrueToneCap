@@ -84,8 +84,12 @@
   <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发）。
        Inputs/Outputs 与 CompileShaders.ps1 实际产出对齐：
        脚本产出 "<Shader>.hlsl.cso"，故 Outputs 写 *.hlsl.cso —— 与 Shaders/ 目录下
-       实际存在的 ToneMapping.hlsl.cso 等文件名一致，增量构建可正确判定。 -->
-  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\ToneMapping.hlsl;Shaders\FullscreenVS.hlsl;Shaders\OverlayComposite.hlsl" Outputs="Shaders\ToneMapping.hlsl.cso;Shaders\FullscreenVS.hlsl.cso;Shaders\OverlayComposite.hlsl.cso">
+       实际存在的文件名一致，增量构建可正确判定。
+       2026-10-01：ToneMapping.hlsl 连同其运行时加载方 GpuToneMapper 一起删除（清单里有、没人加载）。
+       这份清单与 Shaders/*.hlsl、ShaderCompiler.cs 三处的一致性由
+       CorePipelineTests.Test_ShaderList_HasNoOrphanEntry 在门禁里对账——CompileShaders.ps1 那份自检
+       带 Inputs/Outputs 增量判定，cs 文件改了而 .cso 没过期时它整段不跑。 -->
+  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\FullscreenVS.hlsl;Shaders\OverlayComposite.hlsl" Outputs="Shaders\FullscreenVS.hlsl.cso;Shaders\OverlayComposite.hlsl.cso">
     <Message Text="编译 HLSL 着色器..." Importance="high" />
 
     <!-- 宿主探测: 优先 PowerShell 7 (pwsh)，不存在则回退 Windows PowerShell 5.1 (powershell)。
@@ -162,6 +166,26 @@
     <RemoveDir Directories="$(PublishDir)Native" Condition="Exists('$(PublishDir)Native')" />
 
     <Message Text="[TrueToneCap] ✅ 目录整理完成" Importance="high" />
+  </Target>
+
+  <!-- AfterBuild: 把随包原生编码器按【发布包同一份布局】放进开发构建输出的 native/。
+       为什么必须有：Core.dll 里【没有】嵌入资源（口径与实测见 Core/Services/NativeLibraryResolver.cs 文件头），
+       提取逻辑真正依赖的是"BaseDirectory 下找得到 exe"那条文件系统回退链，而喂这条链的一直只有
+       Publish.ps1 的 [3/6]。后果：裸 dotnet build 的 bin 里 native/ 是空的 ⇒
+       AVIF / JPEG XL / WebP / JPEG LI 四种格式在开发构建上必走保底 —— 2026-10-01 实机轮就因此
+       把"选 JPEG XL 拿到 PNG"读成了产品行为（其实是布局缺件）。
+       单一事实源仍是 Core/Resources/（Publish.ps1 的 $toolsSrc 同一个目录），这里只是多拷一份到开发输出，
+       不是第二份事实。计数写成硬断言：少一枚就是布局坏了，不许静默少拷。 -->
+  <Target Name="CopyNativeToolsToDevOutput" AfterTargets="Build">
+    <ItemGroup>
+      <TtcNativeTools Include="..\TrueToneCap.Core\Resources\*.exe" />
+    </ItemGroup>
+    <Error Text="Core/Resources/ 下应有 4 枚原生编码器 exe（实得 @(TtcNativeTools->Count())）⇒ 布局或检出坏了，native/ 不许静默少拷"
+           Condition="'@(TtcNativeTools->Count())' != '4'" />
+    <Copy SourceFiles="@(TtcNativeTools)"
+          DestinationFolder="$(OutDir)native"
+          SkipUnchangedFiles="true"
+          Condition="'@(TtcNativeTools)' != ''" />
   </Target>
 
 </Project>

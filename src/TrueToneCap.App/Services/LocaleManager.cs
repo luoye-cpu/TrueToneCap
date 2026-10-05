@@ -142,13 +142,18 @@ public static class LocaleManager
     public static string FontDefault => s_lang == AppLanguage.Chinese ? "默认 (微软雅黑)" : "Default (Microsoft YaHei)";
     public static string FontCustom => s_lang == AppLanguage.Chinese ? "自定义..." : "Custom...";
     public static string FontCustomPlaceholder => s_lang == AppLanguage.Chinese ? "输入系统已安装的字体名称" : "Enter installed font name";
-    public static string FontDesc => s_lang == AppLanguage.Chinese ? "界面字体仅影响应用外观，不影响截图像素。选择已安装的字体后需重启应用生效。" : "Font only affects UI appearance, not captured pixels. Restart required after change.";
+    public static string FontDesc => s_lang == AppLanguage.Chinese ? "界面字体仅影响应用外观，不影响截图像素。选择后立即生效；该字体未安装时界面会回落到默认字体。" : "Font only affects UI appearance, not captured pixels. Applies immediately; if the font is not installed the UI falls back to the default.";
 
     // ── 状态栏 ──
     public static string Ready => s_lang == AppLanguage.Chinese ? "就绪" : "Ready";
     public static string AreaCapture => s_lang == AppLanguage.Chinese ? "区域截图" : "Area Capture";
     public static string SaveSettings => s_lang == AppLanguage.Chinese ? "保存设置" : "Save Settings";
     public static string CapabilityDetect => s_lang == AppLanguage.Chinese ? "能力检测中..." : "Detecting...";
+    // 2026-09-30：选区预览统一到 HDR 那张自绘窗之后，SDR 与 HDR 用同一句状态提示
+    // （原先两句分别写死 "🖥️ HDR 预览" 与 "📷 选区模式"，都是 .cs 里的中文直写）。
+    public static string SelectionPreview => s_lang == AppLanguage.Chinese ? "🖼️ 选区预览" : "Selection preview";
+    public static string PreviewFallbackTitle => s_lang == AppLanguage.Chinese ? "⚠️ 预览已回退旧界面" : "⚠️ Preview fell back to the legacy UI";
+    public static string PreviewFallbackHint => s_lang == AppLanguage.Chinese ? "预览窗创建失败，本次改用旧版选区界面" : "Preview window failed to initialize; the legacy selection overlay is used this time";
 
     // ── 格式提示 ──
     // ── 格式提示 ──
@@ -185,6 +190,11 @@ public static class LocaleManager
             ["位深按所选编码器能力生效（软件 ≤12-bit、NVENC ≤10-bit、QSV 8-bit），不支持的档位已隐藏；HDR 至少 10-bit，软件编码器（libaom）在 HDR 下还可选 12-bit。8-bit 兼容性最广；>8-bit 仅在源为 Float16（HDR/高级颜色采集）时保留真精度，普通 8-bit 截图恒输出 8-bit。"] =
                 "Bit depth follows the selected encoder (software ≤12-bit, NVENC ≤10-bit, QSV 8-bit); unsupported values are hidden. HDR needs at least 10-bit, and libaom also offers 12-bit under HDR. 8-bit has the widest compatibility; above 8-bit keeps real precision only when the source is Float16 (HDR / advanced-colour capture) — ordinary 8-bit screenshots always export 8-bit.",
             ["JPEG 选项"] = "JPEG options",
+            // ── 换格式保底开关（2026-09-29 用户口径：接上保底 + 触发必须告知 + 设置里给开关）──
+            // 界面里这两串中文是 XAML 写死的，靠这张表被扫描接管；漏一条就是英文界面下的中文残留。
+            ["编码失败时改存为 PNG"] = "Fall back to PNG when an encoder fails",
+            ["勾上：某一格式的编码器这次失败时，这张图改存成 PNG 并弹提示（格式变了、像素无损，比丢图好）。关掉：失败就明确报错，产物仍然是你选的格式——按后缀或格式名接下游流程时建议关掉。同一容器内的后端切换（如 AVIF 硬件失败转软件）不算换格式，不受这个开关影响。"] =
+                "On: if an encoder fails, this shot is saved as PNG with a notice (the format changes, pixels stay lossless — better than losing it). Off: failures are reported as errors and the file stays in the format you picked — turn this off if downstream steps key off the extension or format name. Switching encoders inside the same container (e.g. AVIF hardware falling back to software) is not a format change and is unaffected.",
             ["采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小（截图里的文字边缘最容易看出差别）。增益图开与不开共用这一项。"] =
                 "Higher subsampling means more accurate colour and larger files: 4:4:4 keeps chroma, 4:2:0 is smallest (text edges in screenshots show the difference first). Shared by the gain-map switch, on or off.",
             ["底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。打开此开关时 HDR 输出锁定为开。"] =
@@ -298,7 +308,7 @@ public static class LocaleManager
             ["界面字体"] = "Interface Font",
             ["字体"] = "Font",
             ["输入系统已安装的字体名称"] = "Enter installed font name",
-            ["界面字体仅影响应用外观，不影响截图像素。选择已安装的字体后需重启应用生效。"] = "Font only affects UI appearance, not captured pixels. Restart required after change.",
+            ["界面字体仅影响应用外观，不影响截图像素。选择后立即生效；该字体未安装时界面会回落到默认字体。"] = "Font only affects UI appearance, not captured pixels. Applies immediately; if the font is not installed the UI falls back to the default.",
             ["通知"] = "Notifications",
             ["截图后提示"] = "Toast on capture",
             ["无感截图后提示"] = "Toast on silent capture",
@@ -388,6 +398,136 @@ public static class LocaleManager
             ["TrueToneCap 第三方许可"] = "TrueToneCap Third-party notices",
             ["区域截图"] = "Area Capture",
             ["保存设置"] = "Save Settings",
+        // ── 2026-10-03 英文界面补完 · 第一批：落地页 Format 提示（实机取证 ui-en.png）──
+            ["✅ 无损格式，支持 HDR (cICP Rec.2100 PQ) + 广色域 ICC。截图首选。"] = "✅ Lossless; supports HDR (cICP Rec.2100 PQ) + wide-gamut ICC. Recommended for screenshots.",
+            ["✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。目标色域就是【底图】的色彩空间：Rec.709 或显式 Rec.2020（三件一起搬，底图本身仍是 SDR）。"] = "✅ Ultra HDR (ISO 21496-1): SDR viewers show the base image, HDR viewers restore the full dynamic range. The target gamut IS the base image's colour space - Rec.709 or explicit Rec.2020 (all three travel together; the base image stays SDR).",
+            ["✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；Rec.2020 目标只靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"] = "✅ Encoded by Google jpegli, quality driven by butteraugli distance. 8-bit, and the container has no HDR channel; a Rec.2020 target relies on the ICC declaration only (measured output carries APP2/ICC), while a Rec.709 target writes [nothing at all] (falling back to the JFIF default).",
+            ["✅ 新一代格式，Modular 模式对截图极优。支持 HDR (Rec.2100 PQ) + 广色域。16-bit 走 16-bit PNG 中转（cjxl 无 -b 参数，sBIT=16 声明实际精度）。"] = "✅ New-generation format; Modular mode is excellent for screenshots. Supports HDR (Rec.2100 PQ) + wide gamut. 16-bit goes through a 16-bit PNG hand-off (cjxl has no -b flag; sBIT=16 declares the real precision).",
+            ["✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"] = "✅ Advanced format supporting HDR (PQ) and wide-gamut SDR (Rec.2020 primaries + sRGB transfer, dual-marked by colr(nclx) and ICC). NVENC can hardware-accelerate it (AV1 is 4:2:0 only); the software encoders support 4:4:4 and 12-bit. Bit depth and chroma follow the selected encoder's real capability - unsupported combinations are hidden.",
+            ["⚠ 仅 8-bit、容器没有 HDR 通道；广色域目标靠 ICC 声明（Rec.709 目标不写声明）。适合简单分享场景。"] = "⚠ 8-bit only, and the container has no HDR channel; a wide-gamut target relies on the ICC declaration (a Rec.709 target writes no declaration). Suited to casual sharing.",
+            ["✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"] = "✅ Lossless TIFF, supports 16-bit HDR + embedded ICC. Suited to archiving.",
+            ["✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 "] = "✅ Ultra HDR (ISO 21496-1). Encoding reference = system SDR white point ",
+            [" nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 "] = " nits. Compatible viewers (Chrome / Photos) align automatically; if yours is fixed at 203 nits, set the reference white manually to ",
+        // ── 2026-10-03 英文界面补完 · 第二批：Core 质量文案（键见 MainWindow.CoreQualityTexts）──
+            ["butteraugli 距离 (越小越清晰; 1.0 = 视觉无损)"] = "butteraugli distance (lower = sharper; 1.0 = visually lossless)",
+            ["CRF (0=无损, 63=最低; 15 ≈ 视觉无损)"] = "CRF (0=lossless, 63=lowest; 15 ≈ visually lossless)",
+            ["butteraugli 距离 (0.5-3.0)"] = "butteraugli distance (0.5-3.0)",
+            ["质量 (50-100; 85+ 视觉无损)"] = "Quality (50-100; 85+ is visually lossless)",
+            ["无损 (固定 100%)"] = "Lossless (fixed 100%)",
+            [" (越小越清晰)"] = " (lower = sharper)",
+            ["无损 (固定)"] = "Lossless (fixed)",
+            ["距离: "] = "Distance: ",
+            ["近无损"] = "Near-lossless",
+            ["无损"] = "Lossless",
+        // ── 2026-10-03 英文界面补完 · 第三批：7 个下拉的 35 个中文项（键取自 XAML 逐字）──
+            ["Intel QSV / 系统 MFT"] = "Intel QSV / System MFT",
+            ["LLM 翻译"] = "LLM Translation",
+            ["智谱 GLM"] = "Zhipu GLM",
+            ["⚙️ 系统"] = "⚙️ System",
+            ["深灰半透明"] = "Translucent Dark Grey",
+            ["深紫半透明"] = "Translucent Deep Purple",
+            ["深绿半透明"] = "Translucent Dark Green",
+            ["灰色半透明"] = "Translucent Grey",
+            ["白色半透明"] = "Translucent White",
+            ["纯黑半透明"] = "Translucent Black",
+            ["阿里云百炼"] = "Alibaba Cloud Bailian",
+            ["🖥️ 界面"] = "🖥️ Interface",
+            ["免费翻译"] = "Free Translation",
+            ["硅基流动"] = "SiliconFlow",
+            ["视觉翻译"] = "Vision Translation",
+            ["🌐 网络"] = "🌐 Network",
+            ["💾 编码"] = "💾 Encoding",
+            ["📷 捕获"] = "📷 Capture",
+            ["深海蓝"] = "Deep Sea Blue",
+            ["自定义"] = "Custom",
+            ["信息"] = "Info",
+            ["全部"] = "All",
+            ["天蓝"] = "Sky Blue",
+            ["橙红"] = "Orange Red",
+            ["粉红"] = "Pink",
+            ["紫色"] = "Purple",
+            ["纯白"] = "Pure White",
+            ["翠绿"] = "Emerald",
+            ["自动"] = "Auto",
+            ["警告"] = "Warning",
+            ["调试"] = "Debug",
+            ["金黄"] = "Gold",
+            ["错误"] = "Error",
+            ["青色"] = "Cyan",
+        // ── 2026-10-03 英文界面补完 · 第三批附：AVIF 后端名与状态后缀（键见 MainWindow.CoreAvifBackendTexts）──
+            ["avifenc（软件 · 由 avifenc 自选编码器）"] = "avifenc (software - codec chosen by avifenc)",
+            ["（本机不可用）"] = " (not available on this machine)",
+        // ── 2026-10-03 英文界面补完 · 第四批：色域映射卡的运行时拼串（R2）──
+            [" —— 面板支持 HDR，系统未开启"] = " — panel supports HDR, not enabled in the system",
+            ["8-bit 源 → ICC/矩阵搬到目标 → SDR 输出。"] = "8-bit source -> ICC/matrix to the target -> SDR output.",
+            ["EDID 未读到原色（不猜）"] = "primaries not read from EDID (not guessed)",
+            ["WGC Float16 → 色域矩阵 → PQ ST.2084。"] = "WGC Float16 -> gamut matrix -> PQ ST.2084.",
+            ["WGC Float16 → 分段 Reinhard 出 SDR 底图，另算一张增益图；HDR 在增益图里，不在容器声明里。"] = "WGC Float16 -> piecewise Reinhard into the SDR base image, plus a separate gain map; the HDR lives in the gain map, not in the container declaration.",
+            ["WGC Float16 捕获完整广色域 → 3×3 矩阵搬到目标 → 分段 Reinhard → SDR 输出。"] = "WGC Float16 captures the full wide gamut -> 3x3 matrix to the target -> piecewise Reinhard -> SDR output.",
+            ["→ HDR 直通（容器写 PQ）"] = "-> HDR passthrough (container writes PQ)",
+            ["→ 增益图（SDR 底图 + gain map）"] = "-> gain map (SDR base + gain map)",
+            ["→ 直通（同色域）"] = "-> passthrough (same gamut)",
+            ["→ 色域映射到"] = "-> gamut mapped to",
+            ["→ 色调映射为 SDR（sRGB 容器装不下 PQ）"] = "-> tone-mapped to SDR (an sRGB container cannot carry PQ)",
+            ["→ 色调映射为 SDR（屏幕证据不授权 HDR 声称）"] = "-> tone-mapped to SDR (per-display evidence does not authorise an HDR claim)",
+            ["→ 色调映射为 SDR（此格式没有 HDR 通道）"] = "-> tone-mapped to SDR (this format has no HDR channel)",
+            ["本次按 SDR 色调映射：HDR 开关仍按你的设置保留，只是这块屏的逐屏证据不足以声明 PQ。"] = "Tone-mapped to SDR this run: the HDR switch is kept as you set it; it is only this panel's per-display evidence that is not enough to declare PQ.",
+            ["本次按 SDR 色调映射：目标被解析/收口成 Rec.709，而 PQ 只能与 Rec.2020 原色一起声明。"] = "Tone-mapped to SDR this run: the target resolved/narrowed to Rec.709, and PQ can only be declared together with Rec.2020 primaries.",
+            ["本次按 SDR 色调映射：这个格式的容器没有 HDR 通道（HDR 开关会落空，产物是 8-bit SDR）。"] = "Tone-mapped to SDR this run: this format's container has no HDR channel (the HDR switch has no effect; the output is 8-bit SDR).",
+            ["源与目标同一套原色 ⇒ 矩阵是恒等变换，本次不跑搬色。"] = "Source and target share the same primaries => the matrix is an identity transform; no colour transfer runs this time.",
+            ["读不到被截屏的逐屏证据 ⇒ 不授权广色域/HDR 声称（仍放行 Float16 源）"] = "per-display evidence of the captured screen unavailable => no wide-gamut/HDR claim authorised (Float16 sources still pass through)",
+        // ── 2026-10-03 英文界面补完 · 第四批：色域映射卡的运行时拼串（R2）──
+            ["HDR（{0}，PQ，面板原生 {1}）"] = "HDR ({0}, PQ, panel-native {1})",
+            ["SDR sRGB（{0}）"] = "SDR sRGB ({0})",
+            ["SDR 广色域（{0}，{1}，ACM）"] = "SDR wide gamut ({0}, {1}, ACM)",
+            ["{0}（底图色域）"] = "{0} (base image gamut)",
+            ["⚠ HDR 声称已被收口 ⇒ {0}"] = "⚠ The HDR claim was narrowed => {0}",
+            ["⚠ 广色域声明已被逐屏证据收口为 Rec.709 ⇒ {0}"] = "⚠ The wide-gamut claim was narrowed to Rec.709 by per-display evidence => {0}",
+            ["逐屏证据不足（{0}）⇒ 不授权广色域/HDR 声称"] = "Insufficient per-display evidence ({0}) => no wide-gamut/HDR claim authorised",
+        // ── 2026-10-03 英文界面补完 · 第四批附：能力状态行（R2）──
+            ["⚠ 此显示器不支持 HDR"] = "⚠ This display does not support HDR",
+            ["⚠ HDR 硬件支持但未开启（Windows 显示设置中未开启 HDR）"] = "⚠ HDR is supported by the hardware but not enabled (not turned on in Windows display settings)",
+            [" | ACM 已启用（系统管理显示器色彩）"] = " | ACM enabled (the system manages display colour)",
+            ["ACM 已启用 — 像素会映射到所选目标色域（Rec.709 / Rec.2020）。"] = "ACM enabled - pixels are mapped to the selected target gamut (Rec.709 / Rec.2020).",
+            ["未检测到校色 ICC；目标色域即像素被搬进、容器被声明成的那一套原色（逐格式的声明通道见下方「色域映射」）"] = "No calibrated ICC profile detected; the target gamut is the primaries the pixels are moved into and the container declares (per-format declaration channels are in the Gamut Mapping card below)",
+            ["✅ HDR 已启用（{0}-bit）"] = "✅ HDR enabled ({0}-bit)",
+            [" | SDR 白点 {0} nits"] = " | SDR paper white {0} nits",
+            [" | 峰值 {0} nits"] = " | peak {0} nits",
+            ["检测到校色 ICC → 映射到 {0}"] = "Calibrated ICC detected -> mapped to {0}",
+        // ── 2026-10-03 英文界面补完 · 第五批：Core FormatColorFacts 的声明通道文案（R2 收尾）──
+            ["PNG：cICP {0}（原色/传输/矩阵），matrix 恒 0(identity) —— PNG 存 RGB 采样，没有 YUV 往返可声明。"] = "PNG: cICP {0} (primaries/transfer/matrix); matrix is always 0 (identity) - PNG stores RGB samples, so there is no YUV round-trip to declare.",
+            ["HDR 一律不嵌 ICC。"] = "HDR never embeds ICC.",
+            ["{0} 目标另嵌 iCCP，两条通道同一套原色。"] = "The {0} target additionally embeds iCCP; both channels carry the same primaries.",
+            ["{0} 目标不嵌 ICC（cICP 已足够）。"] = "The {0} target embeds no ICC (cICP is enough).",
+            ["AVIF：colr(nclx) {0}，matrix 随三原色取 {1} —— 它是 YUV 码流，"] = "AVIF: colr(nclx) {0}, matrix follows the primaries as {1} - it is a YUV bitstream, ",
+            ["不能像 PNG 那样写 identity（写 0 时部分解码器自行套错矩阵）。"] = "so it cannot declare identity the way PNG does (with 0, some decoders apply the wrong matrix themselves).",
+            ["HDR 不嵌 ICC。"] = "HDR embeds no ICC.",
+            ["{0} 另可嵌 ICC。"] = "{0} may additionally embed ICC.",
+            ["{0} 不嵌 ICC。"] = "{0} embeds no ICC.",
+            ["JPEG XL：color fields 与 ICC 二选一（同时给时 cjxl 只走 ICC、fields 被丢弃；"] = "JPEG XL: colour fields or ICC, one of the two (given both, cjxl uses only ICC and drops the fields; ",
+            ["ICC 能归约成字段就只写字段，归约不了就整份内嵌）。没有 matrix 这一维，"] = "if the ICC reduces to fields only the fields are written, otherwise the whole profile is embedded). There is no matrix dimension, ",
+            ["且有损产物把像素量化进 XYB —— 声明写的是原图色域，不是码流里的通道值。"] = "and lossy output quantises pixels into XYB - the declaration states the source gamut, not the channel values in the bitstream.",
+            ["HDR 走 Rec.2020 原色 + PQ（cjxl 的枚举名 Rec2100PQ，另带 intensity_target）。"] = "HDR uses Rec.2020 primaries + PQ (cjxl's enum name Rec2100PQ, plus intensity_target).",
+            ["{0} 取到可嵌 ICC 时用 ICC，否则用 color fields。"] = "{0} uses ICC when an embeddable ICC is available, otherwise colour fields.",
+            ["{0} 走 color fields，不嵌 ICC。"] = "{0} uses colour fields and embeds no ICC.",
+            ["JPEG：只有 ICC 一条声明通道，没有代码点 —— "] = "JPEG: ICC is the only declaration channel, there are no code points - ",
+            ["{0} 原色嵌 APP2/ICC（实测产物里 ICC_PROFILE 与 acsp 都在）。"] = "The {0} primaries are embedded as APP2/ICC (measured output has both ICC_PROFILE and acsp).",
+            ["{0} 目标【什么都不写】，靠 JFIF 默认。"] = "The {0} target writes nothing at all, relying on the JFIF default.",
+            ["容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。"] = "The container has no HDR channel, so the switch falls back to 8-bit SDR; that is a separate question from whether Rec.2020 primaries can be declared.",
+            ["WebP：同样只有 ICC 一条通道 —— "] = "WebP: likewise ICC is the only channel - ",
+            ["{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。"] = "The {0} primaries are carried through the intermediate PNG's iCCP, and cwebp gets -metadata icc (measured output has the ICCP chunk, a 2100-byte profile).",
+            ["{0} 目标【什么都不写】（实测对照组无 ICCP）。"] = "The {0} target writes nothing at all (the measured control group had no ICCP).",
+            ["无 HDR 通道 ⇒ HDR 开关落空成 8-bit SDR，但原色声明照常；缺 cwebp.exe 时整份产物会换成 PNG。"] = "No HDR channel, so the HDR switch falls back to 8-bit SDR, but the primaries declaration still applies; when cwebp.exe is missing the whole output is replaced by PNG.",
+            ["TIFF：没有代码点通道 ⇒ 只靠 ICC，连 Rec.709 也老实嵌一份（不像 JPEG/WebP 能省）。"] = "TIFF: no code-point channel, so ICC only - and even Rec.709 is honestly embedded (unlike JPEG/WebP, which can omit it).",
+            ["HDR 用带 PQ TRC 的 ICC 声明。"] = "HDR is declared by an ICC with a PQ TRC.",
+            ["SDR 用标准色域 ICC。"] = "SDR uses the standard-gamut ICC.",
+            ["JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {0} ⇒ 底图、增益比、"] = "JPEG (with gain map): the base image is always SDR and always carries an embedded ICC - with target {0} the base, the gain ratio and ",
+            ["声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由 XMP hdrgm + "] = "the declaration all share one set of primaries; changing the target changes the primaries, it never turns the base into HDR (HDR is carried by XMP hdrgm + ",
+            ["ISO 21496-1 增益图段承载，容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。"] = "the ISO 21496-1 gain-map section, and the container writes no PQ, so this does not conflict with 'the target is not the HDR tier').",
+            ["无码点"] = "no code point",
+            ["未知格式：给不出声明通道。"] = "Unknown format: no declaration channel to give.",
+        // ── 2026-10-03 第五批附：OCR 语言提示（R2 收尾）
+            ["ℹ PP-OCRv6 是单模型统一字典（18708 字），不随语言切换。实测中文/英文最准，日文需字高 ≥24px，韩文不支持（会自动改走 Windows OCR 兜底，需系统装韩文语言包）。"] = "ℹ PP-OCRv6 is a single model with one shared dictionary (18,708 glyphs) and does not follow the language setting. Measured best on Chinese/English; Japanese needs glyph height >= 24px; Korean is unsupported (it automatically falls back to Windows OCR, which requires the Korean language pack installed).",
         };
 
     /// <summary>这条中文有没有英文对照（= 是不是"界面写死、等着被翻译"的那批）。</summary>

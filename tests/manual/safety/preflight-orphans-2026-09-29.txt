@@ -1,0 +1,56 @@
+=== 轮前残留快照 2026-09-29 06:12 · 用于批次 D/F 收尾比差集 ===
+--- %TEMP% 里名字含 ttc/TrueToneCap/avif/nvenc 的条目 ---
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:09 TrueToneCap_Bench
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:10 TrueToneCap_ColorTest
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:10 TrueToneCap_EncTest
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:10 TrueToneCap_FmtTest
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:10 TrueToneCap_HdrDepth
+drwxr-xr-x 1 20210 197609        0 2026-09-28 04:06 TrueToneCap_HdrTest
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:10 TrueToneCap_UsabilityTest
+drwxr-xr-x 1 20210 197609        0 2026-09-28 20:18 TrueToneCap_WgcAvifTest
+-rw-r--r-- 1 20210 197609     1513 2026-09-22 21:01 cjxl_help.txt
+drwxr-xr-x 1 20210 197609        0 2026-09-26 23:30 jim3ttcn.mib
+-rw-r--r-- 1 20210 197609   117441 2026-09-27 15:23 nvenc-old.c
+-rw-r--r-- 1 20210 197609   117441 2026-09-27 15:22 nvenc.c
+-rw-r--r-- 1 20210 197609   227592 2026-09-27 16:37 nvenc_diag.txt
+drwxr-xr-x 1 20210 197609        0 2026-09-19 06:15 svt-avifenc-build
+-rw-r--r-- 1 20210 197609     9381 2026-09-23 00:50 ttc-release-msg.txt
+-rw-r--r-- 1 20210 197609    48521 2026-09-22 22:01 ttc-unit-out.txt
+-rw-r--r-- 1 20210 197609     5907 2026-09-22 17:28 ttc-verify.log
+-rw-r--r-- 1 20210 197609     4913 2026-09-22 19:11 ttc-verify2.log
+-rw-r--r-- 1 20210 197609     5907 2026-09-22 19:14 ttc-verify3.log
+-rw-r--r-- 1 20210 197609     5907 2026-09-22 19:27 ttc-verify4.log
+-rw-r--r-- 1 20210 197609     5907 2026-09-22 20:21 ttc-verify5.log
+-rw-r--r-- 1 20210 197609     5905 2026-09-22 21:34 ttc-verify6.log
+-rw-r--r-- 1 20210 197609     5905 2026-09-22 21:41 ttc-verify7.log
+-rw-r--r-- 1 20210 197609     5907 2026-09-22 22:03 ttc-verify8.log
+-rw-r--r-- 1 20210 197609     5905 2026-09-22 23:42 ttc-verify9.log
+-rw-r--r-- 1 20210 197609     6638 2026-09-23 00:45 ttc-verifyA.log
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:09 ttc_gainmap_color_probe
+drwxr-xr-x 1 20210 197609        0 2026-09-23 01:01 ttc_gainmap_look
+drwxr-xr-x 1 20210 197609        0 2026-09-29 06:09 ttc_jxl_product_probe
+drwxr-xr-x 1 20210 197609        0 2026-09-23 01:20 ttc_look
+drwxr-xr-x 1 20210 197609        0 2026-09-23 01:50 ttc_look_422
+drwxr-xr-x 1 20210 197609        0 2026-09-23 01:37 ttc_look_444
+drwxr-xr-x 1 20210 197609        0 2026-09-23 17:45 ttc_look_sat
+drwxr-xr-x 1 20210 197609        0 2026-09-28 03:07 ttcneg7_b2teap
+drwxr-xr-x 1 20210 197609        0 2026-09-28 02:22 ttcnegdedyli5i
+drwxr-xr-x 1 20210 197609        0 2026-09-28 02:21 ttcnegecbqbaqo
+drwxr-xr-x 1 20210 197609        0 2026-09-28 02:20 ttcneggx6m4h5b
+drwxr-xr-x 1 20210 197609        0 2026-09-28 02:41 ttcneghj3_ds5i
+drwxr-xr-x 1 20210 197609        0 2026-09-28 02:18 ttcnegxucuz8n8
+-rw-r--r-- 1 20210 197609    31840 2026-09-27 18:58 u-nvenc.c
+--- %LOCALAPPDATA%\TrueToneCap ---
+total 17
+-rw-r--r-- 1 20210 197609 1461 2026-09-16 08:07 TrueToneCap.settings.json
+-rw-r--r-- 1 20210 197609 1709 2026-09-16 06:51 app.png
+-rw-r--r-- 1 20210 197609 1031 2026-09-24 00:21 crash.log
+drwxr-xr-x 1 20210 197609    0 2026-07-28 04:56 onnx_models
+-rw-r--r-- 1 20210 197609  117 2026-09-24 22:09 settings.json
+--- encoder-crash sentinel ---
+0
+--- 裁判位（本轮实测可达） ---
+ffprobe = C:\PLAN\FFmpeg\ffprobe.exe（注意：本机构建带非上游 HDR10+ 补丁，声明层读数要用 VQBench 那份干净件复算）
+imagecodecs 2026.6.26 有 AVIF 解码；Pillow 12.3.0 + lcms2；pillow_heif 缺失（HEIF 容器要靠 imagecodecs/ffprobe）
+jxlinfo/djxl = C:\PLAN\ffmpegPictureUI\tools\src\libjxl\build\tools\Release\（运行时 DLL 不在同目录，要 PATH 追加）
+ultrahdr_app = C:\PLAN\ffmpegPictureUI\tools\src\libultrahdr\build\Release\

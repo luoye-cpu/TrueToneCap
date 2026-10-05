@@ -37,6 +37,21 @@ public static class CorePipelineTests
         Test_ConvertFloatToHalf_Roundtrip();
         Test_ConvertFloatToHalf_SpecialValues();
         Test_BgraToScrgbLinear_KnownValues();
+        Test_BgraToScrgbForDisplay_PresentationContract();
+        Test_SdrPreview_RoutesThroughTheHdrWindow();
+        Test_FormatCombo_RebuildKeepsThePersistedFormat();
+        Test_XamlControlsResources_MergedExactlyOnce();
+        Test_ComboByTag_NeverLeavesBlank();
+        Test_XamlIcons_DoNotDependOnSymbolFonts();
+        Test_LogViewer_Toolbar_HasDistinctColumns();
+        Test_WgcCapture_DegradationIsVisibleAtDefaultVerbosity();
+        Test_QualityTexts_CoreStringsAreAllCovered();
+        Test_UiFontSweep_DoesNotTouchIconSubtrees();
+        Test_Autostart_OnlyWrittenOnUserSave();
+        Test_ShowPreview_HasAConsumer();
+        Test_FrameworkOwnedResidue_IsReallyFrameworks();
+
+        Test_OutputDir_OnlyFallsBackWhenEmpty_FailureIsVisible();
 
         // ToneMapper
         Test_ToneMapper_Reinhard_BlackStaysBlack();
@@ -103,13 +118,18 @@ public static class CorePipelineTests
         Test_ColorSpaceTag_MatrixCoverage();
         Test_NormalizeColorSpaceKey();
         Test_ToneMapper_SegmentedReinhard_Monotonic();
-        Test_Hlsl_ToneMapping_MatchesCpu();
+        Test_ShaderList_HasNoOrphanEntry();
         Test_FormatHelper_ResolveActualPath();
 
         // 跨项目源码契约（App 层的"两处常量必须同步"类约束）
         Test_SettingsWhitelist_MatchesXamlTags();
+        Test_AppSelfChecks_AreCalled();
+        Test_PngFallbackSwitch_Wired();
         Test_SettingsDiffPruner_Semantics();
         Test_SettingsPersistence_Sentinels();
+        Test_CaptureRoots_FailureNeverSilent();
+        Test_AnnotationComposedForAllDestinations();
+        Test_ReviewRoundFixes_HaveTeeth();
         Test_LlmConfig_InjectsYoudaoCredentials();
         Test_StartupManager_ReadHandlesQuotedCommand();
 
@@ -129,6 +149,15 @@ public static class CorePipelineTests
         Test_HdrPngDepthNegotiation_SourceSentinels();
         Test_AvifCrfFloorTable();
         Test_DegradationToast_SingleDedupRule();
+        Test_StatusBarLocale_CsMustNotReWriteChinese();
+        Test_HotkeyConflictLog_CarriesRealWin32Error();
+        Test_LogViewer_WindowAndInstanceAttribution();
+        Test_OverlayReentryLatch_SitsBeforeWindowCreation();
+        Test_Overlay_HasNoGpuBackgroundPath();
+        Test_BusyRejection_DoesNotUseFailureToast();
+        // HDR 抓帧窗的字是画进像素的 ⇒ 本地化闸门/UIA/降级告警三条检测路径全瞎，这里把它钉成可数的数
+        StringLiteralScannerTests.RunAll(Assert);   // 尺子自己的对抗用例（先于用它的锁）
+        Test_HdrBakedText_BlindSpotIsCounted();
 
         // MFT（QSV 选项的实际实现路径）真实编码验证
         Test_MftAv1EncodeIfAvailable();
@@ -210,9 +239,13 @@ public static class CorePipelineTests
     // ═══════════════════════════════════════
 
     /// <summary>
-    /// 说明：这两条用例会读写 %LOCALAPPDATA%\TrueToneCap\encoder-crash.sentinel。
-    /// 结束时均主动 ClearAll 复原。若用户此前确有崩溃残留，会被用例清除 ——
-    /// 影响仅为"重新启用一次硬件编码"，属无害副作用。
+    /// 说明：这两条用例会读写 %LOCALAPPDATA%\TrueToneCap\encoder-crash.&lt;backend&gt;.sentinel，
+    /// 结束时均主动 ClearAll 复原（ClearAll 也会忘掉本会话的"已消费"记 ⇒ 用例之间不互相污染）。
+    /// 若用户此前确有崩溃残留，会被用例清除 —— 影响仅为"重新启用一次硬件编码"，属无害副作用。
+    /// <para>═══ 2026-09-29 审查轮 §10.3 V5：这里原先拿【本进程 Arm】当"崩溃残留"的替身 ═══
+    /// 哨兵加上 PID 归属后那个替身不再成立：同进程写的在途文件按定义不是残留，<c>IsBlocked</c>
+    /// 必须返回 false（返回 true 才是本轮修的那个 bug）。要模拟残留就伪造一份【别的进程】写的文件，
+    /// 路径用 <c>SentinelPathFor</c> 现取 —— 在测试里重抄一遍拼法，它就会悄悄跟实现分叉。</para>
     /// </summary>
     static void Test_EncoderCrashSentinel_ArmDisarm()
     {
@@ -221,13 +254,21 @@ public static class CorePipelineTests
             EncoderCrashSentinel.ClearAll();
             bool before = EncoderCrashSentinel.IsBlocked("NVENC");
             EncoderCrashSentinel.Arm("NVENC");
-            bool armed = EncoderCrashSentinel.IsBlocked("NVENC");
+            bool inFlight = EncoderCrashSentinel.IsBlocked("NVENC");
+            bool keptWhileInFlight = File.Exists(EncoderCrashSentinel.SentinelPathFor("NVENC"));
             EncoderCrashSentinel.Disarm();
             bool after = EncoderCrashSentinel.IsBlocked("NVENC");
 
             Assert("EncoderCrashSentinel: 初始未阻塞", !before);
-            Assert("EncoderCrashSentinel: Arm 后处于阻塞态（模拟进程崩溃残留）", armed);
-            Assert("EncoderCrashSentinel: Disarm 后解除（模拟正常返回）", !after);
+            Assert("EncoderCrashSentinel: 本进程在途的 Arm 不算崩溃残留（否则第二个并发编码会替第一个拆保护并误报崩溃）",
+                !inFlight);
+            Assert("EncoderCrashSentinel: 在途期间文件仍在 ⇒ 真崩了仍有据可读", keptWhileInFlight);
+            Assert("EncoderCrashSentinel: Disarm 后解除（模拟正常返回）",
+                !after && !File.Exists(EncoderCrashSentinel.SentinelPathFor("NVENC")));
+
+            WriteForeignSentinel("NVENC");
+            Assert("EncoderCrashSentinel: 别的进程留下的残留仍判崩溃（上面三个 false 不是恒 false）",
+                EncoderCrashSentinel.IsBlocked("NVENC"));
         }
         finally
         {
@@ -235,12 +276,22 @@ public static class CorePipelineTests
         }
     }
 
+    /// <summary>伪造一份"另一个进程留下的"哨兵（三行：后端名 / PID / 时间戳）。</summary>
+    static void WriteForeignSentinel(string backend)
+    {
+        var p = EncoderCrashSentinel.SentinelPathFor(backend);
+        var dir = Path.GetDirectoryName(p)!;
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(p, backend + Environment.NewLine + (Environment.ProcessId + 1) +
+            Environment.NewLine + DateTime.UtcNow.ToString("O"));
+    }
+
     static void Test_EncoderCrashSentinel_BackendScoped()
     {
         try
         {
             EncoderCrashSentinel.ClearAll();
-            EncoderCrashSentinel.Arm("NVENC");
+            WriteForeignSentinel("NVENC");          // 崩溃发生在 NVENC 上（别的进程留下的证据）
             bool nvenc = EncoderCrashSentinel.IsBlocked("NVENC");
             bool mft = EncoderCrashSentinel.IsBlocked("MFT");
 
@@ -256,6 +307,12 @@ public static class CorePipelineTests
     /// <summary>
     /// 并发编码：两个线程同时 Arm，先返回的那个【不得】清除哨兵，
     /// 否则仍在原生调用中的另一个线程就失去了保护 —— 崩溃将不再被记录。
+    /// <para>═══ 2026-09-29 审查轮 §10.3 V5：这个方法的第二条期望原先把【错行为】钉成了契约 ═══
+    /// 旧写法要求"两次 Arm + 一次 Disarm 之后 IsBlocked == true"，可那个文件就是本进程自己刚写的
+    /// 在途标记。按旧期望实现的结果是：第二个并发编码把第一个仍在原生调用中的保护读成
+    /// "上次进程崩了" ⇒ 删掉它、整进程禁用硬件、还弹一条假的崩溃理由。
+    /// 现在的契约是【在途 ≠ 残留】：同进程（PID 相同或本进程仍有在途计数）判 false 且不许删文件；
+    /// 只有别的进程留下的、或旧两行格式（无 PID 行）的残留才判 true。两臂各咬一种错。</para>
     /// </summary>
     static void Test_EncoderCrashSentinel_ConcurrentArm()
     {
@@ -266,12 +323,44 @@ public static class CorePipelineTests
             EncoderCrashSentinel.Arm("NVENC");   // 线程 B 进入原生编码
             EncoderCrashSentinel.Disarm();       // A 正常返回 —— B 仍在编码中
 
-            bool stillArmed = EncoderCrashSentinel.IsBlocked("NVENC");
-            EncoderCrashSentinel.Disarm();       // B 也返回 —— 此时才应清除
-            bool cleared = !EncoderCrashSentinel.IsBlocked("NVENC");
+            var path = EncoderCrashSentinel.SentinelPathFor("NVENC");
+            Assert("哨兵: 同进程在途的 Arm 不得被读成「上次进程崩溃」（不许据此禁用硬件）",
+                !EncoderCrashSentinel.IsBlocked("NVENC"),
+                "在途与残留同形 ⇒ 第二个并发编码会替第一个拆保护并弹假原因");
+            Assert("哨兵: 先返回者不许替后返回者删文件（保护仍在，直到最后一个 Disarm）",
+                File.Exists(path));
 
-            Assert("EncoderCrashSentinel: 并发时先返回者不清除哨兵（后返回者仍受保护）", stillArmed);
-            Assert("EncoderCrashSentinel: 最后一个返回者才清除哨兵", cleared);
+            EncoderCrashSentinel.Disarm();       // B 也返回 —— 此时才应清除
+            Assert("哨兵: 最后一个返回者才清除哨兵", !File.Exists(path));
+
+            // ── 对照臂：别的进程留下的残留【必须】判成崩溃（上面那条 false 不能是"永远 false"） ──
+            var dir = Path.GetDirectoryName(path)!;
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(path, "NVENC" + Environment.NewLine +
+                (Environment.ProcessId + 1) + Environment.NewLine + DateTime.UtcNow.ToString("O"));
+            Assert("哨兵: 别的进程 PID 留下的文件必须判为崩溃残留并禁用该后端一次",
+                EncoderCrashSentinel.IsBlocked("NVENC"),
+                "这一臂不成立 ⇒ 上一条的 false 是恒 false，整条判据空转");
+            Assert("哨兵: 残留被读后即消费（禁用只持续下一次启动那一个会话，不跨会话永久）",
+                !File.Exists(path) && EncoderCrashSentinel.IsBlocked("NVENC"));
+
+            // ── 旧两行格式（第二行是时间戳而不是 PID）：宁可少一次在途保护，也要能恢复 ──
+            EncoderCrashSentinel.ClearAll();
+            File.WriteAllText(path, "NVENC" + Environment.NewLine + DateTime.UtcNow.ToString("O"));
+            Assert("哨兵: 旧两行格式（无 PID 行）的残留仍判为崩溃 ⇒ 不会因为换了格式就永久卡住",
+                EncoderCrashSentinel.IsBlocked("NVENC") && !File.Exists(path));
+
+            // ── 归属校验：文件名与首行不一致时，既不替别人禁用、也不替别人消费 ──
+            //   ⚠ 这一臂必须写到【被请求后端自己的】路径上，否则它是"文件不存在"判绿的空转臂。
+            EncoderCrashSentinel.ClearAll();
+            var otherPath = EncoderCrashSentinel.SentinelPathFor("QSV-MFT");
+            File.WriteAllText(otherPath, "NVENC" + Environment.NewLine +
+                (Environment.ProcessId + 1) + Environment.NewLine + DateTime.UtcNow.ToString("O"));
+            Assert("哨兵: 首行后端名与所请求不符时不许禁用（NVENC 的崩溃不能算到 QSV 头上）",
+                !EncoderCrashSentinel.IsBlocked("QSV-MFT") && File.Exists(otherPath),
+                "凭文件存在就禁用 ⇒ 归属又错回去；顺手删掉 ⇒ 替别人消费了哨兵");
+            Assert("哨兵: 读别的后端时不许顺手删掉这份不匹配的残留（NVENC 自己没残留 ⇒ false）",
+                !EncoderCrashSentinel.IsBlocked("NVENC") && File.Exists(otherPath));
         }
         finally
         {
@@ -745,6 +834,1001 @@ public static class CorePipelineTests
         var linear = PixelOps.BgraToScrgbLinearFast(bgra, 1, 1);
         bool ok = linear[0] == 0f && linear[1] == 0f && linear[2] == 0f && Math.Abs(linear[3] - 1f) < 0.01f;
         Assert("BgraToScrgbLinear: 黑色 → linear(0,0,0,1)", ok);
+    }
+
+    /// <summary>
+    /// 呈现帧函数 <c>BgraToScrgbForDisplay</c> 的契约（2026-09-30，SDR 改道进 HDR 界面的前置条件）。
+    /// <para>三条各对应一种真机上【看得见】的错法，缺一条就会复现维护者肉眼抓到的症状：
+    /// ① 参考白没乘 ⇒ SDR 内容比周围桌面暗一档（HDR 输出下 1.0 名义 = 80 nits，而系统 SDR 白点由用户定）；
+    /// ② 在非 HDR 输出上也乘 ⇒ 白点被推到 1.5，而 DWM 对普通屏的 FP16 scRGB 内容做数值钳位 ⇒ 削成一团白；
+    /// ③ 沿用源 alpha ⇒ Ignore + flip + WS_EX_NOREDIRECTIONBITMAP 下 A=0 表现成"透出实时桌面"
+    ///    （<c>HdrCaptureWindow.cs:332-338</c> 那条注释自己描述过的现象）。</para>
+    /// <para>尺子取【独立实现】而不是抄本文件的 LUT：期望值按 IEC 61966-2-1 的 sRGB EOTF 现算，
+    /// 名义参考白从 <see cref="PixelOps.NominalSdrReferenceWhiteNits"/> 取，不在测试里重抄常数
+    /// （§30.3 那条"抄常数要配行为锚"的直接落实）。</para>
+    /// </summary>
+    static void Test_BgraToScrgbForDisplay_PresentationContract()
+    {
+        // ── 夹具：一整条 256 级灰阶，A 通道故意一半 0、一半 255（看呈现帧还敢不敢信源 alpha）──
+        const int n = 256;
+        var bgra = new byte[n * 4];
+        for (int k = 0; k < n; k++)
+        {
+            int i = k * 4;
+            bgra[i] = (byte)k; bgra[i + 1] = (byte)k; bgra[i + 2] = (byte)k;
+            bgra[i + 3] = (byte)((k % 2 == 0) ? 0 : 255);
+        }
+        static float SrgbEotf(int code)   // 独立参照：IEC 61966-2-1
+        {
+            float c = code / 255f;
+            return c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        float wantHdrWhite = 120f / PixelOps.NominalSdrReferenceWhiteNits;
+        int wi = 255 * 4;   // 码点 255 那一格的起点（夹具里 pixel 索引 == 码点）
+
+        var hdr = PixelOps.BgraToScrgbForDisplay(bgra, n, 1, hdrOutputActive: true, sdrWhiteNits: 120);
+        var sdr = PixelOps.BgraToScrgbForDisplay(bgra, n, 1, hdrOutputActive: false, sdrWhiteNits: 120);
+
+        Assert("呈现帧两档长度都 == w*h*4（呈现侧按这个索引，短一寸就越界读写）",
+            hdr.Length == n * 4 && sdr.Length == n * 4, $"实得 {hdr.Length}/{sdr.Length}");
+
+        // ① 参考白：两档的白点值必须分别是 1.5 与 1.0
+        Assert($"HDR 输出档：码点 255 → {wantHdrWhite:0.###}（= 系统 SDR 白点 120 / 名义 80），三通道",
+            Math.Abs(hdr[wi] - wantHdrWhite) < 1e-5f && Math.Abs(hdr[wi + 1] - wantHdrWhite) < 1e-5f
+            && Math.Abs(hdr[wi + 2] - wantHdrWhite) < 1e-5f,
+            $"实得 {hdr[wi]},{hdr[wi + 1]},{hdr[wi + 2]}");
+        Assert("非 HDR 输出档：码点 255 → 恰好 1.0（再高一点就要被 DWM 钳位）",
+            sdr[wi] == 1f && sdr[wi + 1] == 1f && sdr[wi + 2] == 1f,
+            $"实得 {sdr[wi]},{sdr[wi + 1]},{sdr[wi + 2]}");
+
+        // ② 值域：非 HDR 档整帧不得 >1；HDR 档白必须真的 >1（等于旧函数就是这刀没生效）
+        float maxSdr = 0f;
+        for (int k = 0; k < n; k++) { if (sdr[k * 4] > maxSdr) maxSdr = sdr[k * 4]; }
+        Assert($"非 HDR 档整帧 max ≤ 1.0（实得 {maxSdr:0.####}）", maxSdr <= 1.000001f,
+            "白点被推到 1 以上 = 普通屏上被数值钳位 = 白字糊成一团白");
+        Assert("HDR 档确实抬到 1.0 以上（与旧函数逐位相同 = 参考白根本没乘）", hdr[wi] > 1f,
+            $"实得 {hdr[wi]}");
+
+        // ③ alpha：夹具里一半像素 A=0，两档输出都必须是一
+        int aBad = 0;
+        for (int k = 0; k < n; k++) { if (hdr[k * 4 + 3] != 1f || sdr[k * 4 + 3] != 1f) aBad++; }
+        Assert("A 通道一律 1.0，不信源帧 alpha（夹具含 128 格 A=0）", aBad == 0, $"实得 {aBad} 格不是一");
+
+        // ④ 与独立 EOTF 参照逐点对齐（含低端非线性段）
+        foreach (int code in new[] { 0, 10, 187, 255 })
+        {
+            float e = SrgbEotf(code);
+            int i = code * 4;
+            Assert($"非 HDR 档 码点 {code} → 独立 EOTF 参照 {e:0.######}（三通道逐位）",
+                Math.Abs(sdr[i] - e) < 1e-6f && Math.Abs(sdr[i + 1] - e) < 1e-6f && Math.Abs(sdr[i + 2] - e) < 1e-6f,
+                $"实得 {sdr[i]},{sdr[i + 1]},{sdr[i + 2]}");
+            Assert($"HDR 档 码点 {code} → {e:0.######}×{wantHdrWhite:0.###}",
+                Math.Abs(hdr[i] - e * wantHdrWhite) < 1e-6f, $"实得 {hdr[i]}");
+        }
+
+        // ⑤ 读不到白点不许猜
+        var noNits = PixelOps.BgraToScrgbForDisplay(bgra, n, 1, hdrOutputActive: true, sdrWhiteNits: 0);
+        Assert("sdrWhiteNits<=0 ⇒ 不缩放（回落 1.0），不猜一个白点，但 A 仍写 1",
+            noNits[wi] == 1f && noNits[wi + 3] == 1f, $"实得 白={noNits[wi]} A={noNits[wi + 3]}");
+
+        // ⑥ 守卫必须响亮：短一寸都不许静默失步
+        bool threw = false;
+        try { PixelOps.BgraToScrgbForDisplay(new byte[4 * 10], 32, 1, hdrOutputActive: true, sdrWhiteNits: 120); }
+        catch (ArgumentException) { threw = true; }
+        Assert("源帧长度不足 ⇒ 抛 ArgumentException（少读字段还照样出图是本仓反复拦的那类）", threw);
+
+        // ⑦ 单调性（被钳回/回绕都会破坏它）
+        bool mono = true;
+        for (int k = 1; k < n; k++) { if (sdr[k * 4] < sdr[(k - 1) * 4]) { mono = false; break; } }
+        Assert("非 HDR 档灰阶输出单调（不单调=某处被钳回或回绕）", mono);
+
+        // ⑧ 负样本：这一档【不许】等于旧函数的输出，否则说明缩放根本没进呈现路径
+        var legacy = PixelOps.BgraToScrgbLinearFast(bgra, n, 1);
+        bool sameAsLegacy = true;
+        for (int k = 0; k < n; k++) { if (hdr[k * 4] != legacy[k * 4]) { sameAsLegacy = false; break; } }
+        Assert("HDR 档与旧函数逐位不同（旧函数就是「白点没乘」那一版，相同即改道无效）", !sameAsLegacy);
+    }
+
+    /// <summary>
+    /// 选区预览改道的形状锁（2026-09-30，用户口径"以 HDR 下的界面为准，SDR 与 HDR 体验统一"）。
+    /// <para>钉四件事，每件对应一种会把"两套界面 / 白屏"请回来的改法：
+    /// ① <c>if (hasHdr)</c> 那道分叉不许回来；
+    /// ② 呈现帧必须由带参考白与 alpha 契约的 <c>BgraToScrgbForDisplay</c> 生成，MainWindow 里
+    ///    不许再直接吃 <c>BgraToScrgbLinearFast</c>（那是"白点没乘 + 信驱动给的 alpha"那一版）；
+    /// ③ <c>LoadFrame</c> 必须吃那份统一帧 <c>presentFrame</c>，不许退回只有 HDR 才有值的
+    ///    <c>hdrDesktopPixels</c>（连带老那句 <c>if (hdrDesktopPixels is null) return;</c> 也不许回来——
+    ///    它会把 SDR 档吞成"什么都没发生"）；
+    /// ④ <c>new SelectionOverlay(</c> 全文件只许 1 处，且必须排在 <c>if (initOk)</c>【之后】——
+    ///    它是"预览窗建不起来"的最后兜底，不是 SDR 的正路。</para>
+    /// <para>取下标前一律剥整行注释：我这段说明里就带着这些锚文本，不剥注释这条锁就此恒真
+    /// （§17.2 记过同一类"哨兵读到注释"）。</para>
+    /// </summary>
+    static void Test_SdrPreview_RoutesThroughTheHdrWindow()
+    {
+        var mp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 MainWindow.xaml.cs（缺文件=这条锁失明，不许 Skip 过去）", mp is not null);
+        if (mp is null) return;
+        var code = StripLineComments(ReadSourceNormalized(mp));
+
+        Assert("SDR/HDR 那道 if (hasHdr) 分叉已撤掉（回来就等于两套界面）",
+            !code.Contains("if (hasHdr)"), "hasHdr 重新当地面门槛 ⇒ SDR 又走回旧覆盖层");
+        Assert("预览呈现帧走带参考白/alpha 契约的那支，MainWindow 里不再直接吃 LinearFast",
+            code.Contains("BgraToScrgbForDisplay(") && !code.Contains("BgraToScrgbLinearFast("),
+            "直接吃 LinearFast = 白点没乘 + 相信驱动给的 alpha，正是维护者肉眼抓到的那一族");
+        Assert("LoadFrame 吃的是统一帧 presentFrame；老的『没 HDR 帧就静默 return』不许回来",
+            code.Contains("hdrWnd.LoadFrame(presentFrame,") && !code.Contains("LoadFrame(hdrDesktopPixels")
+            && !code.Contains("if (hdrDesktopPixels is null) return;"),
+            "退回 hdrDesktopPixels ⇒ SDR 档要么没帧，要么被那句 return 吞成无声取消");
+
+        int overlays = 0;
+        for (int i = code.IndexOf("new SelectionOverlay(", StringComparison.Ordinal); i >= 0;
+             i = code.IndexOf("new SelectionOverlay(", i + 1, StringComparison.Ordinal)) overlays++;
+        int initOk = code.IndexOf("if (initOk)", StringComparison.Ordinal);
+        int firstOverlay = code.IndexOf("new SelectionOverlay(", StringComparison.Ordinal);
+        Assert($"旧覆盖层只留 1 处创建点（实得 {overlays}），且排在预览窗初始化判定【之后】（覆盖层={firstOverlay} 判定={initOk}）",
+            overlays == 1 && initOk >= 0 && firstOverlay > initOk,
+            "覆盖层回到 if (initOk) 之前 = 它又成了 SDR 的正路，而不是兜底");
+
+        Assert("预览窗失败的回退会发一条可见提示（不再只写 log；报告 §33.3 那条静默）",
+            code.Contains("PreviewFallbackTitle") && code.Contains("ToastService.ShowToast("),
+            "只记 log ⇒ 用户按了键、看见一张不一样的界面，没有任何一句话解释");
+
+        // 兜底那条路的【可达入口】（报告 §35.5：改道之后这 1662+613 行在正常构建里到不了，
+        // 于是"兜底能不能用"只能引改道前的历史二进制）。判据要钉住三件事：
+        // 存在、默认不改行为、进兜底前先把压在上面的预览窗收掉。
+        // 数的是【读取点】而不是名字出现次数：日志文案里本来就该带上开关名（与 TTC_FORCE_SDR 同形），
+        // 按名字数会把那条消息数成第二个读取点——第一版就是这么红的。
+        int switchSites = System.Text.RegularExpressions.Regex.Matches(
+            code, @"GetEnvironmentVariable\(""TTC_FORCE_LEGACY_OVERLAY""\)").Count;
+        Assert($"诊断开关 TTC_FORCE_LEGACY_OVERLAY 只有一个读取点（实得 {switchSites}）",
+            switchSites == 1, "两处读取 ⇒ 一处改了另一处不变，兜底入口就此半开");
+        Assert("该开关必须与 initOk 取【与】：不置它时默认行为逐字不变",
+            Regex.IsMatch(code, @"if\s*\(initOk\s*&&\s*Environment\.GetEnvironmentVariable\(""TTC_FORCE_LEGACY_OVERLAY""\)\s*==\s*""1""\)"),
+            "不跟 initOk 取与 ⇒ 正常路径也会被它改道，这个开关就不再是「只让兜底可达」");
+        Assert("主动进兜底前先 Close 预览窗并清注册（否则量到的是压在覆盖层上面的那扇窗）",
+            code.Contains("hdrWnd.Close()") && code.Contains("_activeHdrWindow = null"),
+            "不 Close ⇒ 自绘窗还挂在 topmost 上，harness 拍到的是它而不是覆盖层，读数全假");
+
+        // 参考白这条规则现在只有一处实现；拼接那侧若把 80 重新抄回字面量，这条会红
+        var wgc = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        Assert("SDR→scRGB 的名义参考白只有一处定义（拼接侧引用常数，不再各抄一个 80）",
+            wgc is not null && StripLineComments(ReadSourceNormalized(wgc))
+                .Contains("PixelOps.NominalSdrReferenceWhiteNits"),
+            "两处各自抄 80 ⇒ 一处改了另一处不变，亮度基准就此分叉");
+
+        // 兜底那侧的钳制常数：§33.1 用真实拖拽量到"写死 460×50 vs 实测约 932×72" ⇒ 贴右边缘必然把
+        // 最后两枚按钮推出屏幕。改道后主路不再走它，但兜底还在，就把这条也钉住（它此前没有判据覆盖）。
+        var ovp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
+        var ovc = ovp is null ? "" : StripLineComments(ReadSourceNormalized(ovp));
+        int bare460 = System.Text.RegularExpressions.Regex.Matches(ovc, @"-\s*460\b").Count;
+        Assert($"兜底覆盖层按实测尺寸钳工具条（实得裸 460 = {bare460} 处，要求 0）",
+            ovc.Contains("ToolbarWidthDip()") && ovc.Contains("ToolbarHeightDip()") && bare460 == 0,
+            "460 回来 = 贴右边缘那一臂又是『6 枚按钮只看得见 4 枚』");
+    }
+
+    /// <summary>
+    /// 格式下拉重建时【不许】把用户存好的格式抹成默认（2026-10-01 实机量到的 P1）。
+    /// <para>链条（三段，少一段都不成立）：构造期先跑 <c>RebuildFormatCombo()</c>，那时控件尚未实化、
+    /// <c>SelectedIndex</c> 读回来是 -1 ⇒ 旧写法按 <c>FormatOrder.DefaultIndex</c> 回落成 PNG；
+    /// 而这一次<b>程序性</b>赋值会触发 <c>OnFormatChanged</c>（此刻 <c>_uiReady</c> 已经是 true），
+    /// 于是 <c>_settings.FormatIndex = 0</c> 外加 <c>SaveQuiet()</c> 落盘。
+    /// 用户看到的和量到的都一样：选的格式下次开机失效，而且<b>盘上那个键会被删掉</b>（差量写盘 ⇒ 0 就是默认 ⇒ 键消失）。</para>
+    /// <para>前后读数都是实机取的，不靠读码：<c>tests/output/realmachine-2026-10-01/format-persist.log</c>
+    /// （改前：盘上 3 ⇒ 界面 PNG ⇒ 会话结束键没了）、
+    /// <c>…/format-persist-postfix2.log</c>（改后：盘上 5 ⇒ 界面 TIFF ⇒ 键还在）。
+    /// 本卡是 T2 文本锁——它钉得住回落取哪个值，钉不住"赋值会不会又触发写盘"；
+    /// 后者住在实机格里，改这段代码必须重跑那个格子，别只跑门禁。</para>
+    /// </summary>
+    static void Test_FormatCombo_RebuildKeepsThePersistedFormat()
+    {
+        var mp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 MainWindow.xaml.cs（缺文件=本卡失明，不许 Skip 过去）", mp is not null);
+        if (mp is null) return;
+        var code = StripLineComments(ReadSourceNormalized(mp));
+
+        int rb = code.IndexOf("private void RebuildFormatCombo()", StringComparison.Ordinal);
+        int rbAgain = rb < 0 ? -1 : code.IndexOf("private void RebuildFormatCombo()", rb + 1, StringComparison.Ordinal);
+        Assert($"RebuildFormatCombo 的定义唯一（实得 {rb} / 第二处 {rbAgain}）", rb >= 0 && rbAgain < 0,
+            "长出第二个重建口 ⇒ 这条锁和本卡要判的那一段就不是用户实际跑的那一段");
+        if (rb < 0 || rbAgain >= 0) return;
+
+        int bodyEnd = code.IndexOf("\n    }", rb, StringComparison.Ordinal);
+        Assert("取到 RebuildFormatCombo 的方法体", bodyEnd > rb);
+        if (bodyEnd <= rb) return;
+        var body = code.Substring(rb, bodyEnd - rb);
+
+        // ① 回落的值必须是持久化那一份
+        Assert("控件未实化（keep<0）时回落到 _settings.FormatIndex，不是表里的默认项",
+            body.Contains("keep < 0 ? _settings.FormatIndex : keep"),
+            "取 DefaultIndex ⇒ 启动那一次程序性赋值把用户的格式抹成 PNG，还连带写回盘上");
+        Assert("旧的 DefaultIndex 回落写法不许回来",
+            !body.Contains("keep < 0 ? FormatOrder.DefaultIndex : keep"),
+            "同上一句，只是防「改一半」：两处并存时读哪一处取决于谁在后面");
+
+        // ② 这个回落只有【一处】——第二处就是一条没人看守的默认路径
+        int clampSites = System.Text.RegularExpressions.Regex.Matches(
+            body, @"FormatCbo\.SelectedIndex\s*=").Count;
+        Assert($"方法体内对 SelectedIndex 的赋值只有一处（实得 {clampSites}）", clampSites == 1,
+            "两处赋值 ⇒ 其中一处可以绕过上面那条回落，本卡就此只判住一半");
+
+        // ③ keep 必须在换 ItemsSource【之前】读（换了就被 WinUI 打回 -1，读晚了等于永远走回落）
+        int keepAt = body.IndexOf("int keep = FormatCbo.SelectedIndex;", StringComparison.Ordinal);
+        int srcAt = body.IndexOf("FormatCbo.ItemsSource =", StringComparison.Ordinal);
+        Assert($"keep 的读取排在 ItemsSource 赋值之前（keep={keepAt} ItemsSource={srcAt}）",
+            keepAt >= 0 && srcAt > keepAt,
+            "读晚了 ⇒ keep 恒 -1，回落分支取代用户选择");
+    }
+
+    /// <summary>
+    /// 主题资源那一段：第二次合入 <b>不能删</b>，而它的失败<b>不许静默</b>（2026-10-01 实测过的方向）。
+    /// <para>我本轮先按"纯噪声"把它删过一次 ⇒ 产品直接起不来：日志停在 OCR 初始化那一行，
+    /// 托管 UnhandledException 没跑（<c>%LOCALAPPDATA%\TrueToneCap\crash.log</c> 时间戳没动），
+    /// WER 归档给出 <c>故障模块 combase.dll / 异常代码 8000ffff</c> —— 同一个 COM 失败换了个地方冒出来，
+    /// 而那里没人接。所以那条 Warn 的含义不是"故障已被降级"，而是"故障还在、这一层挡住了它"，
+    /// 且这次构造顺带完成的框架初始化后面要用。</para>
+    /// <para>本卡因此钉三件事：XAML 那份在、代码侧那一次 Add 也在、它的 catch 必须往日志说话。
+    /// 真正的修法（为什么构造它会失败）还没找到，找到之前别拿"少一条警告"当收益去删它。</para>
+    /// </summary>
+    static void Test_XamlControlsResources_MergedExactlyOnce()
+    {
+        var ax = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "App.xaml"));
+        var ac = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "App.xaml.cs"));
+        Assert("找到 App.xaml 与 App.xaml.cs（缺文件=本卡失明）", ax is not null && ac is not null);
+        if (ax is null || ac is null) return;
+
+        var xaml = File.ReadAllText(ax);
+        Assert("App.xaml 里那一份 XamlControlsResources 必须在",
+            xaml.Contains("<XamlControlsResources"),
+            "删掉它 ⇒ 主题资源全没，界面退化成裸控件");
+
+        var code = StripLineComments(ReadSourceNormalized(ac));
+        int addSites = System.Text.RegularExpressions.Regex.Matches(
+            code, @"MergedDictionaries\.Add\s*\(\s*new\s+[\w.]*XamlControlsResources").Count;
+        Assert($"代码侧那一次 Add 必须还在（实得 {addSites} 处，要求 1）", addSites == 1,
+            "删掉它产品会【起不来】：0x8000FFFF 换个地方抛出且无人 catch（WER: combase.dll），实测于 2026-10-01");
+        Assert("它的 catch 必须往日志说话，不许静默吞掉",
+            code.Contains("XamlControlsResources 加载失败"),
+            "静默吞掉 ⇒ 这条每次都发生的 COM 失败从账上消失，而下一个人只会看到图标不对");
+        // 这一条是本轮我自己踩出来的：在 try/catch 之外读 Resources.MergedDictionaries 会把产品打死。
+        // 这一段排在 UnhandledException 注册【之前】，那里抛出的东西没人接 ⇒ 日志停在 NativeResolver、
+        // crash.log 时间戳不动、WER 给出 combase.dll / 8000ffff。所以"多加一条守卫"不是更稳，是更脆。
+        int allRefs = System.Text.RegularExpressions.Regex.Matches(code, @"MergedDictionaries").Count;
+        int tryAt = code.IndexOf("Resources.MergedDictionaries.Add", StringComparison.Ordinal);
+        int guardAt = code.IndexOf("MergedDictionaries.Count", StringComparison.Ordinal);
+        Assert($"MergedDictionaries 只许出现在那对 try/catch 里（全文件 {allRefs} 处，越界引用={guardAt}）",
+            allRefs == 1 && tryAt >= 0 && guardAt < 0,
+            "在 try/catch 之外读它 ⇒ 同一个 0x8000FFFF 换个地方抛出且无人 catch，产品直接起不来（2026-10-01 实测）");
+    }
+
+    /// <summary>
+    /// 下拉回填不许留空白，也不许在没选中项时把盘上的值改成写死的兜底（2026-10-01，用户："修"）。
+    /// <para>本机盘上 <c>OverlayColor="#99001833"</c> 不在那 7 个选项里 ⇒ 下拉显示空白，而保存侧
+    /// 那句 <c>?? "#99001833"</c> 又把这个<b>既不在选项里、也与模型默认 #80000000 不同向</b>的值写回去
+    /// ——兜底字面量自己就是造出这条脏数据的凶手（每次空白保存都把它再生产一遍）。
+    /// <c>OcrLanguage</c> 同形：ONNX 引擎下那个下拉是空的，旧写法每次保存把用户存过的语言抹成 ""。</para>
+    /// <para>处方与 §3 那条 P1 同一条：<b>回落取持久化真值，不取写死的默认</b>。
+    /// 这里的做法是"未匹配就把原值补成一项并选中"⇒ 界面显示的就是实际生效的，18 处 <c>?? 字面量</c>
+    /// 那条兜底路径整体不再被触发（所以只改这两处被点名的，其余留作现状）。</para>
+    /// </summary>
+    static void Test_ComboByTag_NeverLeavesBlank()
+    {
+        var mp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Settings.cs"));
+        Assert("找到 MainWindow.Settings.cs（缺文件=本卡失明）", mp is not null);
+        if (mp is null) return;
+        var code = StripLineComments(ReadSourceNormalized(mp));
+
+        int at = code.IndexOf("private static void SetComboByTag(", StringComparison.Ordinal);
+        int again = at < 0 ? -1 : code.IndexOf("private static void SetComboByTag(", at + 1, StringComparison.Ordinal);
+        Assert($"SetComboByTag 定义唯一（实得 {at} / 第二处 {again}）", at >= 0 && again < 0,
+            "长出第二个回填口 ⇒ 有一处会悄悄回到「匹配不到就空白」");
+        if (at < 0 || again >= 0) return;
+        int bodyEnd = code.IndexOf("\n    }", at, StringComparison.Ordinal);
+        Assert("取到 SetComboByTag 的方法体", bodyEnd > at);
+        if (bodyEnd <= at) return;
+        var body = code.Substring(at, bodyEnd - at);
+
+        Assert("0 个选项的下拉直接早退（ONNX 下 OcrLangCbo 本来就没有可选项，那不是值域漂移）",
+            body.Contains("cbo.Items.Count == 0"),
+            "把「控件本来就没项」和「值域漂了」混成一条 Warn ⇒ 真漂移被固定噪声埋掉");
+        Assert("回填比较与校验侧同一把尺（OrdinalIgnoreCase）",
+            body.Contains("StringComparison.OrdinalIgnoreCase"),
+            "IsOneOf 忽略大小写、这里区分 ⇒ 白名单「RGB」对 XAML「Rgb」会一路活到界面再变空白");
+        Assert("未匹配时把原值补成一项并选中，不许留空白",
+            body.Contains("cbo.Items.Add") && body.Contains("cbo.SelectedIndex"),
+            "空白那一瞬就是保存侧兜底字面量改掉用户值的时机");
+        // 选中必须走【控件级 SelectedIndex】。11:18 实机量到：对未实化页面上的容器写
+        // item.IsSelected = true 是空操作 ⇒ 项在列表里（8 项、含原值）却"选中=无"，界面仍旧空白。
+        // 这与本轮那条格式 P1 同族：控件级状态在实化前后语义不同。
+        Assert("选中用控件级 SelectedIndex，不许退回容器级 item.IsSelected",
+            !body.Contains(".IsSelected = true"),
+            "退回 item.IsSelected ⇒ 页面没实化时静默失效，判据看着绿、界面还是空白");
+        // 上面那条只证"补了一项"，证不到补的那一项【带不带原值】。
+        // 变异实测：把 `Tag = tag` 改成 `Tag = null` 时上面那条照样绿（M-C 无牙），
+        // 而 null Tag 会让保存侧 (string)item.Tag 落回空 ⇒ 与"留空白"是同一个坏结果。
+        Assert("补的那一项必须把盘上原值挂在 Tag 上（否则保存侧读回的是 null/空）",
+            body.Contains("Tag = tag"),
+            "Tag 丢了 ⇒ 界面看着有值、保存却把它抹成空，比留空白更坏（它看起来是好的）");
+
+        // 两处被点名的保存侧：只许"有选中项才回写"，不许留写死的兜底。
+        // ⚠ 这一条原先只看 MainWindow.Settings.cs 一份文件，而 _settings.OverlayColor 其实有
+        //   【两个写者】——另一处是 MainWindow.xaml.cs 的 OnOverlayColorChanged。10-01 改了前一份、
+        //   漏了后一份，判据照样绿，本机盘上至今仍是那个脏值（11:44 的 UIA 读数里它作为
+        //   SetComboByTag 补出来的第 8 项冒出来，标签就是一串裸 #99001833）。
+        //   尺子的覆盖面要跟着"这个字段有几个写者"走，不是跟着"我当时打开了哪个文件"走。
+        string Cut2(string s) => s.Length > 96 ? s[..96] + "…" : s;
+        var overlayWriters = new List<string>();
+        foreach (var f in Directory.EnumerateFiles(Path.GetDirectoryName(mp)!, "*.cs", SearchOption.AllDirectories)
+                     .Where(f => !f.Contains("\\obj\\") && !f.Contains("\\bin\\")))
+            foreach (Match m in Regex.Matches(StripLineComments(ReadSourceNormalized(f)),
+                         @"_settings\.OverlayColor\s*=[^\r\n]*"))
+                overlayWriters.Add($"{Path.GetFileName(f)}: {m.Value.Trim()}");
+        Assert("量到了 OverlayColor 的全部写者（少于 2 个 = 尺子又只看见一个文件，正是原来那条的毛病）",
+            overlayWriters.Count >= 2,
+            $"实得 {overlayWriters.Count} 个写者：" + string.Join(" || ", overlayWriters.Select(Cut2)));
+        var stillFallback = overlayWriters
+            .Where(w => w.Contains(@"?? ""#") || w.Contains("#99001833")).ToList();
+        Assert("OverlayColor 的【每一个】写者都不许再留写死的兜底颜色",
+            stillFallback.Count == 0,
+            "兜底字面量自己不在 7 个选项里 ⇒ 每次空白保存都把脏值再生产一遍，还和模型默认 #80000000 不同向；"
+            + $"仍带兜底的写者 {stillFallback.Count} 个：" + string.Join(" || ", stillFallback.Select(Cut2)));
+        Assert("OcrLanguage 的保存侧只在有选中项时回写",
+            code.Contains("ocrLangItem"),
+            "ONNX 下下拉为空 ⇒ 旧写法每次保存把用户存过的语言抹成空串，切回 Windows OCR 只能落回第一项");
+    }
+
+    /// <summary>
+    /// 界面图标不许再依赖符号字体（2026-10-01 实机定因后的形状锁）。
+    /// <para>起因与证据链在报告 §11-②：这个进程按【字体友好名】解析符号字体失败——
+    /// 裸 TextBlock 写 `Segoe MDL2 Assets` / `Segoe Fluent Icons` / `Segoe UI Symbol` 三族并排画同一枚
+    /// U+E713 全是豆腐块，而同一段里的中文与拉丁正常；GDI+ 用同一族同一码点能画出完好齿轮
+    /// （`gdiplus-glyph.png`），挪走 `DWriteCore.dll` 也不改变结果。
+    /// 修法走的是同图里已被证明可用的一条渲染路径：CheckBox 的勾是 `Path` 几何、一直显示正常 ⇒
+    /// 把图标取成字形轮廓（`tests/manual/safety/w7-glyph-to-pathdata.ps1` 用 GDI+ 的 GraphicsPath
+    /// 抽轮廓，回放自检 `w7-pathdata-roundtrip-check.ps1` 证明数据忠实）后改用 `PathIcon`。</para>
+    /// <para>本卡钉三件事：换过的文件里不许再出现 `<FontIcon`；不许靠"把图标删了"来通过（每文件要求
+    /// 至少一枚 PathIcon）；以及 <c>SilentCaptureToast.xaml</c> 那 5 枚是<b>登记在案的例外</b>
+    /// （它们带 `Style="{StaticResource ToastActionIcon}"` 与 `x:Name` 代码回填，要连样式和代码一起改）——
+    /// 例外要写死数量，多出来就红。</para>
+    /// </summary>
+    static void Test_XamlIcons_DoNotDependOnSymbolFonts()
+    {
+        var converted = new[]
+        {
+            "MainWindow.xaml", "SelectionOverlay.xaml", "OcrPreviewWindow.xaml",
+            "AnnotationWindow.xaml", "ThirdPartyNoticesWindow.xaml",
+        };
+        int totalIcons = 0;
+        foreach (var name in converted)
+        {
+            var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", name));
+            Assert($"找到 {name}（缺文件=本卡失明）", path is not null);
+            if (path is null) continue;
+            var text = File.ReadAllText(path);
+            int fontIcons = System.Text.RegularExpressions.Regex.Matches(text, @"<FontIcon\b").Count;
+            int pathIcons = System.Text.RegularExpressions.Regex.Matches(text, @"<PathIcon\b").Count;
+            totalIcons += pathIcons;
+            Assert($"{name} 里不许再有 FontIcon（实得 {fontIcons}）且图标不许凭空消失（PathIcon {pathIcons} 枚）",
+                fontIcons == 0 && pathIcons >= 1,
+                "符号字体在这个进程解析不出来 ⇒ 回到 FontIcon 就等于回到豆腐块");
+        }
+        Assert($"已换成 PathIcon 的图标总数不少于 30（实得 {totalIcons}）", totalIcons >= 30,
+            "数量掉下来说明有人整批改回 FontIcon 或删掉了图标");
+
+        var toast = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SilentCaptureToast.xaml"));
+        Assert("找到 SilentCaptureToast.xaml（登记例外要用）", toast is not null);
+        if (toast is not null)
+        {
+            var tt = File.ReadAllText(toast);
+            int n = System.Text.RegularExpressions.Regex.Matches(tt, @"<FontIcon\b").Count;
+            Assert($"SilentCaptureToast 的 FontIcon 必须为 0（实得 {n}）", n == 0,
+                "回到 FontIcon ⇒ 通知的语义图标又变豆腐块；这 5 枚原来是按 tone 回填 Glyph，改 PathIcon 后回填的是 Data");
+            Assert("按 tone 切换的四枚预置图标都必须在（切可见性，不是共享 Geometry）",
+                tt.Contains("IconSuccess") && tt.Contains("IconWarning")
+                && tt.Contains("IconError") && tt.Contains("IconInfo"),
+                "少一枚 = 有一档 tone 没有对应图标");
+        }
+
+        // 例外清零后，App.xaml 那份隐式样式已删（23:11 A/B：主窗默认页含一枚可见下拉箭头，
+        // 删前删后逐像素零差异）。它原本的注释写着"否则图标字形无法渲染"——那是错的：
+        // 本进程按字体友好名解析符号字体本来就失败（报告 §11-②），这份样式救不了任何图标。
+        var appx = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "App.xaml"));
+        var appxText = appx is null ? "" : File.ReadAllText(appx);
+        Assert("App.xaml 不许再出现隐式 FontIcon 样式，也不许再按名要符号字体",
+            appx is not null && !appxText.Contains("TargetType=\"FontIcon\"") && !appxText.Contains("Segoe MDL2"),
+            "全仓 XAML 已无 FontIcon 元素 ⇒ 再放一份隐式样式只会是带假注释的死码");
+
+        // LogViewer 是另一个 exe（TTCLogViewer）：主程序修好了不代表它也修好了
+        var lvPath = FindRepoFile(Path.Combine("src", "TrueToneCap.LogViewer", "MainWindow.xaml"));
+        Assert("找到 LogViewer/MainWindow.xaml（缺文件=这个独立进程从判据上消失）", lvPath is not null);
+        if (lvPath is not null)
+        {
+            var lv = File.ReadAllText(lvPath);
+            int lvFont = System.Text.RegularExpressions.Regex.Matches(lv, @"<FontIcon\b").Count;
+            int lvPath2 = System.Text.RegularExpressions.Regex.Matches(lv, @"<PathIcon\b").Count;
+            Assert($"LogViewer 里不许再有 FontIcon（实得 {lvFont}）且图标不许消失（PathIcon {lvPath2} 枚）",
+                lvFont == 0 && lvPath2 >= 5,
+                "它的 5 枚此前不在任何清单里 = 纯盲区；本轮一并换成 PathIcon 并纳进本卡");
+        }
+
+        // B0 的否决锁（2026-10-02）。曾经试过把 46 枚轮廓收进两张 Icons.xaml、XAML 侧回到
+        // <PathIcon Style="{StaticResource TtcIcon.XXXX}"/> 一行——权威源写明 PathIcon.Data 是 Geometry、
+        // mini-language 只在【属性字符串】上转换，但 Setter.Value 是 object，对照臂实测能生效，
+        // 于是照着做了。结果：默认页（导航栏 5 枚）改前改后【逐像素零差异】，
+        // 可 AI 翻译页两枚卡头图标【恒定少一枚】；而少哪一枚会随文件里无关行的增删换位
+        // （同一次构建连拍 4 次读数完全一致 ⇒ 不是运行时抖动，是构建期就定了），
+        // 给那枚加显式 Width/Height 也救不回来。
+        // 那一轮 --unit-tests 1121 条全绿、门禁构建 0 错误 ⇒ 这个红在屏幕外没有任何东西看得见。
+        // 判语：Style 下发 Data 这条路在本进程不可用，且失效面无法从屏幕外估界，内联 Data 是唯一形态。
+        int styleCarriedIcons = 0, inlineDataIcons = 0;
+        foreach (var name in converted.Append("SilentCaptureToast.xaml"))
+        {
+            var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", name));
+            if (path is null) continue;
+            var text = File.ReadAllText(path);
+            foreach (System.Text.RegularExpressions.Match m in
+                     System.Text.RegularExpressions.Regex.Matches(text, @"<PathIcon\b[^>]*?/>",
+                         System.Text.RegularExpressions.RegexOptions.Singleline))
+            {
+                if (m.Value.Contains("Style=\"{StaticResource TtcIcon.")) styleCarriedIcons++;
+                if (m.Value.Contains("Data=\"F0 ")) inlineDataIcons++;
+            }
+        }
+        var lvIconPath = FindRepoFile(Path.Combine("src", "TrueToneCap.LogViewer", "MainWindow.xaml"));
+        if (lvIconPath is not null)
+        {
+            var lvText = File.ReadAllText(lvIconPath);
+            styleCarriedIcons += System.Text.RegularExpressions.Regex.Matches(
+                lvText, @"Style=""\{StaticResource TtcIcon\.").Count;
+            inlineDataIcons += System.Text.RegularExpressions.Regex.Matches(lvText, @"Data=""F0 ").Count;
+        }
+        Assert($"不许有图标把轮廓交给 Style 下发（实得 {styleCarriedIcons} 枚），且每一枚都自带内联 Data（实得 {inlineDataIcons} 枚）",
+            styleCarriedIcons == 0 && inlineDataIcons >= 46,
+            "Style 下发 Data 会构建期随机丢图标，而单套件与门禁全绿——这条就是那次踩坑留下的路障");
+        Assert("两个工程都不许出现 Icons.xaml（B0 的生成物）",
+            FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Icons.xaml")) is null
+            && FindRepoFile(Path.Combine("src", "TrueToneCap.LogViewer", "Icons.xaml")) is null,
+            "这张表存在的唯一理由（集中放轮廓）已经被上一条判据否掉，留着就是带死生成器的半成品");
+    }
+
+    /// <summary>
+    /// LogViewer 工具条的六个元素必须各占一列（2026-10-02 实机发现并修复）。
+    /// <para>起因：本轮为了目视那 5 枚换过 PathIcon 的图标，第一次把 TTCLogViewer 拍下来
+    /// （报告 §13.6 此前记它"未目视"）。图上工具条的文字重叠成一团。回源一看：
+    /// 表头那个 Grid 声明了 9 个 ColumnDefinition，而 <c>刷新 / 选择目录 / 级别筛选 / 搜索 / 清理过期 / 清空</c>
+    /// 六个直接子元素<b>一个都没写 <c>Grid.Column</c></b> ⇒ 全部默认落在第 0 列，彼此叠在同一位置。
+    /// 这不是本轮换图标引入的（图标都带 Width/Height 14），是 LogViewer 一直就有的布局缺陷，
+    /// 只是过去没人截过它的图。</para>
+    /// <para>UIA 几何对照（<c>w9-logviewer-uia-geometry.ps1</c>，取图进程未声明 DPI 感知、
+    /// PrintWindow 那条读数会被虚拟化，所以判重叠改用 UIA 的 BoundingRectangle）：
+    /// 修复前六枚 X 全等于 105、<b>重叠对 15 个</b>、X 不递增；修复后 X 依次
+    /// 447/568/725/839/1011/1174、<b>重叠对 0 个</b>、右缘全部在窗口内。
+    /// 本卡把"这一形状不许悄悄退回去"钉成源码判据。</para>
+    /// </summary>
+    /// <summary>
+    /// Core 的编码器把用户可见文案做成了中文成品串（<c>GetQualityRange().Label</c> 与
+    /// <c>GetQualityDescription</c>），而本地化表只存在于 App 这一层 ⇒ 只能在显示点往回翻，
+    /// 能翻的集合就是 <c>MainWindow.xaml.cs</c> 里那份 <c>CoreQualityTexts</c>。
+    /// 这条判据枚举<b>全部</b>格式 × {区间下界, 默认, 上界} 实跑 Core，问一句话：把清单里的
+    /// 串从产出文案里<b>扣掉</b>后，还剩不剩中文？剩 = Core 新增或改写了文案而没人补翻译 ⇒
+    /// 红并点名（英文界面那几处残留中文就是从这里来的）。
+    /// <para>不在这里复刻 App 的替换算法：那是第二份真相。这里只做减法，方向与
+    /// <c>QualityText</c> 一致而实现独立。清单 ↔ 对照表的对应关系也在这里查，
+    /// 两边任一边走样都会红。</para>
+    /// </summary>
+    static void Test_QualityTexts_CoreStringsAreAllCovered()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var lmPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        if (mwPath is null || lmPath is null) { Skip("质量文案本地化覆盖", "未找到源文件"); return; }
+
+        string Cut(string s) => s.Length > 30 ? s[..30] + "…" : s;
+        bool HasCjk(string s) => s.Any(c => c >= 0x4E00 && c <= 0x9FFF);
+
+        // ── 1) 反向锁：Core 的那两个方法【不许再产出用户可见文案】 ──
+        // 这才是这次改动的落点。过去这里返回中文成品串，App 只能往回翻；现在 Core 只给枚举 + 数值。
+        // 谁再往 Core 里塞一句中文质量文案，这里红并点名。
+        var coreLeak = new List<string>();
+        int coreLinesSeen = 0;
+        foreach (var name in new[] { "ImageEncoder.cs", "FormatEncoders.cs", "JpegGainMapEncoder.cs" })
+        {
+            var cp = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", name));
+            if (cp is null) { coreLeak.Add(name + " 找不到文件（本卡这一半失明）"); continue; }
+            foreach (var line in StripLineComments(ReadSourceNormalized(cp)).Split('\n'))
+            {
+                if (!line.Contains("GetQualityRange", StringComparison.Ordinal)
+                    && !line.Contains("GetQualityDescription", StringComparison.Ordinal)) continue;
+                coreLinesSeen++;
+                if (HasCjk(line)) coreLeak.Add($"{name}: {Cut(line.Trim())}");
+            }
+        }
+        Assert("扫到了 Core 里那两个方法的全部声明/实现（少于 12 行 = 扫描口径不对，不能记绿）",
+            coreLinesSeen >= 12, $"实得 {coreLinesSeen} 行");
+        Assert("Core 的质量接口不许再返回中文字面量（措辞归 App 的 ScaleLabels / QualityText）",
+            coreLeak.Count == 0,
+            $"泄漏 {coreLeak.Count} 处：" + string.Join(" | ", coreLeak.Take(6)));
+
+        var mw = StripLineComments(ReadSourceNormalized(mwPath));
+
+        // ── 2) App 的措辞表要【逐个枚举成员】都有模板，且每条在 ZhToEn 有译文 ──
+        int at = mw.IndexOf("ScaleLabels", StringComparison.Ordinal);
+        int dictEnd = at < 0 ? -1 : mw.IndexOf("};", at, StringComparison.Ordinal);
+        var scaleTemplates = (at < 0 || dictEnd < 0) ? new List<(string Key, string Zh)>()
+            : Regex.Matches(mw.Substring(at, dictEnd - at),
+                    @"\[\w*\.(\w+)\]\s*=\s*""([^""\n]*)""")
+                .Select(m => (Key: m.Groups[1].Value, Zh: m.Groups[2].Value)).ToList();
+        Assert("从 MainWindow.xaml.cs 切出质量轴措辞表（切不出来 = 这一半没有尺子）",
+            at >= 0 && dictEnd > at && scaleTemplates.Count >= 1,
+            $"ScaleLabels 位置 {at} / 收尾 }}; 位置 {dictEnd}，解析 {scaleTemplates.Count} 条");
+        var scaleMembers = Enum.GetNames<QualityScale>();
+        var noTemplate = scaleMembers.Where(m => !scaleTemplates.Any(kv => kv.Key == m)).ToList();
+        Assert("每一个 QualityScale 成员都有措辞模板（Core 加一档而 App 没跟 ⇒ 界面会露出枚举名）",
+            noTemplate.Count == 0, $"缺模板 {noTemplate.Count} 个：" + string.Join(" | ", noTemplate));
+        var dupTemplate = scaleTemplates.GroupBy(kv => kv.Key)
+            .Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+        Assert("措辞表里没有重复成员", dupTemplate.Count == 0, "重复：" + string.Join(" | ", dupTemplate));
+
+        // 描述行那 7 个 Kind 走 switch、不在这张表里 ⇒ 单独点名扫一遍
+        var descBranches = Regex.Matches(mw, @"QualityDescKind\.(\w+)\s*=>")
+            .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        var noDesc = Enum.GetNames<QualityDescKind>().Where(n => !descBranches.Contains(n)).ToList();
+        Assert("每一个 QualityDescKind 成员都有渲染分支",
+            noDesc.Count == 0, $"缺分支 {noDesc.Count} 个：" + string.Join(" | ", noDesc));
+
+        // ── 3) 措辞 ↔ 对照表：有名无实 = 英文模式那半句还是中文 ──
+        var lmText = File.ReadAllText(lmPath);
+        int tabAt = lmText.IndexOf("ZhToEn =", StringComparison.Ordinal);
+        int tabEnd = tabAt < 0 ? -1 : lmText.IndexOf("};", tabAt, StringComparison.Ordinal);
+        var table = (tabAt < 0 || tabEnd < 0) ? new HashSet<string>(StringComparer.Ordinal)
+            : Regex.Matches(lmText.Substring(tabAt, tabEnd - tabAt),
+                    @"\[""([^""\n]*)""]\s*=\s*""([^""\n]*)""")
+                .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        Assert("对照表解析成功（解析不出条目 = 这一半判据没有牙）", table.Count > 100,
+            $"只解析出 {table.Count} 条 / ZhToEn = 位置 {tabAt} / 收尾 }}; 位置 {tabEnd}"
+            + $" / 块长 {(tabAt >= 0 && tabEnd > tabAt ? tabEnd - tabAt : -1)}"
+            + $" / 实读文件 {Path.GetFileName(lmPath)} 共 {lmText.Length} 字符");
+        var noTranslation = scaleTemplates.Select(kv => kv.Zh).Where(z => !table.Contains(z)).ToList();
+        Assert("质量轴措辞每一条都在 ZhToEn 有译文", noTranslation.Count == 0,
+            $"无译文 {noTranslation.Count} 条：" + string.Join(" | ", noTranslation.Select(Cut)));
+        // 描述行用的是片段（"距离: " / " (越小越清晰)"），它们也必须各自有译文
+        var trFrags = Regex.Matches(mw, @"LocaleManager\.Tr\(""([^""\n]*)""\)")
+            .Select(m => m.Groups[1].Value).Where(HasCjk).Distinct().ToList();
+        var fragBad = trFrags.Where(z => !table.Contains(z)).ToList();
+        Assert("App 里每一处 LocaleManager.Tr(中文) 的中文都在表里（片段也算）",
+            fragBad.Count == 0,
+            $"无译文 {fragBad.Count} 条：" + string.Join(" | ", fragBad.Select(Cut)));
+
+        // ── 3a) 夹具：走样要能被同一把尺子抓到
+        var fakeMissing = scaleMembers.Append("BrandNewScale")
+            .Where(m => !scaleTemplates.Any(kv => kv.Key == m)).ToList();
+        Assert("变异自检·夹具①：多出一个没模板的 QualityScale 成员要被抓到",
+            fakeMissing.SequenceEqual(new[] { "BrandNewScale" }),
+            "实得：" + string.Join(" | ", fakeMissing));
+        Assert("变异自检·夹具②：Core 那两行里塞一句中文要被第 1 步抓到",
+            HasCjk("GetQualityRange() => (1f, 2f, 2f, \"新中文档\");")
+            && !HasCjk("GetQualityRange() => (1f, 2f, 2f, QualityScale.Crf);"),
+            "HasCjk 对中文不敏感 ⇒ 第 1 步是恒绿的装饰");
+
+        // ── 3b) 第二个产出者：AVIF 后端名（Core 能力表的 DisplayName）+ App 自己拼的状态后缀 ──
+        // 11:57 的 UIA 展开读数暴露出来的：AvifCodecCbo 的项文字【不是】XAML 字面量，
+        // 而是 UpdateAvifEncoderLabels() 按能力表逐重写进去的 DisplayName ⇒
+        // "XAML 项有没有被点名"那把静态尺子看不见它，第三批补的 SetComboItemText 写在这
+        // 也会被盖掉（已撤，改在重写那一处过 CoreText）。这条判据钉的就是这第二个产出者。
+        int bat = mw.IndexOf("string[] CoreAvifBackendTexts", StringComparison.Ordinal);
+        int batEnd = bat < 0 ? -1 : mw.IndexOf("};", bat, StringComparison.Ordinal);
+        var backendKeys = (bat < 0 || batEnd < 0) ? new List<string>()
+            : Regex.Matches(mw.Substring(bat, batEnd - bat), @"""([^""\n]*)""")
+                .Select(m => m.Groups[1].Value).ToList();
+        Assert("从 MainWindow.xaml.cs 切出 App 会翻的 AVIF 后端串清单（切不出来=这一半没有尺子）",
+            bat >= 0 && batEnd > bat && backendKeys.Count >= 1,
+            $"string[] CoreAvifBackendTexts 位置 {bat} / 收尾 }}; 位置 {batEnd}，解析 {backendKeys.Count} 条");
+        var noBackendEn = backendKeys.Where(k => !table.Contains(k)).ToList();
+        Assert("后端清单里每一条都在 ZhToEn 有译文", noBackendEn.Count == 0,
+            $"无译文 {noBackendEn.Count} 条：" + string.Join(" | ", noBackendEn.Select(Cut)));
+        var caps = new List<(string Where, string Text)>();
+        foreach (var k in Enum.GetValues<AvifEncoderKind>())
+            caps.Add(($"{k}.DisplayName", AvifEncoderCapabilities.Caps(k).DisplayName));
+        caps.Add(("App 拼的状态后缀", "（本机不可用）"));   // 这一条不在能力表里，是 App 自己拼的
+        var capsCjk = caps.Where(c => HasCjk(c.Text)).ToList();
+        Assert("量到了含中文的后端名/后缀（一条都没有 = 这一半判据是装饰）", capsCjk.Count >= 2,
+            $"能力表+后缀共 {caps.Count} 条，含中文 {capsCjk.Count} 条");
+        Assert("后端清单里没有空串（同上：抛出 + 减法恒真）",
+            !backendKeys.Any(string.IsNullOrEmpty), $"空串 {backendKeys.Count(string.IsNullOrEmpty)} 条");
+        var bKeys = backendKeys.Where(k => !string.IsNullOrEmpty(k)).ToList();
+        string UncoveredBackend(string s) => bKeys.OrderByDescending(k => k.Length)
+            .Aggregate(s, (acc, k) => acc.Replace(k, "", StringComparison.Ordinal));
+        var backendBad = capsCjk.Where(c => HasCjk(UncoveredBackend(c.Text))).ToList();
+        Assert("Core 能力表产出的中文后端名全被 App 清单覆盖（未覆盖 = 英文界面半中半英）",
+            backendBad.Count == 0,
+            $"未覆盖 {backendBad.Count} 条："
+            + string.Join(" | ", backendBad.Select(c => $"{c.Where}={Cut(c.Text)}")));
+        Assert("变异自检·夹具③：后端清单外的新中文要被同一把尺子抓到",
+            HasCjk(UncoveredBackend("某个新后端（本机从没测过）")),
+            "夹具扣完清单后没有中文残留 ⇒ 减法做多了，这一半判据没牙");
+
+        // ── 3c) 第三个产出者：Core 的 FormatColorFacts.Declaration（色域映射卡那一句）──
+        // 与第 1 步【反向】配对：第 1 步锁"Core 的质量接口不许吐中文"；这里承认
+        // FormatColorFacts 就是要吐中文（它同时喂界面与日志，只能由调用方决定翻不翻），
+        // 于是要求它吐出的每一条中文都被 App 清单点名、且表里有译文。
+        // 谁在 Declaration 里新加一句中文而 App 没跟 ⇒ 英文界面整列漏翻，这里红并点名。
+        var cfPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatColorFacts.cs"));
+        Assert("找到 Core 的 FormatColorFacts.cs（缺文件=这一半失明）", cfPath is not null);
+        if (cfPath is not null)
+        {
+            const string StrLit = @"\u0022([^\u0022\n]*)\u0022";      // 一条 C# 字符串字面量
+            var cfSrc = StripLineComments(ReadSourceNormalized(cfPath));
+            var cfLits = Regex.Matches(cfSrc, StrLit).Select(m => m.Groups[1].Value)
+                .Where(HasCjk).Distinct().ToList();
+            Assert("量到了 Declaration 的中文模板（少于 20 条 = 这一半没有尺子）", cfLits.Count >= 20,
+                $"实得 {cfLits.Count} 条");
+            int cfAt = mw.IndexOf("CoreColorFactsTexts", StringComparison.Ordinal);
+            int cfEnd = cfAt < 0 ? -1 : mw.IndexOf("};", cfAt, StringComparison.Ordinal);
+            var cfKnown = (cfAt < 0 || cfEnd < 0) ? new List<string>()
+                : Regex.Matches(mw.Substring(cfAt, cfEnd - cfAt), StrLit)
+                    .Select(m => m.Groups[1].Value).ToList();
+            Assert("App 侧点名了这份声明通道清单（切不出来=没有对照面）", cfKnown.Count >= 1,
+                $"CoreColorFactsTexts 位置 {cfAt} / 收尾 }}; 位置 {cfEnd}，解析 {cfKnown.Count} 条");
+            var cfUnlisted = cfLits.Where(s => !cfKnown.Contains(s, StringComparer.Ordinal)).ToList();
+            Assert("Core 每一条声明通道文案都被 App 清单点名（未点名 = 英文界面漏翻）",
+                cfUnlisted.Count == 0,
+                $"未点名 {cfUnlisted.Count} 条：" + string.Join(" | ", cfUnlisted.Select(Cut)));
+            var cfNoEn = cfKnown.Where(k => !table.Contains(k)).ToList();
+            Assert("声明通道清单每一条都在 ZhToEn 有译文", cfNoEn.Count == 0,
+                $"无译文 {cfNoEn.Count} 条：" + string.Join(" | ", cfNoEn.Select(Cut)));
+
+            // 模板与译文的占位符数量必须一致：Core 那侧是 string.Format(T(tpl), args)，
+            // 译文少一个 {1} 就漏代值、多一个 {2} 就当场抛 FormatException。
+            var pairsEn = Regex.Matches(lmText.Substring(tabAt, tabEnd - tabAt),
+                    @"\[(\u0022[^\u0022\n]*)\u0022\]\s*=\s*\u0022([^\u0022\n]*)\u0022")
+                .Select(m => (Zh: m.Groups[1].Value, En: m.Groups[2].Value))
+                .ToDictionary(x => x.Zh, x => x.En, StringComparer.Ordinal);
+            var phBad = cfKnown
+                .Where(k => pairsEn.TryGetValue(k, out var en)
+                            && CountPlaceholders(k) != CountPlaceholders(en))
+                .ToList();
+            Assert("模板与译文的占位符数量一致（不一致会漏代值或直接抛 FormatException）",
+                phBad.Count == 0,
+                $"对不上 {phBad.Count} 条：" + string.Join(" | ", phBad.Select(Cut)));
+            Assert("变异自检·夹具④：Core 新加一句未点名的中文声明要被抓到",
+                !cfKnown.Contains("某新格式：没有通道可声明。", StringComparer.Ordinal)
+                && new[] { "某新格式：没有通道可声明。" }
+                    .Any(s => !cfKnown.Contains(s, StringComparer.Ordinal)),
+                "夹具没被抓到 ⇒ 上面那条'未点名'是恒绿的装饰");
+        }
+
+
+    }
+
+    /// <summary>
+    /// 界面字体 sweep 不许进图标子树（报告 §11-② 的根因锁，2026-10-03 三臂实测定死）。
+    /// <para>FontIcon / SymbolIcon 派生自 Control，字形由它<b>模板里的内部 TextBlock</b> 画；
+    /// sweep 写的是局部值（优先级高于样式）⇒ 一路递归下去就把那个 TextBlock 换成界面字体，
+    /// 而默认回退链里没有 PUA 码位，整窗图标成豆腐块。三臂读数：无守卫=方框、
+    /// <b>只跳过 IconElement 本身而仍往下递归=还是方框</b>、整棵子树 return=真齿轮
+    /// （tests/output/recovery-2026-10-03/font-probe-{before,after,subtree}.png）。
+    /// 第二臂是关键：它说明"判据只要写成一个类型检查就算修好"是错的，
+    /// 所以这里锁的是<b>结构顺序</b>——return 必须排在递归那行之前，而不是"提到了 IconElement"。</para>
+    /// </summary>
+    static void Test_UiFontSweep_DoesNotTouchIconSubtrees()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 MainWindow.xaml.cs（缺文件=本卡失明）", mwPath is not null);
+        if (mwPath is null) return;
+        var src = StripLineComments(ReadSourceNormalized(mwPath));
+
+        int at = src.IndexOf("public static void ApplyFontToVisualTree", StringComparison.Ordinal);
+        int again = at < 0 ? -1 : src.IndexOf("public static void ApplyFontToVisualTree", at + 1, StringComparison.Ordinal);
+        Assert($"sweep 实现唯一（实得 {at} / 第二处 {again}）", at >= 0 && again < 0,
+            "长出第二个 sweep ⇒ 有一处会继续往图标里灌界面字体");
+        if (at < 0 || again >= 0) return;
+        int bodyEnd = src.IndexOf("\n    }", at, StringComparison.Ordinal);
+        Assert("取到 sweep 的方法体", bodyEnd > at);
+        if (bodyEnd <= at) return;
+        var body = src.Substring(at, bodyEnd - at);
+
+        int iconAt = body.IndexOf("IconElement", StringComparison.Ordinal);
+        int recurseAt = body.IndexOf("VisualTreeHelper.GetChildrenCount", StringComparison.Ordinal);
+        Assert("方法体里既认得 IconElement、也认得递归那一行（两个锚点都要在，否则下面比较无意义）",
+            iconAt >= 0 && recurseAt >= 0, $"IconElement={iconAt} 递归={recurseAt}");
+        // 这才是有牙的那一条：跳过必须发生在【往下递归之前】
+        Assert("图标分支的 return 排在递归之前（只跳过 IconElement 本身等于没修）",
+            iconAt >= 0 && recurseAt >= 0 && iconAt < recurseAt
+            && body.Substring(iconAt, recurseAt - iconAt).Contains("return", StringComparison.Ordinal),
+            "IconElement 之后、递归之前没有 return ⇒ sweep 仍会进模板里的内部 TextBlock");
+        // 曾在这里加过一条"IconElement 之后不许出现 FontFamily ="的反向哨兵，实测【误报】：
+        // 图标分支之后紧跟的就是 else if (parent is Control ctrl) ctrl.FontFamily = ...，
+        // 任何定长窗口都必然命中这段合法代码。它既误报又与上一条结构判据重复 ⇒ 撤。
+        // 上一条到底有没有牙，由变异证明（把 return 挪到递归之后，必须红）。
+    }
+
+    /// <summary>
+    /// 开机自启动【只许在用户真的按下「保存设置」时】写注册表（P2 发现 #35 的锁，2026-10-03）。
+    /// <para>旧代码在 MainWindow 构造路径里也写一次 <c>StartupManager.IsEnabled = _settings.AutoStart</c>，
+    /// 而 <c>GetAppPath()</c> 取 <c>Environment.ProcessPath</c> ⇒ "最后启动过的那个 exe"就成了自启动项：
+    /// AutoStart=false 的任何一个 dev 构建起来一次，就把用户真正注册过的那一项【删掉】；
+    /// AutoStart=true 时则把它改指到那个构建的输出目录。10-02 实测被这样改过一次。</para>
+    /// <para>所以这条锁的不是"有没有那句代码"，而是"赋值点有几处、在不该在的地方"。
+    /// T3 那一格（w9-autostart-guard-cell.ps1）用哨兵值撞过：修之前必被删、修之后逐字还在。</para>
+    /// </summary>
+    static void Test_Autostart_OnlyWrittenOnUserSave()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 MainWindow.xaml.cs（缺文件=本卡失明）", mwPath is not null);
+        if (mwPath is null) return;
+        var appDir = Path.GetDirectoryName(mwPath)!;
+        var sites = new List<string>();
+        foreach (var f in Directory.EnumerateFiles(appDir, "*.cs", SearchOption.AllDirectories)
+                     .Where(f => !f.Contains("\\obj\\") && !f.Contains("\\bin\\")))
+        {
+            var src = StripLineComments(ReadSourceNormalized(f));
+            foreach (Match m in Regex.Matches(src, @"StartupManager\.IsEnabled\s*=[^;\r\n]*"))
+            {
+                int owner = src.LastIndexOf("void ", m.Index, StringComparison.Ordinal);
+                var head = owner < 0 ? "" : src.Substring(owner, Math.Min(60, m.Index - owner));
+                sites.Add($"{Path.GetFileName(f)} :: {m.Value.Trim()}");
+                _ = head;
+            }
+        }
+        Assert("量到了自启动的赋值点（0 处 = 尺子没看见东西，不能记绿）",
+            sites.Count >= 1, $"实得 {sites.Count} 处");
+        // 只许一个写者，且必须是用户显式保存那条路径（SyncStartupAndHotkey）
+        Assert("自启动赋值点全仓唯一（多一处就有一条【用户没要求改】的路径会去改注册表）",
+            sites.Count == 1, $"实得 {sites.Count} 处：" + string.Join(" || ", sites));
+        Assert("那唯一的写者是 SyncStartupAndHotkey 里的 _settings.AutoStart（由「保存设置」触发）",
+            sites.Count == 1 && sites[0].Contains("MainWindow.Settings.cs", StringComparison.Ordinal)
+            && sites[0].Contains("_settings.AutoStart", StringComparison.Ordinal),
+            "实得：" + string.Join(" || ", sites));
+        // 构造路径必须改成"只读 + 不一致就报警"，不许静默改写
+        var ctor = StripLineComments(ReadSourceNormalized(mwPath));
+        Assert("启动路径改成了只读一致性检查，并且不一致会报警（不许悄悄吞掉漂移）",
+            ctor.Contains("StartupManager.IsEnabled", StringComparison.Ordinal)
+            && Regex.IsMatch(ctor, @"registered\s*!=\s*_settings\.AutoStart"),
+            "构造路径里既读又比、还要 Warn —— 少了报警就等于漂移无人知");
+    }
+
+    /// <summary>
+    /// 「截图后右下角缩略图预览」这个复选框必须有真实消费者（可用性审计 F4，2026-10-03）。
+    /// <para>它过去被三处赋值进 <c>_settings.ShowPreview</c>、又被一处读回去设 <c>IsChecked</c>，
+    /// 但【没有任何行为读它】——取消勾选后那块带「打开文件夹」的自定义浮层照样弹。
+    /// 界面写着它管这件事，实际没人读：这是"设置项与行为脱钩"那一类，
+    /// 用户按它改了没反应，比没有这个开关更糟。</para>
+    /// <para>这条锁不查"有没有出现次数"（那会被三个写入点自己喂饱），
+    /// 查的是【读的一侧要出现在决定要不要创建浮层的那个判断里】。</para>
+    /// </summary>
+    static void Test_ShowPreview_HasAConsumer()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 MainWindow.xaml.cs（缺文件=本卡失明）", mwPath is not null);
+        if (mwPath is null) return;
+        var src = StripLineComments(ReadSourceNormalized(mwPath));
+
+        var writes = Regex.Matches(src, @"_settings\.ShowPreview\s*=[^;\r\n]*").Count;
+        Assert("写侧仍在（复选框还连着设置，实得 " + writes + " 处）", writes >= 1,
+            "写侧没了 ⇒ 这个开关整条链都断了，该连带撤控件而不是留个空壳");
+        Assert("读侧要真的参与决定浮层：出现 if (!_settings.ShowPreview …) 这种判断",
+            Regex.IsMatch(src, @"if\s*\(\s*!\s*_settings\.ShowPreview"),
+            "只有赋值没有判断 ⇒ 用户取消勾选后右下角照样弹，这就是 F4 原本的形状");
+        // 关掉预览不等于什么都不提示：必须退回系统通知，否则会把 ToastOnCapture 的语义一起吃掉
+        int at = src.IndexOf("if (!_settings.ShowPreview", StringComparison.Ordinal);
+        Assert("退回分支取的是系统通知那条路（不是静默吞掉提示）",
+            at >= 0 && src.Substring(at, Math.Min(260, src.Length - at))
+                .Contains("ToastService.ShowCaptureSuccess", StringComparison.Ordinal),
+            "关掉浮层却什么都不发 ⇒ 顺手改坏了另一个开关的语义");
+    }
+
+    /// <summary>数模板里 {0}/{1}… 这类占位符的个数（<c>{</c> 紧跟数字才算）。</summary>
+    static int CountPlaceholders(string s) => Regex.Matches(s, @"\{\d+\}").Count;
+
+    /// <summary>
+    /// 英文残留计数里那条"框架自带"白名单不许被拿来自证清白（2026-10-03）。
+    /// <para>背景：修完 R2 之后残留从 5 降到 1，剩下 3 处（CommandBar 溢出按钮「更多」、
+    /// ToggleSwitch 默认「开 / 关」）在<b>全仓 XAML/.cs 里搜不到</b> —— 它们是 WinUI 自己资源表里
+    /// 随 <b>OS 显示语言</b> 取词的控件文字，与本应用的 AppLanguage 无关，永远清不掉。
+    /// 混进"我们的漏翻"计数就等于养出一条读不到底的告警，所以单独归类。</para>
+    /// <para>但这条白名单本身是个逃生口：把自家没翻的串塞进去，Warn 就永远 0。
+    /// 所以这里逐条验"它确实不在我们的任何一份 XAML/.cs 里" —— 在，就说明它是我们的漏翻，红。</para>
+    /// </summary>
+    static void Test_FrameworkOwnedResidue_IsReallyFrameworks()
+    {
+        var locPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Localization.cs"));
+        Assert("找到 MainWindow.Localization.cs（缺文件=本卡失明）", locPath is not null);
+        if (locPath is null) return;
+        var src = StripLineComments(ReadSourceNormalized(locPath));
+        int at = src.IndexOf("s_frameworkOwnedText", StringComparison.Ordinal);
+        int end = at < 0 ? -1 : src.IndexOf("};", at, StringComparison.Ordinal);
+        var allowed = (at < 0 || end < 0) ? new List<string>()
+            : Regex.Matches(src.Substring(at, end - at), @"\u0022([^\u0022\n]*)\u0022")
+                .Select(m => m.Groups[1].Value).ToList();
+        Assert("切出框架自带白名单（切不出来=这条判据没有尺子）", allowed.Count >= 1,
+            $"s_frameworkOwnedText 位置 {at} / 收尾 }}; 位置 {end}，解析 {allowed.Count} 条");
+        Assert("白名单规模封顶 6 条（它每长一条，就是有人把自家漏翻判成了框架的词）",
+            allowed.Count <= 6, $"实得 {allowed.Count} 条：" + string.Join(" | ", allowed));
+
+        // 使用面：App 工程里所有 .xaml 与 .cs（剥注释），并【先去掉白名单自己那一段】
+        // —— 否则白名单里的词永远会命中它自己的声明，那条断言恒红。
+        var appDir = Path.GetDirectoryName(locPath)!;
+        var faceSb = new System.Text.StringBuilder();
+        foreach (var f in Directory.EnumerateFiles(appDir, "*.xaml", SearchOption.AllDirectories)
+                     .Concat(Directory.EnumerateFiles(appDir, "*.cs", SearchOption.AllDirectories))
+                     .Where(f => !f.Contains("\\obj\\") && !f.Contains("\\bin\\")))
+        {
+            var one = StripLineComments(ReadSourceNormalized(f));
+            if (Path.GetFileName(f) == "MainWindow.Localization.cs")
+                one = one.Substring(0, one.IndexOf("s_frameworkOwnedText", StringComparison.Ordinal));
+            faceSb.Append(one).Append('\n');
+        }
+        var face = faceSb.ToString();
+        // ⚠ 必须是【完整字面量】匹配，不能用 Contains(子串)：白名单里有 "开"/"关" 这种单字，
+        //   而"未开启""开关"这类词遍布全仓 —— 子串匹配会让这条判据恒红，
+        //   10-03 第一次写就是这么错的（据此差点把"框架自带"的结论推翻，其实错的是尺子）。
+        string Lit(string w)
+        {
+            var e = System.Text.RegularExpressions.Regex.Escape(w);
+            // \u0022 是正则里的双引号 —— 借它躲开 C# 字符串与外层脚本两层转义。
+            return "\\u0022" + e + "\\u0022|>" + e + "<|=\\u0022" + e + "\\u0022";
+        }
+        var ours = allowed.Where(w => System.Text.RegularExpressions.Regex.IsMatch(face, Lit(w))).ToList();
+        Assert("白名单每一条都不是我们自己写死的字面量（是 = 那是我们的漏翻，不是框架的词）",
+            ours.Count == 0, "伪装成框架词：" + string.Join(" | ", ours));
+        // 反向：这条判据自己要有牙 —— 我们确实写过的中文，必须被 face 认出来
+        Assert("变异自检·夹具：我们真写死的字面量要被同一把尺子认出来",
+            System.Text.RegularExpressions.Regex.IsMatch(face, Lit("能力检测中..."))
+            && System.Text.RegularExpressions.Regex.IsMatch(face, Lit("截图后右下角缩略图预览")),
+            "使用面认不出已知字面量 ⇒ 上面那条'不是我们写的'是恒真的装饰");
+    }
+
+    static void Test_LogViewer_Toolbar_HasDistinctColumns()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.LogViewer", "MainWindow.xaml"));
+        Assert("找到 LogViewer/MainWindow.xaml（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var lines = File.ReadAllText(path).Split('\n');
+
+        string[] toolbar = ["RefreshBtn", "OpenDirBtn", "LevelFilterCbo", "SearchTxt", "ClearOldBtn", "ClearAllBtn"];
+        var cols = new List<string>();
+        int missing = 0;
+        foreach (var nm in toolbar)
+        {
+            var hit = lines.FirstOrDefault(l => l.Contains($"x:Name=\"{nm}\""));
+            if (hit is null) { Assert($"{nm} 必须存在于 LogViewer 主窗（它被删了要显式改本卡）", false, "元素消失 = 判据覆盖面缩水"); missing++; continue; }
+            var g = System.Text.RegularExpressions.Regex.Match(hit, @"Grid.Column=""(\d+)""");
+            if (!g.Success) { Assert($"{nm} 所在行缺 Grid.Column ⇒ 它会退回第 0 列与别人叠在一起", false,
+                    "六个元素同列就是本轮实机看到的『文字重叠成一团』"); missing++; continue; }
+            cols.Add(g.Groups[1].Value);
+        }
+        Assert($"工具条六个元素都要有 Grid.Column（实得 {cols.Count}/{toolbar.Length}）",
+            cols.Count == toolbar.Length, "少一个就是少一列，那一个会和别人叠在同一位置");
+        Assert($"六个列号要互不相同（实得 {cols.Distinct().Count()} 个不同值：{string.Join(",", cols)}）",
+            cols.Distinct().Count() == toolbar.Length,
+            "重复列号 = 两枚元素落在同一格；UIA 实测这种形状的重叠对数是 15");
+        var hdr = lines.FirstOrDefault(l => l.Contains("<ColumnDefinition"));
+        Assert($"表头声明的列数（实得 {(hdr is null ? -1 : hdr.Split("<ColumnDefinition").Length - 1)}）要不少于元素数 6",
+            hdr is not null && hdr.Split("<ColumnDefinition").Length - 1 >= toolbar.Length,
+            "列不够，多出来的元素同样会挤回已有列");
+    }
+
+    /// <summary>
+    /// 降级事实不许只落 Debug 档（2026-10-02 可用性审计 §2.1）。
+    /// <para>契约在 <c>CoreLog</c> 自己身上：<c>LogDetail.Brief</c> 的注释写着"简（默认）: 用户操作、
+    /// 启动时的各种能力识别、<b>一切降级事实</b>。Info 及以上"，而 <c>AppSettingsData.LogVerbosity</c>
+    /// 默认值就是 <c>"Brief"</c>。所以一句降级一旦用 Debug 记录，默认配置下用户永远看不到它。</para>
+    /// <para>起因：<c>WgcCaptureService</c> 里 <c>private static void Log(string) =&gt; LogService.Debug(...)</c>
+    /// 与 <c>LogInfo(...)</c> 并存（38 处 vs 24 处），而"放弃整图 HDR，输出 SDR"这类句子走的是前者
+    /// ⇒ 一个主打真色/HDR 截图的工具，最要紧的那条降级被自己的日志档过滤掉了。本轮已把三处提到 Info，
+    /// 本卡防止它再被改回去、也防止同类新句子直接写成 Debug。</para>
+    /// <para>⚠ 本卡必须带反向锚：只判"没有违规"会因为【降级句子被整句删掉】而假绿，
+    /// 所以第二条断言要求确有若干条降级事实以 Info 及以上落盘。</para>
+    /// </summary>
+    static void Test_WgcCapture_DegradationIsVisibleAtDefaultVerbosity()
+    {
+        var src = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        Assert("找到 WgcCaptureService.cs（缺文件=本卡失明）", src is not null);
+        if (src is null) return;
+        var lines = File.ReadAllLines(src);
+        string[] degradeWords = ["放弃", "丢弃", "捕获失败", "回退", "不参与"];
+
+        // ⚠ 光靠词表会被"换个说法"绕过 —— 本轮就现场踩过一次：我把那句
+        //   "D3D11 设备创建于默认适配器 (回退)" 改成 "（未按显示器匹配到适配器）"，
+        //   词表里的"回退"随之消失，变异（LogInfo→Log）当场不再被抓 = 假绿。
+        //   所以已知降级必须【按当前措辞逐条钉死】，词表只是加宽的新句捕获网。
+        //   改措辞是允许的，但要同一次改动里更新这张表，否则本卡红。
+        string[] knownDegradations =
+        [
+            "放弃整图 HDR，输出 SDR",
+            "HDR 源区域填充失败，放弃 HDR 输出",
+            "Float16 捕获失败",
+            "D3D11 设备创建于默认适配器",
+            "适配器匹配异常，改走默认适配器",
+            "已回退 SDR",
+        ];
+
+        bool IsDegradeLine(string t)
+        {
+            if (t.StartsWith("//") || t.StartsWith("*")) return false;   // 整行注释 / 块注释续行
+            int c = t.IndexOf("//", StringComparison.Ordinal);
+            if (c >= 0) t = t[..c];                                       // 行尾注释也要剥：
+            return degradeWords.Any(t.Contains);                          // 本仓注释里大量出现"回退/放弃"
+        }
+
+        var offenders = new List<string>();
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var t = lines[i].Trim();
+            if (t.StartsWith("//") || t.StartsWith("*")) continue;
+            int cc = t.IndexOf("//", StringComparison.Ordinal);
+            var code = cc >= 0 ? t[..cc] : t;
+            bool isDegrade = IsDegradeLine(t) || knownDegradations.Any(code.Contains);
+            if (!isDegrade) continue;
+            if (code.Contains("Log($") || code.Contains("Log(\"") || code.Contains("LogService.Debug"))
+                offenders.Add($"{i + 1}: {code[..Math.Min(72, code.Length)]}");
+        }
+        Assert($"降级语句不许只写进 Debug 档（实得 {offenders.Count} 处）", offenders.Count == 0,
+            "默认详细度是 Brief=Info 及以上，走 Debug 等于用户永远看不见这条降级 ｜ " +
+            string.Join("  ", offenders.Take(4)));
+
+        // 逐条点名：已知降级里任何一条不再以 Info 及以上出现 ⇒ 红（这条不受换词影响）
+        var missing = knownDegradations.Where(k => !lines.Any(l =>
+            (l.Contains("LogInfo(") || l.Contains("LogService.Warn") || l.Contains("LogService.Info"))
+            && l.Contains(k))).ToList();
+        Assert($"已知降级逐条都要以 Info 及以上落盘（缺失 {missing.Count} 条）", missing.Count == 0,
+            "换了措辞就要同一次改动里更新这张表；一条都不许悄悄退回 Debug ｜ 缺失：" +
+            string.Join(" | ", missing.Take(4)));
+
+        int infoLevel = lines.Count(l =>
+            (l.Contains("LogInfo(") || l.Contains("LogService.Warn") || l.Contains("LogService.Info"))
+            && degradeWords.Any(l.Contains));
+        Assert($"至少要有 3 条降级事实以 Info 及以上落盘（实得 {infoLevel}）", infoLevel >= 3,
+            "一条都没有 = 降级提示被整句删掉了；本卡不能靠『没有违规』判绿");
+    }
+
+    /// <summary>
+    /// 输出目录这条链的现状锁（2026-10-01，报告 §41）。
+    /// <para>起因：本机两处设置都写着 <c>OutputPath="D:\TTC"</c> 而<b>这台机器没有 D 盘</b>
+    /// （实测 <c>Test-Path D:\</c> = False，盘符只有 C,E,G,Q,W）。全仓原本<b>一条判据都没点过 OutputPath</b>
+    /// ⇒ 这条路是纯盲区。本卡只钉现状，不引入任何降级：将来谁要加"建不出来就回落到 图片"这种兜底，
+    /// 必须显式改这条并说明理由（静默把用户的落点改掉，正是本仓反复定义的"降级不是修复"）。</para>
+    /// <para>另半边钉可见性：目录建不出来时异常会一路冒到保存链的 catch，那里必须既落日志又弹提示——
+    /// "日志里一个字都没有、屏幕上只有一张不一样的界面"这种形状本轮刚在覆盖层里修过一次。</para>
+    /// </summary>
+    static void Test_OutputDir_OnlyFallsBackWhenEmpty_FailureIsVisible()
+    {
+        var cps = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
+        Assert("找到 CapturePipelineService.cs（缺文件=本卡失明，不许静默过去）", cps is not null);
+        if (cps is null) return;
+        var code = StripLineComments(ReadSourceNormalized(cps));
+
+        // ① 只有【空/空白】才回落，非空路径一律按用户写的用
+        Assert("空 OutputPath 才回落到 图片\\TrueToneCap（回落条件读得到）",
+            code.Contains("string.IsNullOrWhiteSpace(outDir)")
+            && code.Contains("SpecialFolder.MyPictures"),
+            "这两句是回落的唯一入口；读不到说明回落形状变了");
+
+        // ② 非空但建不出来 ⇒ 当场抛，没有第二道回落。
+        //    ⚠ 第一版这里写的是"那一句原样存在"，被自己的变异当场判成假绿：
+        //      把整句包进 `try { … } catch { 换目录 }` 之后，那句子串**仍然完整存在** ⇒ 判据照绿
+        //      （tests/output/tierA-2026-10-01/mutation-outputdir.log）。所以改成【结构判据】：
+        //      这个解析方法里一条 try/catch 都不许有——要加降级，就必须先过本卡。
+        int gmStart = code.IndexOf("public string GetEffectiveOutputDir()", StringComparison.Ordinal);
+        Assert("读得到 GetEffectiveOutputDir 的方法体（锚点漂了就不判，不蒙绿）", gmStart >= 0,
+            $"IndexOf 实得 {gmStart}");
+        int gmEnd = gmStart >= 0 ? code.IndexOf("\n    }", gmStart, StringComparison.Ordinal) : -1;
+        var gmBody = gmStart >= 0 && gmEnd > gmStart ? code.Substring(gmStart, gmEnd - gmStart) : "";
+        Assert("输出目录解析里不许有任何 try/catch（非空路径不可创建就当场抛，不许静默换个目录）",
+            gmBody.Contains("Directory.CreateDirectory(outDir)")
+            && !gmBody.Contains("try") && !gmBody.Contains("catch"),
+            $"方法体里 try={gmBody.Contains("try")} catch={gmBody.Contains("catch")}");
+
+        // ③ 失败必须同时留日志与弹提示（不静默）
+        var mw = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 MainWindow.xaml.cs", mw is not null);
+        if (mw is null) return;
+        var mwCode = StripLineComments(ReadSourceNormalized(mw));
+        Assert("保存失败会落一条 Error 日志（含异常），不是只往状态栏塞一句",
+            System.Text.RegularExpressions.Regex.IsMatch(mwCode,
+                @"LogService\.Error\(""MainWindow"",\s*\$""截图保存失败"),
+            "只剩 SetStatus/Toast 时，事后翻日志会什么都找不到（本轮 §39.4 就是被这种形状骗过一次）");
+        Assert("保存失败会弹用户可见的失败提示",
+            mwCode.Contains("ToastService.ShowCaptureFailed(ex.Message)"),
+            "抛异常但界面不吭声 = 用户以为截到了，其实一张都没有");
     }
 
     // ═══════════════════════════════════════
@@ -1953,29 +3037,96 @@ public static class CorePipelineTests
     }
 
     /// <summary>
-    /// P0-C 回归：HLSL 与 CPU 的分段 Reinhard 必须一致。
-    /// <para>HLSL 无法在 C# 中直接执行，故做<b>源码级</b>校验：断言 ToneMapping.hlsl 的
-    /// SegmentedReinhardMap 函数体内【不再出现】旧的 ReinhardMap / smoothstep 公式。
-    /// 属文本级检查，相对脆弱，但能抓住"CPU 改了、HLSL 没跟"这类跨实现漂移 ——
-    /// 而该类漂移曾真实导致 HDR 预览与最终输出长期不一致。</para>
+    /// 着色器清单不许有孤儿条目（A 档回归，2026-10-01）。
+    /// <para>为什么只能钉源码：.cso 是构建产物、不入库（见 App.csproj 的 CollectCompiledShaders 说明），
+    /// "运行时到底加载不加载"要开预览才有读数；而这条锁要防的恰恰是<b>声明与实现分家</b>——
+    /// <c>ShaderCompiler.cs</c> 的注释曾长期写着 <c>ToneMapping.hlsl ✅ 存在，运行时消费</c>，
+    /// 但它唯一的加载方 <c>GpuToneMapper</c> 自 2026-09-16 起不再构造
+    /// （<c>AppServices.cs</c> 自己写着"【死代码】…属性全仓没有任何调用者"）。</para>
+    /// <para>三张名单各自独立地取：清单来自 <c>ShaderCompiler.cs</c> 的 <c>new("X.hlsl", …)</c>，
+    /// 磁盘来自 <c>Shaders/*.hlsl</c> 目录列举，构建期来自 <c>App.csproj</c> 的 CompileShaders Inputs——
+    /// 两两比对是单向锁，所以三张都要对。消费点判据只认<b>剥掉整行注释之后</b>的代码，
+    /// 否则一句"我们曾查找 X.cso"的注释就能把自己证成活的。</para>
     /// </summary>
-    static void Test_Hlsl_ToneMapping_MatchesCpu()
+    static void Test_ShaderList_HasNoOrphanEntry()
     {
-        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Shaders", "ToneMapping.hlsl"));
-        if (path is null) { Skip("HLSL/CPU 曲线一致性", "未找到 ToneMapping.hlsl"); return; }
+        const string card = "着色器清单无孤儿条目";
+        var scPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "ShaderCompiler.cs"));
+        if (scPath is null) { Skip(card, "未找到 ShaderCompiler.cs"); return; }
 
-        var src = File.ReadAllText(path);
-        int idx = src.IndexOf("float SegmentedReinhardMap", StringComparison.Ordinal);
-        if (idx < 0) { Assert("HLSL: 找到 SegmentedReinhardMap", false); return; }
+        var sc = StripLineComments(ReadSourceNormalized(scPath));
+        var listed = Regex.Matches(sc, @"new\(""([^""]+\.hlsl)""").Select(m => m.Groups[1].Value)
+                         .OrderBy(x => x, StringComparer.Ordinal).ToList();
+        // 守卫必须 fail-closed：清单若为空（锚点写错/清单被挪走），下面每条"不许出现 X"的缺席断言都恒真。
+        Assert("着色器清单至少要有 2 条（空清单会让本卡全部判据失去牙齿）",
+            listed.Count >= 2, $"实得 {listed.Count} 条：{string.Join(",", listed)}");
 
-        // 只取函数体（到下一个 "\n}" 为止），避免把前置说明性注释里的旧公式名算进来
-        int end = src.IndexOf("\n}", idx, StringComparison.Ordinal);
-        var body = end > idx ? src[idx..end] : src[idx..];
+        var appDir = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(scPath)!, ".."));
+        var coreDir = Path.GetFullPath(Path.Combine(appDir, "..", "TrueToneCap.Core"));
+        var scanDirs = new[] { appDir, coreDir };
 
-        Assert("HLSL: 已移除旧 ReinhardMap 公式 (y / h2)", !body.Contains("y / h2"));
-        Assert("HLSL: 已移除 smoothstep 过渡（暗环来源）", !body.Contains("smoothstep") && !body.Contains("3.0f - 2.0f * t"));
-        Assert("HLSL: y>1 时饱和到 1.0（与 CPU 一致）", body.Contains("return 1.0f"));
-        Assert("HLSL: 保留 y<=1 直通分支", body.Contains("y <= 1.0f"));
+        // ① 清单 ↔ 磁盘
+        var shaderDir = Path.Combine(appDir, "Shaders");
+        var onDisk = Directory.Exists(shaderDir)
+            ? Directory.GetFiles(shaderDir, "*.hlsl").Select(p => Path.GetFileName(p)!)
+                       .OrderBy(x => x, StringComparer.Ordinal).ToList()
+            : new List<string>();
+        Assert("清单与 Shaders/*.hlsl 逐字一致（谁多谁少都算漂移）",
+            string.Join(",", listed) == string.Join(",", onDisk),
+            $"清单={string.Join(",", listed)} 磁盘={string.Join(",", onDisk)}");
+
+        // ② 清单 ↔ 构建期 Inputs（增量构建时 CompileShaders.ps1 那份四方自检可能根本不跑）
+        var csprojPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "TrueToneCap.App.csproj"));
+        var csprojInputs = new List<string>();
+        if (csprojPath is not null)
+        {
+            var m = Regex.Match(ReadSourceNormalized(csprojPath),
+                "Name=\"CompileShaders\"[^>]*Inputs=\"([^\"]+)\"");
+            if (m.Success)
+                csprojInputs = m.Groups[1].Value.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(p => Path.GetFileName(p.Replace('\\', '/'))).Distinct()
+                    .OrderBy(x => x, StringComparer.Ordinal).ToList();
+        }
+        Assert("App.csproj 的 CompileShaders Inputs 与清单一致",
+            csprojInputs.Count == listed.Count && !listed.Except(csprojInputs).Any()
+            && !csprojInputs.Except(listed).Any(),
+            $"csproj={string.Join(",", csprojInputs)} 清单={string.Join(",", listed)}");
+
+        // ③ 每条清单都要有"按名字找字节码"的消费点；清单自己那份不算消费方
+        foreach (var entry in listed)
+        {
+            var hits = ScanCode(scanDirs, $"\"{entry}.cso\"", exceptFiles: new[] { scPath });
+            Assert($"清单条目 {entry} 有运行时消费点", hits.Count >= 1,
+                hits.Count == 0 ? "剥注释后 App/Core 无人按名字找它的 .cso" : $"命中：{string.Join(",", hits)}");
+        }
+
+        // ④ 反向哨兵：只删资产、留下指向它的代码，比原地留着更坏
+        Assert("ToneMapping.hlsl 不在清单里", !listed.Contains("ToneMapping.hlsl"));
+        Assert("Shaders/ 下没有 ToneMapping.hlsl 源文件",
+            !File.Exists(Path.Combine(shaderDir, "ToneMapping.hlsl")));
+        var orphan = ScanCode(scanDirs, "ToneMapping.hlsl", exceptFiles: Array.Empty<string>());
+        Assert("无人加载的 ToneMapping.hlsl 不许被任何代码引用", orphan.Count == 0,
+            $"命中：{string.Join(",", orphan)}");
+    }
+
+    /// <summary>在给定工程目录里找"剥掉整行注释后仍含某字面量"的文件（跳过 obj/bin，返回文件名）。</summary>
+    static List<string> ScanCode(string[] dirs, string literal, string[] exceptFiles)
+    {
+        var skip = new HashSet<string>(exceptFiles.Select(Path.GetFullPath), StringComparer.OrdinalIgnoreCase);
+        var hits = new List<string>();
+        foreach (var dir in dirs)
+        {
+            if (!Directory.Exists(dir)) continue;
+            foreach (var cs in Directory.GetFiles(dir, "*.cs", SearchOption.AllDirectories))
+            {
+                var full = Path.GetFullPath(cs);
+                if (full.Contains("\\obj\\") || full.Contains("\\bin\\")
+                    || full.Contains("/obj/") || full.Contains("/bin/")) continue;
+                if (skip.Contains(full)) continue;
+                if (StripLineComments(ReadSourceNormalized(cs)).Contains(literal)) hits.Add(Path.GetFileName(cs));
+            }
+        }
+        return hits;
     }
 
     /// <summary>从测试运行目录向上查找仓库内文件；找不到返回 null（由调用方 Skip）。</summary>
@@ -2034,6 +3185,209 @@ public static class CorePipelineTests
     // ═══════════════════════════════════════
 
     /// <summary>
+    /// 「换格式保底开关」必须【从界面一路接到编码器】——本条把这条链的每一段都钉住。
+    /// <para>来历（2026-09-29 用户口径）：接上 PNG 保底 ⇒ "触发一定要告诉用户" ⇒ "给保底做一个开关在用户设置里面"。
+    /// 三件事分别落在四个文件加 Core，任何一段接不上，用户看到的都是一个假旋钮：
+    /// 界面有勾但产品照旧换格式 / 关掉之后仍然偷偷落 PNG / 英文界面剩中文。</para>
+    /// <para>为什么这一条只能是源码锁：Core 侧的行为矩阵（<c>ColorPipelineTests.JpegLiAndJxl_BackendFailure_NeverClaimsSuccess</c>，
+    /// 5 格式 × 开关两态 = 10 格 / 45 条断言）判的是【编码器认不认这个布尔】；
+    /// 而"设置页那个勾到布尔之间"这一截全在 App 工程里，<c>Test</c> 只引用 Core，运行时够不到 ⇒
+    /// 这里钉接线，行为那半边由矩阵钉。<b>两段合起来才叫这条链被判过。</b></para>
+    /// </summary>
+    static void Test_PngFallbackSwitch_Wired()
+    {
+        string Read(params string[] rel) => relaggregate(rel);
+        static string relaggregate(string[] rel)
+        {
+            var p = FindRepoFile(Path.Combine(rel));
+            return p is null ? "" : File.ReadAllText(p);
+        }
+
+        // ═══ 定位失败必须先红，不能让下面的负断言空转 ═══
+        // Read 找不到文件返回 ""：正向锁（Contains）会红，但【负向】锁
+        // （!bench.Contains / badWriters.Count == 0 / 闸的处数下限之外的"不许出现"那一类）
+        // 在空串上恒成立 ⇒ 文件一丢就集体假绿。这一轮 §11.6 数过 53 条"缺文件即 Skip"的失明，
+        // 同一个道理不能在自己新写的锁里再犯一遍（本文件 2186 那段注释立的规矩：找不到就是 ❌）。
+        var needed = new (string Label, string[] Rel)[]
+        {
+            ("Core/FormatEncoders.cs", ["src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"]),
+            ("Core/JpegGainMapEncoder.cs", ["src", "TrueToneCap.Core", "Encoding", "JpegGainMapEncoder.cs"]),
+            ("App/Models/AppSettingsData.cs", ["src", "TrueToneCap.App", "Models", "AppSettingsData.cs"]),
+            ("App/Services/CapturePipelineService.cs", ["src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"]),
+            ("App/MainWindow.xaml.cs", ["src", "TrueToneCap.App", "MainWindow.xaml.cs"]),
+            ("App/MainWindow.Settings.cs", ["src", "TrueToneCap.App", "MainWindow.Settings.cs"]),
+            ("App/MainWindow.xaml", ["src", "TrueToneCap.App", "MainWindow.xaml"]),
+            ("App/Services/LocaleManager.cs", ["src", "TrueToneCap.App", "Services", "LocaleManager.cs"]),
+            ("Tools/FormatBench.cs", ["src", "TrueToneCap.Tools", "FormatBench.cs"]),
+            ("App/Services/SelfTest.cs", ["src", "TrueToneCap.App", "Services", "SelfTest.cs"]),
+        };
+        var misses = needed.Where(n => FindRepoFile(Path.Combine(n.Rel)) is null).Select(n => n.Label).ToList();
+        Assert($"保底开关这条链的 {needed.Length} 个源文件都要定位到（实得缺 {misses.Count} 个）", misses.Count == 0,
+            "缺的那几个文件上的【负向】锁在空串里恒成立 ⇒ 先拦，不许拿假绿当读数：" + string.Join("；", misses));
+        if (misses.Count > 0) return;
+
+        var core = Read("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs");
+        var gm = Read("src", "TrueToneCap.Core", "Encoding", "JpegGainMapEncoder.cs");
+        var model = Read("src", "TrueToneCap.App", "Models", "AppSettingsData.cs");
+        var pipe = Read("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs");
+        var main = Read("src", "TrueToneCap.App", "MainWindow.xaml.cs");
+        var sett = Read("src", "TrueToneCap.App", "MainWindow.Settings.cs");
+        var xaml = Read("src", "TrueToneCap.App", "MainWindow.xaml");
+        var loc = Read("src", "TrueToneCap.App", "Services", "LocaleManager.cs");
+
+        Assert("App 的设置项存在且【默认开】（默认翻成关就是拿一次审查改变所有老用户的行为）",
+            model.Contains("public bool PngFallbackEnabled { get; set; } = true;"), "");
+
+        // ── 开关只有一个写者 ──
+        // AvifPngSuffix 那种"快照字段 + 控件位"双写是前车之鉴：同一参数两个写者时，
+        // 只测其中一半会留下另一半的漂移（本轮 §14 刚为此撤回过一把尺子）。
+        Assert("管线侧把这个字段从设置快照接进 EncodingSettings",
+            pipe.Contains("PngFallbackEnabled = s.PngFallbackEnabled"), "");
+        // ═══ 测量宿主【不许】碰这个开关（默认必须是关）═══
+        // 保底会把"编码器失败"洗成"产物存在"，而外部裁判普遍按"那个文件在不在"读结果。
+        // 实测过一次：把 EncodingSettings 的初始值定成 true，param_sweep_check 的
+        // c_avifsvt_444 就从"按预期失败"翻成"竟然成功了"（真因只是多了一枚 .png）。
+        // ⇒ 这条把"测量路径永远关"钉住：Tools 与 SelfTest 里出现这个字段名就是有人在
+        //   给测量宿主打开保底（或至少在读它），那必须先说清楚为什么。
+        var bench = Read("src", "TrueToneCap.Tools", "FormatBench.cs");
+        var st = Read("src", "TrueToneCap.App", "Services", "SelfTest.cs");
+        Assert("测量宿主（Tools / 审计卡）不提这个开关 ⇒ 它们永远拿 EncodingSettings 的关默认值",
+            !bench.Contains("PngFallbackEnabled") && !st.Contains("PngFallbackEnabled = true"),
+            "宿主一旦自己打开保底，'编码器坏了'就会以'产物存在'的形式被裁判读成成功");
+        // 但审计卡【必须】把这个布尔判到两个方向。原先它只拿 snap 自己的值和落点比 ⇒ 单向锁：
+        // EncodingSettings 的默认是【关】，用户也关着时，把管线里那行接线删掉两侧也都是关 ⇒ 卡片照样
+        // "一致 ✓"，最该判的那一格没有牙（2026-09-29 审查轮从 App lane 抓回来，增益档那一格同病）。
+        // ⇒ 现在两趟探针（正向 snap + 反向取反快照）的形状钉在这里，取值对不对仍由 --display-audit 的退出码判。
+        Assert("审计卡的保底开关探针两个方向都跑（正向 snap + 反向取反快照）",
+            st.Contains("flipped.PngFallbackEnabled = !snap.PngFallbackEnabled")
+            && st.Contains("probeEsFlipped.PngFallbackEnabled"),
+            "退回单向比较 = 关态那一格零判据；删掉取反那趟 = 只有盘上恰好开着时才判得到");
+        // ═══ 台账 §17.6 第 1 条（2026-09-30 接手轮）：落点·全局这一段与"哪块屏"无关 ⇒ 必须排在
+        // 逐屏循环【之外】。钉的是【顺序】而不是"有没有这句话"（同 Test_OverlayReentryLatch 的写法），
+        // 挪回循环里 = 下面三刀各红一次。为什么值得钉：
+        //   ① 卡片末尾"管线落点判红 N 条"的那个 N，在多屏那天会把同一句分叉数成 N 条 ⇒ N 不是缺陷数；
+        //   ② 这一段里的 Load() 不是纯读 —— 迁移门触发时它末尾会 Save()、还会写 SecretStore，
+        //      而审计跑在单实例锁之前 ⇒ 每块屏重复一遍"可能改用户盘"的动作。
+        // ⚠ 取下标前必须剥整行注释：不剥的话，注释散文里出现的锚文本会把下标提前，
+        //   这条锁就此恒真（§17.2 记过同一类"哨兵读到注释"的错）。
+        var stPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SelfTest.cs"));
+        var stCode = stPath is null ? "" : StripLineComments(ReadSourceNormalized(stPath));
+        int idxLoad = stCode.IndexOf("settingsSource.Load()", StringComparison.Ordinal);
+        int idxLoop = stCode.IndexOf("foreach (var d in displays)", StringComparison.Ordinal);
+        Assert("落点·全局的两处锚点都还在（Load 与逐屏循环头）", idxLoad >= 0 && idxLoop >= 0,
+            $"实得 Load={idxLoad} 循环头={idxLoop}（少一个说明锚点漂了，不是代码坏了）");
+        Assert($"Load() 必须【先于】逐屏循环（实得 {idxLoad} < {idxLoop}）= 整轮只读一次盘",
+            idxLoad >= 0 && idxLoop >= 0 && idxLoad < idxLoop,
+            "挪回循环里 = 多屏那天把 Load 的写盘副作用重复 N 次（它迁移门触发时会 Save 并写 SecretStore）");
+        Assert("SelfTest.cs 全文件只许一处 Load()（不许按屏各读一份）",
+            System.Text.RegularExpressions.Regex.Matches(stCode, @"\.Load\(\s*\)").Count == 1,
+            "第二处 = 有人把落点段复制回逐屏循环 ⇒ 判红条数会按屏数吹大");
+        Assert("落点判红的标签：全局那两条不许带屏名",
+            stCode.Contains("全局·保底开关") && stCode.Contains("全局·增益档反向")
+            && !stCode.Contains("{d.Name}·保底开关") && !stCode.Contains("{d.Name}·增益档反向"),
+            "带 d.Name = 同一句分叉按屏数各记一条 ⇒ '判红 N 条'不再是缺陷数");
+        // 这句"你的设置与默认值在这几根轴上相同 ⇒ 差分读数不判别"讲的是【设置侧】，与屏无关。
+        // 第一版我只挪了全局那一份，循环里那份漏了 ⇒ 卡片上同句出现两次（本机 1 屏；两屏就是三次）。
+        // 是补出来的切片读数（audit-case 的逐屏段）抓到的，不是推出来的 ⇒ 钉成"全文件恰好一处"。
+        int sameAxis = System.Text.RegularExpressions.Regex.Matches(
+            stCode, System.Text.RegularExpressions.Regex.Escape("你这份设置与默认值在【这几根轴】")).Count;
+        Assert($"同轴警告那句在 SelfTest.cs 里恰好一处（不许按屏各印一遍，实得 {sameAxis} 处）",
+            sameAxis == 1, "两处 = 循环里还留着一份 ⇒ 同一句警告按屏数重复");
+        // MainWindow 里允许出现 <c>_settings.PngFallbackEnabled = …</c>（那是"保存用户选择"，
+        // 是这条链的上游），不许出现的是把值盖进【EncodingSettings】的那一句。
+        // 第一版这里写成 !main.Contains("settings.PngFallbackEnabled =")，被自己的
+        // <c>_settings.PngFallbackEnabled =</c> 当子串命中 ⇒ 假红了一条根本不存在的写者。
+        var badWriters = System.Text.RegularExpressions.Regex
+            .Matches(main, @"(\w+)\.PngFallbackEnabled\s*=")
+            .Where(m => m.Groups[1].Value != "_settings")
+            .Select(m => m.Value).ToList();
+        Assert("MainWindow 那份 BuildEncodingSettings【不】把这个字段盖进编码设置（写者只许管线那一处）",
+            badWriters.Count == 0, string.Join("；", badWriters));
+
+        // ── Core 侧每条换格式腿都要认这个闸 ──
+        // 模式必须锚在 `when (` 上：原先写的是宽泛的 `(s|settings)\.PngFallbackEnabled`，
+        // 于是文档注释里的 `<see cref="EncodingSettings.PngFallbackEnabled"/>` 也被算成一处读闸
+        //（本轮我自己新写的那段注释当场把数字吹大了一格）。注释不是判据，读闸的是那条 catch 的守卫。
+        int gates = System.Text.RegularExpressions.Regex.Matches(core, @"when \(\s*s\.PngFallbackEnabled").Count
+                  + System.Text.RegularExpressions.Regex.Matches(gm, @"when \(\s*settings\.PngFallbackEnabled").Count;
+        Assert($"换格式保底的每一腿都读这个闸（实得 {gates} 处 catch 守卫，五格式 × SDR/HDR 入口 ≥ 7）", gates >= 7,
+            "少一处 = 那条腿的开关是假的（关掉仍会偷偷改存 PNG），行为矩阵也只覆盖了一部分");
+
+        // ── 界面侧：控件、回填、保存、事件分支，四段缺一不可 ──
+        Assert("XAML 里有这个开关控件", xaml.Contains("x:Name=\"PngFallbackChk\""), "");
+        Assert("ApplySettingsToUI 回填这个勾（否则界面显示与盘上值不一致，用户看不出自己关没关）",
+            sett.Contains("PngFallbackChk.IsChecked = _settings.PngFallbackEnabled"), "");
+        Assert("SaveSettings 读回这个勾", sett.Contains("_settings.PngFallbackEnabled = PngFallbackChk.IsChecked == true"), "");
+        Assert("OnPerFormatChanged 里有这个控件的分支（漏了就是：勾能点、值不落盘）",
+            main.Contains("cb.Name == nameof(PngFallbackChk)"), "");
+
+        // ── 英文界面：XAML 那两串中文必须在 ZhToEn 表里有一对一的译文 ──
+        // 逐条按【XAML 实际字面量】去表里查，而不是数条数 —— 改了文案忘了改表，
+        // 英文模式下就是残留中文（本仓 §55 那条扫描面判据的同族）。
+        var zhLiterals = System.Text.RegularExpressions.Regex.Matches(xaml,
+                "x:Name=\"PngFallback(?:Chk|Hint)\"[\\s\\S]{0,600}?(?:Content|Text)=\"([^\"]+)\"")
+            .Select(m => m.Groups[1].Value).ToList();
+        Assert($"从 XAML 取到保底开关的中文文案（实得 {zhLiterals.Count} 条，应为 2）", zhLiterals.Count == 2,
+            "取不到 = 控件结构被改，下面的漏翻锁就此失去对象 ⇒ 这条必须先红");
+        // 查表要先切出【表窗口】：整份 LocaleManager.cs 里 `["…"]` 这种形状不止表里有（别的字典/数组
+        // 同样长这样），拿全文件当表 ⇒ 一条根本不在表里的键也能"有对照"。更强的整表尺子在
+        // Test_UiChineseLocalizationCoverage（解析全表 + 扫 XAML 全部中文），这一处只钉这两串，
+        // 所以窗口必须自己切对，并自证切到了。
+        int tabAt = loc.IndexOf("ZhToEn =", StringComparison.Ordinal);
+        int tabEnd = tabAt < 0 ? -1 : loc.IndexOf("};", tabAt, StringComparison.Ordinal);
+        var tableWindow = tabAt >= 0 && tabEnd > tabAt ? loc.Substring(tabAt, tabEnd - tabAt) : "";
+        Assert("从 LocaleManager.cs 切到 ZhToEn 表窗口（切不到就等于没有查表的尺子）", tableWindow.Length > 0,
+            $"ZhToEn = 命中位置 {tabAt}，收尾那一处 }}; 位置 {tabEnd}");
+        foreach (var zh in zhLiterals)
+            Assert($"保底开关文案在 ZhToEn 表里有英文对照：{zh[..Math.Min(18, zh.Length)]}…",
+                tableWindow.Contains($"[\"{zh}\"]"), "");
+    }
+
+    /// <summary>
+    /// App 侧自检「被写了」不等于「被跑了」——本条把 <c>RunNormalizeGateCheck</c> 钉进两个入口。
+    /// <para>起因（本轮批次 E）：为了让 <c>Normalize</c> 的越界回落不再是"读码台账"，
+    /// 在 <c>SelfTest.cs</c> 里新写了一条直调生产分支的自检。而这类"自检函数"最省事的失效方式
+    /// 不是写错，是<b>没人调用</b>：函数留着、编译通过、门禁全绿、判据一次没跑。
+    /// 本仓 §11.6 数过 53 条源码哨兵"缺文件即 Skip"＝集体失明，同一个道理：
+    /// 接线必须自己也是一条会红的判据。</para>
+    /// <para>刻意用断言而不是 Skip：文件找不到就是 <c>❌</c>。Skip 只在"这轮没判"时用，
+    /// 而这两个文件在仓库里，找不到只可能是路径变了或文件被删 —— 那正是必须拦住的情形。</para>
+    /// </summary>
+    static void Test_AppSelfChecks_AreCalled()
+    {
+        var stPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SelfTest.cs"));
+        Assert("能在仓库里定位到 SelfTest.cs（定位不到就是接线哨兵失明）", stPath is not null,
+            stPath is null ? "FindRepoFile 未命中 src/TrueToneCap.App/Services/SelfTest.cs" : stPath);
+        if (stPath is null) return;
+        var st = File.ReadAllText(stPath);
+
+        // ① 两个入口都得调它：`--settings-migration`（毫秒级随手复验）与 `--selftest`（CI 与出包）。
+        // 数的是【调用点】而不是某一种写法：第一版这里钉的是 `RunNormalizeGateCheck(outDir).Status == "fail"`
+        // 这一串，而 --selftest 那侧是 `var ng = RunNormalizeGateCheck(outDir);` 先接住再判 ——
+        // 于是它把自己【没匹配到】读成"没接线"，当场红了一次。红得对（那时确实只接了一个入口），
+        // 但尺子必须认得出两种等价写法，否则下次换个写法它就哑了。
+        int called = Regex.Matches(st, @"RunNormalizeGateCheck\(\s*outDir\s*\)").Count;
+        Assert($"RunNormalizeGateCheck 被两个入口点名（实得 {called} 处）", called >= 2,
+            called == 1 ? "只有 --settings-migration 或只有 --selftest 会跑它 ⇒ 另一个入口零判据"
+                        : "没有任何入口调用 ⇒ 这条自检是死代码，门禁永远全绿而它一次没跑");
+
+        // ② 读数必须进 selftest.json：只在控制台打印的话，CI 失败时没人能对着机器读差异
+        Assert("NORMALIZE 这条进了 selftest.json（JsonEntry 注册）",
+            Regex.IsMatch(st, @"JsonEntry\(\s*""NORMALIZE"""), st.Length.ToString());
+
+        // ③ 它必须【直调生产分支】，而不是在自检里"算一遍应该得什么"——后者是恒等式，改坏产品不会红
+        // 地板贴着【当前夹具枚数】（2026-09-29 审查轮数过：oob/keep/cased/upper/legacy/legacyLower/csIdx = 7 枚，
+        // 原先写 >= 4 时实际已是 6 枚 ⇒ 悄悄删两枚夹具这把尺子也不响；标签还写着"四枚"，与实况差两枚）。
+        int prodCalls = Regex.Matches(st, @"SettingsService\.Normalize\(").Count;
+        Assert($"自检真调 SettingsService.Normalize（实得 {prodCalls} 处，七枚夹具各一次）", prodCalls >= 7,
+            "少一枚 = 那一格的 Normalize 分支没被真跑过，读数就只是我算的期望值");
+
+        // ④ 夹具不许退化成"只喂默认值"：默认值全过 = 恒真式。数一下夹具里的越界字面量
+        Assert("越界夹具带着真越界值（999 与 99 都在）",
+            st.Contains("\"QualityAvif\", \"999\"") && st.Contains("\"QualityJpegXl\", \"9\""), "");
+    }
+
+    /// <summary>
     /// 设置白名单必须与 XAML 下拉框的实际 Tag 完全一致。
     /// <para>历史缺陷：SettingsService 的 OcrEngineMode 白名单写作 "Windows"/"Acme"，
     /// 而 MainWindow.xaml 的 ComboBoxItem Tag 是 "OnnxGpu"/"OnnxCpu"/"WindowsOcr"
@@ -2054,12 +3408,74 @@ public static class CorePipelineTests
         CheckWhitelistEqualsTags(xaml, srv, "OcrEngineCbo", "s.OcrEngineMode", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "AvifCodecCbo", "s.AvifEncoder", expectTags: 5);
 
+        // ═══ 2026-09-29（审查批次 E）把同一条尺子从 2 个下拉扩到 7 个 ═══
+        // 这条判据防的是"配置里的值域 > 界面项"，而它有两种犯法：多出一个值，【以及大小写不同】。
+        // 校验用的 IsOneOf 是 OrdinalIgnoreCase，回填界面用的 SetComboByTag 却是
+        // `(string)item.Tag == tag`（区分大小写）⇒ 白名单写 "RGB"、XAML 挂 "Rgb" 时，
+        // 值一路活到界面，下拉却匹配不到任何项 ⇒ 空白 + 下次保存被兜底值覆盖。
+        // 原先只钉 OcrEngineMode / AvifEncoder 两项，其余五项从来没有这一层对照。
+        CheckWhitelistEqualsTags(xaml, srv, "ThemeCbo", "s.ThemeMode", expectTags: 4);
+        CheckWhitelistEqualsTags(xaml, srv, "LanguageCbo", "s.Language", expectTags: 2);
+        CheckWhitelistEqualsTags(xaml, srv, "GainMapModeCbo", "s.GainMapMode", expectTags: 2);
+        CheckWhitelistEqualsTags(xaml, srv, "ArchiveModeCbo", "s.ArchiveMode", expectTags: 3);
+        CheckWhitelistEqualsTags(xaml, srv, "ToastPositionCbo", "s.ToastPosition", expectTags: 5);
+
+        // ═══ 色域那一轴不比对白名单字符串，它存的是【裸索引】⇒ 要钉的是两张表的长度等式 ═══
+        // Normalize 里的越界上界写的是字面量 5，而它的含义是"旧 6 项表的最后一项"（MainWindow.Settings.cs
+        // 的 legacyTags）。今天两者一致，但没有任何东西保证下次改 legacyTags 时那个 5 跟着改 ——
+        // 差一格的后果与 2026-09-26 摘掉 GainMap 那一项同型：合法区间放过一个指向不存在的旧索引。
+        var uiSetPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Settings.cs"));
+        if (uiSetPath is null) { Skip("色域索引上界 vs legacyTags 表长", "未找到 MainWindow.Settings.cs"); }
+        else
+        {
+            var uiSet = File.ReadAllText(uiSetPath);
+            var legacy = ExtractQuotedValuesOfArrays(uiSet, "var legacyTags = new[]");
+            var current = ExtractQuotedValuesOfArrays(uiSet, "var currentTags = new[]");
+            var bound = System.Text.RegularExpressions.Regex.Match(srv,
+                @"ColorSpaceIndex is < 0 or > (\d+)");
+            Assert($"Normalize 的色域上界写死了字面量（实得 {(bound.Success ? bound.Groups[1].Value : "<没匹配到>")}）",
+                bound.Success);
+            Assert($"legacyTags 解析到 6 项", legacy.Count == 6, $"实际 {legacy.Count}");
+            if (bound.Success && legacy.Count > 0)
+                Assert($"色域索引上界 {bound.Groups[1].Value} == legacyTags 表长-1 {legacy.Count - 1}",
+                    int.Parse(bound.Groups[1].Value) == legacy.Count - 1,
+                    "两者不等 ⇒ 旧文件里的某个合法索引会被 Normalize 判成越界（静默改成 System），"
+                    + "或反过来放过一个 legacyTags 里没有的索引（SetComboByTag 落空）");
+            // currentTags 必须逐项等于界面那三项：Array.IndexOf(currentTags, wantTag) 落空时
+            // 代码走 `newIdx < 0 → 0`，用户看到"跟随显示器"而想要的是 Rec.2020。
+            var colorTags = ExtractComboItemTags(xaml, "ColorCbo");
+            // 两边都是 0 时"数量相等"照样成立 ⇒ 先各自证明"解析器真的解析到了东西"，
+            // 否则这条锁在两张表都读瞎的那一格是恒真的（本仓 §11.6 那条"空枚举必须拦"的同型）。
+            Assert($"界面 ColorCbo 解析到 Tag（实得 {colorTags.Count}）", colorTags.Count > 0,
+                "一个都没解析到 ⇒ 下面两条等式在空集合上恒成立，这一格等于没判");
+            Assert($"currentTags 解析到项（实得 {current.Count}）", current.Count > 0,
+                "抽不到 currentTags ⇒ 与 Tag 的数量等式就变成 0==0 的假绿");
+            Assert($"界面 ColorCbo 解析到 {(current.Count > 0 ? current.Count : 3)} 个 Tag",
+                colorTags.Count == current.Count, $"currentTags {current.Count} 项 vs Tag {colorTags.Count} 项");
+            if (current.Count > 0 && colorTags.Count > 0)
+                Assert($"currentTags[{string.Join(",", current)}] == ColorCbo Tag[{string.Join(",", colorTags)}]",
+                    current.SequenceEqual(colorTags, StringComparer.Ordinal));
+        }
+
         // ═══ "Avifenc" 档 2026-09-24 从界面移除，但旧值必须迁到 LibAom 而不是 Auto ═══
         // Auto 优先走硬件 ⇒ 拿它当迁移目标会翻转用户"选了软件编码器"的语义。
         // 这条判据防的是将来有人"顺手简化"成一句白名单回落。
+        // ⚠ 锚点不能用 IndexOf("s.AvifEncoder = \"LibAom\"")：那句在文件里【出现两次】——
+        //   MigrateLegacyAvifEncoder（旧两层设置迁移）先写了一遍，第一处 IndexOf 命中的是它，
+        //   于是"其之前最近的 Avifenc"永远是 -1，这条锁红得莫名其妙（本轮实测 950/1）。
+        //   改成一整段形状匹配：Avifenc 那枚比较与 LibAom 那句赋值必须在同一小块里。
         Assert("旧值 Avifenc 显式迁到 LibAom（不是悄悄落到 Auto）",
             System.Text.RegularExpressions.Regex.IsMatch(srv,
-                "s\\.AvifEncoder == \"Avifenc\"[\\s\\S]{0,200}s\\.AvifEncoder = \"LibAom\""));
+                "AvifEncoder[\\s\\S]{0,60}\"Avifenc\"[\\s\\S]{0,200}s\\.AvifEncoder = \"LibAom\""),
+            "找不到『Avifenc 比较 → LibAom 赋值』这一段 ⇒ 迁移被改成了白名单回落（Auto 优先走硬件）");
+        // 2026-09-29 审查轮加的第二层：这道门必须与紧随其后的 FitTag【同向】认大小写。
+        // 原先写的是精确 ==，而 FitTag 按 IgnoreCase 认得 "avifenc" ⇒ 手写成小写的那份逃过迁移、
+        // 被白名单回落成 Auto（优先硬件），恰好是本条禁止的那个翻转。真行为由 NORMALIZE 新增的
+        // "AvifEncoder(小写逃过迁移门)" 那一臂钉住，这里钉的是写法不许退回精确比较。
+        Assert("Avifenc 那道迁移门按 IgnoreCase 比（与 FitTag 同口径）",
+            System.Text.RegularExpressions.Regex.IsMatch(srv,
+                "Avifenc\"[\\s\\S]{0,60}StringComparison\\.OrdinalIgnoreCase"),
+            "改成精确 == 就等于允许手写的 avifenc 绕过迁移、被白名单回落成 Auto");
     }
 
     static void CheckWhitelistEqualsTags(string xaml, string srv, string combo, string prop, int expectTags)
@@ -2167,10 +3583,245 @@ public static class CorePipelineTests
         Assert("迁移结果必须驱动写盘（否则交还的默认值只活在内存里，重启即复原）",
             srvCode.Contains("migrated |= MigrateStaleDefaults(") && srvCode.Contains("if (migrated) Save();"),
             "返回值没人接 ⇒ 门开了也不落盘");
+
+        // ═══ 2026-09-29 审查轮 §10.3 V6/V7：上面那两条只钉"存不存在"，对这次的病是盲的 ═══
+        // ① 迁移重写必须排在 Normalize 之后。写在前面 ⇒ 把【未归一的越界值】钉回盘上，
+        //    而 Save() 顺手盖的 SettingsRevision/GainMapMerged 章让迁移门永不再开 ⇒ 盘上坏值就此固化。
+        Assert("迁移重写排在 Normalize 之后（越界值不许被钉回盘上）",
+            srvCode.IndexOf("Normalize(Current)", System.StringComparison.Ordinal) >= 0
+            && srvCode.IndexOf("if (migrated) Save()", System.StringComparison.Ordinal) >
+               srvCode.IndexOf("Normalize(Current)", System.StringComparison.Ordinal),
+            "Save 早于 Normalize ⇒ 手改盘上的 FormatIndex=99 这类会被原样写回并盖章固化");
+
+        // ② 空凭据不许无条件当成"用户要删"：读盘失败时 Current 的凭据字段同样是空的。
+        Assert("清除凭据必须挂在「本次读取可信」上（坏文件不许毁掉 secrets.bin）",
+            srvCode.Contains("else if (allowDelete)")
+            && !System.Text.RegularExpressions.Regex.IsMatch(srvCode, @"else\s*\{\s*SecretStore\.Delete\("),
+            "无条件走删除分支 ⇒ 一份写坏或丢失的 settings.json 就能无备份地删掉 API Key");
+
+        // ③ 2026-09-29 审查轮：那道门只有"读进来"一个来源时，新装机那一格是坏的——
+        //   首启根本没有 settings.json ⇒ Load() 走 else ⇒ 标志整会话为假 ⇒ 用户先填 API Key、再清空，
+        //   删除被一直挡成一条 Warn，下次启动 Load() 又从 SecretStore 回填出"我已经删掉了"的那条凭据。
+        //   ⇒ "本会话写成功过"必须也算可信；而写成功必须排在 File.Move 之后（没落盘就不算），
+        //     Load() 开头两个标志要一起复位（读失败会把 Current 换成默认值表，之前那次写的可信度随之作废）。
+        int saveCallsGated = System.Text.RegularExpressions.Regex
+            .Matches(srvCode, @"SaveSecret\([^;]*SecretClearanceIsUserIntent\)").Count;
+        Assert($"两个凭据写点都走同一道门（实得 {saveCallsGated}，应为 2）", saveCallsGated == 2,
+            "漏一个 = 那条凭据的空值仍然无条件当成用户意图");
+        Assert("写成功也算「本次可信」，且必须排在真正落盘之后",
+            srvCode.Contains("_savedToDisk = true;")
+            && srvCode.IndexOf("File.Move(tmp, SettingsPath", System.StringComparison.Ordinal) >= 0
+            && srvCode.IndexOf("File.Move(tmp, SettingsPath", System.StringComparison.Ordinal)
+               < srvCode.IndexOf("_savedToDisk = true;", System.StringComparison.Ordinal),
+            "写盘失败却把标志抬起来 ⇒ 又回到\"空值即用户要删\"的假前提");
+        Assert("Load() 开头把读、写两个可信来源一起复位",
+            srvCode.Contains("_loadedFromDisk = false;") && srvCode.Contains("_savedToDisk = false;"),
+            "只复位读的那半 ⇒ 上一次写留下的可信度会穿过一次失败的 Load，坏文件又能删凭据了");
     }
 
     /// <summary>
-    /// 「JPEG Gain Map 并入 JPEG LI」的重映射与接线（2026-09-26 用户口径）。
+    /// 三根截图入口的失败静默度必须一致（2026-09-29 审查轮 §10.3 V1）。
+    /// <para>形状：写了 Error/Warn 就 return，而那一格里既没有状态栏也没有通知 ⇒ 用户按下热键后
+    /// 什么都没发生也没被告知。选区那根一直是 ❌ + 通知，无感那根只写日志 —— 同一种错在两根入口
+    /// 表现不同，报障时按「有没有弹提示」根本分不出是哪条路。</para>
+    /// <para>Test 引用不到 App ⇒ 这条只能钉「日志语句与可见提示在同一段里」。</para>
+    /// </summary>
+    static void Test_CaptureRoots_FailureNeverSilent()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (mwPath is null)
+        {
+            Skip("截图根失败可见性", "未找到 MainWindow.xaml.cs");
+            return;
+        }
+        var mw = File.ReadAllText(mwPath);
+        // 三条无感路径上的失败点：拿日志原文当锚点。锚不在 ⇒ 先判红，不能让这条悄悄变成空判。
+        var anchors = new[]
+        {
+            "WGC 捕获服务未初始化",       // 捕获服务没起来
+            "SDR 像素数据为空，跳过保存", // 拿到空帧
+            "无感截图编码失败",           // 后台编码抛
+        };
+        foreach (var anchor in anchors)
+        {
+            int at = mw.IndexOf(anchor, System.StringComparison.Ordinal);
+            Assert($"无感截图的失败点【{anchor}】仍在源码里", at >= 0,
+                "锚点不见了 ⇒ 这条判据失效（改日志文案要同步这里，别让它空转）");
+            if (at < 0) continue;
+            int ret = mw.IndexOf("return;", at, System.Math.Min(400, mw.Length - at));
+            int end = ret >= 0 ? ret + 7 : System.Math.Min(at + 400, mw.Length);
+            var win = mw.Substring(at, end - at);
+            Assert($"【{anchor}】必须同时给用户状态栏与失败提示（不许只写日志）",
+                win.Contains("SetStatus(") && win.Contains("ShowCaptureFailed("),
+                "只写日志 = 用户按了热键却零反馈；对照选区那根是同形两句");
+        }
+    }
+
+    /// <summary>
+    /// 四个目的地都必须吃【合成标注后】的像素（2026-09-29 审查轮 §10.3 V10）。
+    /// <para>缺陷形状：只有「保存/复制」做标注合成，「识字/翻译」落回原始桌面像素 ⇒
+    /// 用户用马赛克盖住的原文会被 OCR 原样读出来，且没有任何提示。</para>
+    /// </summary>
+    static void Test_AnnotationComposedForAllDestinations()
+    {
+        var ovPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (ovPath is null || mwPath is null)
+        {
+            Skip("标注合成覆盖四个目的地", "未找到 SelectionOverlay.xaml.cs / MainWindow.xaml.cs");
+            return;
+        }
+        var ov = StripLineComments(File.ReadAllText(ovPath));
+        var mw = StripLineComments(File.ReadAllText(mwPath));
+
+        int g = ov.IndexOf("if (result is ActionResult.", System.StringComparison.Ordinal);
+        Assert("SDR 覆盖层：合成守卫必须同时含 Confirm/Copy/Ocr/Translate",
+            g >= 0 && ov.Substring(g, System.Math.Min(140, ov.Length - g)) is var guard
+            && guard.Contains("ActionResult.Confirm") && guard.Contains("ActionResult.Copy")
+            && guard.Contains("ActionResult.Ocr") && guard.Contains("ActionResult.Translate"),
+            "少一个目的地 = 那一路读的是未合成的原始桌面像素（马赛克白画）");
+
+        foreach (var act in new[] { "Ocr", "Translate" })
+        {
+            int c = mw.IndexOf($"case HdrCaptureAction.{act}:", System.StringComparison.Ordinal);
+            Assert($"HDR 覆盖层：case {act} 必须走 ComposeAnnotatedSdr（与 Save/Copy 同源）",
+                c >= 0 && mw.Substring(c, System.Math.Min(300, mw.Length - c)).Contains("ComposeAnnotatedSdr(")
+                && !mw.Substring(c, System.Math.Min(300, mw.Length - c))
+                       .Contains($"{act}FromPixelsAsync(sdrRegion", System.StringComparison.Ordinal),
+                "把未合成的 sdrRegion 直接交给识字/翻译 ⇒ 标注与马赛克在这两路上失效");
+        }
+    }
+
+    /// <summary>
+    /// 2026-09-29 审查轮 §10.3 那五处修复各自的判据（能真跑的都提级到 T1，够不到的老实标 T2）。
+    /// <para>每条都配一条【会翻转的对照臂】：只测"修好之后是对的"不算数，要能证明旧写法在这里必然红。</para>
+    /// </summary>
+    static void Test_ReviewRoundFixes_HaveTeeth()
+    {
+        // ── ① BT.601 灰度权重：R/B 系数曾装反（BGRA 布局下把 77 给了 B、29 给了 R）──
+        // 夹具挑的是"正确权重"与"装反权重"给出【相反结论】的一对颜色：
+        //   (R=255,G=120,B=0) → 正确 147 / 装反 99 ；(R=0,G=120,B=255) → 正确 99 / 装反 147
+        // 阈值 110 正好卡在中间 ⇒ 旧写法两臂全反，这条一定红。
+        static byte[] Solid(int r, int g, int b)
+        {
+            var px = new byte[64 * 64 * 4];
+            for (int i = 0; i < px.Length; i += 4) { px[i] = (byte)b; px[i + 1] = (byte)g; px[i + 2] = (byte)r; px[i + 3] = 255; }
+            return px;
+        }
+        var brightWarm = Solid(255, 120, 0);    // 真亮度高（红权重大）
+        var dimCool = Solid(0, 120, 255);       // 真亮度低（蓝权重小）
+        Assert("灰度权重按 BT.601 落在正确通道上：暖色不算深底",
+            !BitmapPreprocessor.IsDarkBackground(brightWarm, 64, 64),
+            "R/B 系数装反会把暖色读成深底 ⇒ 深色主题判定与反色一起走反");
+        Assert("灰度权重按 BT.601 落在正确通道上：冷色算深底",
+            BitmapPreprocessor.IsDarkBackground(dimCool, 64, 64),
+            "两臂必须相反，同判说明这条判据是恒真的");
+
+        // ── ② LLM 回 200 而 content 为空：原写法把源文本当译文返回（静默假成功）──
+        bool threwNull = false, threwBlank = false;
+        try { TranslationService.RequireTranslatedContent(null); } catch { threwNull = true; }
+        try { TranslationService.RequireTranslatedContent("   "); } catch { threwBlank = true; }
+        Assert("端点回空 content 必须判失败（不许把用户自己的源文本当译文返回）",
+            threwNull && threwBlank,
+            "content?.Trim() ?? text 这种回落长得像成功，比报错更坏");
+        Assert("有内容时原样去空白返回（别把这条改成恒抛）",
+            TranslationService.RequireTranslatedContent("  hello  ") == "hello");
+
+        // ⚠ 上面两条臂只证明 helper 本身正确 —— 变异实测 M2 抓到：把调用点退回
+        //    `content?.Trim() ?? text` 时它们【照样全绿】。缺陷长在调用点上，所以必须再钉调用点。
+        //    切片只取到本方法结束（`\n    }`），并先剥掉整行注释 —— helper 的 XML 文档里就写着
+        //    旧写法当反例，不剥注释这条锁会永久假红。
+        var tsPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "TranslationService.cs"));
+        string tsRaw = tsPath is null ? "" : File.ReadAllText(tsPath);
+        int la = tsRaw.IndexOf(".GetProperty(\"content\")", System.StringComparison.Ordinal);
+        int lb = la < 0 ? -1 : tsRaw.IndexOf("\n    }", la, System.StringComparison.Ordinal);
+        var llmWin = (la >= 0 && lb > la) ? StripLineComments(tsRaw.Substring(la, lb - la)) : "";
+        Assert("LLM 解析的调用点必须真的走那道守卫（helper 正确 ≠ 有人调它）",
+            llmWin.Contains("RequireTranslatedContent(content)"),
+            "调用点退回 content?.Trim() ?? text ⇒ 端点回空 content 时又把源文本当译文交出去");
+        Assert("LLM 解析路径上不许再出现『回空就吐源文本』这种回落",
+            llmWin.Length > 0 && !llmWin.Contains("?? text") && !llmWin.Contains("?? sourceText"),
+            "这正是本轮 §10.3 V2 修掉的那一行的写法");
+
+        // ── ③ AVIF 全后端失败的 PNG 保底必须仍带色域声明 ──
+        // 行为级：裸值入口与 EncodingSettings 入口必须逐字节同结果（映射逻辑只该有一处）。
+        foreach (var (tag, icc) in new (string, byte[]?)[3]
+        {
+            ("BT2020", new byte[128]), ("sRGB", null), ("System", new byte[64]),
+        })
+        {
+            var st = new EncodingSettings { ColorSpaceTag = tag, IccProfile = icc };
+            var viaSettings = FormatHelper.GetColorMetadata(st);
+            var viaRaw = FormatHelper.GetColorMetadata(tag, icc);
+            Assert($"两个入口同输入必须同输出（tag={tag}）",
+                SameBytes(viaSettings.icc, viaRaw.icc) && SameBytes(viaSettings.cicp, viaRaw.cicp),
+                "保底若自己拼一份映射，主路改了它不会跟着改 ⇒ 又长出一个事实源");
+        }
+        Assert("sRGB / System 目标不嵌 ICC（保底与主路共用的这条口径不许漂）",
+            FormatHelper.GetColorMetadata("sRGB", new byte[128]).icc is null
+            && FormatHelper.GetColorMetadata("System", new byte[128]).icc is null);
+        var fePath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"));
+        // ⚠ §13.9 之后这条必须钉在【函数本体】上。原先的窗口是 "最终回退 PNG" → 最近的 "RecordFallbackPath"，
+        //   而 WebP 保底里也有一句 RecordFallbackPath ⇒ 我在它前面新加一处调用，窗口就被提前截断、
+        //   锁自己错位红了（本轮实测：--unit-tests 899/1）。锚点式文本锁就这么脆。
+        //   真正的行为判据是 ColorPipelineTests.AvifPngFallback_KeepsDeclarationAndNotice
+        //   （独占目标文件、真跑一次保底、读回 PNG 的 iCCP/cICP）；下面这几条只钉形状。
+        string feSrc = fePath is null ? "" : File.ReadAllText(fePath);
+        var fbWin = SliceAround(feSrc, "internal static void PngLastResort", "catch (Exception pngEx");
+        Assert("PNG 保底那一路真的把色域声明传进编码器（就近钉）",
+            fbWin.Contains("ManagedPngEncoder.Encode(bgra, w, h, pngPath, 8, "),
+            "少了这两个实参 ⇒ 产物是「广色域像素 + 零声明」的 PNG，查看器一律按 sRGB 解");
+        Assert("PNG 保底必须写降级留痕（换的是格式，不只是参数）",
+            fbWin.Contains("EncoderFallbackNotifier.LastReason"),
+            "只从后缀发现格式换了 ⇒ 用户查不到原因（WebP 保底早就写了这条）");
+        // 2026-09-29 审查轮：那条留痕【不许覆盖更早的那条】。原先这里是裸赋值 ⇒ 同一次编码里已经写过
+        // 的格式内降级（例如"MFT 失败已回退 libaom，会明显变慢"）被"改存 PNG"挤出唯一槽位，
+        // 用户永远不知道自己还绕开过硬件后端。HDR 那份从一开始就是并起来的，byte[] 这份必须同形。
+        Assert("PNG 保底不许吃掉更早的降级留痕（与 HDR 那份同样并起来 + 另留一行 Warn）",
+            fbWin.Contains("｜另外：") && fbWin.Contains("var earlier = EncoderFallbackNotifier.LastReason;")
+            && fbWin.Contains("已并入而非丢弃"),
+            "裸赋值 = 换格式那句把本次编码里更早的格式内降级挤出唯一槽位，两份事实只剩一份可见");
+        // 调用点按"哪条腿"分别数：byte[] 那份（AVIF SDR / WebP / JPEG LI / JXL SDR）与
+        // HDR 帧那份（AVIF HDR / JXL HDR）。增益图的两处在 JpegGainMapEncoder.cs，由
+        // Test_PngFallbackSwitch_Wired 那条"每个写者都读这个闸"的总数覆盖。
+        int sdrLegs = CountOccurrences(feSrc, "FormatHelper.PngLastResort(");
+        int hdrLegs = CountOccurrences(feSrc, "FormatHelper.PngLastResortHdrFrameAsync(");
+        Assert($"换格式保底的 byte[] 腿调用点 ≥4（实得 {sdrLegs}）", fbWin.Length > 0 && sdrLegs >= 4,
+            "少一条腿就退回「只覆盖某一条路」的形状；行为矩阵那时会红，但归属不到是哪条路");
+        Assert($"换格式保底的 HDR 腿调用点 ≥2（实得 {hdrLegs}）", hdrLegs >= 2,
+            "HDR 那条腿没有保底 = 用户在 HDR 屏上按一次热键什么都不落，而开关也无从关掉它");
+        // ═══ 2026-09-29 F 批：保底实现【只能有一份】═══
+        // WebP 原先自己内联写了整套（取声明 → Encode → 写留痕 → 登记路径），与 AVIF 那份并行存在，
+        // 于是"promise 写在文案里、实现却只接住 DllNotFoundException"这种错法没有任何一处会暴露。
+        // 换后缀是"换格式"这件事实最硬的签名 ⇒ 它只许出现在保底的两个函数里
+        // （byte[] 那份 + HDR 帧那份），出现第三处就意味着有人又抄了一份保底。
+        var suffixSwitches = System.Text.RegularExpressions.Regex
+            .Matches(feSrc, @"Path\.ChangeExtension\(\s*path\s*,\s*""\.png""").Count;
+        Assert($"换格式保底的「换后缀」实现只许两份（byte[] 与 HDR 帧各一，实得 {suffixSwitches}）",
+            suffixSwitches == 2,
+            "第三处 = 又长出一份并行保底；一份都没有 = HDR 那条腿的保底被删了");
+        // 硬件链自己【不再】换格式：2026-09-29 把决定上移到带 EncodingSettings 的那一层，
+        // 否则用户那个开关在硬件路径上根本无从生效（后端层拿不到设置）。
+        var hwChain = SliceAround(feSrc, "public static void FallbackToLibAom", "throw;");
+        Assert("AVIF 硬件链失败后只抛出，不在后端层换格式（开关才管得住它）",
+            hwChain.Length > 0 && !hwChain.Contains("PngLastResort"),
+            "后端层里换格式 = 那一层看不到 PngFallbackEnabled，用户关掉开关也照换");
+    }
+
+    /// <summary>取 [锚点, 结束锚点] 之间的那段源码（锚点找不到就返回空串 ⇒ 判红，不空转）。</summary>
+    static string SliceAround(string src, string startAnchor, string endAnchor)
+    {
+        int a = src.IndexOf(startAnchor, System.StringComparison.Ordinal);
+        if (a < 0) return "";
+        int b = src.IndexOf(endAnchor, a, System.StringComparison.Ordinal);
+        return b > a ? src.Substring(a, b - a + endAnchor.Length) : "";
+    }
+
+    /// <summary>字节序列同值（不是同引用）。&lt;c&gt;BuildSdrCicp&lt;/c&gt; 每次新分配数组，
+    /// 拿 <c>==</c> 比会恒定判红——本轮第一版就是这么错的。</summary>
+    static bool SameBytes(byte[]? a, byte[]? b)
+        => ReferenceEquals(a, b) || (a is not null && b is not null
+            && a.AsSpan().SequenceEqual(b.AsSpan()));
     /// <para>为什么这是本轮最需要判据的一处：<c>FormatIndex</c> 存的是<b>裸索引</b>，
     /// 旧表 1=GainMap、2=JPEG LI，新表 1=JPEG LI。而全仓对它的唯一旧防线是越界钳制
     /// （<c>is &lt; 0 or &gt; 6</c>）—— 删掉一项之后，旧值 1 与新默认值都仍在合法区间内 ⇒
@@ -2233,7 +3884,11 @@ public static class CorePipelineTests
             rbBody.Length > 0
             && firstSel >= 0 && firstSel < itemsAt          // 先读
             && assignSel > itemsAt                           // 后写
-            && rbBody.Contains("FormatOrder.DefaultIndex"),   // 未选中时的落点 = 产品默认
+            // 2026-10-01 这一格的口径改过：未选中时的回落取【持久化那一份】(_settings.FormatIndex)，
+            // 不再取表里的默认项 —— 默认项那条会把用户选的格式抹成 PNG 并连带写回盘上
+            // （实机前后读数见 Test_FormatCombo_RebuildKeepsThePersistedFormat 的注释）。
+            // 本条只判"先读后写 + 回落这条路接的是持久化真值"，值的正确性由那张卡判。
+            && rbBody.Contains("_settings.FormatIndex"),      // 未选中时的落点 = 盘上那一份
             $"读选中@{firstSel} / ItemsSource@{itemsAt} / 写选中@{assignSel}");
 
         // ── App 侧接线（Test 引用不到 App，只能钉形态；行为级在 SelfTest --settings-migration）──
@@ -2384,20 +4039,43 @@ public static class CorePipelineTests
             && text.Contains("\" --\""));          // C:\a.exe --autostart     → C:\a.exe
     }
 
-    /// <summary>提取 XAML 中指定 ComboBox 块内的 ComboBoxItem Tag。</summary>
+    /// <summary>
+    /// 提取 XAML 中指定 ComboBox 块内的 ComboBoxItem Tag。
+    /// <para>锚点用 <c>x:Name="X"</c> 而不是裸名字：XAML 里 <c>ColorCbo</c> 是
+    /// <c>OverlayColorCbo</c> / <c>BorderColorCbo</c> 的子串，按裸名"取第一次命中"一旦别人把
+    /// 那两张卡片挪到前面，这里就会静默换块 ⇒ 解析到别人的 Tag 还自认为对了（本轮实测过这个形状）。
+    /// 现有 8 个调用点都是 <c>SelectionChanged</c> 的界面下拉，XAML 里必然写成 <c>x:Name="…"</c>。</para>
+    /// </summary>
     static List<string> ExtractComboItemTags(string xaml, string comboBoxName)
     {
-        int idx = xaml.IndexOf(comboBoxName, StringComparison.Ordinal);
+        int idx = xaml.IndexOf("x:Name=\"" + comboBoxName + "\"", StringComparison.Ordinal);
         if (idx < 0) return new List<string>();
         int end = xaml.IndexOf("</ComboBox>", idx, StringComparison.Ordinal);
         var block = end > idx ? xaml[idx..end] : xaml[idx..];
         return ExtractQuotedValues(block, "Tag=\"");
     }
 
-    /// <summary>提取 IsOneOf(s.Xxx, "a", "b", ...) 括号内的合法值。</summary>
+    /// <summary>取 <c>var X = new[] { "a", "b", … };</c> 这一行的字面量（到分号为止）。</summary>
+    static List<string> ExtractQuotedValuesOfArrays(string cs, string decl)
+    {
+        int idx = cs.IndexOf(decl, StringComparison.Ordinal);
+        if (idx < 0) return new List<string>();
+        int end = cs.IndexOf(';', idx, StringComparison.Ordinal);
+        var seg = end > idx ? cs[idx..end] : cs[idx..];
+        return ExtractQuotedValues(seg, "\"");
+    }
+
+    /// <summary>
+    /// 提取 <c>FitTag(s.Xxx, v =&gt; …, dft.Xxx, "a", "b", …)</c> 里的合法值。
+    /// <para>只取调用里的字符串字面量：第三参是 <c>dft.Xxx</c>（无引号），lambda 体也无引号
+    /// ⇒ 段内所有引号串恰好等于那张 Tag 表，不会混进默认值。</para>
+    /// <para>2026-09-29 前这里找的是 <c>IsOneOf(s.Xxx…</c>；换成 <c>FitTag(</c> 之后，若有人把某一轴
+    /// 退回成"只校验不改写拼法"的写法，这里就解析不到 ⇒ <c>白名单: 解析到 …</c> 那条断言直接红，
+    /// 不会静默放过。</para>
+    /// </summary>
     static List<string> ExtractIsOneOfArgs(string cs, string propertyRef)
     {
-        int idx = cs.IndexOf("IsOneOf(" + propertyRef, StringComparison.Ordinal);
+        int idx = cs.IndexOf("FitTag(" + propertyRef, StringComparison.Ordinal);
         if (idx < 0) return new List<string>();
         int close = cs.IndexOf(')', idx);
         var seg = close > idx ? cs[idx..close] : cs[idx..];
@@ -2734,7 +4412,365 @@ public static class CorePipelineTests
         // 这里原本还有第三条"源码里不得出现 s_hwFallbackNotified 字样"——写错了，删掉：
         // 本文件有一段注释正是用那个名字解释这次修复，断言不该去禁文档措辞（它当场把注释判红）。
         // 防重犯已由上面那条正则负责，第三条没有增量价值。
+
+        // ═══ 2026-09-30 任务 #10：消费降级留痕必须排在【两条编码腿】的 finally 里 ═══
+        // 原先这一句只写在成功路径末尾 ⇒ 编码整条失败时那次原因留在单槽里，下一次【成功】的截图
+        // 会把它当成自己的降级弹出来（本文件那句"不清空会把上一次的原因报到下一次截图上"警告过，
+        // 但清槽只做了一半路径）。按 finally 里有没有它来钉，而不是钉"调用总数"——
+        // 调用总数对"写在成功路径"这种错法完全不敏感（一样是 2 次）。
+        int consumesInFinally = System.Text.RegularExpressions.Regex
+            .Matches(cps, @"AllowSleep\(\);[\s\S]{0,200}?NotifyEncoderFallbackIfAny\(").Count;
+        Assert($"两条编码腿都在 finally 里消费降级留痕（实得 {consumesInFinally}，应为 2）",
+            consumesInFinally == 2,
+            "少于 2 = 有一条腿的失败路径不清槽，原因会泄漏到下一张；0 = 整个机制退回成功路径");
+        int totalConsumes = System.Text.RegularExpressions.Regex
+            .Matches(cps, @"NotifyEncoderFallbackIfAny\(").Count;
+        Assert("消费点只有『一处定义 + 两条腿各一次调用』（实得 3）", totalConsumes == 3,
+            $"实得 {totalConsumes}：多出来的那一处若落在 finally 之外，成功路径会把原因提前吃掉，"
+            + "失败路径又回到不消费的老形状");
     }
+
+    /// <summary>
+    /// 英文界面的状态栏不许被 .cs 里的字面量盖回中文（2026-09-30 批次 T3 实测抓出来的）。
+    /// <para>起因：进程外 UIA 扫真身（`tests/manual/safety/en-ui-count.ps1`，读数
+    /// `tests/output/en-ui-count-en2.log`）——英文模式下 41 个带名控件里 9 条仍是中文，
+    /// 其中「就绪」<b>已经在 ZhToEn 表里</b>（<c>LocaleManager.cs:316</c>），XAML 初值也确实被翻了，
+    /// 但 <c>MainWindow.xaml.cs</c> 有三处把字面量 <c>"就绪"</c> 直接写回 <c>StatusTxt.Text</c>
+    /// ⇒ 英文界面每次操作后状态栏自己变回中文。</para>
+    /// <para>为什么必须新加这一条：现有的"界面中文本地化覆盖"那把尺子查的是<b>XAML 字面量有没有进表</b>，
+    /// 它管不到"运行时用 .cs 盖回中文"这一类——而这类恰恰是 UIA 看得见、静态扫描看不见的
+    /// （同族缺口见交接报告 §55"漏翻在 .cs 拼串"）。所以这里钉的是【赋值右侧】的形态，
+    /// 而不是数表里的条目。</para>
+    /// </summary>
+    static void Test_StatusBarLocale_CsMustNotReWriteChinese()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var lp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        if (p is null || lp is null)
+        { Skip("状态栏英文模式回中文", "未找到 MainWindow.xaml.cs / LocaleManager.cs"); return; }
+        var main = StripLineComments(File.ReadAllText(p));
+        var loc = File.ReadAllText(lp);
+
+        Assert("对照表里确实有『就绪 → Ready』这一条（否则下面两条是空谈）",
+            loc.Contains("[\"就绪\"] = \"Ready\"") && loc.Contains("public static string Ready"),
+            "表里缺这条 ⇒ 界面扫描也翻不出来，属另一种错法");
+        int raw = System.Text.RegularExpressions.Regex
+            .Matches(main, @"StatusTxt\.Text\s*=\s*""就绪""").Count;
+        Assert($"状态栏不许再直写中文『就绪』（实得 {raw} 处，应为 0）", raw == 0,
+            "直写字面量会盖掉可视树扫描的结果 ⇒ 英文模式下每次操作后状态栏变回中文（UIA 实测抓到 3 处）");
+        int via = System.Text.RegularExpressions.Regex
+            .Matches(main, @"StatusTxt\.Text\s*=\s*LocaleManager\.Ready").Count;
+        Assert($"三处复位点都走 LocaleManager.Ready（实得 {via}，应为 3）", via == 3,
+            "少一处 = 那条路径仍然直写或写了别的串，英文界面按路径随机回退成中文");
+    }
+
+    /// <summary>
+    /// 热键冲突日志里的 <c>err=</c> 必须是真的错误码（2026-09-30 批次 T3 实测抓到它恒打 0）。
+    /// <para>来历：本进程抢下 <c>Ctrl+Shift+S</c> / <c>Ctrl+Shift+Q</c> 再起真身，产品日志如实写了
+    /// <c>冲突: Ctrl+Shift+S (err=0)</c> 并回退到 <c>Ctrl+Alt+S</c> / <c>Ctrl+Alt+Q</c>（见
+    /// <c>tests/output/hotkey-clipboard-cell2.log</c> 与其后的产品日志）。回退链本身是对的，
+    /// 但那个 <c>err=0</c> 是假的：<c>RegisterHotKey</c> 的 <c>LibraryImport</c> 没开
+    /// <c>SetLastError</c>，<c>Marshal.GetLastWin32Error()</c> 取不到本次调用的错误码。</para>
+    /// <para>为什么值得单独钉：热键问题只有两个成因——被别的程序占用（1410）与参数不合法（87），
+    /// 而这两者的处置完全相反。日志把关键分叉印成 0，等于把这一格退回"靠猜"。</para>
+    /// </summary>
+    static void Test_HotkeyConflictLog_CarriesRealWin32Error()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HotkeyManager.cs"));
+        if (p is null) { Skip("热键冲突日志的 err", "未找到 HotkeyManager.cs"); return; }
+        var src = File.ReadAllText(p);
+
+        Assert("冲突日志确实读了 GetLastWin32Error（否则下面那条没意义）",
+            src.Contains("Marshal.GetLastWin32Error()"),
+            "日志里不印错误码也行，但那就该把这句从话里删掉，别留一个恒为 0 的数");
+        Assert("RegisterHotKey 的 LibraryImport 必须开 SetLastError = true",
+            System.Text.RegularExpressions.Regex.IsMatch(src,
+                @"LibraryImport\(""user32\.dll""[^)]*SetLastError\s*=\s*true\s*\)\][\s\S]{0,120}?RegisterHotKey"),
+            "不开这个标志，err 恒打 0 ⇒ 排查的人分不出『被占用(1410)』与『参数非法(87)』");
+    }
+
+    /// <summary>
+    /// LogViewer 的"调用者 → 哪个窗口"与"这行属于哪个实例"判据（镜像正则哨兵，2026-09-30）。
+    /// <para>为什么只能钉源码：Test 工程只引用 Core，运行时够不到 LogViewer 的 LogParser，
+    /// 所以把生产侧的四条正则原文抄一份当镜像，再拿【逐字相等】把两侧锁住。抄两份是刻意的：
+    /// 不锁字面，改生产判据时这条用例就永远绿在错的地方；锁了字面，任一侧漂移立刻红 ——
+    /// 那时该做的决定是"两边一起改"，而不是"把这条删掉"。</para>
+    /// <para>钉住的缺陷本体：旧 caller 判据 <c>[A-Za-z0-9_]+\.cs</c> 只吃"一个点的名字"，
+    /// 而窗口源文件的形状恰恰是代码后置 <c>SelectionOverlay.xaml.cs</c> / <c>MainWindow.xaml.cs</c>
+    /// 与分部切片 <c>MainWindow.Settings.cs</c> ⇒ 真实日志（当日 2120 行）里 739 行 Caller 恒空、
+    /// "文件.cs:行号"整段粘在 Message 上当文案，日志查看器对"这行出自哪个窗口"整体失明。
+    /// 探针实测读数：修前 Caller 非空 1358 / 修后 2097，窗口归属 0 → 791，实例身份 0 → 69。</para>
+    /// </summary>
+    static void Test_LogViewer_WindowAndInstanceAttribution()
+    {
+        // ── 镜像常量：与 LogParser.cs 的字面量逐字一致（漂移即红，见上面的设计说明）──
+        const string CallerMirror = @"\s+([A-Za-z0-9_.]+\.cs):(\d+)\s*$";
+        const string WindowMirror =
+            @"^(?!App\.xaml\.cs$)(?<name>[A-Za-z0-9_]*Window|[A-Za-z0-9_]+(?=\.xaml\.cs$))(?:\.[A-Za-z0-9_]+)?\.cs$";
+        const string InstanceMirror = @"实例#(\d+)";
+        const string ActivationMirror = @"(?:Activated\s*#(\d+)|第(\d+)次)";
+
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.LogViewer", "Services", "LogParser.cs"));
+        // fail-closed：源文件都没定位到 ⇒ 下面一条判据都没跑，必须报红。
+        // 这里不许 Skip：Skip 会把"测试自己瞎了"记成"这块没测"，而这条正是唯一能看见那处失明的地方。
+        if (p is null)
+        {
+            Assert("LogViewer 窗口/实例哨兵：LogParser.cs 已定位", false,
+                "未找到 src/TrueToneCap.LogViewer/Services/LogParser.cs ⇒ 镜像比对一条都没执行");
+            return;
+        }
+        var src = StripLineComments(ReadSourceNormalized(p));
+
+        // 取某条 Regex 字段声明后面的 @"" 字面量（锚点找不到返回 null，由调用方判红）
+        string? LiteralOf(string field)
+        {
+            int i = src.IndexOf(field, StringComparison.Ordinal);
+            if (i < 0) return null;
+            int at = src.IndexOf('@', i, StringComparison.Ordinal);
+            if (at < 0) return null;
+            int open = at + 2;                                   // 跳过 @"
+            int close = src.IndexOf('"', open, StringComparison.Ordinal);
+            return close < 0 ? null : src[open..close];
+        }
+        static string Yes(string? v) => v is null ? "无" : "有";
+
+        var prodCaller = LiteralOf("s_callerRegex");
+        var prodWindow = LiteralOf("s_windowRegex");
+        var prodInstance = LiteralOf("s_instanceRegex");
+        var prodActivation = LiteralOf("s_activationRegex");
+        Assert("生产侧四条正则都按字段名找得到（找不到 = 锚点漂了，不是代码坏了）",
+            prodCaller is not null && prodWindow is not null &&
+            prodInstance is not null && prodActivation is not null,
+            $"实得 caller={Yes(prodCaller)} window={Yes(prodWindow)} instance={Yes(prodInstance)} activation={Yes(prodActivation)}");
+
+        Assert("caller 正则与镜像逐字一致", prodCaller == CallerMirror, $"生产侧实得「{prodCaller}」");
+        Assert("窗口归属正则与镜像逐字一致", prodWindow == WindowMirror, $"生产侧实得「{prodWindow}」");
+        Assert("实例号正则与镜像逐字一致", prodInstance == InstanceMirror, $"生产侧实得「{prodInstance}」");
+        Assert("激活次数正则与镜像逐字一致", prodActivation == ActivationMirror, $"生产侧实得「{prodActivation}」");
+
+        // 旧判据不许回来（它才是这次失明的成因，且写起来只差一个点，最容易顺手改回去）
+        Assert("旧的单点式 caller 判据已下线",
+            !src.Contains(@"\s+([A-Za-z0-9_]+\.cs):(\d+)\s*$"),
+            "[A-Za-z0-9_]+\\.cs 匹配不到 MainWindow.xaml.cs 这种两个点的名字 ⇒ 窗口行的调用者又会掉回 Message");
+
+        // 行为面：拿镜像复现生产的归属结论（含两类被漏掉的窗口与必须排除的非窗口文件）
+        var cases = new (string File, string Want)[]
+        {
+            ("SelectionOverlay.xaml.cs", "SelectionOverlay"),   // WinUI 窗口，代码后置，不以 Window 结尾
+            ("MainWindow.xaml.cs", "MainWindow"),               // 同上（本仓主窗口）
+            ("MainWindow.Settings.cs", "MainWindow"),           // 同一窗口的分部切片
+            ("AnnotationWindow.xaml.cs", "AnnotationWindow"),
+            ("HdrCaptureWindow.cs", "HdrCaptureWindow"),        // 自绘窗口（自己 CreateWindowExW 一个 HWND）
+            ("App.xaml.cs", ""),                                // Application，不是窗口
+            ("LogService.cs", ""),                              // 服务类，不该被误认成窗口
+            ("ToastService.cs", ""),
+        };
+        foreach (var (file, want) in cases)
+        {
+            var m = Regex.Match(file, WindowMirror);
+            var got = m.Success ? m.Groups["name"].Value : "";
+            Assert($"窗口归属：{file} → 「{want}」", got == want, $"镜像实得「{got}」");
+        }
+
+        // 真实日志行的形状核对（这两条正是报告里"看不见归属"的那两行）
+        const string overlayLine = "04:42:47.536 [Info   ] #qqwrtg [界面/Overlay] " +
+            "Activated #2（实例#1）进入背景创建 SelectionOverlay.xaml.cs:189";
+        var cm = Regex.Match(overlayLine, CallerMirror);
+        Assert("真实覆盖层行能切出调用者文件", cm is { Success: true } && cm.Groups[1].Value == "SelectionOverlay.xaml.cs",
+            $"实得「{(cm.Success ? cm.Groups[1].Value : "<未匹配>")}」");
+        Assert("该行能归到 SelectionOverlay 窗口",
+            cm.Success && Regex.Match(cm.Groups[1].Value, WindowMirror) is { Success: true } wm2 &&
+            wm2.Groups["name"].Value == "SelectionOverlay");
+        var im = Regex.Match(overlayLine, InstanceMirror);
+        Assert("该行读得出实例号 1", im is { Success: true } && im.Groups[1].Value == "1", $"实得「{im.Groups[1].Value}」");
+        var am = Regex.Match(overlayLine, ActivationMirror);
+        Assert("该行读得出激活次数 2（Activated #N 这一支）",
+            am is { Success: true } && am.Groups[1].Value == "2", $"实得「{am.Groups[1].Value}」");
+        const string readyLine = "覆盖层就绪 实例#1 第30次进入 DPI=144 Scale=1.50 虚拟桌面=3840x2160@(0,0)";
+        var am2 = Regex.Match(readyLine, ActivationMirror);
+        Assert("'第N次进入'那一支也读得出同一个数（30）",
+            am2 is { Success: true } && am2.Groups[2].Value == "30", $"实得「{am2.Groups[2].Value}」");
+
+        // 解析出来的东西必须真在界面上露出来，否则这条归因就只是字段名
+        var xaml = FindRepoFile(Path.Combine("src", "TrueToneCap.LogViewer", "MainWindow.xaml"));
+        if (xaml is null)
+        {
+            Assert("LogViewer 列表模板已定位（MainWindow.xaml）", false, "未找到 src/TrueToneCap.LogViewer/MainWindow.xaml");
+            return;
+        }
+        var template = ReadSourceNormalized(xaml);
+        Assert("列表模板绑定窗口徽标（WindowDisplay + WindowVisibility）",
+            template.Contains("{Binding WindowDisplay}") && template.Contains("{Binding WindowVisibility}"));
+        Assert("列表模板绑定实例徽标（InstanceDisplay + InstanceVisibility）",
+            template.Contains("{Binding InstanceDisplay}") && template.Contains("{Binding InstanceVisibility}"));
+    }
+
+    /// <summary>
+    /// 覆盖层里不许再出现 GPU 背景那一路（B 档的反向哨兵，2026-10-01 报告 §39）。
+    /// <para>被删的那条路不是"性能选型没选中"，是【实测从来没上屏】：标记帧实验里下层窗整帧品红 +
+    /// 跳过覆盖层 CPU 合成，屏幕读到 0/6400 品红、三通道均值中性灰（判据与亮度无关，报告 §37.7）。
+    /// 它当时会报"呈现成功"，而成功恰好把唯一画得出来的那段关掉 —— 这就是"预览全白"的成因。
+    /// 所以本卡锁的不是形状好看，是【别再把它请回来】。</para>
+    /// </summary>
+    static void Test_Overlay_HasNoGpuBackgroundPath()
+    {
+        var ov = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
+        if (ov is null) { Assert("覆盖层源文件在（缺文件不许静默过去）", false, "未找到 SelectionOverlay.xaml.cs"); return; }
+        var src = StripLineComments(ReadSourceNormalized(ov));
+
+        Assert("下层供帧窗的类不许被覆盖层再引用（删掉的是一条被证明不上屏的供帧路）",
+            !src.Contains("HdrPreviewWindow"), "覆盖层里又出现了 HdrPreviewWindow");
+        Assert("覆盖层里不许再有按名字找字节码去呈现的那一步",
+            !src.Contains("PresentFrame("), "覆盖层里又出现了 PresentFrame");
+        Assert("CPU 背景合成必须仍是无条件（当年那个「GPU 成功就跳过」的开关就是全白的成因）",
+            !src.Contains("gpuBgOk") && src.Contains("RenderDesktopBackground(desktopPixels, vw, vh)"),
+            "出现 gpuBgOk 这类「成功就跳过」的条件 = 恢复「预览全白」");
+        Assert("就绪那行不许再承诺一个不存在的 GPU 字段（读数不能指向没有的东西）",
+            !src.Contains("GPU背景="), "覆盖层就绪那行又写回了 GPU背景=");
+        Assert("DWM 那套四边 -1 的透明尝试不许回来（实测在 WinUI 3 岛窗上没兑现）",
+            !src.Contains("DwmExtendFrameIntoClientArea"),
+            "又想靠透下去让另一扇窗供帧 ⇒ 先重做 §37.7 那个标记帧实验再说");
+    }
+
+    /// <summary>
+    /// 选区覆盖层的防再入闩锁必须钉在 Activated 回调【入口】（2026-09-30 报告 §23.3 / §24.4 的实机风暴）。
+    /// <para>起因：<c>tests/manual/safety/overlay-visual-cell.ps1</c> 在真身上量到——单实例（打点只有
+    /// 实例#1）却打了 30 条「进入背景创建」、只有 1 条「背景渲染」，同一时刻 EnumWindows 数到
+    /// 36 个可见的 <c>HDR Preview</c> 全屏窗。旧写法把 <c>_bgRendered = true</c> 放在回调【底部】，
+    /// 而 CreateWindowEx / GPU 呈现这一段会跑嵌套消息泵 ⇒ Activated 在同一次调用里被再次派发，
+    /// 每一层进来都看见 false ⇒ 每层建一个背景窗；最深那层置位后往外退，其余各层在底部看见 true，
+    /// 又把 CPU 兜底跳过了 ⇒ 所以是"几十个窗 + 只渲染一次"这种看着矛盾的形状。</para>
+    /// <para>为什么只能钉源码：Test 工程不引用 App，运行时够不到这个回调（同族的 App 侧盲区见报告 §18）。
+    /// 而且这条不变量是【顺序】不变量——不是"有没有这句话"，是"这句话在那次分配之前"，
+    /// 所以判据拿两个下标比大小；复位与包裹形态各钉一刀。</para>
+    /// </summary>
+    static void Test_OverlayReentryLatch_SitsBeforeWindowCreation()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
+        if (p is null) { Skip("覆盖层防再入闩锁", "未找到 SelectionOverlay.xaml.cs"); return; }
+        var src = StripLineComments(ReadSourceNormalized(p));
+
+        int latch = src.IndexOf("_bgRendered = true", StringComparison.Ordinal);
+        // 2026-10-01 B 档：原来的右锚点是 `new HdrPreviewWindow(`，那扇窗整个删了（报告 §39）。
+        // 顺序不变量本身没变——闩锁必须先于【回调里那段会跑消息泵的重活】，所以右锚点换成仍然存在的
+        // 背景渲染 + 区域检测那一步，语义不变：闩锁在后面 = 每次激活都再跑一遍。
+        int alloc = src.IndexOf("RenderDesktopBackground(desktopPixels, vw, vh)", StringComparison.Ordinal);
+        Assert("闩锁写入点与背景渲染段都还在（少一个说明锚点漂了，不是代码坏了）",
+            latch >= 0 && alloc >= 0, $"实得 latch={latch} alloc={alloc}");
+        Assert($"闩锁必须【先于】背景渲染段（实得 latch={latch} < alloc={alloc}）",
+            latch >= 0 && alloc >= 0 && latch < alloc,
+            "把 `_bgRendered = true` 挪回回调底部 = 恢复『一次捕获叠 30 个全屏窗』的那个形状");
+        Assert("闩锁全文件只许写一次 true、不许有复位",
+            System.Text.RegularExpressions.Regex.Matches(src, @"_bgRendered\s*=\s*true").Count == 1
+            && !src.Contains("_bgRendered = false"),
+            "GPU 成功路径上那句重复置位是当年风暴的伴生物；多一个复位入口，入口闩锁就退化成『每次激活都重建』");
+        Assert("CPU 兜底 + 窗口检测不许再被闩锁包着",
+            !src.Contains("if (!_bgRendered)"),
+            "闩锁移到入口后若仍留着这个判断，兜底和窗口检测会被静默关死——比风暴更糟");
+        Assert("入口早退守卫只许有一处（防再入的唯一出口）",
+            System.Text.RegularExpressions.Regex.Matches(src, @"if\s*\(_bgRendered\)").Count == 1,
+            "多于一个说明有人把守卫复制进了分支里，两处读的是同一个闩锁却是两套行为");
+    }
+
+
+    /// <summary>
+    /// 被防重入闸拦下的那一次按键【不是失败】，不许再借"截图失败"的通知通道。
+    /// <para>起因（2026-09-30，造 GPU 失败腿时撞出来的）：同一毫秒两行日志
+    /// <c>截图已在进行中，忽略重复触发</c> 紧跟 <c>已提交系统通知: ❌ 截图失败</c>
+    /// ——红色失败通知的正文写的却是"请稍候"，标题与正文互相打脸。
+    /// 用户视角更糟：他按了个键，屏幕上什么都没发生，却收到一条"截图失败"。</para>
+    /// <para>为什么钉形状而不是钉文案：文案会改，通道不会随便换。
+    /// <c>ShowCaptureFailed</c> 走的是老的 <c>Show(dict)</c> 直发系统通知，
+    /// 既忽略用户设的"通知位置"，也把"被拦下"和"真失败"混成同一个出口。</para>
+    /// </summary>
+    static void Test_BusyRejection_DoesNotUseFailureToast()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (p is null) { Skip("防重入通知语义", "未找到 MainWindow.xaml.cs"); return; }
+        var src = StripLineComments(ReadSourceNormalized(p));
+        int at = src.IndexOf("忽略重复触发", StringComparison.Ordinal);
+        Assert("防重入闸那一支还在（锚点漂了就不判，不蒙绿）", at >= 0, "找不到『忽略重复触发』这行 ⇒ 后两条没有意义");
+        var win = at >= 0 ? src[at..Math.Min(src.Length, at + 400)] : "";
+        Assert("拦下之后 400 字符内不许再出现 ShowCaptureFailed",
+            at >= 0 && !win.Contains("ShowCaptureFailed"),
+            "红色『❌ 截图失败』与『请稍候』正文打脸；被拦下的那一发并没有失败");
+        Assert("要改走带 tone 的统一入口 ShowToast + ToastTone.Info",
+            at >= 0 && win.Contains("ShowToast(") && win.Contains("ToastTone.Info"),
+            "统一入口才尊重用户设的『通知位置』（旧路径直发系统通知，忽略该设置）");
+    }
+
+    /// <summary>
+    /// HDR 抓帧窗（<c>Services/HdrCaptureWindow.cs</c>）的界面文字是【直接画进像素缓冲】的
+    /// （<c>DrawTextGdi(...)</c> / <c>ds.DrawText(...)</c>），不是 XAML 控件 ⇒ 三条检测路径全瞎：
+    /// 本地化闸门只扫 XAML 字面量、UIA 实测那块全屏窗暴露 0 个控件（2026-09-30）、
+    /// 降级与翻译告警也不看这里。本条把这块盲区钉成一个【可数的数】：
+    /// 谁再往那扇窗里烘焙一条中文，闸门就红。
+    /// <para>计数单位 = 手写扫描器切出的完整字面量（<c>StringLiteralScanner</c>；
+    /// 它自己的对抗用例 <c>StringLiteralScannerTests</c> 就在同一次运行里跑，尺子坏了先响）。
+    /// 上一轮拿正则数：实测 98 而手点 41 —— 正则把 <c>$"…{expr}…"</c> 从插值洞处切成
+    /// <c>)} 全屏={(_mpoFullsc</c> 这种碎片，单位一旦没有意义，基线就是一把随机抖动的尺子 ⇒ 禁用正则计数。</para>
+    /// <para>缺文件判红而不是 Skip：本仓 memory 记过"缺文件即 Skip = 集体失明"这一类缺陷，
+    /// 这条锁判的正是"没人看得见的那扇窗"，再留一个静默跳过就等于把锁拆开。</para>
+    /// </summary>
+    static void Test_HdrBakedText_BlindSpotIsCounted()
+    {
+        // ═══ 基线：2026-09-30 实测（HdrCaptureWindow.cs 里含 U+4E00–U+9FFF 的字面量条数）═══
+        // 用另一个独立实现（Python 版同一规格扫描器）对过同一份文件：同样 98 条，计数单位是整条字面量。
+        // 改动这个数只能是【刻意的】：中文真的增减、或把某条接进了本地化 ⇒ 在同一次改动里同步调它，
+        // 并在提交说明里说清楚。不许为了让闸门变绿而随手改这里。
+        // 2026-09-30：98 → 99。抬升的原因是新增了一条【日志】串（HdrCaptureWindow.cs 的
+        // `选区完成 WxH …`，给"选区后按键有没有落地"这类判据当前提见证），不是画进位图的字变多了。
+        // 为什么算在基线里而不是给它开个例外：这把尺的单位本来就是"该文件里的中文字面量条数"——
+        // 头六条里 `"CreateWindowExW 失败: {…}"`、`"MPO 检测失败"`、`"VRR 支持: ✓ 启用"` 都是日志串。
+        // 单位变了才要改口径；只是数量 +1 就走它自己写的解释①（同一次改动里改基线并说明）。
+        const int BakedCnBaseline = 99;
+
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        if (p is null)
+        {
+            Assert("HDR 抓帧窗盲区计数：那份源码必须定位得到", false,
+                "FindRepoFile 未命中 src/TrueToneCap.App/Services/HdrCaptureWindow.cs ⇒ " +
+                "这里不许 Skip：判不到的文件上，下面的否定断言会在空串上恒成立（假绿）");
+            return;
+        }
+
+        var src = ReadSourceNormalized(p);
+        var codeOnly = StripLineComments(src);          // 锚点判据只看代码，注释里提一句 LocaleManager 不该把闸门挤红
+        var scan = StringLiteralScanner.Scan(src);
+        var cjk = StringLiteralScanner.CjkLiterals(scan);
+        static string Trunc(string t, int max = 30) => t.Length <= max ? t : t[..max] + "…";
+
+        // 扫描器自己没跑偏才谈得上计数（未闭合 ⇒ 残破那条已经被丢弃，但单位就不再是"整条字面量"了）
+        Assert("HDR 抓帧窗：扫描全程没有未闭合字面量（有的话下面那个数不是【字面量】计数）",
+            scan.UnterminatedAt < 0 && scan.Literals.Count > 0,
+            scan.UnterminatedAt < 0 ? $"一条字面量都没扫到（实得 {scan.Literals.Count}）⇒ 文件读空了？" : scan.UnterminatedNote);
+
+        Assert($"HDR 抓帧窗烘焙中文条数 == 基线 {BakedCnBaseline} 条（实得 {cjk.Count} 条）",
+            cjk.Count == BakedCnBaseline,
+            $"基线 {BakedCnBaseline} vs 实得 {cjk.Count}；前 6 条长这样（让你看清计数单位是什么）：" +
+            string.Join("｜", cjk.Take(6).Select(l => Trunc(l.Text))) + "。" +
+            "只有两种正当解释：①那扇窗的中文确实增减 / 接进了本地化 ⇒ 同一次改动里改基线并说明；" +
+            "②扫描器坏了 ⇒ 先看 StringLiteralScannerTests 是否也红");
+
+        // ── 锚点①：盲区这个前提还在（文字仍然是画进像素的）──
+        int gdi = Regex.Matches(codeOnly, @"DrawTextGdi\(").Count;
+        int w2d = Regex.Matches(codeOnly, @"\.DrawText\(").Count;
+        Assert($"两条绘制腿都还在（DrawTextGdi( 实得 {gdi} 处 / .DrawText( 实得 {w2d} 处）",
+            gdi >= 1 && w2d >= 1,
+            "一条都没了 ⇒ 那扇窗不再自己画字，本条的基线与前提一起过期，应删锁并改走真正的本地化闸门");
+
+        // ── 锚点②：不许有绘制腿【直接】吃 LocaleManager 的文本 ──
+        // 有人真去本地化它时，这条会红 ⇒ 逼他在同一次改动里把中文条数（上面那个基线）降下来，
+        // 而不是"接了本地化、基线照旧"—— 那等于盲区计数停在旧世界。
+        var fedFromLocale = Regex.Matches(codeOnly, @"(DrawTextGdi|\.DrawText)\([^;]*LocaleManager")
+            .Select(m => Trunc(m.Value)).ToList();
+        Assert("绘制腿没有一处把 LocaleManager 的文本直接喂进去（实得 " + fedFromLocale.Count + " 处）",
+            fedFromLocale.Count == 0,
+            "要么已经本地化 ⇒ 基线必须同批缩小；要么是没接线（拿 LocaleManager 当装饰），两种都要先说清楚：" +
+            string.Join("｜", fedFromLocale));
+    }
+
+
 
     /// <summary>
     /// 源码哨兵在匹配前必须先去掉**整行注释**。
@@ -5033,7 +7069,11 @@ public static class CorePipelineTests
         Assert("卡片三个字段全部来自同一份决定 + 同一份交付形态判定",
             cm.Contains("DecisionForCursorScreen(ui, ui.HdrEnabled)")
             && cm.Contains("FormatColorFacts.Delivery(decision, ui.Format)")
-            && cm.Contains("FormatColorFacts.Declaration(format, d.TargetTag, writesPq)"));
+            // 第 4 个实参是本地化钩子：Core 的 Declaration 同时喂界面与日志，
+            // 只有这一路该传 Tr，日志与 SelfTest 那张表刻意不传（保持中文）。
+            // 摘掉它 = 界面退回中文，所以这里钉的是【带钩子那一整句】，不是旧的那三参形式。
+            && cm.Contains("FormatColorFacts.Declaration(format, d.TargetTag, writesPq, LocaleManager.Tr)"),
+            "Declaration 的调用要带 LocaleManager.Tr 这一路 —— 少它英文界面就整列中文");
         Assert("旧的显示文案前缀不许回来（它们曾经是判据的输入）",
             !cm.Contains("BT.2020/PQ") && !cm.Contains("HDR 未开启"));
 
@@ -5445,6 +7485,93 @@ public static class CorePipelineTests
         Assert("变异自检：钩子判据有牙 —— 窗口源必须 5 份以上且逐个含 HookLocaleSweep",
             windowSources.Count >= 5 && noHook == 0,
             $"窗口源 {windowSources.Count} 份，缺钩子 {noHook} 份");
+
+        // ── 7) 反向孤儿：表里有、而界面上没有任何一处用它 ──
+        // 上面几条管的都是正方向（"界面有中文 ⇒ 表里必须有英文"）。反方向过去没人管 ⇒
+        // 删掉一处界面而不清表，表里就留下一条死键，而且【不会红】——这正是 §35.3 点名的闸门缺口，
+        // 也是 B/C 档删除动作的前置读数（夹具④就是那个数）。
+        // 使用面 = XAML 静态中文（上面 attrs）+ App 全部 .cs 剥注释后的源码文本 + 窗口标题。
+        // 为什么用"包含"而不是再解析一遍字面量：再写一个解析器就是第二份真相（本仓反复踩过）。
+        // 误差方向是刻意的——宁可漏报也不误报；而"新孤儿"只在引用它的文件被删掉时出现，
+        // 那时包含匹配必然失败 ⇒ 该响的一定响。
+        var csFiles = Directory.GetFiles(appDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("\\obj\\") && !f.Contains("\\bin\\")
+                        && Path.GetFileName(f) != "LocaleManager.cs").ToList();
+        // 使用面要能按需"摘掉某一份界面"再算——这样才敢用它报 B/C 档的翻译代价（夹具④）。
+        string FaceOf(string[] skipBasenamePrefixes)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var f in csFiles)
+            {
+                var name = Path.GetFileName(f);
+                if (skipBasenamePrefixes.Any(p => name.StartsWith(p, StringComparison.Ordinal))) continue;
+                sb.Append(StripComments(File.ReadAllText(f))).Append('\n');
+            }
+            return sb.ToString();
+        }
+        var csFace = FaceOf(Array.Empty<string>());
+        // ⚠ 使用面必须自己补上 `<Window Title="…">`：上面 attrs 那一循环【刻意】不收窗口标题
+        //   （窗口不在可视树里，正向判据只能放行、由构造器 `Title = Tr(Title)` 兜）。
+        //   第一版直接拿 attrs 当使用面 ⇒ 误报两条真在用的键（`TrueToneCap 标注` / `TrueToneCap 文字识别`），
+        //   这条自纠本身就是要留的证据：借用别人的扫描面，就要连它故意留的洞一起补。
+        var winTitles = new List<string>();
+        foreach (var f in xamlFiles)
+            foreach (Match m in Regex.Matches(File.ReadAllText(f),
+                         @"<Window\b[^>]*?\bTitle=""([^""]*)""", RegexOptions.Singleline))
+            {
+                var t = System.Net.WebUtility.HtmlDecode(m.Groups[1].Value);
+                if (HasCjk(t)) winTitles.Add(t);
+            }
+        // 守卫不写"至少 N 条"这种我猜的数：直接钉住"第一版栽的那两条必须在提取结果里"。
+        // （实测本仓中文窗口标题共 3 条，写 >=5 会在今天就把这条判据自己判红。）
+        Assert("窗口标题单独进了使用面（读不到那两条已知标题 = 提取式失效，会把真键误报成孤儿）",
+            winTitles.Contains("TrueToneCap 标注", StringComparer.Ordinal)
+            && winTitles.Contains("TrueToneCap 文字识别", StringComparer.Ordinal),
+            $"读到 {winTitles.Count} 条：" + string.Join(" | ", winTitles.Select(Cut)));
+
+        static List<string> OrphanKeys(IEnumerable<string> keys,
+            IEnumerable<(string File, string Tag, string Prop, string Value)> xaml,
+            IReadOnlyCollection<string> titles, string codeText) =>
+            keys.Where(k => !xaml.Any(a => a.Value == k) && !titles.Contains(k, StringComparer.Ordinal)
+                            && !codeText.Contains(k, StringComparison.Ordinal))
+                .OrderBy(s => s, StringComparer.Ordinal).ToList();
+        List<string> OrphansOf(IEnumerable<string> keys) => OrphanKeys(keys, attrs, winTitles, csFace);
+
+        // fail-closed 守卫：使用面读空了，"零孤儿"就是假绿（这把尺子自己先要能看见东西）
+        Assert("反向判据的使用面不是空的（XAML 中文与 .cs 源码文本都要读到）",
+            attrs.Count > 150 && csFace.Length > 100_000,
+            $"attrs={attrs.Count} 处 / .cs 面 {csFace.Length} 字符");
+        // 夹具①：一条谁都不用的键必须被抓出来（不然"零孤儿"可能只是判据失明）
+        Assert("反向判据有牙·夹具①：凭空造一条键必须被判孤儿",
+            OrphansOf(new[] { "绝不可能出现在界面上的键文甲" }).Count == 1,
+            "夹具没被抓出来 ⇒ 这条锁是恒绿的装饰");
+        // 夹具②：真在 XAML 里出现的中文一条都不许报成孤儿（误报会淹没真信号）
+        Assert("反向判据不误报·夹具②：XAML 实际用到的中文，孤儿数必须为 0",
+            OrphansOf(distinct).Count == 0,
+            $"误报 {OrphansOf(distinct).Count} 条：" + string.Join(" | ", OrphansOf(distinct).Select(Cut).Take(6)));
+        // 夹具③：这两个正是第一版误报出来的键（只做窗口标题用）——必须被认成"在用"。
+        Assert("反向判据不误报·夹具③：只做窗口标题的中文键不许被判孤儿（第一版就是栽在这里）",
+            OrphansOf(new[] { "TrueToneCap 标注", "TrueToneCap 文字识别" }).Count == 0,
+            "窗口标题又从使用面里漏掉了（若是这两扇窗被删了，本夹具要与基线一起撤，不许只放开这一条）");
+
+        // 基线 0 = 2026-10-01 由这条判据自己报出的实得数（第一版报 2，那两条是窗口标题、属误报，
+        // 已把标题补进使用面）。留 0 的意义：以后删一处界面忘了清表，这里就红并点名。
+        const int OrphanBaseline = 0;
+        var orphanKeys = OrphansOf(table);
+        // 夹具④ = 这一节真正要为 B/C 档报的数：把覆盖层那两份文件（.xaml 与 .xaml.cs）整个从使用面里摘掉，
+        // 表里立刻死掉几条？这就是"删界面却忘了清表"的翻译代价，实测数直接打进日志。
+        var goneXaml = attrs.Where(a => !a.File.StartsWith("SelectionOverlay", StringComparison.Ordinal)).ToList();
+        var goneCs = FaceOf(new[] { "SelectionOverlay" });
+        var ifOverlayGone = OrphanKeys(table, goneXaml, winTitles, goneCs);
+        Console.WriteLine($"  ⓘ 反向孤儿·夹具④：摘掉 SelectionOverlay 那两份文件 ⇒ 表里立刻死 {ifOverlayGone.Count} 条："
+                          + string.Join(" | ", ifOverlayGone.Select(Cut).Take(15)));
+        Assert("反向判据能报出删除代价（摘掉覆盖层 ⇒ 表里必须立刻出现死键；当前树自己是零死键）",
+            ifOverlayGone.Count >= 1 && orphanKeys.Count == OrphanBaseline,
+            $"摘掉后死 {ifOverlayGone.Count} 条 / 当前树死 {orphanKeys.Count} 条");
+        Assert($"表里的死键数量 == 基线 {OrphanBaseline}（实得 {orphanKeys.Count}）",
+            orphanKeys.Count == OrphanBaseline,
+            $"基线 {OrphanBaseline} vs 实得 {orphanKeys.Count}：" +
+            string.Join(" | ", orphanKeys.Select(Cut).Take(8)));
     }
 
     /// <summary>

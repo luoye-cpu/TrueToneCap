@@ -41,6 +41,12 @@ public partial class App : Application
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SendMessageTimeout(nint hWnd, uint msg, nuint wParam, nint lParam,
         uint fuFlags, uint uTimeout, out nint lpdwResult);
+    // 第二个实例被 Shell 拉起时持有前台切换权；广播前把它让出去，否则接收侧的
+    // Activate() 会被系统前台锁拒绝（实测：广播 6 ms 内就收到了，前台仍是别的窗）。
+    private const int ASFW_ANY = -1;
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AllowSetForegroundWindow(int dwProcessId);
     // ⚠ DPI_AWARENESS_CONTEXT 是指针尺寸类型（x64 下 8 字节），不能声明为 int。
     // 用 int 传递时 RCX 高 32 位被零扩展，得到无效上下文句柄。
     [LibraryImport("user32.dll")]
@@ -203,6 +209,13 @@ public partial class App : Application
         this.InitializeComponent();
 
         // ── 安全加载 WinUI 主题资源（代码中 try-catch，避免 XAML 期间原生崩溃）──
+        // ⚠ 这一段【整段】都必须在 try/catch 里，连读 Resources.MergedDictionaries 也不例外。
+        // 2026-10-01 实测：我在这句之后加了一条"两份都没合上就报 Error"的守卫，读
+        // `Resources.MergedDictionaries.Count` ⇒ 产品直接起不来，日志停在 NativeResolver 那一行，
+        // 托管 UnhandledException 没跑（crash.log 时间戳没动），WER 给出 combase.dll / 8000ffff。
+        // 位置就是关键：这一段排在 UnhandledException 注册【之前】，这里抛出的东西没人接。
+        // 而这条 0x8000FFFF 与下面那条被 catch 掉的是同一个 COM 失败——它一直都在，
+        // "警告消失"不等于"故障修好"，只是换个地方死。真正的修法未找到，见报告 §10-②。
         try
         {
             Resources.MergedDictionaries.Add(new Microsoft.UI.Xaml.Controls.XamlControlsResources());
@@ -302,6 +315,20 @@ public partial class App : Application
     private static void BroadcastActivateExistingInstance()
     {
         if (ActivateMessage == 0) return;
+        // 意图：本进程若持有前台权就让出去，否则接收侧的 Activate()/SetForegroundWindow()
+        // 会被系统前台锁直接拒绝（实测被拒：广播 6 ms 内就收到了，Restore/Show/
+        // MoveInZOrderAtTop/Activate 全跑了，前台仍是别的窗）。
+        // ⚠ 14:33 实测这一条【在本 harness 下没成立】：AllowSetForegroundWindow(ASFW_ANY) ok=False。
+        //   归因要说准——那是 PowerShell Start-Process 起的第二实例，它本来就不持有前台权，
+        //   所以 False 是这条启动路径的性质，【不能】外推到"用户在 Explorer 里双击 exe"那种情形
+        //   （那条路此刻是否持有前台权，本机没有读数）。
+        //   调用保留（失败无副作用），返回值落盘见下一行之后——别再把"没生效"记成"没验"。
+        // 返回值必须落盘，否则"这处改动到底有没有生效"在本机没有任何读数。
+        // 注意这是【第二实例】的进程，日志器可能还没起来 ⇒ 落不下来也要能看出来：
+        // 下面那条 Broadcast 完成行是同一进程写的，两行都在才算量到。
+        var asfwOk = AllowSetForegroundWindow(ASFW_ANY);
+        TrueToneCap.App.Services.LogService.Info("App",
+            $"AllowSetForegroundWindow(ASFW_ANY) ok={asfwOk}（第二实例，pid={Environment.ProcessId}）");
         SendMessageTimeout((nint)HWND_BROADCAST, ActivateMessage, 0, 0,
             SMTO_ABORTIFHUNG | SMTO_NORMAL, 1500, out _);
     }

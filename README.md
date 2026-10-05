@@ -129,7 +129,7 @@ dotnet run --project src\TrueToneCap.Test -- --unit-tests   # 单套件示例
 | 核心单元（PixelOps / ToneMapper / ICC / 标注 / 编码器） | `--unit-tests` | |
 | 色彩管线精度 | `--color-tests` | |
 | 编码管线集成 | `--encoding-tests` | |
-| 基础设施服务（ShaderLoader / NativeLibraryResolver） | `--service-tests` | |
+| 基础设施服务（NativeLibraryResolver） | `--service-tests` | |
 | OCR 服务（BitmapPreprocessor / LLM 提供商与模型清单闭合） | `--ocr-tests` | |
 | 输出结构合法性（TIFF IFD / AVIF box） | `--format-tests` | |
 | 综合可用性 | `--usability-tests` | ✓ |

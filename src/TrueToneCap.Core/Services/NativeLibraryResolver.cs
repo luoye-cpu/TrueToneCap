@@ -1,8 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/NativeLibraryResolver.cs
-// 原生工具链（avifenc.exe / cwebp.exe）嵌入资源提取器
-// 内嵌在 Resources/ 下的 exe 在首次运行时提取到 native/ 目录
+// 原生工具链（avifenc / cwebp / cjpegli / cjxl）就位解析器
+//
+// ⚠ 2026-10-01 更正本文件头与类注释的口径：这些 exe **不是嵌入资源**。
+//   TrueToneCap.Core.csproj 里【没有任何 EmbeddedResource 条目】，Core.dll 内也没有这四枚文件
+//   （实测：从 dotnet build 的产物起产品，四条 `⚠️ X.exe 未找到 (嵌入资源或文件系统均无)` 每次都打）。
+//   所以下面 GetManifestResourceNames() 那条"从嵌入资源提取"的分支【从未命中】，
+//   真正在跑的只有它后面的【文件系统回退链】：BaseDirectory 下的 Resources/ → data/Tools/ → PLAN/tools/。
+//   而把 exe 放进那些位置的，是 Publish.ps1 的 [3/6]（单一事实源 = Core/Resources/）。
+//   后果：裸 `dotnet build` 的 bin 里 native/ 是空的 ⇒ AVIF / JPEG XL / WebP / JPEG LI
+//   四种格式在开发构建上一律走保底（本轮实机就量到"选 JPEG XL 拿到 PNG"）。
+//   开发构建侧现在由 TrueToneCap.App.csproj 的 CopyNativeToolsToDevOutput 目标补齐同一份布局，
+//   与发布包逐字同源；两处口径若再分叉，那条目标会先红。
 
 using System.Reflection;
 using System.IO.Compression;

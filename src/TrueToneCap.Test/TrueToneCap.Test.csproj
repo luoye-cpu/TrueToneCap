@@ -8,7 +8,12 @@
     <ProjectReference Include="..\TrueToneCap.Core\TrueToneCap.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <!-- 版本由 ../../Directory.Packages.props 管理 -->
+    <!-- 版本见 ../../Directory.Packages.props -->
     <PackageReference Include="System.Drawing.Common" />
   </ItemGroup>
+
+  <!-- 2026-10-01：这里原先是 CopyCompiledShadersForTests —— 把 App 编出的 *.hlsl.cso 搬进测试宿主的
+       data/Shaders/，专门喂 ServiceTests 的 ShaderLoader 字节码校验与缓存路径。ShaderLoader 与它唯一的
+       调用方 GpuToneMapper 随"清单里有、运行时没人加载"那一族死资产一起删除后，没有任何测试再读
+       data/Shaders ⇒ 目标一并撤。留着它就等于留一条"我们在测着色器加载"的假声明。 -->
 </Project>

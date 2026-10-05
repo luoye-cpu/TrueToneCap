@@ -31,8 +31,8 @@ public static class AppServices
     /// <summary>WGC 统一捕获服务（可能为 null，初始化失败时）。</summary>
     public static WgcCaptureService? Wgc => GetOptional<WgcCaptureService>();
 
-    /// <summary>GPU 色调映射器（可能为 null，着色器缺失时回退 CPU）。</summary>
-    public static GpuToneMapper? GpuToneMapper => GetOptional<GpuToneMapper>();
+    // 2026-10-01：这里原有的 `public static GpuToneMapper? GpuToneMapper` 已随该类一起删除——
+    // 它在 09-16 就停止构造（下面的注释当时写明"死代码"），属性本身也全仓无人读取。
 
     private static T GetRequired<T>() where T : class =>
         Provider.GetRequiredService<T>();
@@ -73,13 +73,14 @@ public static class AppServices
                 ?? TrueToneCap.Core.Capture.DisplayEnumerator.GetMonitorUnderCursor();
             var d3dDevice = wgc.GetOrCreateDevice(primaryMonitor);
 
-            // ═══ 2026-09-16：不再在启动时构造 GpuToneMapper ═══
-            // GpuToneMapper 目前是【死代码】：AppServices.GpuToneMapper 属性全仓没有任何调用者，
-            // 实际的 HDR→SDR 色调映射走的是 Core 的 ToneMapper（CPU 路径）。
-            // 而它构造时会去磁盘读着色器字节码 —— 每次启动都在为一条根本不会执行的路径付费。
-            // 这里停止构造（属性将返回 null）。
-            // ⚠️ HdrCaptureWindow.cs 曾有注释声称"真正承担色调映射的是 GpuToneMapper"，
-            //    与事实相反，已一并修正。若将来要真正接入 GPU 色调映射，在此恢复构造即可。
+            // ═══ GpuToneMapper：2026-09-16 停止构造，2026-10-01 连类一起删除 ═══
+            // 当时的判断是"死代码"：属性全仓没有调用者，而构造它要按磁盘上的 .cso 走一遍 IO，
+            // 每次启动都在为一条不会执行的路径付费；实际的 HDR→SDR 走 Core 的 ToneMapper（CPU）。
+            // 09-16 只停了构造、留下了类和属性，于是"清单写着在用"这句假话又活了两周
+            // —— 这次连类、ShaderLoader 和那份 ToneMapping.hlsl 资产一并摘掉，并在门禁里
+            // 补了 Test_ShaderList_HasNoOrphanEntry（清单每条都要有剥注释后的 .cso 消费点）。
+            // 若将来真要接 GPU 色调映射，从 HdrCaptureWindow 的 FindCso + 自己的交换链那条活路加，
+            // 别复活这份"启动时构造、运行中没人读"的形状。
 
             // 共享 D3D11 设备给 NVENC 后端
             TrueToneCap.Core.Encoding.NvencAvifBackend.SetSharedD3DDevice(d3dDevice);
@@ -97,7 +98,7 @@ public static class AppServices
         }
         finally
         {
-            wgc?.Dispose();   // GpuToneMapper 不再构造，无需在此释放（见上方说明）
+            wgc?.Dispose();   // 移交容器后 wgc 已被置 null ⇒ 这里只会释放在移交前就失败的那一份
         }
 
         // ── Phase 1 (2026-08-11): 启动后台预热预览 UI 缓存（Win2D 设备 + 工具栏文字位图）──

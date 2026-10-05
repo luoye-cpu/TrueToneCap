@@ -63,15 +63,10 @@ public sealed partial class WgcCaptureService : IDisposable
     // 实例级锁：每个 WgcCaptureService 实例的 D3D11 设备各自加锁，多显示器场景不互相阻塞
     private readonly object _d3dContextLock = new();
 
-    /// <summary>D3D11 设备上下文锁（供共享同一设备的组件如 HdrPreviewWindow 使用，防止与 WGC 回读并发）。</summary>
-    public object D3dContextLock => _d3dContextLock;
-
-    /// <summary>
-    /// 获取现有 D3D11 设备（只读，不创建、不销毁）。
-    /// ⚠️ 禁止用 GetOrCreateDevice(光标显示器) 给预览窗口取设备 —— 光标显示器与截图显示器
-    /// 不一致时它会 Dispose 正在被 WGC 会话使用的设备，导致 GPU 操作挂起、UI 线程等锁卡死。
-    /// </summary>
-    public ID3D11Device? GetSharedDevice() => _d3dDevice;
+    // 2026-10-01：这里原有 `public object D3dContextLock` 与 `public ID3D11Device? GetSharedDevice()`
+    // 两个"把设备/锁借给外部组件"的出口，唯一消费者是覆盖层那扇下层供帧窗（报告 §39 已删）。
+    // 内部仍然处处用 _d3dContextLock，所以字段留着，公共出口撤掉——
+    // 留一个没人调用的"共享设备入口"，就等于留一份"外部可以并进这条 GPU 上下文"的错误承诺。
 
     // ═══ P0: 懒启动会话池 + 延迟自动停止 ═══
     // P3 修复: 使用 (HMONITOR, IsHdr) 元组 key，避免位或标记碰撞
@@ -655,7 +650,10 @@ public sealed partial class WgcCaptureService : IDisposable
         NvencAvifBackend.NotifySharedDeviceDisposed();
     }
 
-    /// <summary>获取或创建 D3D11 设备。线程安全（内部加锁）。</summary>
+    /// <summary>获取或创建 D3D11 设备。线程安全（内部加锁）。
+    /// ⚠️ 不要拿它给"另一扇窗口"取设备：传进来的 hmonitor 与截图所用显示器不一致时，
+    /// 它会 Dispose 正在被 WGC 会话使用的设备 ⇒ GPU 操作挂起、UI 线程等锁卡死。
+    /// （覆盖层那扇下层窗就是这么死的，2026-10-01 报告 §39 已整条删除。）</summary>
     public ID3D11Device GetOrCreateDevice(nint hmonitor)
     {
         // ═══ 2026-09-16 根因修复：设备不应因显示器切换而销毁 ═══
@@ -716,13 +714,13 @@ public sealed partial class WgcCaptureService : IDisposable
         }
         catch (Exception ex)
         {
-            Log($"[WGC] 适配器匹配跳过: {ex.Message}");
+            LogInfo($"[WGC] 适配器匹配异常，改走默认适配器: {ex.Message}");
         }
 
         _d3dDevice = D3D11.D3D11CreateDevice(
             Vortice.Direct3D.DriverType.Hardware,
             DeviceCreationFlags.BgraSupport);
-        Log("[WGC] D3D11 设备创建于默认适配器 (回退)");
+        LogInfo("[WGC] D3D11 设备创建于默认适配器（未按显示器匹配到适配器）");
         return _d3dDevice;
     }
 
@@ -1110,7 +1108,6 @@ public sealed partial class WgcCaptureService : IDisposable
                     if (hdrPixels is not null &&
                         (hdrSession.Width != w || hdrSession.Height != h))
                     {
-                        Log($"[WGC] Float16 会话尺寸 {hdrSession.Width}x{hdrSession.Height} 与 SDR {w}x{h} 不一致，丢弃 HDR 像素");
                         LogInfo($"HDR 会话尺寸不匹配 ({hdrSession.Width}x{hdrSession.Height} != {w}x{h})，已回退 SDR");
                         hdrPixels = null;
                     }
@@ -1124,7 +1121,7 @@ public sealed partial class WgcCaptureService : IDisposable
             }
             catch (Exception ex)
             {
-                Log($"[WGC] Float16 捕获失败: {ex.Message}（不影响 SDR 结果）");
+                LogInfo($"[WGC] Float16 捕获失败: {ex.Message}（不影响 SDR 结果）");
             }
         }
 
@@ -1405,7 +1402,7 @@ public sealed partial class WgcCaptureService : IDisposable
         // 若不乘这个系数，SDR 显示器那部分会比 HDR 源区域**明显偏暗** ——
         // 这才是"亮度基准不一致"的真正来源，不能靠"放弃整图 HDR"来回避。
         int sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
-        float sdrScale = sdrWhiteNits > 0 ? sdrWhiteNits / 80f : 1f;
+        float sdrScale = sdrWhiteNits > 0 ? sdrWhiteNits / TrueToneCap.Core.PixelOps.NominalSdrReferenceWhiteNits : 1f;
         if (sdrScale != 1f)
             Log($"[WGC] SDR 内容亮度对齐: {sdrWhiteNits} nits → 缩放 ×{sdrScale:F2}");
 
@@ -1484,7 +1481,7 @@ public sealed partial class WgcCaptureService : IDisposable
         // 输出这种图比直接给整张 SDR 更糟，故整体放弃 HDR（SDR 结果始终不受影响）。
         if (fullHdr is not null && hdrFillFailures > 0)
         {
-            Log($"[WGC] {hdrFillFailures} 个显示器未参与 HDR 拼接 → 放弃整图 HDR，输出 SDR");
+            LogInfo($"[WGC] {hdrFillFailures} 个显示器未参与 HDR 拼接 → 放弃整图 HDR，输出 SDR");
             fullHdr = null;
         }
 
@@ -1505,7 +1502,7 @@ public sealed partial class WgcCaptureService : IDisposable
             catch (Exception ex)
             {
                 // 半张 HDR 比全 SDR 更糟（亮度基准不一致），直接放弃整图的 HDR 输出
-                Log($"[WGC] HDR 源区域填充失败，放弃 HDR 输出（保留 SDR）: {ex.Message}");
+                LogInfo($"[WGC] HDR 源区域填充失败，放弃 HDR 输出（保留 SDR）: {ex.Message}");
                 fullHdr = null;
             }
         }
