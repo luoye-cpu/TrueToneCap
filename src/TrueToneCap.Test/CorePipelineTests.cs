@@ -3420,6 +3420,80 @@ public static class CorePipelineTests
         CheckWhitelistEqualsTags(xaml, srv, "ArchiveModeCbo", "s.ArchiveMode", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "ToastPositionCbo", "s.ToastPosition", expectTags: 5);
 
+        // ═══ 2026-10-07：压缩强度三档（AVIF / JPEG XL / WebP）═══
+        // 三个下拉共用同一组 Tag（Smallest/Balanced/Fastest），但各写各的字段 ⇒ 逐个对撞。
+        // 这条判据在这里格外值钱：三个下拉长得一样，若某个分支漏写或写错字段名，
+        // 界面看起来"改成功了"而管线读的是另一个字段（本仓 ChromaAvif 那次就是这形状）。
+        CheckWhitelistEqualsTags(xaml, srv, "EffortAvifCbo", "s.EffortAvif", expectTags: 3);
+        CheckWhitelistEqualsTags(xaml, srv, "EffortJpegXlCbo", "s.EffortJpegXl", expectTags: 3);
+        CheckWhitelistEqualsTags(xaml, srv, "EffortWebpCbo", "s.EffortWebp", expectTags: 3);
+        // JPEG LI 是后来纳入的（用户据 --xyb 实测要求）——增益图与它共用同一栏。
+        CheckWhitelistEqualsTags(xaml, srv, "EffortJpegLiCbo", "s.EffortJpegLi", expectTags: 3);
+
+        // ── 档位 → 底层参数的映射（2026-10-07，用户口径「最小体积」= 极限参数拉满）──
+        // 值本身由真机实测定（见 docs/encoder-params-and-smallest-tier-2026-10-07.md），
+        // 这里钉的是"落地的值不许被随手改动"，因为每个数字背后都有一次实测。
+        Assert("压缩强度/JXL 三档 = 7/5/3",
+            CompressionEffortMap.JxlEffort(CompressionEffort.Smallest) == 7
+            && CompressionEffortMap.JxlEffort(CompressionEffort.Balanced) == 5
+            && CompressionEffortMap.JxlEffort(CompressionEffort.Fastest) == 3);
+        Assert("压缩强度/AVIF 三档 = 0/6/10（最小体积已改为 0 = 极限）",
+            CompressionEffortMap.AvifencSpeed(CompressionEffort.Smallest) == 0
+            && CompressionEffortMap.AvifencSpeed(CompressionEffort.Balanced) == 6
+            && CompressionEffortMap.AvifencSpeed(CompressionEffort.Fastest) == 10);
+        Assert("压缩强度/WebP 三档 = 6/4/2",
+            CompressionEffortMap.WebPMethod(CompressionEffort.Smallest) == 6
+            && CompressionEffortMap.WebPMethod(CompressionEffort.Balanced) == 4
+            && CompressionEffortMap.WebPMethod(CompressionEffort.Fastest) == 2);
+        Assert("压缩强度/NVENC 三档 = P7/P4/P1",
+            CompressionEffortMap.NvencPresetNumber(CompressionEffort.Smallest) == 7
+            && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Balanced) == 4
+            && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Fastest) == 1);
+
+        // ── 「均衡档必须等于改动前的行为」──
+        // 这是本功能最重要的一条承诺：默认档在 AVIF/WebP 上恰好是它们原来的硬编码值
+        // ⇒ 不选档位的用户产物逐字节不变。改这两个数字就等于静默改变所有老用户的输出。
+        Assert("压缩强度/AVIF 均衡档 == 改动前的硬编码 '-s 6'（老用户产物不变）",
+            CompressionEffortMap.AvifencSpeed(CompressionEffort.Balanced) == 6);
+        Assert("压缩强度/WebP 均衡档 == cwebp 默认 '-m 4'（老用户产物不变）",
+            CompressionEffortMap.WebPMethod(CompressionEffort.Balanced) == 4);
+
+        // ── libaom 高级选项只在「最小体积」档下发 ──
+        // 实测量化（真机 4K）：tune=ssim 把 110.2 KB 降到 93.7 KB（−15%）且不额外变慢；
+        // 其余小参（aq-mode / sharpness / enable-chroma-deltaq）在该内容上零效果。
+        // ⚠ 若把它下发放到所有档位，就会连"均衡档 == 改动前"一起破坏 ⇒ 必须只在 Smallest 有。
+        var advSmallest = CompressionEffortMap.AvifencAdvancedArgs(CompressionEffort.Smallest);
+        Assert("压缩强度/最小体积档带 libaom tune=ssim",
+            advSmallest.Count == 2 && advSmallest[0] == "-a" && advSmallest[1] == "tune=ssim",
+            string.Join(",", advSmallest));
+        Assert("压缩强度/均衡档不带任何 libaom 高级选项（否则会改掉老用户产物）",
+            CompressionEffortMap.AvifencAdvancedArgs(CompressionEffort.Balanced).Count == 0);
+        Assert("压缩强度/最快档不带任何 libaom 高级选项",
+            CompressionEffortMap.AvifencAdvancedArgs(CompressionEffort.Fastest).Count == 0);
+
+        // ── 坏值回落「均衡」而不是「最小体积」──
+        // 回落成最慢档会让一次配置损坏变成"每张图都跑极限参数"（AVIF 上从 0.9 s 变 7.2 s）。
+        Assert("压缩强度/未识别值回落均衡档（不是最小体积档）",
+            CompressionEffortMap.Parse(null) == CompressionEffort.Balanced
+            && CompressionEffortMap.Parse("") == CompressionEffort.Balanced
+            && CompressionEffortMap.Parse("wat") == CompressionEffort.Balanced);
+
+        // ── JPEG LI 的 --xyb（2026-10-07 用户据实测要求纳入）──
+        // 实测（两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）**一律更小 1.5%~4.7%**，
+        // 是本仓所有编码器小参里唯一"在所有测过的内容与质量上都为正"的开关。
+        Assert("压缩强度/JPEG LI 最小体积档带 --xyb",
+            CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Smallest)
+            && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Smallest) == " --xyb");
+        Assert("压缩强度/JPEG LI 均衡档不带 --xyb（否则老用户产物会变）",
+            !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Balanced)
+            && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Balanced) == "");
+        Assert("压缩强度/JPEG LI 最快档不带 --xyb",
+            !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Fastest));
+        Assert("压缩强度/Tag 往返一致",
+            CompressionEffortMap.Parse(CompressionEffortMap.ToTag(CompressionEffort.Smallest)) == CompressionEffort.Smallest
+            && CompressionEffortMap.Parse(CompressionEffortMap.ToTag(CompressionEffort.Balanced)) == CompressionEffort.Balanced
+            && CompressionEffortMap.Parse(CompressionEffortMap.ToTag(CompressionEffort.Fastest)) == CompressionEffort.Fastest);
+
         // ═══ 色域那一轴不比对白名单字符串，它存的是【裸索引】⇒ 要钉的是两张表的长度等式 ═══
         // Normalize 里的越界上界写的是字面量 5，而它的含义是"旧 6 项表的最后一项"（MainWindow.Settings.cs
         // 的 legacyTags）。今天两者一致，但没有任何东西保证下次改 legacyTags 时那个 5 跟着改 ——
@@ -6833,6 +6907,164 @@ public static class CorePipelineTests
             CDec.Build(wideP3, "DisplayP3", false, Acm).ExplicitWideTarget
             && CDec.Build(wideP3, "AdobeRGB", false, Acm).ExplicitWideTarget);
 
+        // ══════════════════════════════════════════════════════════════════════════════
+        //  2026-10-06：JPEG 家族 / WebP 的「默认档就是 Rec.709」（格式口径收口）
+        // ══════════════════════════════════════════════════════════════════════════════
+        // 为什么要有这一整块：上面那张 4 参表守的是【屏幕证据】这条口径，而本轮新增的是【格式口径】——
+        // 同一块【完全授权的 P3 屏】上，光是用户选了 JPEG LI/WebP，产物的目标色域就从 Rec.2020 变成
+        // Rec.709。这是产品口径变更（用户没选过广色域 ⇒ 不替他升级），与"这块屏给不给"毫无关系。
+        // ⚠ 上面 4 参的断言【一条都不用改】：format 是可选参数，不传 = 维持今天的行为。这正是本轮
+        //   把它做成可选参数而不是改默认行为的目的；下面每一格都要拿 5 参形状去问。
+        // ⚠ 这一块必须自己扛住"两种收口不许串味"：屏幕钳制先跑（置 GamutClamped），格式钳制后跑
+        //   （置 Rec709Defaulted），而"显式 BT.2020 + 窄屏 + JPEG LI"那格两条都真 —— 标记必须各归各。
+
+        // ── (1) 白名单本身：哪些格式算"默认档就是 Rec.709" ──
+        // 为什么单钉这一条：设计上用【白名单】而不是黑名单（见 DefaultsToRec709 的注释）——
+        // 以后往 OutputFormat 里加新格式时，它默认落进"不改变今天行为"那一侧，必须有人主动登记。
+        // 这条断言就是那次"主动登记"的账本：漏登记 = 新格式静默跟随显示器，而界面上看不出来。
+        Assert("★ 默认档 = Rec.709 的格式【正好】是 JPEG LI / GainMap / WebP 三个（白名单，新格式默认不登记）",
+            CDec.DefaultsToRec709(OutputFormat.JPEG_LI)
+            && CDec.DefaultsToRec709(OutputFormat.JPEG_GAINMAP)
+            && CDec.DefaultsToRec709(OutputFormat.WebP)
+            && !CDec.DefaultsToRec709(OutputFormat.PNG)
+            && !CDec.DefaultsToRec709(OutputFormat.JPEG_XL)
+            && !CDec.DefaultsToRec709(OutputFormat.AVIF)
+            && !CDec.DefaultsToRec709(OutputFormat.TIFF),
+            string.Join(" ", Enum.GetValues<OutputFormat>()
+                .Select(f => $"{f}={CDec.DefaultsToRec709(f)}")));
+        // null 是"这次调用没有格式上下文"（动画录制 / 自检 / 静默采样）⇒ 必须 false，
+        // 否则那族入口会跟着一起改行为，而它们根本没有"用户选的那个格式"这回事。
+        Assert("★ 没有格式上下文的调用（format=null）不在白名单里 ⇒ 那族入口行为逐字不变",
+            !CDec.DefaultsToRec709(null));
+
+        // ── (2) 核心新行为：完全授权的 P3 屏 + 跟随显示器 + 三个格式 ⇒ 目标被收成 sRGB ──
+        // 这一格是本轮的产品主张：屏【完全授权】广色域（不是被屏幕证据压掉的），收口纯粹来自格式口径。
+        // 故 GamutClamped 必须为假（它说的是"屏不给"，这里屏明明给了），Rec709Defaulted 才是那个原因。
+        foreach (var (f, why) in new[]
+                 {
+                     (OutputFormat.JPEG_LI, "JPEG LI 的消费端固定假设 Rec.709"),
+                     (OutputFormat.WebP, "WebP 同上（浏览器/聊天软件按 Rec.709 解）"),
+                     (OutputFormat.JPEG_GAINMAP, "Ultra HDR 的底图按约定也是 Rec.709"),
+                 })
+        {
+            var d = CDec.Build(wideP3, "System", false, Acm, f);
+            Assert($"★ {f} + 确证 P3 屏 + 跟随显示器 ⇒ 目标收成 sRGB 且记 Rec709Defaulted（{why}）",
+                d.TargetTag == "sRGB" && d.Rec709Defaulted,
+                $"Target={d.TargetTag} Rec709Defaulted={d.Rec709Defaulted} | {d.Describe()}");
+            Assert($"{f}：这一收口是【格式口径】不是【屏幕证据】⇒ GamutClamped 必须为假（屏是给了的）",
+                !d.GamutClamped && !d.HdrClamped, d.Describe());
+            // 源侧一个字都不许动：像素此刻确实在 P3 里，只是要搬去 sRGB。
+            // 这也是"声明与像素同源"那条承重不变式在格式收口下的正面形状。
+            Assert($"{f}：源色域仍如实是 DisplayP3 ⇒ 真的搬（P3→sRGB），不是只把标签改成 sRGB",
+                d.SourceTag == "DisplayP3" && d.NeedsMapping, d.Describe());
+            Assert($"{f}：跟随显示器【不算】用户的手 ⇒ ExplicitWideTarget 为假",
+                !d.ExplicitWideTarget && d.RequestedTag == "System");
+        }
+
+        // ── (3) 用户显式要 Rec.2020 ⇒ 格式默认档必须让路（"要 2020 请明说"就是这条） ──
+        // 为什么必须有：这是新口径的另一半。只测"会收口"而不测"显式时不收口"，等于把功能改成
+        // "JPEG/WebP 永远出不了 Rec.2020"—— 那是另一个（更坏的）行为，与本轮需求相反。
+        var expJpeg = CDec.Build(wideP3, "BT2020", false, Acm, OutputFormat.JPEG_LI);
+        Assert("★ 显式 BT.2020 + JPEG LI ⇒ 不收口（目标仍是 BT2020，Rec709Defaulted 为假）",
+            expJpeg.TargetTag == "BT2020" && !expJpeg.Rec709Defaulted && expJpeg.ExplicitWideTarget,
+            expJpeg.Describe());
+        Assert("显式 BT.2020 + WebP ⇒ 同样让路（两个格式同一条规则，不是各写各的）",
+            CDec.Build(wideP3, "BT2020", false, Acm, OutputFormat.WebP) is { TargetTag: "BT2020", Rec709Defaulted: false });
+        Assert("显式 BT.2020 + 增益图 ⇒ 不收口（用户要整张增益图走 Rec.2020，与底图档位无关）",
+            CDec.Build(wideP3, "BT2020", false, Acm, OutputFormat.JPEG_GAINMAP) is { TargetTag: "BT2020", Rec709Defaulted: false });
+        // 旧配置里的广色域别名（DisplayP3/AdobeRGB）经 CollapseSelectableTag 收成 BT2020 ⇒ 也算"明说"。
+        // 这条防的是"按原样字符串判显式"那种写法：用户存的是 P3，实现若只认字面 BT2020 就会把它当自动档收掉。
+        Assert("★ 旧别名 DisplayP3 / AdobeRGB 也算显式（按收口后的值判，不按原样字符串判）",
+            CDec.Build(wideP3, "DisplayP3", false, Acm, OutputFormat.JPEG_LI) is { TargetTag: "BT2020", ExplicitWideTarget: true, Rec709Defaulted: false }
+            && CDec.Build(wideP3, "AdobeRGB", false, Acm, OutputFormat.JPEG_LI) is { TargetTag: "BT2020", ExplicitWideTarget: true, Rec709Defaulted: false });
+        // 显式 sRGB 是"用户要的就是 709"，目标本来就是 sRGB ⇒ 没什么可收的，标记也不许亮。
+        // （标记的语义是"我们替用户把广色域压回去了"，不是"目标是 sRGB"。）
+        Assert("显式 sRGB + JPEG LI ⇒ 目标是 sRGB 但 Rec709Defaulted 为假（没东西被收口）",
+            CDec.Build(wideP3, "sRGB", false, Acm, OutputFormat.JPEG_LI) is { TargetTag: "sRGB", Rec709Defaulted: false });
+
+        // ── (4) 其余格式与非格式入口一律不受影响（收窄的范围必须精确，不能让整仓一起变） ──
+        foreach (var f in new[] { OutputFormat.PNG, OutputFormat.JPEG_XL, OutputFormat.AVIF, OutputFormat.TIFF })
+            Assert($"{f} 有完整色彩通道 ⇒ 跟随显示器照旧解析成 BT2020（新口径不许外溢到它们）",
+                CDec.Build(wideP3, "System", false, Acm, f) is { TargetTag: "BT2020", Rec709Defaulted: false });
+        Assert("★ format=null（4 参形状）⇒ 与上面那句 4 参断言逐字同值：不收口、标记为假",
+            CDec.Build(wideP3, "System", false, Acm, (OutputFormat?)null) is { TargetTag: "BT2020", Rec709Defaulted: false }
+            && wSys.TargetTag == "BT2020" && !wSys.Rec709Defaulted);
+        // format 与 requestedTag 是【两个正交的输入】：格式白名单不该让"显式"这条一起失效。
+        Assert("format 与 requestedTag 正交：白名单格式 + 显式广色域 ⇒ 两条判据各答各的",
+            CDec.DefaultsToRec709(OutputFormat.JPEG_LI)
+            && CDec.Build(wideP3, "BT2020", false, Acm, OutputFormat.JPEG_LI).ExplicitWideTarget);
+
+        // ── (5) HDR 档：格式收口只动【目标色域】，不许把 HDR 开关一起收掉 ──
+        // 为什么单独钉：收口的形状与"目标是 sRGB ⇒ 降级成 SDR"那条老逻辑长得像，极易被顺手写进去。
+        // 但 HDR 许不许写 PQ 由【屏幕】决定（HdrClamped 那条路），格式只决定通道与色域。
+        // 增益图尤其不能丢 HdrOutput —— 丢了它 Delivery 会在第①步就返回 BlockedByDisplay，
+        // 用户开着增益图开关却拿到一张普通 JPEG（那正是本文件顶部注释记着的老缺陷）。
+        var hdrGm = CDec.Build(hdr, "System", true, Acm, OutputFormat.JPEG_GAINMAP);
+        Assert("★ 增益图 + HDR 屏 + 跟随显示器 ⇒ HdrOutput 仍为真，只是目标收成 sRGB（HDR 由增益图承载）",
+            hdrGm.HdrOutput && !hdrGm.HdrClamped && hdrGm.TargetTag == "sRGB" && hdrGm.Rec709Defaulted,
+            hdrGm.Describe());
+        Assert("增益图在 HDR 屏上源仍如实是 P3（收目标不等于改源）",
+            hdrGm.SourceTag == "DisplayP3" && hdrGm.NeedsMapping);
+        var hdrJpeg = CDec.Build(hdr, "System", true, Acm, OutputFormat.JPEG_LI);
+        Assert("JPEG LI + HDR 屏 + 跟随显示器 ⇒ HdrOutput 为真而目标 sRGB（两件事都记着自己的原因）",
+            hdrJpeg.HdrOutput && hdrJpeg.TargetTag == "sRGB" && hdrJpeg.Rec709Defaulted && !hdrJpeg.HdrClamped,
+            hdrJpeg.Describe());
+
+        // ── (6) 两处收口不许串味：窄屏 + 显式 BT.2020 + JPEG LI ⇒ 两个标记各归各 ──
+        // 这是本轮最容易写错的一格，也是钳制顺序（屏幕先、格式后）唯一的可见后果：
+        //   · 屏幕钳制先把目标收成 sRGB 并置 GamutClamped（它看到的目标确实是 BT2020）；
+        //   · 格式钳制随后看到 target 已是 sRGB ⇒ 条件 target != "sRGB" 不成立 ⇒ 不置 Rec709Defaulted。
+        // 若哪天把两处顺序对调，格式钳制会先把目标清成 sRGB，屏幕钳制就再也不置位 ⇒ GamutClamped 静默丢失，
+        // 而这枚标记有它自己的 UI 文案（"你这块屏不授权"）。这条断言就是那次对调的报警器。
+        var narrowExplicit = CDec.Build(narrow, "BT2020", false, Acm, OutputFormat.JPEG_LI);
+        Assert("★ 确证窄屏 + 显式 BT.2020 + JPEG LI ⇒ GamutClamped 真【且】Rec709Defaulted 假（屏先收，格式不再记一笔）",
+            narrowExplicit.TargetTag == "sRGB" && narrowExplicit.GamutClamped && !narrowExplicit.Rec709Defaulted,
+            narrowExplicit.Describe());
+        Assert("同格不许因为「格式也默认 709」就把屏证据那条收口算成格式收的（日志里两种原因必须分开读）",
+            narrowExplicit.Describe().Contains("广色域已收口")
+            && !narrowExplicit.Describe().Contains("格式默认档收为Rec.709"),
+            narrowExplicit.Describe());
+        // 反过来：窄屏 + 跟随显示器（目标本来就是 sRGB）⇒ 没有任何东西被收口，两枚标记都为假。
+        // 这条防的是"无条件置位"那种写法 —— 标记一旦变成"目标是 sRGB 就亮"，它就不再是一条证据。
+        Assert("确证窄屏 + 跟随显示器 + JPEG LI ⇒ 目标 sRGB 但两枚收口标记都为假（默认 709 + 窄屏恰好同向）",
+            CDec.Build(narrow, "System", false, Acm, OutputFormat.JPEG_LI) is
+                { TargetTag: "sRGB", Rec709Defaulted: false, GamutClamped: false });
+        // Unknown 屏（逐屏证据缺失）+ 显式 BT.2020 + JPEG LI ⇒ 格式默认档【不许】盖掉用户显式选择。
+        // ⚠ 这一格守的是格式钳制的【边界】，不是它的触发 —— 两者必须都有断言，缺哪边都危险：
+        //   · 「会收口」那一边由上面的 (2)/(3) 守着（wideP3 + 跟随显示器 ⇒ 收成 sRGB）；
+        //   · 这一格守的是反面：用户【手动】拨到 Rec.2020 时，格式默认档一个字都不许动。
+        // 为什么反面这么要紧（这是本轮的承重语义，不是补充说明）：需求原话是
+        //   「JPEG LI 下默认色彩是 Rec.709，勾了 ultra HDR 后也是 Rec.709（选择跟随显示器），
+        //     只有用户手动指定 Rec.2020 时候才是 Rec.2020」。
+        //   ⇒ 钳制条件里的 `!explicitWideRequested` 就是"手动指定"这个守卫。若它被删掉或写错，
+        //     用户明确要的 Rec.2020 会被静默降成 Rec.709 —— 那是与需求【完全相反】的行为，
+        //     而且产物看着"更正常"，极难被发现。这条断言就是那个守卫的报警器。
+        // 选 Unknown 屏不是因为它能让钳制触发（恰恰相反），而是因为它是唯一能把两处收口【各自单独关掉】的屏态：
+        //   屏幕钳制在 classKnown=false 时整体跳过 ⇒ GamutClamped 必为假；
+        //   于是这一格只剩"格式钳制会不会误伤显式选择"这一个变量，归因不含糊。
+        Assert("★ Unknown 屏 + 显式 BT.2020 + JPEG LI ⇒ 格式默认档【不许】盖掉用户显式选择（默认档只管没选过的人）",
+            CDec.Build(null, "BT2020", false, Acm, OutputFormat.JPEG_LI) is
+                { TargetTag: "BT2020", Rec709Defaulted: false, GamutClamped: false });
+        // 对照：同一个用户显式选择，换成不默认 709 的 PNG ⇒ 结果逐项相同。
+        // 两者相同正是这条要证明的事：显式选择高于格式默认档，与"这个格式有没有默认档"无关。
+        // ⚠ 这不是"重复断言"——它把"JPEG LI 那一格保持 BT2020"的原因钉在【显式】上：
+        //   若哪天有人把守卫写错，PNG 那格仍会绿、而 JPEG LI 那格会红，两格一比就知道是格式档闯的祸。
+        Assert("对照：同一显式选择换成 PNG ⇒ 结果逐项相同（显式选择高于格式默认档，与格式是否白名单无关）",
+            CDec.Build(null, "BT2020", false, Acm, OutputFormat.PNG) is
+                { TargetTag: "BT2020", Rec709Defaulted: false, GamutClamped: false }
+            && CDec.Build(null, "BT2020", false, Acm, OutputFormat.JPEG_LI) is
+                { TargetTag: "BT2020", Rec709Defaulted: false, GamutClamped: false });
+
+        // ── (7) 审计行必须能读出"是谁收的" ──
+        // Describe() 是现场日志与 --display-audit 的唯一出处；两种收口共用一种形状（目标=sRGB），
+        // 全靠这两句尾巴区分。少了它，读日志的人只能看到"目标 sRGB"，分不出屏不给还是格式不给。
+        Assert("★ 审计行把格式收口与屏幕收口分开写（两种原因共用『目标=sRGB』这一种形状，只能靠尾巴分辨）",
+            hdrGm.Describe().Contains("[格式默认档收为Rec.709]")
+            && !hdrGm.Describe().Contains("[广色域已收口]")
+            && narrowExplicit.Describe().Contains("[广色域已收口]"));
+        Assert("凡 Rec709Defaulted 为真 ⇒ 审计行必须带那句尾巴（标记与文案不许分叉）",
+            CDec.Build(wideP3, "System", false, Acm, OutputFormat.WebP).Describe().Contains("[格式默认档收为Rec.709]"));
+
         // ═══ 形态哨兵：两侧都不许再各自解析下拉（否则这张表护不住实际行为）═══
         var cps = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"))!);
         var mw = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"))!);
@@ -6968,6 +7200,38 @@ public static class CorePipelineTests
             Del(sdrWideScreen, "BT2020", OutputFormat.PNG) == HdrDelivery.BlockedByDisplay
             && wcg.TargetTag == "BT2020" && !wcg.GamutClamped);
 
+        // ═══ ③′ 2026-10-06：默认目标改成 Rec.709 之后，交付形态【一格都没变】 ═══
+        // 这一小节存在的唯一理由是"证明那次产品口径变更没有波及交付形态"，而不是"再测一遍 Delivery"。
+        // 上面所有的 Del(...) 走的都是 4 参 Build（无格式上下文），因此它们守的仍是老行为；
+        // 而真实管线【一定会传格式】⇒ 上面那张表与线上跑的根本不是同一个形状。这里有责任把
+        // "带上格式之后结论是否仍然一致"单独钉一遍，否则 140 格全绿也说明不了线上的事。
+        //
+        // 逐格推一遍（HDR 屏 + HDR 开关 + 跟随显示器）：
+        //   · JPEG LI / WebP：新的格式收口把目标从 BT2020 变成 sRGB，HdrOutput 仍为真；
+        //     Delivery 的第②步（SupportsHdr=false）在③之前命中 ⇒ BlockedByFormat。
+        //     ⚠ 关键：它【不能】变成 BlockedBySrgbTarget —— 两者的用户动作完全不同
+        //     （前者"换格式"，后者"改目标"），而对 JPEG/WebP 而言把目标改回 2020 也写不出 PQ。
+        //     这条断言就是那个"顺序不许对调"的报警器。
+        HdrDelivery Fmt(TrueToneCap.Core.Capture.DisplayInfo? s, string tag, OutputFormat f)
+            => FormatColorFacts.Delivery(CDec.Build(s, tag, true, true, f), f);
+        foreach (var f in new[] { OutputFormat.JPEG_LI, OutputFormat.WebP })
+            Assert($"★ {f} + HDR 屏 + 跟随显示器（带格式的 5 参形状）⇒ BlockedByFormat，不是 BlockedBySrgbTarget",
+                Fmt(hdrScreen, "System", f) == HdrDelivery.BlockedByFormat);
+        // 增益图两档都必须是 GainMap：新收口只换底图原色，不改"交付物是什么"。
+        // 若哪天有人把"目标=sRGB ⇒ 降级"顺手写进增益图这条路，这里立刻红。
+        Assert("★ 增益图 + HDR 屏 + 跟随显示器（带格式）⇒ 仍是 GainMap：收口只换原色，不换交付形态",
+            Fmt(hdrScreen, "System", OutputFormat.JPEG_GAINMAP) == HdrDelivery.GainMap);
+        Assert("增益图 + HDR 屏 + 显式 BT.2020（带格式）⇒ 也是 GainMap（两档只差原色）",
+            Fmt(hdrScreen, "BT2020", OutputFormat.JPEG_GAINMAP) == HdrDelivery.GainMap);
+        // 对照组：不默认 709 的格式在【同一个 5 参形状】下不受影响 ⇒ 收口确实只针对白名单那一族。
+        // 这条同时把上面三格的"变化"归因锁死：变的只有白名单格式，不是 Delivery 或屏判据变了。
+        Assert("对照：PNG 在同一个 5 参形状下仍写 PQ（说明上面几格的变化来自格式口径，不是 Delivery 变了）",
+            Fmt(hdrScreen, "System", OutputFormat.PNG) == HdrDelivery.PqContainer);
+        // 4 参 vs 5 参必须能同时成立：同一个 PNG + System 两种形状同值 ⇒ "不传格式 = 不改行为"。
+        Assert("同一个 PNG + 跟随显示器：4 参与 5 参形状同值 ⇒ 『不传格式 = 不改行为』这句话可执行地成立",
+            Del(hdrScreen, "System", OutputFormat.PNG) == Fmt(hdrScreen, "System", OutputFormat.PNG)
+            && Del(hdrScreen, "System", OutputFormat.PNG) == HdrDelivery.PqContainer);
+
         // ═══ ④ 承重不变式：全表扫（4 屏态 × 5 标签 × 7 格式 = 140 格），防"以后加一档漏一格" ═══
         int pqInSrgbContainer = 0, gainMapMismatch = 0, pqWithoutEncoderConsent = 0, cells = 0;
         foreach (var s in new[] { hdrScreen, sdrWideScreen, narrowScreen, null })
@@ -7013,6 +7277,45 @@ public static class CorePipelineTests
             && Decl(OutputFormat.WebP, "sRGB", false).Contains("什么都不写")
             && Decl(OutputFormat.TIFF, "sRGB", false).Contains("连 Rec.709 也")
             && !Decl(OutputFormat.TIFF, "sRGB", false).Contains("什么都不写"));
+
+        // ═══ 2026-10-06：声明文案必须自己交代「默认档是 Rec.709」这条规则 ═══
+        // 为什么这不能只靠上面那条 4 参行为断言：行为收口发生在一个用户【看不见】的地方
+        // （Build 里 target 被改成 sRGB），而用户看到的解释只有色域映射卡片上这句文案。
+        // 卡片同时是"过去跟随显示器会解析出 Rec.2020、现在不会"这件事的唯一交代处 ——
+        // 少了它，用户遇到的最坏情况是"产物色域悄悄和我以前拿到的不同，界面一个字没说"。
+        // ⚠ 断言取【稳定子串】而不是整句：文案的措辞会随语言/润色改，但这两件事必须一直在。
+        //   (a) `Rec.709` — 说的是哪一档；(b) `【显式】`/`显式` — 说清升级的开关在用户手里。
+        //   按整句匹配的话，任何一次标点或语序调整都会红，而那并不代表规则丢了。
+        foreach (var f in new[] { OutputFormat.JPEG_LI, OutputFormat.WebP })
+        {
+            var txt = Decl(f, "sRGB", false);
+            Assert($"★ {f} 的声明文案说出「默认档就是 Rec.709」（用户看得见的唯一交代处）",
+                txt.Contains("Rec.709"),
+                txt);
+            Assert($"★ {f} 的声明文案说清 Rec.2020 只在【显式】选择时才会写出（自动档不升级）",
+                txt.Contains("默认目标") && txt.Contains("显式"),
+                txt);
+        }
+        // 两族格式必须说成【同一件事】：JPEG 与 WebP 分句写（各自的"什么都不写"细节不同），
+        // 但规则本身只有一条。这条防的是"改了一处的文案、另一处留着旧说法"。
+        Assert("JPEG LI 与 WebP 的默认档说法是同一件事（两处分开写句子，但规则不许分叉）",
+            new[] { OutputFormat.JPEG_LI, OutputFormat.WebP }
+                .All(f => Decl(f, "sRGB", false).Contains("默认目标") && Decl(f, "sRGB", false).Contains("Rec.709")));
+        // 反向：不默认 709 的格式不许长出这句话（否则用户会以为 PNG/AVIF 也被收口了）。
+        Assert("反向：不默认 Rec.709 的格式不许出现「默认目标」这套说法（免得用户以为 PNG/AVIF 也被收口）",
+            new[] { OutputFormat.PNG, OutputFormat.JPEG_XL, OutputFormat.AVIF, OutputFormat.TIFF }
+                .All(f => !Decl(f, "sRGB", false).Contains("默认目标")));
+        // ⚠ 这几条必须与全仓「旧叫法封杀」共存：文案只能说 `Rec.709`，不许写 `BT.709`/`BT.2020`
+        //   （上面 7191 那条已在全域扫过，这里对新加的两句再点名一次，免得日后补文案时用错叫法）。
+        Assert("新加的默认档文案用新叫法（Rec.709），不许带 BT.709 / BT.2020 这两个被全域封杀的旧写法",
+            new[] { OutputFormat.JPEG_LI, OutputFormat.WebP }
+                .All(f => !Decl(f, "sRGB", false).Contains("BT.709") && !Decl(f, "sRGB", false).Contains("BT.2020")));
+        // 措辞纪律的直接后果：这句话不许写成 `sRGB 目标` —— ColorDecision 内部那枚标记是 sRGB，
+        // 但面向用户的档位名只有 Rec.709。写成 sRGB 会撞上界面用词的旧叫法清单。
+        Assert("声明文案说档位时用 Rec.709 而不是 sRGB（内部标记是 sRGB，那是盘上契约，不是用户用词）",
+            new[] { OutputFormat.JPEG_LI, OutputFormat.WebP }
+                .All(f => !Decl(f, "sRGB", false).Contains("sRGB 目标")
+                       && !Decl(f, "sRGB", false).Contains("目标 sRGB")));
 
         // ═══ 2026-09-27 用户口径：面向用户的色域名字只有 Rec.709 / Rec.2020 两个 ═══
         // 原来同一档在界面上叫 sRGB、卡片里叫 BT.709/sRGB、声明文案里叫 BT.2020、灰字里还写过"非 sRGB"，

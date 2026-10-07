@@ -4,6 +4,7 @@
 // 显示器信息枚举、HDR 检测、鼠标所在显示器定位
 
 using System.Runtime.InteropServices;
+using TrueToneCap.Core.Encoding;
 using Vortice.DXGI;
 
 namespace TrueToneCap.Core.Capture;
@@ -881,6 +882,28 @@ public sealed class ColorDecision
     /// <summary>是否发生过"广色域目标被收口成 sRGB"。只为日志/审计，不参与判定。</summary>
     public bool GamutClamped { get; init; }
 
+    // ═══════════════════════════════════════════════════════════════════════════════
+    //  2026-10-06：JPEG 家族 / WebP 的"默认就是 Rec.709"（产品口径变更）
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 需求：JPEG LI（含 Ultra HDR / JPEG_GAINMAP）与 WebP 这两个容器，默认档必须是 Rec.709；
+    //       只有【用户亲手】选了广色域才升到 Rec.2020（开着增益图也一样，选 2020 就不降回底图）。
+    //
+    // ⚠ 为什么不能塞进上面那个 GamutClamped（这是我认真考虑过、并且否掉的第一个形状）：
+    //   GamutClamped 的语义是"【屏幕证据】把用户合法要的广色域压掉了"，所以它有自己的 UI 文案、
+    //   而且它只在 !CanClaimWideGamut(cls) 时置位。本轮的收口恰恰发生在【屏幕完全授权】的屏上
+    //   （P3 面板 + 跟随显示器那格就正是这样），跟屏幕证据毫无关系，是【格式口径】收的。
+    //   两者共用一枚布尔 ⇒ 那条 UI 文案会开始为一件它没做过的事作证（"你这块屏不授权"），
+    //   日志里也再也分不出"屏不给"和"格式不给"。所以新增一枚只表格式口径的 flag，见下。
+
+    /// <summary>本次目标色域是被<b>格式默认档</b>收成 Rec.709/sRGB 的（不是屏幕证据收的）。
+    /// <para>判据：<see cref="DefaultsToRec709"/> 对该格式为真（JPEG LI / GainMap / WebP）、
+    /// 用户没有显式点广色域、而解析出来的目标不是 sRGB ⇒ 落回 sRGB 并置本标记。
+    /// 它与 <see cref="GamutClamped"/> 是<b>两件事</b>（一个是格式口径、一个是屏幕证据），
+    /// 同一份决定里可能只有其一，也可能两个都真（例如确证窄屏 + 显式 BT.2020 + JPEG LI）。</para>
+    /// <para>只为日志/审计，不参与判定 —— 与 GamutClamped 同一条纪律：真实行为由 TargetTag 承载，
+    /// 标记只回答"为什么会变成这样"。</para></summary>
+    public bool Rec709Defaulted { get; init; }
+
     /// <summary>是否发生过"HDR 声称被收口成 SDR 色调映射"。</summary>
     public bool HdrClamped { get; init; }
 
@@ -913,11 +936,43 @@ public sealed class ColorDecision
         => DisplayEnumerator.CanDeliverExtendedRange(Source, SystemAcm);
 
     /// <summary>
+    /// 该输出格式是不是"<b>默认档就是 Rec.709</b>"的那一族（2026-10-06 用户口径）。
+    /// <para><b>为什么是这几个格式</b>：JPEG LI（含 Ultra HDR / <see cref="OutputFormat.JPEG_GAINMAP"/>）
+    /// 与 WebP 都是<b>消费端假设固定</b>的容器 —— 绝大多数解码器、浏览器、聊天软件、手机相册
+    /// 见到它们就按 Rec.709/sRGB 解释，容器里那条声明经常被整条忽略；把一块 P3 桌面屏自动解析出的
+    /// Rec.2020 写进去，用户拿到的就是一张<b>在别人机器上偏色</b>的图。PNG / JPEG XL / AVIF / TIFF
+    /// 要么带完整的 ICC/cICP 通道、要么本来就是"色彩档案格式"，自动跟屏仍然是对的。</para>
+    /// <para><b>为什么用白名单而不是黑名单</b>（这是被否掉的另一种写法）：写成
+    /// <c>f != OutputFormat.PNG &amp;&amp; f != AVIF &amp;&amp; …</c> 的话，以后往
+    /// <see cref="OutputFormat"/> 里加一个新格式，默认落进"不带 Rec.709 默认档"那一侧 ——
+    /// 而"忘了给新格式定口径"这件事在测试里是看不出来的（没有格子会红）。
+    /// 白名单则让新格式默认落进"不改变今天行为"那一侧，需要有人<b>主动</b>把它登记进来。
+    /// 代价是每个"其实也该默认 709"的新格式会先错一阵 —— 但这个错误会被人发现（偏色是可报告的），
+    /// 漏登记的代价远小于静默改掉一串老格式行为的代价。</para>
+    /// <para><b>为什么收 <c>OutputFormat?</c> 而不是 <c>OutputFormat</c></b>：null 表示"这次调用
+    /// 没有格式上下文"（动画录制、自检、静默采样那些入口），它<b>必须</b>返回 false —— 否则
+    /// 那些入口会跟着一起改变行为，而它们没有"用户选的那个格式"这回事。
+    /// 见 <see cref="Build"/> 的 <c>format</c> 参数：格式是<b>可选</b>的，不传就等于今天的行为。</para>
+    /// </summary>
+    public static bool DefaultsToRec709(OutputFormat? f) => f switch
+    {
+        OutputFormat.JPEG_LI or OutputFormat.JPEG_GAINMAP or OutputFormat.WebP => true,
+        _ => false,
+    };
+
+    /// <summary>
     /// 构造一次决定。<paramref name="source"/> 必须是<b>被截那块屏</b>；传 null 表示不知道，
     /// 此时按"逐屏证据缺失"处理（分类给 Unknown ⇒ 放行源精度但不授权声明），不去猜光标屏。
     /// </summary>
+    /// <param name="format">本次要落盘的那个格式；省略（null）时<b>完全维持 2026-10-06 之前的行为</b>。
+    /// <para>为什么做成可选参数而不是重载、也不是必填：本方法的调用方分两族 ——
+    /// 截图管线那一族手里有 <c>OutputFormat</c>（用户选的），动画录制 / 自检 / 工具那一族没有。
+    /// 加一个 4 参重载会让"哪一族走哪个形状"变成编译期看不见的选择，而可选参数把
+    /// "不传 = 不改变行为"写进了签名本身；必填参数则会逼着那族调用方随便填一个格式，
+    /// 那比不填更坏（等于替它们编了一个它并不掌握的上下文）。</para></param>
     public static ColorDecision Build(
-        DisplayInfo? source, string? requestedTag, bool hdrOutput, bool systemAcm)
+        DisplayInfo? source, string? requestedTag, bool hdrOutput, bool systemAcm,
+        OutputFormat? format = null)
     {
         var cls = DisplayEnumerator.ClassifyDisplayColor(source, systemAcm);
         bool classKnown = cls != DisplayEnumerator.DisplayColorClass.Unknown;
@@ -953,6 +1008,28 @@ public sealed class ColorDecision
             gamutClamped = true;
         }
 
+        // ②′ 格式口径钳制（2026-10-06 用户口径）：JPEG 家族 / WebP 的默认档 = Rec.709。
+        //     ⚠ 顺序上有意排在【屏幕钳制之后】，这不是随手放的：
+        //     两处钳制的形状在这里一样（target="sRGB"），但语义是两回事（屏幕证据 vs 格式口径），
+        //     而且【标记不同】。写在前面的话，屏幕钳制仍然会在它之后跑一遍，
+        //     两个标记的置位条件就会互相污染（显式 BT.2020 + 窄屏那格会变成"两条收口都记一笔"，
+        //     到时日志里分不清是屏不给还是格式不给）。排在后面 ⇒ 谁收的都记得准，
+        //     且"显式要的广色域被屏收口"这条既有口径（GamutClamped）一个字都不用改。
+        //     ⚠ 这个布尔是【唯一】的显式判据：下面格式钳制用它决定压不压，
+        //     初始化器里的 ExplicitWideTarget 也直接取它（不再各写一遍表达式）。
+        //     两个消费点共用一份 ⇒ 不可能出现"声明说是显式要的、钳制却当非显式压掉"的分叉；
+        //     这也正是"同一个规则只写一次"在本仓的既有纪律（见 CollapseSelectableTag）。
+        //     ⚠ 声明位置有意留在目标解析之后、钳制之前：它的两个输入（下拉原样值、collapse）
+        //     在这里都已就绪，而两个消费点都在它之后 ⇒ 不存在"先用后赋"的读法。
+        bool explicitWideRequested = !string.IsNullOrWhiteSpace(requestedTag) && requestedTag != "System"
+                                     && collapse(requestedTag) != "sRGB";
+        bool rec709Defaulted = false;
+        if (DefaultsToRec709(format) && !explicitWideRequested && target != "sRGB")
+        {
+            target = "sRGB";
+            rec709Defaulted = true;
+        }
+
         // ③ 源色域：只有"系统确实把这块屏按扩展范围在合成"时，8-bit 字节才可能不在 sRGB 里。
         // 取 EDID 确证过的细标签（不 collapse —— 源是 DisplayP3 就该按 DisplayP3 反解）。
         // 读不到 EDID 时 NativeGamutTag 恒为 "sRGB" ⇒ 按 sRGB 搬、按搬后的结果声明，两边仍然一致。
@@ -971,12 +1048,18 @@ public sealed class ColorDecision
             TargetTag = target,
             HdrOutput = hdr,
             GamutClamped = gamutClamped,
+            Rec709Defaulted = rec709Defaulted,
             HdrClamped = hdrClamped,
             RequestedTag = requestedTag,
             // "显式要广色域" = 下拉本身就不是 System/空，且收口之后确实是个广色域。
             // 注意用的是收口前的原样值：System 在 P3 屏上也会解析成 BT2020，但那不是用户的手。
-            ExplicitWideTarget = !string.IsNullOrWhiteSpace(requestedTag) && requestedTag != "System"
-                                 && collapse(requestedTag) != "sRGB",
+            // ⚠ 这条规则【只在上面的 explicitWideRequested 写一次】（2026-10-06 收口）：
+            //   本轮一度在这里把表达式重写了一遍（理由是"初始化器里看得见输入、不必依赖远处的局部变量"），
+            //   那是个坏理由 —— 同一份决定里立刻出现两个事实源，改一处忘另一处就会得到
+            //   "ExplicitWideTarget=true 却被当非显式收口成 sRGB"这种自相矛盾的决定，
+            //   而两处都各自"看起来对"，测试也很难咬住。本仓的既有纪律是"规则只写一次"
+            //   （见 CollapseSelectableTag 那次收口），这里照办：钳制与声明共用同一个布尔。
+            ExplicitWideTarget = explicitWideRequested,
             Evidence = DisplayEnumerator.DescribeColorEvidence(source, systemAcm),
         };
     }
@@ -984,7 +1067,10 @@ public sealed class ColorDecision
     /// <summary>审计/日志用的一行。把"决定"本身而不是各侧局部变量打出来，才看得出两侧有没有分叉。</summary>
     public string Describe() =>
         $"分类={ScreenClass} 源色域={SourceTag} 目标={TargetTag} HDR={(HdrOutput ? "写PQ" : "SDR")}" +
-        (GamutClamped ? " [广色域已收口]" : "") + (HdrClamped ? " [HDR已收口]" : "");
+        (GamutClamped ? " [广色域已收口]" : "") + (HdrClamped ? " [HDR已收口]" : "") +
+        // 两种"目标被收成 sRGB"必须能分开读：上面那句是"屏幕证据不给"，
+        // 这句是"这个格式的默认档就是 Rec.709"（屏可能完全授权，是格式口径收的，见 Rec709Defaulted）。
+        (Rec709Defaulted ? " [格式默认档收为Rec.709]" : "");
 }
 
 

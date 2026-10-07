@@ -119,6 +119,22 @@ public sealed class AppSettingsData
     public double QualityWebp { get; set; } = 90;           // 质量 (50-100)
     public double QualityTiff { get; set; } = 100;          // 无损 (0-100)
 
+    // ── 压缩强度三档（2026-10-07 用户口径）──
+    // 只作用于 AVIF / JPEG XL / WebP 的 effort/speed 旋钮，不动质量。
+    // 逐格式各一栏（用户要求"给这三个格式提供额外的一个条"），字面量取 "Smallest"/"Balanced"/"Fastest"：
+    //   · 为什么不用 int 索引：索引会随枚举增删而静默改义（本仓 settings 的"裸索引静默指向别的格式"
+    //     已经踩过一次，见 SettingsService 的 GainMap 并入记录）⇒ 用字符串，坏值由
+    //     CompressionEffortMap.Parse 回落到均衡档，不会变成"最慢档"。
+    //   · 默认 "Balanced" 对 AVIF/WebP 恰好等于改动前的硬编码值（-s 6 / cwebp 默认 -m 4）⇒ 产物不变；
+    //     JPEG XL 则由 -e 9 变为 -e 5（实测 25.0s → 0.82s），这是用户明确要的提速。
+    public string EffortAvif { get; set; } = "Balanced";
+    public string EffortJpegXl { get; set; } = "Balanced";
+    public string EffortWebp { get; set; } = "Balanced";
+    // JPEG LI 是 2026-10-07 后加的（用户据实测要求纳入）：它的 --xyb 在两张真实截图 × 整个质量区间
+    // 以及 GainMap 的 Baseline 路上**一律更小 1.5%~4.7%**，是唯一全正收益的小参。
+    // 默认 Balanced ⇒ 不加 --xyb，产物与从前逐字节一致（与 AVIF/WebP 同一条承诺）。
+    public string EffortJpegLi { get; set; } = "Balanced";
+
     // ── 输出路径 ──
     public string OutputPath { get; set; } = "";
     public string FileNamePrefix { get; set; } = "TrueToneCap_";

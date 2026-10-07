@@ -473,6 +473,18 @@ public sealed class SettingsService
 
         // ── 位深：按格式钳制（各格式实际支持的集合不同，详见 NormalizeBitDepth）──
         NormalizeBitDepth(s);
+
+        // ── 压缩强度三档（2026-10-07 用户口径）──
+        // 逐格式各一栏，只作用于 AVIF / JPEG XL / WebP 的 effort 旋钮。
+        // 用 FitTag 而不是自己写 if：它是本文件既有的"合法值收口"通道，同时负责
+        // 「大小写不符时改写成 Tag 拼法」—— 自己写比较会漏掉那一半（见 FitTag 的备注）。
+        // 三个字段的合法值相同但各自独立：用户可以对三者分别设不同档。
+        // ⚠ Core 侧 CompressionEffortMap.Parse 对未识别值也回落均衡档 ⇒ 编码器侧的兜底与这里
+        //   口径一致（设置被绕过时仍安全），是有意的双保险而非重复。
+        FitTag(s.EffortAvif, v => s.EffortAvif = v, dft.EffortAvif, "Smallest", "Balanced", "Fastest");
+        FitTag(s.EffortJpegXl, v => s.EffortJpegXl = v, dft.EffortJpegXl, "Smallest", "Balanced", "Fastest");
+        FitTag(s.EffortWebp, v => s.EffortWebp = v, dft.EffortWebp, "Smallest", "Balanced", "Fastest");
+        FitTag(s.EffortJpegLi, v => s.EffortJpegLi = v, dft.EffortJpegLi, "Smallest", "Balanced", "Fastest");
     }
 
     /// <summary>

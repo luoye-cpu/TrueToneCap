@@ -15,10 +15,289 @@
 
 ---
 
-## [0.3.7-beta] — 2026-09-28 ~ 10-05
+## [未发布] — 2026-10-07：MSIX 框架依赖开关（商店包体积减半）
+
+> 分析见 `docs/msix-size-and-publish-pipeline-analysis-2026-10-07.md`（含实测体积矩阵与实现记录）。
+
+### 新增：`-FrameworkDependent`（商店包 MSIX 从 175.82 MB → **84.57 MB**，−52%）
+
+- 用法：`.\Publish.ps1 -Msix -FrameworkDependent`
+- 把 .NET 与 WinAppSDK 运行时交给目标机（商店包由 Windows 自动解析依赖），
+  实测 **−91.25 MB（−52%）**。
+- ⚠️ **只作用于商店包**：绿色包保持自包含（"解压即用"是本仓的分发卖点）。
+  不加 `-Msix` 单独用本开关会产出框架依赖的绿色包，`Publish.ps1` 会**显式告警**说明后果。
+
+### 修复：命令行 `-p:` 覆盖 csproj 属性，导致开关静默失效
+
+- 首次接入实测得到 **175.82 MB —— 不但没瘦，反而更大**。查出两个叠加原因：
+  1. `Publish.ps1` **硬编码** `--self-contained true -p:WindowsAppSDKSelfContained=true`，
+     命令行优先级高于 csproj ⇒ csproj 里的 `false` 被完全覆盖；
+  2. `Publish.ps1` 默认传 `PublishReadyToRun=true/Composite=true`，
+     而 R2R 映像与**目标运行时**绑定 ⇒ 框架依赖下多出一个 **122 MB 的 `TrueToneCap.r2r.dll`**。
+- 修法：自包含参数改为按开关组装；框架依赖时**强制关闭 R2R**。
+- 修正后 **84.57 MB**，与设计目标一致。
+
+### 澄清：`dotnet build` 与 `dotnet publish` 产出的 MSIX 不同
+
+| 模式 | `dotnet build` | `dotnet publish`（`Publish.ps1` 实际路径） |
+|---|---|---|
+| 自包含 | 150.90 MB | **175.82 MB** |
+| 框架依赖 | 84.57 MB | **84.57 MB** |
+
+差异来自 R2R（publish 会打进包、build 不会）。
+⇒ **真实发布基线是 175.82 MB**，先前文档里"MSIX 不含 R2R"的说法只在 build 口径下成立，已更正。
+
+### 验收读数（本机实测）
+
+| 项 | 结果 |
+|---|---|
+| 5 项目 Release 构建 | ✅ 0 警告 0 错误 |
+| 8 套件测试 | ✅ **1840 通过 / 0 失败** |
+| `--selftest` | ✅ 通过 |
+| `Publish.ps1 -Msix` | ✅ exit 0（MSIX 内容核对通过，175.82 MB） |
+| `Publish.ps1 -Msix -FrameworkDependent` | ✅ exit 0（核对通过，**84.57 MB**） |
+| 框架依赖包内容 | ✅ 4 原生工具 + 3 OCR 资产 + onnxruntime 全在；运行时已按预期移除 |
+
+> ⚠️ **仍未做**：框架依赖包**尚未在干净机器上实机安装启动验证**（本次验证到"内容正确 + 体积达标"）。
+
+---
+
+## [未发布] — 2026-10-07：MSIX 打包（为微软商店上架铺路）
+
+> 分析见 `docs/msix-store-packaging-analysis-2026-10-07.md`（含实测配置推导与验收读数）。
+
+### 新增：MSIX 打包能力（`-Msix`，与绿色包并行）
+
+- `.\Publish.ps1 -Msix` 在原有绿色包之外**追加**产出 `.msix`（150.9 MB）+ `.appxsym`（符号包，
+  供 Partner Center 崩溃分析）。**默认不加该开关时，未打包流程完全不受影响**（实测不产出任何 .msix）。
+- 新增 `Package.appxmanifest`：含 `runFullTrust` 能力（桌面应用必需）与
+  **`windows.startupTask` 扩展**（MSIX 下开机自启的正确机制 —— 沙箱内写 `HKCU\...\Run` 无效）。
+- 新增 `scripts/gen-msix-assets.py` 与 13 个磁贴/启动画面资产（可复现生成，
+  配色与本应用运行时自绘图标一致 #0078D4）。
+
+### 修复：MSIX 包里 4 枚原生编码器会**静默缺失**（本项的核心）
+
+- **实测现象**：打包成功、退出码 0，但解包核对发现 `native\` 下
+  `avifenc` / `cjxl` / `cjpegli` / `cwebp` **全部不在包里**（OCR 模型却在）
+  ⇒ AVIF / JPEG XL / WebP / JPEG LI 四种格式在包内整体失效。
+- **根因**：MSIX 打包**枚举 MSBuild 声明的项（items）**，不是输出目录里的文件。
+  OCR 模型走 `<Content Include="Models\*.onnx">`（是声明的项）故能进包；
+  原生 exe 当时只靠 `<Copy DestinationFolder="$(OutDir)native">`（文件系统动作）故被漏掉。
+- **修法**：把同一批文件**声明为 `<Content>` 项**（`Link="native\%(Filename)%(Extension)"`），
+  保留原 Copy 作兜底与 4 枚硬断言。
+- 这是典型的"编译/发布/打包三条路径全程绿灯、功能却是坏的"，
+  **只能靠解包核对发现**。
+
+### 新增：`scripts/verify-msix.ps1` 解包核对门禁（已做变异测试）
+
+- 四项检查：必需内容（4 exe + 3 OCR 资产 + 主程序）／清单身份
+  （版本第四段须为 0、`runFullTrust`、`startupTask`、Publisher 占位符告警）／
+  卫生（无 `.pdb`/`.ppm`/`.tmp` 混入）／汇总。
+- 已接入 `Publish.ps1` 的 `[5.6/6]`：**不通过即拒绝盖章**（不生成 SHA256SUMS/build-info）。
+- **变异测试**：删掉修好的 `<Content>` 项后构建仍 exit 0（静默故障复现），
+  而门禁 **exit 1** 并逐条点出 4 枚缺失 ⇒ 证明门禁真的拦得住它要拦的缺陷，不是摆设。
+
+### 修复：一次合法瘦身被发布门禁误拦
+
+- 跑 `Publish.ps1 -Msix` 时冒烟门禁报 `native\cjpegli.exe — 759808 B，低于下限 1048576 B`。
+  这是**早前 cjpegli 自编译改造**（5.13 MB → 0.72 MB）之后 `verify-package.ps1` 里
+  1 MB 下限口径过时所致。尺寸下限的本意是"挡住截断/空文件"，应贴着当前真实体积取
+  ⇒ 已改为 256KB 并注明依据。
+
+### 验收读数（本机实测）
+
+| 项 | 结果 |
+|---|---|
+| 5 项目 Release 构建 | ✅ 0 警告 0 错误 |
+| 默认路径不受影响 | ✅ 不加 `-Msix` 时不产出任何 .msix |
+| 测试套件 | ✅ 8 套件 **1820 通过 / 0 失败** |
+| `--selftest` | ✅ 通过 |
+| MSIX 内容核对 | ✅ 4 原生工具 + 3 OCR 资产 + 清单身份全通过 |
+| **`Publish.ps1 -Msix` 端到端** | ✅ **exit 0**（冒烟 → MSIX 核对 → 盖章全通） |
+
+> ⚠️ **仍未做**（已记录在文档 §8.8）：`Identity/@Publisher` 仍是占位符，须等 Partner Center
+> 预留应用名后替换；开机自启**代码侧尚未切到 `StartupTask` API**（清单已声明，打包后暂不生效）；
+> MSIX 沙箱内**尚未实机安装运行验证**（本次验证到"包内容正确"）。
+
+---
+
+## [未发布] — 2026-10-07：依赖全面升级
+
+> 依据 `docs/dependency-update-analysis-2026-10-07.md` 的分批计划执行。
+> 所有版本均经上游注册表/仓库实时核实，所有产物均经重建 + 哈希回填 + 测试回归。
+
+### 安全：avifenc 内嵌 libpng 1.6.58 → 1.6.59（CVE-2026-46675）
+
+- **libpng 1.6.58 存在 CVE-2026-46675**（中等：`png_read_end` 中 zlib 输入的 use-after-free，
+  触发条件为畸形/截断的 zTXt/iTXt/iCCP 块）。已从两处独立核实：随包 `avifenc.exe` 的二进制字符串
+  （`1.6.58`）+ libpng 官方 `CHANGES`（v1.6.59 条目原文）。
+- **升级比表面复杂**：libpng 的版本**不是本仓选的**，而是 libavif v1.4.2 在
+  `cmake/Modules/LocalZlibpng.cmake` 里 `set(AVIF_LIBPNG_GIT_TAG v1.6.58)` 钉的，
+  且该变量是普通变量、**无法用 `-D` 覆盖**，而 libavif 最新就是 1.4.2。
+  解法用上游自带的旁路：把 libpng v1.6.59 源码放到 `libavif/ext/libpng/`，libavif 即改用本地源码。
+- **无意外漂移**：aom 3.14.1、SVT v4.1.0、zlib 1.3.2 与旧件完全一致，只 libpng 变了。
+- **暴露面评估（决定优先级）**：该 CVE 位于**解码**路径，而本应用只用自研 `ManagedPngEncoder`
+  编码 PNG、**从不解码不可信 PNG**（全仓 `png_read`/`libpng` 搜索仅命中 2 处注释）
+  ⇒ 实际可利用性低，本次属消除版本落后的常规加固。
+
+### 安全：cjxl 0.11.2 → 0.12.0（libjxl 加固 delta）
+
+- 0.12.0 的 release notes 含大段 Security 章节（数十个整数溢出/越界读写/缓冲区溢出加固 PR，
+  多数未单独分配 CVE）。与 0.11.x 相关的两个 CVE 影响区间**均止于 0.11.1** ⇒ 0.11.2 无开放 CVE，
+  故属**加固**而非止血。
+- ⚠️ **libpng 暴露面未变**：实测 0.11.2 与 0.12.0 的 cjxl 都内含 libpng 1.6.50（均低于修复版 1.6.59）。
+  未自编译 cjxl：自建需完整 libjxl 工具链，成本远高于收益，且**无法**改善该版本（由 libjxl 自身 pin 决定）。
+
+### 变更：cjpegli 由 libjxl 预编译件改为**从 google/jpegli 自编译**
+
+- **根因（实测发现）**：libjxl v0.12.0 **移除了整个 jpegli 代码库**（其 CHANGELOG：
+  *"The `jpegli` codebase has been removed as it is now maintained as a separate project at
+  google/jpegli. (#4657)"*）。实测 v0.12.0 的 `jxl-x64-windows-static.zip` 与 `jxl-x64-windows.zip`
+  **都不含 cjpegli.exe**（v0.11.2 的两个包都有），而 google/jpegli **没有任何 Release**。
+  ⇒ 升 cjxl 就没有可下载的配套 cjpegli，必须自建。
+- **新增 `scripts/build-cjpegli.py`**：按本仓 `build-avifenc.py` 的既有模式（vcvarsall 环境块
+  由 Python 自行写批处理采集，规避 MSYS argv 改写），并内置**依赖漂移核查**告警与子模块就位检查。
+- **依赖漂移已核查并规避**：jpegli 的 submodule 钉的是 libpng 1.6.47 与 libjpeg-turbo **2.1.5.1**
+  （2.x **确有已知 CVE**，该项目 CVE 全部止于 2.1.90）。用
+  `-DJPEGLI_ENABLE_JPEGLI_LIBJPEG=OFF -DJPEGLI_ENABLE_SJPEG=OFF -DBUILD_TESTING=OFF` 构建后，
+  成品**完全不链接 libpng/libjpeg-turbo**（二进制内无二者版本串），故不引入旧依赖，
+  体积也从 5.13 MB 降至 **0.72 MB**。
+- **行为等价性实测**：与旧件在 `--distance 1.0 / 0.5 / -q 90 / --chroma_subsampling 420`
+  四种配置下产出的 JPEG **逐字节相同**（SHA256 全等）；`--distance/--progressive/--chroma_subsampling/-q/--quality` 全支持。
+
+### 变更：Microsoft.WindowsAppSDK 2.4.0 → 2.5.1
+
+- 一并前移卫星包：`WindowsAppSDK.ML` 2.1.74→**2.1.94**、`Foundation` 2.3.9→2.3.12、
+  `WinUI` 2.3.6→2.3.9、`InteractiveExperiences` 2.1.6→2.1.9、`AI`/`Search` 2.4.4→2.5.5、
+  `Runtime` 2.4.0→2.5.1。
+- ⚠️ 澄清一处易误判点：`WindowsAppSDK.ML` 2.1.94 对 WinML 声明的是**下限区间** `[2.1.74, 3.0.0)`，
+  NuGet 取**最低满足版**，故不引用 Core 的 LogViewer 仍解析到 WinML 2.1.74（**属正常，且不影响 OCR**——
+  OCR 只在 App 进程跑）。App 因 Core 显式引用 2.4.89 而经 nearest-wins 正确取到 **2.4.89 / ORT 1.27**（实测确认）。
+
+### 变更：SDK 声明修正 + System.Drawing.Common 补丁
+
+- `global.json` 由 `11.0.100-preview.7` 改为 **`11.0.100-rc.1.26425.128`**。
+  此前声明与实际使用（rc.1）不符，构建能过**纯靠 `rollForward: latestPatch` 自动提升** ⇒
+  "声明的基线"与"真实基线"不一致。现二者一致（纯声明修正，不改变构建结果）。
+  ⚠️ `.NET 11` **尚未 GA**（官方 metadata：`support-phase: go-live`，最新产物就是 rc.1，无 RTM），
+  故源码中"待 GA 后升回 11.x"的注释仍然成立、但现在无法执行。
+- `System.Drawing.Common` 10.0.11 → **10.0.12**（同一 .NET 10 LTS 线补丁级）。
+
+### 变更：GitHub Actions v4 → v7（**Node 20 已于 2026-09-23 被移除**）
+
+- `actions/checkout` v4→**v7**、`actions/upload-artifact` v4→**v7**。
+- ⚠️ 这不是"锦上添花"而是**已过期用法**：GitHub 官方 changelog 明言 Node 20
+  *"will only work until we upgrade the runner and remove Node20 on September 23rd, 2026"* ——
+  该日期已过去。v4 系列基于 node20，v5+ 才用 node24。
+- ⚠️ **自托管 runner 必须 ≥ v2.335.0**（该版本加入 node24 支持；v2.333.0 为 node24 enforcement）。
+  runner 不在本机、无法代查，已在两个 workflow 就地注明"首次跑 CI 前先确认 runner 版本"。
+
+### 记录：libjpeg-turbo 版本补全 + 许可台账同步
+
+- `tools-manifest.json` 的 cjpegli 条目原写 *"libjpeg-turbo（libavif's pin）"*，**无法审计**。
+  本次从二进制提取实际版本 **3.1.2** 并回填 —— 该事实有意义：libjpeg-turbo 的 CVE 全部止于 2.1.90，
+  **3.x 无已知 CVE**，故当时无安全暴露。
+- **许可台账**：新增 `lcms-MIT.txt`（自编译 cjpegli 经 `jpegli_cms.lib` 链接 lcms，属**新增义务**）；
+  同时因新 cjpegli 不再链接 sjpeg/skcms/brotli/libpng/libjpeg-turbo，把 7 份许可的
+  `shippedIn` 从 `[cjxl, cjpegli]` 收窄为 `[cjxl]`（文件本身保留 —— cjxl 仍在用）。
+  收窄后 `INDEX.json`(44 条) 与 `tools-manifest.json` 的 `licenseFiles` **双向闭合**，
+  由既有判据 `原生工具的 licenseFiles 与 INDEX 双向闭合` 把关（本次正是它先报红才发现的）。
+
+### 验收读数（本机实测）
+
+| 项 | 结果 |
+|---|---|
+| 构建 | ✅ 5 个项目 Release 全 **0 警告 0 错误** |
+| 测试 | ✅ 8 套件 **1820 通过 / 0 失败** |
+| 自测 | ✅ `--selftest` **11/11**（JPEG_LI / JPEG_XL / AVIF / WebP 全 ok） |
+| OCR 回归 | ✅ 与基线**完全一致**（6421/7052、202/292、14 失败样本） |
+| JXL 色彩探针 | ✅ `--jxl-color-product` **exit 0**（SDR 两层 + HDR 层全判且通过） |
+| 工具哈希 | ✅ 4 个 exe 的 sha256/sizeBytes 全部回填并校验通过 |
+| 许可闭合 | ✅ INDEX.json 44 条哈希全对 + 与 manifest 双向闭合 |
+
+> 📌 附带收益：本次发现 JXL 色彩探针的 HDR 层此前因缺参考解码器而 SKIP。
+> 0.12.0 发布包内含 `djxl.exe`/`jxlinfo.exe`，用 `TTC_JXLINFO`/`TTC_DJXL` 指过去后
+> **HDR 层首次真正被判且通过** ⇒ 该探针从此可全绿运行。
+
+---
+
+## [未发布] — 2026-10-07：ONNX 推理运行时迁移到 WinML
+
+> 起因：微软 ORT 官方 DirectML 文档声明 **DirectML 进入 sustained engineering（维护模式）**，
+> 新功能开发已转向 WinML。DML 仍受支持，但运行时不再前进。
+> 完整论证、验收判据与风险登记见 `docs/winml-migration-plan-2026-10-07.md`。
+
+### 变更：OCR 推理运行时 `Microsoft.ML.OnnxRuntime.DirectML` 1.24.4 → `Microsoft.Windows.AI.MachineLearning`（WinML）2.4.89
+
+- **`OnnxOcrEngine` 零代码改动**：WinML 提供同一套 ORT 托管 API。实测把该文件用到的
+  `AppendExecutionProvider_DML` / `AddSessionConfigEntry` / `EnableMemoryPattern` /
+  `ORT_SEQUENTIAL` / 线程与日志配置全部原样编译运行通过。
+- **运行时 ORT 由 1.24.4 升至 1.27**（`onnxruntime.dll` 实测 `1.27.20260711`）。
+- **⚠ 这是"替换"而非"叠加"**：WinML 单包同时提供托管 API + `onnxruntime.dll` + `DirectML.dll`。
+  两个包并存会导致托管 1.24 与原生 1.27 版本错配（实测侥幸可跑，但属未定义行为且随 NuGet
+  解析顺序变化）⇒ `Directory.Packages.props` 与 `Core.csproj` 处均已写明禁止加回旧包。
+- **体积 +2.30 MB**（实测 38.71 → 41.01 MB）。官方宣传的"更小体积"依赖 framework-dependent
+  模式，本包是 self-contained，拿不到该收益；为保持"便携绿色包"定位，**不改变分发形态**。
+- 收益：运行时不再停滞于维护模式；后续可经 `ExecutionProviderCatalog` 动态获取厂商 EP
+  （QNN / OpenVINO / NvTensorRtRtx 等）以解锁 NPU —— 属**独立增量，本次未做**。
+
+### 修复：LayerNorm workaround 不再是"静默死代码"
+
+- `OnnxOcrEngine` 的 `optimization.disable_simplified_layer_norm_fusion` 此前被 `catch { }` 静默吞掉。
+  后果：升级 ORT 后若某版本开始拒绝该 key，OCR 会**静默失效**（det 输出近全 0 → 识别全空），
+  而日志里没有任何线索。实测该配置在新版 ORT 上已非必需，正说明"是否需要它"会随版本变化。
+- 现在：成功记 Debug，失败记 **Warn + 原因**；新增 `LayerNormWorkaround` 状态位，
+  并在模型加载处以 **Info 级**留痕（`LayerNorm fusion workaround: Applied/Rejected`），
+  使"OCR 能否出正确结果"的隐性前提可被事后诊断。实测当前为 `Applied`。
+
+### 新增：`--winml-stress` 压力回归 harness
+
+- `dotnet run --project src/TrueToneCap.Tools -- --winml-stress [轮次] [modelDir]`
+- 驱动**真实 `OnnxOcrEngine`**（含 `_inferGate` 串行化、张量池化、box 提取、CTC 解码），
+  双 EP × 7 种尺寸 × N 轮 + 24 路并发，退出码非 0 即失败。
+- 存在的理由：迁移规划期观察到**一次** det `Add.154` 广播失败，后续 139 次运行 0 复现，
+  判定为测试进程自身的 dll 文件锁竞态，但**无法排除**低概率稳定性问题。OCR 场景下
+  "失败 = 用户看到空结果/乱码"，故必须用压力回归兜住，而非一次冒烟。
+  ⚠ 现有 `--selftest` 只覆盖编码器与设置迁移，**不覆盖 OCR 推理** —— 本 harness 补上这个缺口。
+
+### 许可合规：新增 Windows ML Runtime EULA 条目
+
+- `licenses/INDEX.json` 新增 `microsoft-winml-LicenseRef-Microsoft-EULA.txt`（13,996 B）。
+  ⚠ 该 EULA 与通用 WindowsAppSDK EULA、以及 WindowsAppSDK.ML 2.1.74 的 EULA 是
+  **三份不同文本**（哈希互不相同），**不可互相顶替**。
+- 关键条款：§3.a.i 明确允许再分发随应用 binplace 的文件，**同时覆盖 framework-dependent
+  与 self-contained 两种部署**（本包为 self-contained）；§3.b.iii 含**赔偿担保**义务。
+  本仓本体为 Apache-2.0，此条属专有 EULA，义务性质与 MIT/Apache/BSD 条目不同。
+- `onnxruntime-third-party-notices.txt`（331,175 B）经实测两个包内**字节完全相同**，只落一份，
+  仅更新来源与说明。`THIRD-PARTY-NOTICES.md` 已由生成器重建（`--check` 通过）。
+
+### 打包：第三方 PDB 剔除逻辑现状说明
+
+- 迁 WinML 后 `microsoft.ai.directml` **不再出现在依赖图**，发布目录第三方 `.pdb` 实测为 **0**
+  ⇒ `Publish.ps1` 中该段逻辑目前**空转**。**保留不删**：它是一道通用的"防止第三方私有符号
+  混进发布包"闸门，未来任何包（含 WinML 后续版本、新增厂商 EP 包）重新带上 `.pdb` 时仍拦得住。
+  原注释里 12.3 MB 是历史实测值，已就地注明不代表当前体积。
+
+### 验收读数（本机实测）
+
+| 判据 | 结果 |
+|---|---|
+| A1 识别结果逐字符一致 | ✅ `--ocr-bench-real` 84 个样本的准确率读数**全部相同**（6421/7052, 202/292, 14 失败样本）；`--ocr-bench` 123 行结果**逐字节相同** |
+| A2 误检不增加 | ✅ `--ocr-noise` 输出与迁移前**完全一致** |
+| A3 性能不劣化 | ✅ 反而**显著变快**：真实语料均值 5772ms → 3351ms（-42%），复跑 1954ms（-66%）|
+| A4 压力回归 | ✅ 112 次识别（双 EP × 7 尺寸 × 8 轮）**0 失败** |
+| A5 并发不崩溃 | ✅ 24 路并发 **0 失败**，无死锁 |
+| A6 构建/测试/发布链 | ✅ 5 个项目 Release 全部 0 警告 0 错误；8 套件 **1820 通过 / 0 失败**；`--selftest` 11/11；`native/` 4 exe 断言完好 |
+| A8 CPU 与 DML 双路径 | ✅ 两路径读数均与基线一致 |
+| A9 DML 不可用降级 | ✅ 降级路径未改动，API 在 WinML 下可用 |
+
+---
+
+## [0.3.7-beta] — 2026-09-28 ~ 10-06
 
 > 承接 `v0.3.6-beta`（`4368eed`）。`v0.3.6-beta` 之后主线只有文档提交，本节汇总那之后
-> **九个工作轮**的全部改动（交接 §64 ~ §68）。沿用"一条提交 = 一版本"，发布提交即本节所在提交。
+> **十个工作轮**的全部改动（交接 §64 ~ §68，末轮为 10-06 的 JPEG/WebP 默认色域收紧）。
+> 沿用"一条提交 = 一版本"，发布提交即本节所在提交。
 > ⚠ 下面所有读数都是本机跑出来的，出处逐条指到 `tests/output/*.log` 或判据脚本。
 
 ### 修复：HDR 降级不再静默
@@ -77,7 +356,223 @@
 - **判据地板 1365 → 1738**（7 套件：unit 1175 / color 267 / encoding 14 / service 2 / ocr 12 /
   format 43 / usability 225），`scripts/gate-baseline.json` 记录逐套件值与取数时间。
 
+### 变更：JPEG / WebP 的默认目标色域收紧为 Rec.709
+
+- **在广色域或 HDR 屏上、以「跟随显示器」出 JPEG / WebP，产物色域从 Rec.2020 变成 Rec.709。**
+  这两个格式此前只要面板是广色域/HDR 就跟着走 Rec.2020，用户没选过这个档却拿到 Rec.2020 的图；
+  现在它们**默认就是 Rec.709**（「跟随显示器」也解析成 Rec.709）。这是**真的按 Rec.709 出像素**，
+  不是只把标签换掉。JPEG 卡片上的「附带增益图」（Ultra HDR）同为 Rec.709。
+- **只有亲手把「目标色域」选成 Rec.2020 才输出 Rec.2020。** 旧的显式广色域别名
+  （DisplayP3 / AdobeRGB / DCI_P3）照样算显式选择，产出不变；本次改的只是"没选过"时的默认落点。
+- **Rec.709 的声明行为一个字没改**：JPEG / WebP 仍然**什么都不写**（靠 JFIF / 格式默认），
+  不是新嵌一份 ICC；产物里此前没有色域声明，现在也没有。
+- **不受影响**：PNG / JPEG XL / AVIF / TIFF 在 HDR 屏上仍走 Rec.2020 + PQ，行为与上一版逐条一致。
+- **判据地板 1738 → 1787**（unit 1175→1224，其余六套件不变：color 267 / encoding 14 / service 2 /
+  ocr 12 / format 43 / usability 225）。新增 40 条锁在 Core 的格式口径上：白名单恰好是
+  JPEG / GainMap / WebP 三个、非显式请求才收口、显式选择【不许】被默认档盖掉、两种收口
+  （屏幕证据 vs 格式口径）的标记互不污染、`format=null` 的四参调用逐位维持旧行为。
+  ⚠ 这 40 条里有一条在落地时是错的（把"显式 BT2020 也会被收口"当成了预期），
+  若照它改实现，用户亲手选的 Rec.2020 会被静默降成 Rec.709 —— 已改正为反向判据。
+
+### 新增：压缩强度三档（AVIF / JPEG XL / WebP）
+
+- **用户口径（2026-10-07）**：给这三个格式各加一栏「压缩强度」，分三档 ——
+  最小体积（最慢）/ 均衡（推荐）/ 最快。**只改变编码耗时，不动质量设置**（两根正交的轴）。
+- **为什么只有这三个格式**：只有它们的编码器有**独立于质量**的 effort/speed 旋钮
+  （avifenc `-s 0..10`、cjxl `-e 1..10`、cwebp `-m 0..6`、NVENC preset P1..P7）。
+  JPEG LI 与 PNG 的"压缩强度"与**质量**是同一个旋钮，再加一档等于给同一件事开第二个入口。
+- **实测取值**（4K 真实截图，写入 `CompressionEffortMap`，一处映射四个消费方）：
+  * JPEG XL：`-e 7 / 5 / 3`
+  * AVIF 软件：`-s 0 / 6 / 10`，且**最小体积档额外加 libaom `tune=ssim`**；AVIF 硬件（NVENC）：P7 / P4 / P1
+  * WebP：`-m 6 / 4 / 2`
+- **默认档 = 均衡，且对 AVIF / WebP 恰好等于改动前的值**（`-s 6` / cwebp 默认 `-m 4`）
+  ⇒ 这两个格式的产物与从前**一致**；只有 JPEG XL 从 `-e 9` 变成 `-e 5`。
+- **★ 顺带修掉 JPEG XL 的 25 秒**：`-e 9` 实测在 4K 上要 **23.8–25.0 s** 且产物**比 `-e 7` 更大**
+  （541 KB vs 491 KB）。三档最高档因此取 `-e 7` 而**不提供 `-e 9`** ——
+  把一个"更慢且更大"的值当"最高档"卖给用户是骗人的。默认档 `-e 5` 实测 **0.31–0.82 s**，
+  即编码从二十多秒降到一秒内，**体积在同一内容上基本不变甚至更小**。
+- **如实标注收益差异**：AVIF 软件路三档差异最大（时间 **50×**、体积 **−37%**）；
+  **WebP 最小**（时间约 2.4×、体积约 8%），界面上写明"本档差异比 JPEG XL / AVIF 小"，不夸大。
+- **★ 「最小体积」档按用户要求做到极限，但极限不等于"把数字拉满"** —— 全编码器小参实测后：
+  * **AVIF 有真极限**：`-s 0` + libaom `tune=ssim` ⇒ **123.4 → 93.7 KB（−24%）**。
+    逐项排除过 `aq-mode=2` / `sharpness=7` / `enable-chroma-deltaq=1` —— 在本内容上**零效果**，
+    全开还会互相干扰（102.5 KB，比只开 ssim 更差）。`tune=ssim` 是唯一真起作用的一个。
+    ⚠ 该参数**只在最小体积档下发**，且只在 codec 确实走 libaom 时加
+    （SVT-AV1 / NVENC 不认 aom 的 key，avifenc 会告警）；否则会连"均衡档 == 改动前"一起破坏。
+  * **JPEG XL 的"拉满"是双刃**：实测两张真实 4K 截图，`-e 8` 在样张 A 上省 5.4%、
+    在样张 B 上**反而涨 8.9%**。同一参数、方向随内容而变 ⇒ **无法承诺"拉满一定更小"**，
+    因此最高档停在 `-e 7`，并在界面上如实写明"本档主要影响速度而非体积"。
+    另 `--brotli_effort=11` / `--buffering=0` / `-P 15 -E 11` 实测对体积零效果
+    （241.5 → 241.2 KB），却把时间从 6.3 s 抬到 13.1 s ⇒ 不下发。
+  * **WebP 的小参基本是负收益**：`-pass 10` 让时间从 0.47 s 涨到 3.53 s 而体积**反而变大**
+    （205.0 → 205.7 KB）；`-af -sharp_yuv` 208.2 KB；`-sns 100` 213.4 KB。故最小体积档**只**用 `-m 6`。
+- 三个下拉共用同一组 Tag，但**各写各的字段**（`EffortAvif` / `EffortJpegXl` / `EffortWebp`），
+  已加进"设置白名单 == XAML Tag"判据逐一对撞 —— 防的正是"三个长得一样的下拉里某个分支
+  漏写或写错字段，界面显示改成功了而管线读的是另一个字段"（本仓 ChromaAvif 那次就是这形状）。
+- ⚠ 过程中被本仓判据抓到两次，都已修：① 三个档位文案只写进翻译表却没走 `SetComboItemText`
+  ⇒ 判据报"3 个死键"（ComboBoxItem 收起时不在可视树里，必须显式接线）；
+  ② 我在 `LocaleManager` 的属性里手写了一份英文、表里又写了一份
+  ⇒ 判据报"同一个中文只许有一种英文说法"（显示点各写一份时，后写入的那份说了算，
+  另一份是死文案）。现统一经 `Tr()` 查表。
+- 新增判据 20 条（7 套件总数 1787 → **1807**），覆盖：映射表逐格取值、
+  **均衡档必须等于改动前的行为**（AVIF/WebP 不许因本功能而变）、坏值回落均衡档（不是最慢档）、
+  三个下拉的 Tag ↔ 白名单 ↔ 实际字段三方对撞。
+- **其余编码器的小参也逐项实测过** —— 详见 `docs/other-encoders-params-analysis-2026-10-07.md`：
+  * **NVENC（硬件 AVIF）**：`tuningInfo` 已是 `HIGH_QUALITY`（最高质量档；2/3 是降延迟换质量、
+    4 是无损不适合截图）。**不引入 `enableAQ`/`lookahead`**：那是往 `NV_ENC_RC_PARAMS`
+    的裸内存偏移里塞新字段，而本仓已为该偏移表付过代价（"旧实现用 13/15/21，实为
+    Destroy*/GetEncodeStats"、"错位值 → InitializeEncoder 必然失败（纹理直通从未工作过）"）。
+    写错一个字节就是初始化失败或花屏，且硬件路的价值是**快**不是小 —— 要小请切软件路
+    （已可得 −24%）。
+  * **★ JPEG LI（cjpegli）— 已接入「最小体积」档（用户据实测要求）**：
+    它的 `xyb` 开关（改用感知均匀的 XYB 色彩空间）实测在**两张真实截图 × 完整质量区间
+    + GainMap 的 Baseline 路共 9 个组合上全部为正收益**，无一例外：
+    `-d 0.5` **−4.7%**、`-d 1.0` −2.9%、`-d 2.0` −3.8%、`-d 3.0` **−4.6%**（样张 A）；
+    `-d 0.5` −4.0%、`-d 1.0` −2.4%、`-d 3.0` −3.5%（样张 B）；GainMap 路 −1.5%。
+    是本仓所有编码器小参里**唯一**做到"在所有测过的内容与质量上都为正"的开关
+    （对照：cjxl 高 effort 有正有负、cwebp 的 `-pass`/`-sns` 全为负）。
+    ⚠ **我起初拒绝了它，两次判断都错**：① 把"收益小（3%）"当成了"不值得做" ——
+    但这一栏的代价**只有时间**，而时间正是该功能唯一管的轴，不需要牺牲任何东西；
+    ② 只在产品默认档 `-d 1.0` 单点取样，恰好取到了收益**最小**的位置（两端达 4.7%）。
+    ⇒ 已按「最小体积」档纳入（`CompressionEffortMap.JpegLiUseXyb`），
+    均衡档不加，老用户产物逐字节不变；增益图与 JPEG LI 共用同一栏。
+    `-p 0`、`--fixed_code`、`--std_quant`、`--noadaptive_quantization` **全是负收益**（更大），不加。
+    另确认产品**没有漏参数**：不传 `-p` 时 cjpegli 默认就是 `-p 2`（progressive），
+    实测与显式 `-p 2` 字节完全相同；GainMap 那条走 `--progressive_level 0`（Baseline）
+    是格式硬要求，也是对的。
+  * **PNG / TIFF（托管）**：`CompressionLevel.SmallestSize` **是对的**。⚠ 我一度用合成数据
+    测出"SmallestSize 反而大 0.06% 却慢 26%"并差点据此改掉它 —— 换成**真实截图结构**的 4K
+    内容重测，`SmallestSize` 比 `Optimal` **小 41%**（0.14 vs 0.24 MB）。**合成噪声夹具会把
+    deflate 档位差异抹平甚至反向**，这类夹具不能用来判压缩档位。TIFF 无 filter 是规范内做法
+    （tag 8 = Adobe Deflate），不是缺陷。
+  * 判据数 1807 → **1813**（新增 JPEG LI 的 `xyb` 三档取值 + 第四个下拉的 Tag↔白名单↔字段对撞）。
+
+### 性能：单屏取帧不再每帧分配整帧缓冲（2026-10-07）
+
+- **4K 下每次截图省 20.5 ms 与 158 MB 的分配**（实测暖机 30 次：35.05 → 14.53 ms/帧，**降 59%**）。
+  `WgcCaptureService.GetLatestSdr/GetLatestHdr` 原先每调用一次就 `new` 一个整帧数组再 `BlockCopy`；
+  4K 下这两块分别是 33 MB 与 133 MB，**都远超 85 KB ⇒ 每帧两次大型 LOH 分配**（LOH 默认不压缩，
+  碎片随时间累积；本机出包前 C 盘只剩 21.6 GB）。现改为复用同一对缓冲，只保留拷贝。
+- **只改了单屏热路径**。多屏拼接与录制器（`TryGetLatestFrame`，无锁且结果被长期持有）
+  **保持原分配行为** —— 前者按显示器并行取帧会互相覆盖，后者会被下一帧改写，复用即错。
+- 三条防护：尺寸不符则另分配（绝不截断）、复用槽只在缓冲真被采用时更新、
+  仍持 `_frameLock` 拷贝（去掉的是分配，不是同步）。
+- 完整分析（含逐段实测、按收益/风险排序的其余 5 项建议）见
+  `docs/performance-analysis-2026-10-07.md`。
+  ⚠ 其中最大的一项 **`cjxl -e 9`**（JXL 编码 22.5 s vs 其它格式 0.5–3.7 s，实测降到
+  `-e 7` 可省 22–23× 时间）**尚未改动**：它的收益是"时间换体积"，**需要产品决策**，不擅自改。
+  📌 **已在随包 `cjxl` v0.11.2 → v0.12.0 升级后复测**：方向不变、数值微降
+  （样张 A：e7 1.08 s/490.8 KB vs e9 23.80 s/541.3 KB，**e9 反而大 10%**；
+  样张 B：e7 0.41 s/255.2 KB vs e9 9.42 s/241.4 KB，小 5.4%）。
+- **随包原生工具换版后的回归核查**（另一会话在当日替换了工具，故逐项核对是否影响本仓路径）：
+  - `cjxl.exe` v0.11.2 → **v0.12.0**：参数与行为一致，§2 读数已复测；
+  - `cjpegli.exe` **5.13 MB → 0.72 MB**（不同构建）：新构建只收 `PPM/PNM/PFM/PAM/PGX`，
+    比旧版**少**了 PNG/JXL/GIF/JPEG 输入 —— 但本仓**只写 PPM/PGM**（`JpegLiNative.cs:102/269`），
+    交集完整 ⇒ **不是回归**。功能实测：`-d 1.0` 对 4×4 PPM 正常产出 477 B JPEG。
+    之所以专门查：体积掉 7 倍且确实少了输入格式，很容易被误判成"工具被换成残废版"。
+- **D3D11 设备现在真的建在"驱动目标显示器的那块适配器"上**。原代码在 `EnumOutputs` 里
+  匹配到了适配器，却在创建时调了个**没有适配器形参**的重载 ⇒ 拿到的一律是默认适配器，
+  那层匹配只影响一行日志。混合显卡机上会造成"帧池在 A 卡、画面在 B 卡"的跨适配器拷贝
+  （本机 RTX 5080 恰是 adapter[0] 所以未暴露）。走原生 P/Invoke 指定适配器；
+  同款陷阱与结论本仓已有先例（`NvEncoderNative.cs:303/427`）。
+  顺带把"用了哪块卡"那行从 Debug 提为 Info —— 默认档位会滤掉 Debug，
+  它从来没落过盘，导致"匹配失败"与"匹配成功"在日志上完全一样。
+- **性能分析补完一项关键读数（只测未改）**：真机 D3D11 实测 **GPU→CPU 回读在稳态下单帧最大**
+  —— SDR 40.2 ms + HDR 85.4 ms = **125.6 ms/帧**，而 `CopyResource`（含 128 MB）约 **0 ms**
+  （GPU 侧异步）。也就是说贵的是 `Map`（排空管线 + 搬进系统内存），不是拷贝。
+  ⚠ **"最大"只在稳态成立**：冷捕获的真实大头是会话/设备建立，见本节末尾那条修正。
+  **但两条回读都在用**（SDR 供预览与 `?? GetDisplayPixels()` 兜底、
+  HDR 供 >8-bit 编码），要减少就得动"源精度/预览/编码分派"的语义 ⇒ **本轮只测量，
+  留待评审**，不擅自改。
+  **→ 已补设计提案 `docs/perf-G-readback-proposal-2026-10-07.md`**（三方案 + 逐行查证的数据流）。
+  提案里纠正了一个我起初写错的机制：`MainWindow` 的 HDR / SDR 两条分支**互斥**
+  （`:1566` 走 HDR 时**从不读** `SdrPixels`），所以走 HDR 时那次 **40.2 ms 的 SDR 回读被直接丢弃**
+  —— 这既是可省的一块钱，也说明 `?? GetDisplayPixels()` 那条兜底在真实流程里**从不触发**。
+- **两项建议经实测被否，已如实撤回/作废**（不留在报告里当"待办"）：
+  - **中间 PNG 的 RGBA→BGRA 换序**：隔离测量显示逐像素 22.8 ms、纯行拷贝 6.4 ms，看似有 3.5×；
+    实现了一版"每 2 像素掩码交换"并配了 4 条逐字节判据（含穷举 + 非对齐 + 奇数尾巴），
+    变异测试确认判据有牙。但**真机 A/B 证否收益**：`EncodeFast` 4K 下旧 532.7 ms vs 新 527.2/550.1 ms
+    —— 差值落在噪声里。原因是该路径 530 ms 里 **deflate(Fastest) 占约 96%**，换序只占 4%。
+    ⇒ **已连同判据一并撤回**，不留"看着更快、实测无差别"的复杂度。
+  - **子进程编码器改管道**（省一次临时文件往返）：spawn 实测 139 ms 确是可观固定成本，
+    但四个随包工具**全都不支持 stdin/stdout** —— `cjpegli`/`cjxl`/`avifenc` 只收文件路径，
+    `cwebp` 实测 `-` 直接 exit 1（"tried to write to a nonexistent pipe"）
+    ⇒ 除自行重编工具外无路可走，**该项作废**。
+- **★ 修正两处自己先前给错的判断（性能分析的**冷捕获**部分）**——两次都留痕，因为结论方向相反：
+  - **第一处**：报告此前强调"GPU 回读（125.6 ms/帧）是单帧最大单项开销"。把 app 日志时间轴
+    **逐行摊开**后可见，那只在**稳态**（会话已建好、连续截图）成立。
+  - **第二处（推翻第一处的修正方向）**：当时我据此推断"冷捕获的大头是设备/会话建立，应预热"。
+    逐条实测后**这个推断也不成立**：
+    * **D3D11 设备建立实测 292–338 ms**（新进程首建；同进程第二块只 40–42 ms，
+      说明主要是驱动/模块装载）。我先前写的"~158 ms"来自"启动→设备日志"的时间差，
+      **混入了启动杂项**，是错的。
+    * 但**它发生在应用启动期**（`AppServices.cs:74` = `wgc.GetOrCreateDevice(primaryMonitor)`），
+      **进程内只建一次**（当天全部运行的"设备创建"日志共 9 条，与运行次数吻合；
+      截图路径走 `GetOrCreateDevice:716` 的复用快路径）。
+      ⇒ **它不在截图热路径上，没有"预热掉它"的收益可言。**
+    * 截图路径真正剩下的是**会话建立 ×2 + 首帧等待 ×2 ≈ 450 ms**，而会话池**本就是复用设计**
+      （15 s 空闲才停）⇒ 稳态下也不重复付。
+    ⇒ **该项撤回，不再作为优化建议。** 真正可动的仍只有回读（见提案）。
+  - 为什么会连错两次：先做的是隔离微基准（只反映稳态单段成本），端到端 `hdr-probe` 又被冷启动
+    主导且已被我标注"不可作判据"——两头一对，恰好把"启动期 vs 截图期"的归属搞混。
+    **补上靠的是逐行对齐日志时间轴 + 把设备建立单独拿到新进程里量。**
+- **顺带排除一个"看着像缺陷"的东西**：`GetLatestTexture()` 每次调用都 `CreateTexture2D`
+  一块新快照纹理（4K 下 33 MB / 127 MB），结构上很像"每帧分配"的同类问题。
+  **实测否掉**：`CreateTexture2D` 4K 仅 **0.07–0.14 ms**（D3D11 分配是驱动侧惰性保留），
+  `CopyResource` 也 ~0 ms；快照也确实由 `CaptureResult.Dispose()` 释放。**不是性能问题。**
+
 ### 已知问题（不在本版修复，如实记录）
+
+- **WGC 捕获失败在日志里原本无法归因（本版只补了诊断，未改捕获逻辑）**：2026-10-06 排查
+  "打开即报无法为显示器 0x10001 创建 WGC 会话"时，四条创建路径全部返回
+  `E_ACCESSDENIED (0x80070005)`，而旧日志只有一句无信息的显示器号。实测结论：
+  - **WGC 本身在本机是好的**：一个普通控制台进程（HIGH 完整性）调同一个 `CreateForMonitor`
+    得到 `S_OK`，重复三次均成功 ⇒ 不是机器级损坏、也不是 interop 代码缺陷。
+  - **本程序被外部以 Low 完整性令牌启动时四路径全灭**（由独立的外部读取者确认，
+    非程序自述）；隔离基线 `publish/TrueToneCap-v0.3.6-beta` 现在同样读到 Low ⇒
+    **不是本版改动引入的**，是环境侧近期施加的令牌降级（嫌疑：串流类软件与虚拟显示器驱动、
+    全局图形钩子、10-01 的三个 Windows 更新）。
+  - 本版把该分支的归因补齐：读出令牌完整性级别（Low/Medium/High/System），把
+    "低完整性 / 提权 / 被第三方挡"三种成因分开记，并把那句用户提示从复述显示器号
+    换成可照做的说明。**未改动任何捕获路径**（两条 interop 路径、DisplayId 反查、
+    桌面窗口兜底都保持原样）。
+  - ⚠ 排查中一度把成因误判为"UAC 关闭导致全进程提权"，并据此往 `app.manifest` 加了
+    `requestedExecutionLevel=asInvoker`。那是**错的**，已整条撤回：Microsoft 文档明写
+    "Specifying requestedExecutionLevel node will disable file and registry virtualization"，
+    而本程序把 `settings.json` 与 `log/` 写在 exe 同目录（`SettingsService.cs:26`、
+    `LogService.cs:108`），虚拟化一关就从"静默重定向到 VirtualStore"变成"直接打真实路径"
+    ⇒ 用户会新看到一个来源类警告。**若将来要加这个元素，必须先把它依赖的写入位置
+    迁到 `%LOCALAPPDATA%`，顺序不能反。**
+  - 用户侧待办（需真实交互式启动才能判定）：彻底退出串流/钩子类软件后手动启动一次，
+    看日志新增的 `[WGC] 归因` 行给出的完整性读数是 0x2000（正常）还是 0x1000（仍被降权）。
+    ⚠ **该项已闭环**，见下一条：真凶是仓库目录上的低完整性标签，与串流/钩子软件无关
+    （RTSS / MSI Afterburner / GameViewer 三者停掉后复测仍为 LOW，已全部排除）。
+
+- **★ 本仓库目录曾带"低完整性"强制标签，导致所有构建产物无法做屏幕捕获（2026-10-06 定位，环境已修复）**：
+  现象是"打开即报无法为显示器 0x10001 创建 WGC 会话"，四条创建路径全部
+  `E_ACCESSDENIED (0x80070005)`。根因**不在代码里**：
+  - `C:\PLAN\TrueToneCap` 的 SACL 上带着可继承的 `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`，
+    而 `C:\PLAN` 无标签、`C:\` 是 High ⇒ 该目录下**新建的每个文件都被标成 Low**。
+  - 依据 Microsoft《Mandatory Integrity Control》：
+    *"the new process is created with the minimum of the user integrity level and the file integrity level"*
+    ⇒ exe 文件是 Low，进程就必然是 Low，**与启动者是谁无关**（实测：用户从 HIGH 的
+    `explorer`/`pwsh` 启动，子进程照样 LOW）。
+  - 低完整性进程不被允许读取桌面 ⇒ WGC 四路径全灭。**已用受控实验证明因果**：
+    同一探针只改令牌级别，`HIGH → S_OK`、`MEDIUM → S_OK`、`LOW → E_ACCESSDENIED`。
+  - 这解释了一整轮排查里所有"诡异"读数：同一台机器上 `cmd.exe`/`explorer.exe`（`C:\Windows`，
+    无标签）正常，而**所有** TrueToneCap 构建（09-27 旧版到 10-06 新版）一律 LOW；
+    连当时那个"最小空白 WinUI3 对照程序"也是 LOW —— 因为它是**建在同一个带标签的目录里**的。
+    ⚠ **那是我的混淆变量，第一轮据此得出的"WinUI/SDK/机器级机制"结论是错的，已作废。**
+  - **修复**（改的是文件系统 SACL，不动任何源码）：
+    `icacls "C:\PLAN\TrueToneCap" /setintegritylevel "(OI)(CI)M" /T /C`（本次处理 13076 项，0 失败）。
+    修复后 `bin\Release` 与 `publish\TrueToneCap-v0.3.7-beta` 两处均实测恢复：
+    `会话启动: 0x10001 3840x2160 SDR/HDR` 全部成功。
+  - **防复发**：若目录被重新打上 Low 标签，症状会原样复现。诊断入口是日志里的
+    `[WGC] 归因` 行（本版新增，会打印令牌完整性读数）；一眼判据是
+    `icacls <产物目录> | findstr "Mandatory Label"` —— 出现 `Low` 即为此问题。
+  - ⚠ **未查明是谁**给这个目录打了 Low 标签（伴随一条 `Everyone:(CI)(DENY)(DC)` 与一条
+    `S-1-4-…` 的自定义 ACL 项，形态像某安全软件的"防篡改/沙箱"策略）。若再犯，先查这个来源，
+    否则重建目录后仍会被标回去。
 
 - **`--unit-tests` 在 DSH 沙箱内需要绕行**：`EncoderCrashSentinel` 的哨兵目录走
   `Environment.GetFolderPath(SpecialFolder.LocalApplicationData)`，而 DSH 的工作区沙箱用

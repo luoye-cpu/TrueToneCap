@@ -44,13 +44,30 @@ public static class LocaleManager
     public static string AvifOptions => s_lang == AppLanguage.Chinese ? "AVIF 选项" : "AVIF Options";
     public static string EncoderBackend => s_lang == AppLanguage.Chinese ? "编码后端" : "Backend";
     public static string ChromaSampling => s_lang == AppLanguage.Chinese ? "色度采样" : "Chroma";
+
+    // ═══ 压缩强度三档（2026-10-07 用户口径）═══
+    // 三档名按【用户视角的结果】命名（体积/均衡/速度），不按底层参数名 ——
+    // 四家参数的方向与量纲都不同（avifenc 越小越慢、cjxl 越大越慢、cwebp 越大越慢、NVENC P 越大越快），
+    // 照参数名翻译必然误导。
+    public static string CompressionEffort => s_lang == AppLanguage.Chinese ? "压缩强度" : "Compression";
+    public static string EffortSmallest => s_lang == AppLanguage.Chinese ? "最小体积（最慢）" : "Smallest file (slowest)";
+    public static string EffortBalanced => s_lang == AppLanguage.Chinese ? "均衡（推荐）" : "Balanced (recommended)";
+    public static string EffortFastest => s_lang == AppLanguage.Chinese ? "最快" : "Fastest";
+    // ═══ 压缩强度三档的说明文案 ═══
+    // ⚠ 一律经 Tr() 查表，不许在这里写第二份英文：
+    //   本仓有一条判据「同一个中文只许有一种英文说法」，因为显示点各写一份英文时，
+    //   切语言后"后写入的那份说了算"，另一份就变成永远不生效的死文案。
+    //   我自己第一次就这么写了（属性里手写英文 + 表里另写一份），当场被那条判据抓住。
+    public static string EffortDescJxl => Tr("三档只改变编码耗时（cjxl 的 effort），与上方的质量设置无关。实测 4K 截图：最小体积约 0.4~0.9 秒、均衡约 0.3~0.8 秒、最快约 0.3~0.6 秒。⚠ 本格式的档位主要影响速度而非体积：更高的 effort 对部分内容更小、对另一部分反而更大，因此最高档停在 e7，不提供更慢的档位。");
+    public static string EffortDescAvif => Tr("只改变编码耗时，不影响质量设置。软件编码器（libaom）差异很大：实测 4K 下最小体积约 7.1 秒 / 93.7 KB、均衡约 0.3 秒 / 123.4 KB、最快约 0.1 秒 / 148.8 KB。最小体积档会同时启用 libaom 的 tune=ssim 以求更小。硬件编码（NVENC）三档都很快，差异小得多。");
+    public static string EffortDescWebp => Tr("只改变编码耗时，不影响质量设置。WebP 的档位差异比 JPEG XL / AVIF 小：实测 4K 下三档约 0.4 / 0.7 / 1.0 秒，体积相差约两成。");
     public static string AvifPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
     public static string JxlPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
     // 2026-09-26：GainMap 并入 JPEG LI ⇒ 独立卡片的标题（GainMapOptions）已删，
     // 开关本身的名字是 GainMapToggle，说明仍是 GainMapDesc（挂在开关下方）。
     public static string GainMapToggle => s_lang == AppLanguage.Chinese
         ? "附带增益图（输出 Ultra HDR 照片）" : "Attach gain map (Ultra HDR output)";
-    public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。打开此开关时 HDR 输出锁定为开。" : "The base image is always SDR - that is the structure of Ultra HDR: the HDR lives in the gain map, not in the base image declaration. The Target gamut above picks the primaries shared by base and gain map: Rec.709 (default) or Rec.2020 (only an explicit choice does that; Follow display resolving to a wide gamut does not). While this is on, HDR output is locked to on.";
+    public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。这条口径不只管增益图：JPEG 与 WebP 两族格式的默认目标同样是 Rec.709，只有你亲手选 Rec.2020 才产出 Rec.2020。打开此开关时 HDR 输出锁定为开。" : "The base image is always SDR - that is the structure of Ultra HDR: the HDR lives in the gain map, not in the base image declaration. The Target gamut above picks the primaries shared by base and gain map: Rec.709 (default) or Rec.2020 (only an explicit choice does that; Follow display resolving to a wide gamut does not). This rule is not just about the gain map: plain JPEG and WebP also default to Rec.709, and only your explicit pick of Rec.2020 produces Rec.2020. While this is on, HDR output is locked to on.";
     public static string GainMapModeLabel => s_lang == AppLanguage.Chinese ? "增益图模式" : "Gain Map Mode";
 
     // ═══ 2026-09-19：WebP 的「色度采样」下拉已撤掉，改为一句静态说明 ═══
@@ -197,8 +214,8 @@ public static class LocaleManager
                 "On: if an encoder fails, this shot is saved as PNG with a notice (the format changes, pixels stay lossless — better than losing it). Off: failures are reported as errors and the file stays in the format you picked — turn this off if downstream steps key off the extension or format name. Switching encoders inside the same container (e.g. AVIF hardware falling back to software) is not a format change and is unaffected.",
             ["采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小（截图里的文字边缘最容易看出差别）。增益图开与不开共用这一项。"] =
                 "Higher subsampling means more accurate colour and larger files: 4:4:4 keeps chroma, 4:2:0 is smallest (text edges in screenshots show the difference first). Shared by the gain-map switch, on or off.",
-            ["底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。打开此开关时 HDR 输出锁定为开。"] =
-                "The base image is always SDR - that is the structure of Ultra HDR: the HDR lives in the gain map, not in the base image declaration. The Target gamut above picks the primaries shared by base and gain map: Rec.709 (default) or Rec.2020 (only an explicit choice does that; Follow display resolving to a wide gamut does not). While this is on, HDR output is locked to on.",
+            ["底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。这条口径不只管增益图：JPEG 与 WebP 两族格式的默认目标同样是 Rec.709，只有你亲手选 Rec.2020 才产出 Rec.2020。打开此开关时 HDR 输出锁定为开。"] =
+                "The base image is always SDR - that is the structure of Ultra HDR: the HDR lives in the gain map, not in the base image declaration. The Target gamut above picks the primaries shared by base and gain map: Rec.709 (default) or Rec.2020 (only an explicit choice does that; Follow display resolving to a wide gamut does not). This rule is not just about the gain map: plain JPEG and WebP also default to Rec.709, and only your explicit pick of Rec.2020 produces Rec.2020. While this is on, HDR output is locked to on.",
             ["PNG 选项"] = "PNG options",
             ["JPEG XL 选项"] = "JPEG XL options",
             ["本格式没有 4:2:2：cjxl 只能整幅 1x1 或 2x2 降采样（不是只减色度），逐轴子采样仅在转码 JPEG 时可用 ⇒ 想要 4:2:2 请改用 JPEG 或 AVIF。"] =
@@ -252,6 +269,20 @@ public static class LocaleManager
             ["随本应用一并再分发的第三方组件及其许可证全文。"] =
                 "License texts of the third-party components redistributed with this app.",
             ["查看第三方许可"] = "View third-party notices",
+
+            // ── 隐私政策（2026-10-07，商店政策 10.5.1 要求的产品内入口）──
+            // 与上面三条同理：英文以 PrivacyPolicyWindow 的
+            // CardTitleText / CardDescText / CardButtonText 与窗口内静态文字为准，
+            // 表里与实机显示保持一致 ⇒ 英文措辞只有一处说了算。
+            ["隐私政策"] = "Privacy policy",
+            ["截图与文字识别均在本机完成。仅在你使用翻译功能时会向第三方发送内容——视觉翻译会上传整张截图，请阅读详情。"] =
+                "Screenshots and OCR run entirely on this device. Content is sent to third parties only when you use translation — Vision translation uploads the whole screenshot.",
+            ["查看隐私政策"] = "View privacy policy",
+            // 窗口内静态文字（PrivacyPolicyWindow.xaml 的头/脚/降级面）
+            ["本应用的数据处理方式（只读展示）"] = "How this app handles your data (read only).",
+            ["未找到 PRIVACY.md"] = "PRIVACY.md was not found",
+            ["TrueToneCap 隐私政策"] = "TrueToneCap Privacy Policy",
+
             ["清空"] = "Clear",
             ["打开日志文件夹"] = "Open log folder",
             ["级别:"] = "Level:",
@@ -281,6 +312,18 @@ public static class LocaleManager
             ["AVIF 选项"] = "AVIF Options",
             ["AVIF 编码器"] = "AVIF encoder",
             ["色度采样"] = "Chroma",
+            // ═══ 压缩强度三档（2026-10-07）═══
+            // ⚠ 键必须与 XAML 里的中文【逐字相同】：本仓的本地化闸门是拿 XAML 的中文属性
+            //   去 ZhToEn 表里做精确查找（CorePipelineTests 的 XAML 中文覆盖判据），
+            //   差一个全角括号就会报"未翻译"。改 XAML 文案时必须同步改这里。
+            ["压缩强度"] = "Compression",
+            ["最小体积（最慢）"] = "Smallest file (slowest)",
+            ["均衡（推荐）"] = "Balanced (recommended)",
+            ["最快"] = "Fastest",
+            ["三档只改变编码耗时（cjxl 的 effort），与上方的质量设置无关。实测 4K 截图：最小体积约 0.4~0.9 秒、均衡约 0.3~0.8 秒、最快约 0.3~0.6 秒。⚠ 本格式的档位主要影响速度而非体积：更高的 effort 对部分内容更小、对另一部分反而更大，因此最高档停在 e7，不提供更慢的档位。"] = "Only encoding time changes (cjxl effort); the quality setting above is unaffected. Measured at 4K: about 0.4-0.9 s / 0.3-0.8 s / 0.3-0.6 s for smallest / balanced / fastest. Note: these tiers mainly affect speed, not size - higher effort produces smaller files for some content and larger for others, so the top tier stops at e7 and no slower tier is offered.",
+            ["只改变编码耗时，不影响质量设置。软件编码器（libaom）差异很大：实测 4K 下最小体积约 7.1 秒 / 93.7 KB、均衡约 0.3 秒 / 123.4 KB、最快约 0.1 秒 / 148.8 KB。最小体积档会同时启用 libaom 的 tune=ssim 以求更小。硬件编码（NVENC）三档都很快，差异小得多。"] = "Only encoding time changes; the quality setting is unaffected. The software encoder (libaom) differs a lot: measured at 4K about 7.1 s / 93.7 KB, 0.3 s / 123.4 KB, 0.1 s / 148.8 KB for smallest / balanced / fastest. The smallest-file tier also enables libaom's tune=ssim for extra density. Hardware (NVENC) is fast in all three tiers, with far smaller differences.",
+            ["只改变编码耗时，不影响质量设置。WebP 的档位差异比 JPEG XL / AVIF 小：实测 4K 下三档约 0.4 / 0.7 / 1.0 秒，体积相差约两成。"] = "Only encoding time changes; the quality setting is unaffected. WebP's tiers differ less than JPEG XL / AVIF: measured at 4K about 0.4 / 0.7 / 1.0 s, with roughly a 20% size spread.",
+            ["只改变编码耗时，不影响质量设置。实测 4K 截图：最小体积档约 0.16~0.28 秒、均衡约 0.10~0.17 秒；最小体积档体积小约 2%~5%（它改用 XYB 色彩空间，同样的观感质量下码率更低）。最快档与均衡档的产物相同（本格式没有更快的档位可用）。"] = "Only encoding time changes; the quality setting is unaffected. Measured at 4K: about 0.16-0.28 s for smallest, 0.10-0.17 s for balanced; the smallest-file tier is 2-5% smaller (it switches to the XYB colour space, which needs fewer bits at the same perceived quality). The fastest tier produces the same output as balanced (this format has no faster setting available).",
             ["额外添加 .png 后缀来提高兼容性"] = "Add .png suffix for compatibility",
             ["附带增益图（输出 Ultra HDR 照片）"] = "Attach gain map (Ultra HDR output)",
             ["增益图模式"] = "Gain Map Mode",
@@ -401,10 +444,10 @@ public static class LocaleManager
         // ── 2026-10-03 英文界面补完 · 第一批：落地页 Format 提示（实机取证 ui-en.png）──
             ["✅ 无损格式，支持 HDR (cICP Rec.2100 PQ) + 广色域 ICC。截图首选。"] = "✅ Lossless; supports HDR (cICP Rec.2100 PQ) + wide-gamut ICC. Recommended for screenshots.",
             ["✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。目标色域就是【底图】的色彩空间：Rec.709 或显式 Rec.2020（三件一起搬，底图本身仍是 SDR）。"] = "✅ Ultra HDR (ISO 21496-1): SDR viewers show the base image, HDR viewers restore the full dynamic range. The target gamut IS the base image's colour space - Rec.709 or explicit Rec.2020 (all three travel together; the base image stays SDR).",
-            ["✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；Rec.2020 目标只靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"] = "✅ Encoded by Google jpegli, quality driven by butteraugli distance. 8-bit, and the container has no HDR channel; a Rec.2020 target relies on the ICC declaration only (measured output carries APP2/ICC), while a Rec.709 target writes [nothing at all] (falling back to the JFIF default).",
+            ["✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709 —— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020。Rec.2020 目标靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"] = "✅ Encoded by Google jpegli, quality driven by butteraugli distance. 8-bit, and the container has no HDR channel; the default target gamut is Rec.709 — Follow display resolving to a wide gamut does not change that, and only an explicit pick of Rec.2020 outputs Rec.2020. A Rec.2020 target relies on the ICC declaration (measured output carries APP2/ICC), while a Rec.709 target writes [nothing at all] (falling back to the JFIF default).",
             ["✅ 新一代格式，Modular 模式对截图极优。支持 HDR (Rec.2100 PQ) + 广色域。16-bit 走 16-bit PNG 中转（cjxl 无 -b 参数，sBIT=16 声明实际精度）。"] = "✅ New-generation format; Modular mode is excellent for screenshots. Supports HDR (Rec.2100 PQ) + wide gamut. 16-bit goes through a 16-bit PNG hand-off (cjxl has no -b flag; sBIT=16 declares the real precision).",
             ["✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"] = "✅ Advanced format supporting HDR (PQ) and wide-gamut SDR (Rec.2020 primaries + sRGB transfer, dual-marked by colr(nclx) and ICC). NVENC can hardware-accelerate it (AV1 is 4:2:0 only); the software encoders support 4:4:4 and 12-bit. Bit depth and chroma follow the selected encoder's real capability - unsupported combinations are hidden.",
-            ["⚠ 仅 8-bit、容器没有 HDR 通道；广色域目标靠 ICC 声明（Rec.709 目标不写声明）。适合简单分享场景。"] = "⚠ 8-bit only, and the container has no HDR channel; a wide-gamut target relies on the ICC declaration (a Rec.709 target writes no declaration). Suited to casual sharing.",
+            ["⚠ 仅 8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709（不写声明）—— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020（靠 ICC 声明）。适合简单分享场景。"] = "⚠ 8-bit only, and the container has no HDR channel; the default target gamut is Rec.709 (no declaration written) — Follow display resolving to a wide gamut does not change that, and only an explicit pick of Rec.2020 outputs Rec.2020 (via the ICC declaration). Suited to casual sharing.",
             ["✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"] = "✅ Lossless TIFF, supports 16-bit HDR + embedded ICC. Suited to archiving.",
             ["✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 "] = "✅ Ultra HDR (ISO 21496-1). Encoding reference = system SDR white point ",
             [" nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 "] = " nits. Compatible viewers (Chrome / Photos) align automatically; if yours is fixed at 203 nits, set the reference white manually to ",
@@ -513,10 +556,16 @@ public static class LocaleManager
             ["JPEG：只有 ICC 一条声明通道，没有代码点 —— "] = "JPEG: ICC is the only declaration channel, there are no code points - ",
             ["{0} 原色嵌 APP2/ICC（实测产物里 ICC_PROFILE 与 acsp 都在）。"] = "The {0} primaries are embedded as APP2/ICC (measured output has both ICC_PROFILE and acsp).",
             ["{0} 目标【什么都不写】，靠 JFIF 默认。"] = "The {0} target writes nothing at all, relying on the JFIF default.",
+            // 2026-10-06：JPEG / WebP 的【默认目标就是 Rec.709】这条新口径，Core 侧劈成两句 L(…) 发出
+            //（模板即运行时字符串，故这里必须逐字拆开抄，不能合成一句）。
+            ["本格式的默认目标就是 Rec.709：跟随显示器也好、默认档也好，都不会自动升到 Rec.2020 —— "] = "This format's default target is Rec.709: neither Follow display nor the default tier ever auto-upgrades to Rec.2020 - ",
+            ["只有用户把目标【显式】选成 Rec.2020 时才会写出 Rec.2020 原色。"] = "Rec.2020 primaries are written only when the user picks Rec.2020 [explicitly] as the target.",
             ["容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。"] = "The container has no HDR channel, so the switch falls back to 8-bit SDR; that is a separate question from whether Rec.2020 primaries can be declared.",
             ["WebP：同样只有 ICC 一条通道 —— "] = "WebP: likewise ICC is the only channel - ",
             ["{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。"] = "The {0} primaries are carried through the intermediate PNG's iCCP, and cwebp gets -metadata icc (measured output has the ICCP chunk, a 2100-byte profile).",
             ["{0} 目标【什么都不写】（实测对照组无 ICCP）。"] = "The {0} target writes nothing at all (the measured control group had no ICCP).",
+            ["本格式的默认目标同样是 Rec.709：跟随显示器或默认档都只给 Rec.709，"] = "This format's default target is likewise Rec.709: Follow display and the default tier both give Rec.709 only, ",
+            ["要 Rec.2020 得由用户【显式】指定 —— 与 JPEG 同一条规则，两族格式不再各自为政。"] = "and Rec.2020 has to be [explicitly] specified by the user - the same rule as JPEG, so the two families no longer go their own way.",
             ["无 HDR 通道 ⇒ HDR 开关落空成 8-bit SDR，但原色声明照常；缺 cwebp.exe 时整份产物会换成 PNG。"] = "No HDR channel, so the HDR switch falls back to 8-bit SDR, but the primaries declaration still applies; when cwebp.exe is missing the whole output is replaced by PNG.",
             ["TIFF：没有代码点通道 ⇒ 只靠 ICC，连 Rec.709 也老实嵌一份（不像 JPEG/WebP 能省）。"] = "TIFF: no code-point channel, so ICC only - and even Rec.709 is honestly embedded (unlike JPEG/WebP, which can omit it).",
             ["HDR 用带 PQ TRC 的 ICC 声明。"] = "HDR is declared by an ICC with a PQ TRC.",

@@ -18,8 +18,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- ── UI 框架 (App / LogViewer) ── -->
-    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <!-- ── UI 框架 (App / LogViewer) ──
+         2026-10-07: WindowsAppSDK 2.4.0 → 2.5.1。
+         收益: 一并前移 WinUI/AI/ML/Foundation 等卫星包，并把传递引入的
+               Microsoft.WindowsAppSDK.ML 从 2.1.74（内含 ORT 1.24）抬到 2.1.94，
+               降低"传递旧 ORT 与显式 WinML 2.4.89 共存"的复杂度。
+         ⚠ 本包是 App/LogViewer 的 WinUI 3 基座，升级牵动面最广，必须整套回归。 -->
+    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageVersion Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
 
     <!-- ── 依赖注入 (App) ──
@@ -32,8 +37,23 @@
             整体仍属预发布基线；待 .NET 11 GA 后应整体评估升回 11.x。 -->
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
 
-    <!-- ── 推理 / 图形 (Core) ── -->
-    <PackageVersion Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+    <!-- ── 推理 / 图形 (Core) ──
+         ═══ 2026-10-07 迁移：Microsoft.ML.OnnxRuntime.DirectML → Microsoft.Windows.AI.MachineLearning ═══
+         原因: ORT 官方 DirectML EP 文档声明 DirectML 进入 sustained engineering（维护模式），
+               新功能开发已转向 WinML。DML 仍受支持，但运行时不再前进。
+         收益（实测）: ① 同一套 ORT 托管 API，OnnxOcrEngine 零代码改动；
+                      ② 运行时为 ORT 1.27（原 1.24.4）；
+                      ③ 可用 ExecutionProviderCatalog 动态获取厂商 EP（解锁 NPU）为后续增量。
+         关键取舍:
+           - WinML 单包【同时提供】托管 API + onnxruntime.dll + DirectML.dll，
+             因此这是【替换】而非【叠加】。两包并存会导致托管 1.24 与原生 1.27 版本错配
+             （实测侥幸可跑，但属未定义行为且随 NuGet 解析顺序变化）—— 严禁同时引用。
+           - 体积 +2.3 MB（实测 38.71 → 41.01 MB）：官方宣传的"更小体积"依赖
+             framework-dependent 模式，本仓是 self-contained（App.csproj:8,15），拿不到该收益。
+           - 许可性质变化：WinML 是 Microsoft 专有 EULA（含赔偿担保条款），
+             非 ORT 那样的 MIT。台账见 licenses/INDEX.json。
+         版本 2.4.89 为实测验证过的稳定版（内含 ORT 1.27.20260711.1.7b7c0e2）。 -->
+    <PackageVersion Include="Microsoft.Windows.AI.MachineLearning" Version="2.4.89" />
     <PackageVersion Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageVersion Include="Vortice.DXGI" Version="3.8.3" />
 
@@ -42,8 +62,9 @@
          理由与取证见 src/TrueToneCap.Core/TrueToneCap.Core.csproj 原位注释。 -->
 
     <!-- ── 测试 / 工具 (Test / Tools) ──
-         仅用于生成测试图，不随主程序发布。 -->
-    <PackageVersion Include="System.Drawing.Common" Version="10.0.11" />
+         仅用于生成测试图，不随主程序发布。
+         2026-10-07: 10.0.11 → 10.0.12（同一 .NET 10 LTS 线的补丁级更新，低风险）。 -->
+    <PackageVersion Include="System.Drawing.Common" Version="10.0.12" />
   </ItemGroup>
 
 </Project>

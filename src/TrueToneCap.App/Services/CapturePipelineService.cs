@@ -217,6 +217,22 @@ public sealed class CapturePipelineService
         // ⚠️ AVIF 的能力协商【不在这里】—— 必须等 settings.HdrOutput 最终确定之后再做，
         //    原因见下方「AVIF 能力协商」处（:264 起）。此处若提前协商会用错场景（HDR/SDR）。
 
+        // ── 压缩强度三档（2026-10-07 用户口径）──
+        // 只有 AVIF / JPEG XL / WebP 有独立于质量的 effort 旋钮，故只有它们读设置的对应字段；
+        // 其余格式（JPEG LI / PNG / TIFF / GainMap）恒为 Balanced —— 它们不读这个值
+        // （编码器里根本没接），给 Balanced 只是"不要传一个没意义的最慢档"。
+        // ⚠ 逐格式读、不是全局一栏：用户要的是"给这三个格式各提供一个条"。
+        var effort = format switch
+        {
+            OutputFormat.AVIF => CompressionEffortMap.Parse(s.EffortAvif),
+            OutputFormat.JPEG_XL => CompressionEffortMap.Parse(s.EffortJpegXl),
+            OutputFormat.WebP => CompressionEffortMap.Parse(s.EffortWebp),
+            // JPEG LI 与增益图（= JPEG LI 的另一个形态）共用同一栏：增益图开与不开是同一个
+            // 格式下拉的两种形态，各设一个"压缩强度"就是刚被合并掉的那种分裂。
+            OutputFormat.JPEG_LI or OutputFormat.JPEG_GAINMAP => CompressionEffortMap.Parse(s.EffortJpegLi),
+            _ => CompressionEffort.Balanced,
+        };
+
         var settings = new EncodingSettings
         {
             Format = format,
@@ -231,6 +247,7 @@ public sealed class CapturePipelineService
             PngFallbackEnabled = s.PngFallbackEnabled,
             ChromaSubsampling = chroma,
             OutputBitDepth = bitDepth,
+            Effort = effort,
             GainMapMode = s.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
             Metadata = meta,
             // ── SDR 白点: 系统检测值优先 (DISPLAYCONFIG_SDR_WHITE_LEVEL), 用户手动设置回退 ──
@@ -272,8 +289,12 @@ public sealed class CapturePipelineService
         //   ②像素路拿的是未钳制的 ui.ColorSpaceTag ⇒ 窄屏上按 P3 搬色却声明 sRGB（§41.3 的错位 A）。
         // 调用方没给决定时按"无源屏信息"构造（分类 ⇒ Unknown ⇒ 不授权声明、也不施加钳制），
         // 不再退回去猜光标屏。
+        // ⚠ 兜底那一支也必须带 format：JPEG 家族 / WebP 的"默认档 = Rec.709"是【格式口径】
+        //    （Core 的 ColorDecision.DefaultsToRec709），与有没有源屏证据无关。不传的话，
+        //    走到这条兜底路的调用方会拿到与主路不同的目标色域 —— 同一个格式两种口径，
+        //    正是 §41 那轮收口要消灭的形态（那里的错位正是"解析跑了两次、口径分叉"）。
         var decision = decisionOrNull ?? ColorDecision.Build(
-            null, colorSpaceTag, hdrOutput, acm);
+            null, colorSpaceTag, hdrOutput, acm, format);
         hdrOutput = decision.HdrOutput;
         settings.HdrOutput = hdrOutput;
         if (decision.HdrClamped)

@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TrueToneCap/Package.appxmanifest
+     MSIX 清单 —— 仅在做商店/侧载打包时被引用（见 TrueToneCap.App.csproj 的 MsixPackaging 段）。
+     默认的未打包构建（WindowsPackageType=None）不读本文件。
+
+     ⚠️ 三条最容易踩的规则，写在这里避免下次重犯：
+       1) Identity/@Publisher 必须与 Partner Center「查看应用标识详细信息」给出的值【逐字一致】
+          （含大小写与空格）。不一致会直接导致上传失败，且报错不指向这里。
+          当前值是占位符 —— 上架前必须替换。
+       2) Identity/@Version 的**第四段必须为 0**（官方规定该段留给商店使用）。
+          本项目 AssemblyVersion 形如 0.3.7.0，与之一致。
+       3) 所有 Logo 路径指向的文件必须真实存在，否则 MakeAppx / 认证直接失败。
+          Assets/ 下的图由 scripts/gen-msix-assets.py 生成（可重跑复现）。
+
+     EntryPoint="Windows.FullTrustApplication" 是必需的：本应用是 Win32/WinUI 桌面应用，
+     不是 UWP 沙箱应用；配合 rescap:runFullTrust 能力，才能做 D3D11 捕获、子进程调用原生编码器等操作。 -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap5 desktop rescap">
+
+  <Identity
+    Name="TrueToneCap"
+    Publisher="CN=PLACEHOLDER-REPLACE-WITH-PARTNER-CENTER-IDENTITY"
+    Version="0.3.7.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>TrueToneCap 真色截图</DisplayName>
+    <PublisherDisplayName>TrueToneCap contributors</PublisherDisplayName>
+    <Description>TrueToneCap — HDR 感知的截图与 OCR 工具</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Resources>
+    <Resource Language="zh-CN" />
+    <Resource Language="en-US" />
+  </Resources>
+
+  <Dependencies>
+    <!-- MinVersion 与本仓 TFM 一致（net11.0-windows10.0.26100.0）。
+         理由：代码用到 Win11 24H2 才有的能力（Windows ML EP 目录、部分 HDR/ACM API），
+         声明更低只会让低版本机器装上后运行失败。 -->
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.26100.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Applications>
+    <Application Id="App"
+                 Executable="TrueToneCap.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="TrueToneCap 真色截图"
+        Description="TrueToneCap — HDR 感知的截图与 OCR 工具"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- ═══ 开机自启：MSIX 下的正确机制 ═══
+             ⚠️ 未打包时 StartupManager 写 HKCU\...\Run；但在 MSIX 沙箱内 HKCU 写入被重定向到
+                包专属 hive，那条 Run 项【对系统启动无效】。打包形态必须走下面的 startupTask。
+             代码侧对应 StartupTask.GetAsync("TrueToneCapStartup")（见 StartupManager 的打包分支）。
+             Enabled="false" = 默认不勾选，由用户在 设置→应用→启动 或应用内开关里启用。 -->
+        <uap5:Extension Category="windows.startupTask"
+                        Executable="TrueToneCap.exe"
+                        EntryPoint="Windows.FullTrustApplication">
+          <uap5:StartupTask
+            TaskId="TrueToneCapStartup"
+            Enabled="false"
+            DisplayName="TrueToneCap 真色截图" />
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- 桌面应用（Win32/WinUI）必需：允许以完全信任方式运行，
+         以进行 D3D11/WGC 屏幕捕获、调用随包分发的原生编码器子进程等。 -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

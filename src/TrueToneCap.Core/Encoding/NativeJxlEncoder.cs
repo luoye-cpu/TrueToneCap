@@ -159,7 +159,7 @@ public static class NativeJxlEncoder
 
     public static void Encode(byte[] bgra, int w, int h, string path,
         float distance = 1.0f, int bitDepth = 10, byte[]? iccProfile = null, string? chroma = null,
-        string? colorSpaceTag = null)
+        string? colorSpaceTag = null, CompressionEffort effort = CompressionEffort.Balanced)
     {
         if (!IsAvailable)
             throw new InvalidOperationException("[JXL] cjxl.exe 不可用，请将 cjxl.exe 放入 native/ 目录或系统 PATH。");
@@ -226,10 +226,15 @@ public static class NativeJxlEncoder
             // 中转，输出 16-bit 容器（cjxl 无法区分 10 与 12，二者产物相同）。
             string bitsArg = "";
 
+            // ═══ 2026-10-07：effort 由「压缩强度」三档决定（原为硬编码 `-e 9`）═══
+            // 实测（4K 真实截图）：e9 要 25.0 s 且产物 541 KB，而 e5 只要 0.82 s / 491 KB
+            // —— 即旧的硬编码值既慢得多、体积**还更大**。三档取 7/5/3，理由见 CompressionEffort.cs 文件头。
+            var effortArg = CompressionEffortMap.JxlEffort(effort);
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e 9{bitsArg} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPpm}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e {effortArg}{bitsArg} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPpm}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -279,7 +284,7 @@ public static class NativeJxlEncoder
     /// </remarks>
     public static void Encode16Bgra16(byte[] bgra16BigEndian, int w, int h, string path,
         float distance = 1.0f, int bitDepth = 10, byte[]? iccProfile = null, string? chroma = null,
-        string? colorSpaceTag = null)
+        string? colorSpaceTag = null, CompressionEffort effort = CompressionEffort.Balanced)
     {
         if (!IsAvailable)
             throw new InvalidOperationException("[JXL] cjxl.exe 不可用，请将 cjxl.exe 放入 native/ 目录或系统 PATH。");
@@ -319,7 +324,7 @@ public static class NativeJxlEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e 9 {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -368,7 +373,8 @@ public static class NativeJxlEncoder
     /// <see cref="BuildResamplingArg"/>（默认 444 产出与不传逐字节相同，故既有 HDR 产物不变）。</param>
     public static void EncodeHdr(ushort[] rgba16, int w, int h, string path,
         float distance = 1.0f, byte[]? iccProfile = null, float intensityTarget = 10000f,
-        string colorSpaceTag = "BT2020", string? chroma = null)
+        string colorSpaceTag = "BT2020", string? chroma = null,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         if (!IsAvailable)
             throw new InvalidOperationException("[JXL] cjxl.exe 不可用，请将 cjxl.exe 放入 native/ 目录或系统 PATH。");
@@ -408,7 +414,7 @@ public static class NativeJxlEncoder
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e 9 {colorArg} --intensity_target={intensityTarget:F0}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg} --intensity_target={intensityTarget:F0}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

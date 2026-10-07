@@ -57,7 +57,15 @@ public sealed class AnimationRecorder : IDisposable
     private ColorDecision? _colorDecision;
 
     /// <summary>取本次录制的色彩决定；理论上到不了 null（存帧前 RecordLoop 必然已赋值），
-    /// 兜一份"无源屏信息"的决定，比在帧循环里再解析一次下拉好。</summary>
+    /// 兜一份"无源屏信息"的决定，比在帧循环里再解析一次下拉好。
+    /// <para>⚠ 有意不传第 5 个 format 参数（= null），两处调用点同理：录音里真正被本仓库编码的
+    /// 只有<b>中间 PNG 帧</b>（<c>ManagedPngEncoder.Encode</c>），而 PNG 不在
+    /// <c>ColorDecision.DefaultsToRec709</c> 的白名单里；动图容器（WebP/APNG/GIF）由 ffmpeg
+    /// 另编，本决定根本不参与它的色彩声明。传 OutputFormat.PNG 结果与 null 逐位相同，
+    /// 但会把"这次编的是 PNG"写进签名，而这里并没有这种格式上下文
+    /// （<see cref="RecordingConfig.OutputFormat"/> 是 <c>AnimationFormat</c>，与
+    /// <c>Core.Encoding.OutputFormat</c> 不是同一个枚举，不能硬套）。
+    /// 不传 = 维持 2026-10-06 之前的行为，正是这条兜底该有的语义。</para></summary>
     private ColorDecision Decision() => _colorDecision
         ?? ColorDecision.Build(null, _config.ColorSpaceTag, false, AppServices.Settings.Current.AcmeDetected);
 
@@ -131,6 +139,8 @@ public sealed class AnimationRecorder : IDisposable
                 : DisplayEnumerator.GetMonitorUnderCursor());
 
         // 色彩决定整次录制算一次（源屏 = 被录那块屏），逐帧复用；帧循环里不再各自解析下拉。
+        // ⚠ 格式有意传 null（不传第 5 个参数），理由见 Decision()：本决定服务的容器是 PNG 中间帧，
+        //    而 PNG 不属"默认档 = Rec.709"那一族 ⇒ 与 2026-10-06 之前的行为逐位相同。
         _colorDecision = ColorDecision.Build(displayInfo, _config.ColorSpaceTag, false,
             AppServices.Settings.Current.AcmeDetected);
 

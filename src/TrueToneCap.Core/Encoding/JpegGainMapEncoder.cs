@@ -105,12 +105,23 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// <item><b>拿不到可嵌的 2020 ICC 就整条退回默认模式</b>。JPEG 没有 cICP 这类码点通道，
     /// ICC 是它唯一的色彩声明通道；只搬像素而声明不了，产出的就是一张"2020 像素 + sRGB 标签"的错件。</item>
     /// </list>
+    /// <para><b>2026-10-06 口径收口：本函数的判据一行都不用改，但"它是第几道闸"变了，写在这儿免得下轮误解。</b>
+    /// JPEG 家族的默认档从这一轮起是 Rec.709（产品口径），落地在 <c>ColorDecision.Build</c> 的格式口径钳制里。
+    /// 于是"跟随显示器 + P3 屏"这个老场景现在拿到的 <c>settings.ColorSpaceTag</c> 已经是 <c>"sRGB"</c>，
+    /// <c>wideTarget</c> 直接为 false，连 <c>ExplicitWideTarget</c> 都不用看 ——
+    /// 也就是说下面这条 if 现在是<b>第二道闸，不是第一道</b>。</para>
+    /// <para>它仍然必须留在原地（而不是"上面既然已经收口了就删掉"），因为它是<b>唯一</b>能挡住
+    /// "有谁绕过 ColorDecision、直接往 EncodingSettings 里塞一个 2020 tag"的那道 ——
+    /// 而那种调用方在本仓是真实存在的：判据样张宿主 / 各探针 / 参数扫描都直接构造
+    /// <see cref="EncodingSettings"/>（<c>ColorSpaceTag = tag</c>），根本不经过 ColorDecision。
+    /// 删掉它等于把那批入口的产物从"默认 sRGB base"静默改成"整张 2020"，而没有任何一个测试格子会变红。</para>
     /// </summary>
     /// <para>两条路的差别只在"要不要用户亲手选"：<b>带增益图的主路径</b>默认保持 sRGB base
     /// （Ultra HDR 的常规形状），所以要求 <c>ExplicitWideTarget</c>；
     /// <b>HDR 关闭的 base-only 路</b>产的就是一张普通 JPEG、没有增益图，格式约定管不到它 ⇒
     /// 跟解析后的目标走（<paramref name="requireExplicit"/>=false），否则会出现
-    /// "同一个目标色域，8-bit 源搬进 2020、浮点源不搬"这种按源精度分叉的老问题（§41.4-M6）。</para>
+    /// "同一个目标色域，8-bit 源搬进 2020、浮点源不搬"这种按源精度分叉的老问题（§41.4-M6）。
+    /// （2026-10-06 这一路行为不变：目标只可能是用户显式选的 2020，默认档已在 ColorDecision 里被收成 sRGB。）</para>
     /// </summary>
     /// <param name="requireExplicit">true = 只有用户显式选广色域才升级整条增益图；
     /// false = 解析后的目标是广色域就搬（无增益图的普通 JPEG 路）。</param>
@@ -157,7 +168,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             byte[] sdrBgra = LinearToBgra8(sdrLinear, w, h);
             float distance = Math.Clamp(settings.Quality, 0.5f, 25.0f);
             byte[] jpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, distance,
-                baseIcc, settings.ChromaSubsampling);
+                baseIcc, settings.ChromaSubsampling, settings.Effort);
             File.WriteAllBytes(outputPath, jpegBytes);
         }, ct);
     }
@@ -194,7 +205,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             var icc = (settings.ColorSpaceTag is not (null or "System" or "sRGB")) ? settings.IccProfile : null;
             // settings.Quality 是 butteraugli 距离 (GetQualityRange: 0.5-3.0)，直接使用
             float distance = Math.Clamp(settings.Quality, 0.5f, 25.0f);
-            var jpegBytes = JpegLiNative.Encode(sdrPixels, width, height, distance, settings.ChromaSubsampling, icc, forceBaseline: true);
+            var jpegBytes = JpegLiNative.Encode(sdrPixels, width, height, distance, settings.ChromaSubsampling, icc, forceBaseline: true, effort: settings.Effort);
             File.WriteAllBytes(outputPath, jpegBytes);
         }, ct);
     }
@@ -246,7 +257,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             //       现在转换真的发生了，所以那句随之作废 —— 别再照它改回去。
             float baseDist = Math.Clamp(settings.Quality, 0.5f, 25.0f);
             byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, baseDist,
-                baseIcc, settings.ChromaSubsampling);
+                baseIcc, settings.ChromaSubsampling, settings.Effort);
             ct.ThrowIfCancellationRequested();
 
             // ── 4. 增益比计算（统一到 SDR 白点相对线性空间）──
@@ -275,7 +286,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             float gmDistance = Math.Clamp(settings.Quality, 0.0f, 25.0f);
             byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, gainMapMode, out int gmSW, out int gmSH);
             byte[] gainMapJpegBytes = EncodeGainMapToJpegBytesSafe(gainMapScaled, gmSW, gmSH,
-                gainMapMode, gmDistance);
+                gainMapMode, gmDistance, settings.Effort);
             ct.ThrowIfCancellationRequested();
 
             // ── 6. MPF + XMP 封装（增益范围基于实际 headroom）──
@@ -395,18 +406,20 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// 原实现写死 "444"，而 <c>ChromaGainMap</c> 只在两条降级旁路被读 ⇒ 同一格式因走哪条路而色度不同
     /// （交接 §27 未修清单第 1 条）。现在主路径与旁路同源。</para>
     /// </summary>
-    private static byte[] EncodeToJpegBytesSafe(byte[] bgra, int w, int h, float distance, byte[]? icc, string chroma)
+    private static byte[] EncodeToJpegBytesSafe(byte[] bgra, int w, int h, float distance, byte[]? icc, string chroma,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         var result = NativeEncoderGuard.TryEncode("GainMap_BaseJPEG", () =>
         {
-            return JpegLiNative.Encode(bgra, w, h, distance, chroma, icc, forceBaseline: true);
+            return JpegLiNative.Encode(bgra, w, h, distance, chroma, icc, forceBaseline: true, effort: effort);
         });
         if (result.Success) return result.Value!;
         throw new InvalidOperationException($"[GainMap] Base JPEG 编码失败: {result.Error?.Message}");
     }
 
     private static byte[] EncodeGainMapToJpegBytesSafe(byte[] pixels, int w, int h,
-        GainMapMode mode, float distance)
+        GainMapMode mode, float distance,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         // ═══ 2026-08-10 修复: Gray 模式用真灰度 JPEG (YCbCr400 1 分量) ═══
         // 旧实现: Gray 像素复制到 RGB 三通道 + 彩色 444 编码 → 3 分量彩色 JPEG,
@@ -418,7 +431,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         {
             var result = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
             {
-                return JpegLiNative.EncodeGray(pixels, w, h, distance, forceBaseline: true);
+                return JpegLiNative.EncodeGray(pixels, w, h, distance, forceBaseline: true, effort: effort);
             });
             if (result.Success) return result.Value!;
             throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result.Error?.Message}");
@@ -441,7 +454,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         // JpegLiNative.Encode 内部已 clamp [0,25] (与 JXL 的 -d 修复一致)。
         var result2 = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
         {
-            return JpegLiNative.Encode(bgra, w, h, distance, "444", null, forceBaseline: true);
+            return JpegLiNative.Encode(bgra, w, h, distance, "444", null, forceBaseline: true, effort: effort);
         });
         if (result2.Success) return result2.Value!;
         throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result2.Error?.Message}");

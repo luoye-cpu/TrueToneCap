@@ -75,6 +75,17 @@ public sealed partial class WgcCaptureService : IDisposable
     private CancellationTokenSource? _idleStopCts;
     private const int IdleStopDelayMs = 15000; // 15 秒无截图则自动停止会话
 
+    // ═══ 2026-10-07 性能轮：单帧取帧缓冲复用 ═══
+    // 单屏捕获路径（CaptureMonitorInternal）每帧各取一次 SDR/HDR，复用这两块把
+    // 「分配+拷贝」变成「只拷贝」：4K 下实测暖机 30 次 **35.05 → 14.53 ms/帧（省 20.5 ms，降 59%）**，
+    // 并消掉 158 MB/帧的 LOH 分配。
+    // 为什么是实例字段而不是局部变量：CaptureMonitorInternal 每帧返回后调用方就把它拷进
+    // 拼接画布/交给编码器，下一帧再进来时上一帧早已消费完 ⇒ 复用安全（契约见 GetLatestSdr/Hdr 备注）。
+    // ⚠ 只有单屏路径用它们。多屏拼接路径按显示器并行取帧，共用一块必被互相覆盖，
+    //   所以那条路继续走"每次分配"的旧重载 —— 那是正确性，不是遗漏。
+    private byte[]? _reuseSdr;
+    private float[]? _reuseHdr;
+
     // ═══ P1: HDR 能力缓存 ═══
     private static readonly Dictionary<nint, bool> s_hdrCapabilityCache = [];
 
@@ -101,6 +112,20 @@ public sealed partial class WgcCaptureService : IDisposable
     // ═══ P0: 捕获降级警告传播 ═══
     // 当 CreateItemForMonitor 回退到方法3 (桌面窗口=仅壁纸) 时，记录警告文本供给 CaptureResult 传播
     private static string? s_lastItemDegradation;
+
+    /// <summary>四条创建路径全部失败时，留给上层的那句话（含"是提权还是被挡"的判别）。
+    /// <para>与 <see cref="s_lastItemDegradation"/> 分开：那个是"成功了但降级"，
+    /// 这个是"根本没成功"，两种事实不该共用一枚字段 —— 共用就会让"降级提示"在
+    /// 失败路径上被覆写成空，用户两头都收不到话。</para></summary>
+    private static string? s_lastItemFailureMessage;
+
+    /// <summary>取走最近一次 item 创建失败的说明（读后即清，避免泄漏到下一张图）。</summary>
+    internal static string? TakeItemFailureMessage()
+    {
+        var m = s_lastItemFailureMessage;
+        s_lastItemFailureMessage = null;
+        return m;
+    }
 
     // P2: Staging 纹理复用已移入 PooledSession 内部
 
@@ -352,24 +377,46 @@ public sealed partial class WgcCaptureService : IDisposable
         public bool WaitForFirstFrame(int timeoutMs) => _firstFrameEvent.Wait(timeoutMs);
 
         /// <summary>获取最新 SDR 帧（安全拷贝，调用方可跨线程使用）。</summary>
-        public byte[]? GetLatestSdr()
+        public byte[]? GetLatestSdr() => GetLatestSdr(null);
+
+        /// <summary>获取最新 HDR 帧（安全拷贝，调用方可跨线程使用）。</summary>
+        public float[]? GetLatestHdr() => GetLatestHdr(null);
+
+        // ═══════════════════════════════════════════════════════════════════════════════
+        //  帧缓冲复用（2026-10-07 性能轮）
+        //  ═══════════════════════════════════════════════════════════════════════════════
+        //  为什么要有 reuse 形参：这两个方法每调用一次就 new 一个整帧数组再 BlockCopy。
+        //  4K 下实测（暖机 30 次取均值）：SDR+HDR 合计 **35.05 → 14.53 ms/帧，省 20.5 ms（降 59%）**。
+        //  （早期单点估计写的是"34.8 → 11.9、省 22.8"，那是未暖机的读数；以暖机值为准。）
+        //  更要紧的是**分配落在 LOH**（byte[4K]=33 MB、float[4K]=133 MB，都远超 85 KB 门槛），
+        //  而 LOH 默认不压缩 ⇒ 碎片随时间累积。C 盘当时只剩 21.6 GB，这条不是纸面问题。
+        //
+        //  ⚠ 传进来的 reuse 只用于 **SDR 与 HDR 各自的固定尺寸**（会话尺寸在一个会话内不变）。
+        //    尺寸不符就**忽略它另分配**，绝不截断 —— 把一帧截短比多分配一次糟得多。
+        //  ⚠ 调用方必须保证：拿到之后到下次调用本方法之前，不再读那份缓冲。
+        //    现有 6 个调用点都是"取到即消费"（拷进拼接画布 / 交给编码器），符合这条契约。
+        //  ⚠ 仍持锁拷贝（_frameLock）：复用只去掉了分配，**没有**去掉生产者/消费者之间的拷贝，
+        //    帧回调线程随时会改写 _latestSdr/_latestHdr。省的是分配与 LOH 压力，不是同步。
+
+        /// <summary>获取最新 SDR 帧。<paramref name="reuse"/> 尺寸匹配时复用它（省一次分配）。</summary>
+        public byte[]? GetLatestSdr(byte[]? reuse)
         {
             lock (_frameLock)
             {
                 if (_latestSdr is null) return null;
-                var copy = new byte[_latestSdr.Length];
+                var copy = (reuse is not null && reuse.Length == _latestSdr.Length) ? reuse : new byte[_latestSdr.Length];
                 Buffer.BlockCopy(_latestSdr, 0, copy, 0, copy.Length);
                 return copy;
             }
         }
 
-        /// <summary>获取最新 HDR 帧（安全拷贝，调用方可跨线程使用）。</summary>
-        public float[]? GetLatestHdr()
+        /// <summary>获取最新 HDR 帧。<paramref name="reuse"/> 尺寸匹配时复用它（省一次分配）。</summary>
+        public float[]? GetLatestHdr(float[]? reuse)
         {
             lock (_frameLock)
             {
                 if (_latestHdr is null) return null;
-                var copy = new float[_latestHdr.Length];
+                var copy = (reuse is not null && reuse.Length == _latestHdr.Length) ? reuse : new float[_latestHdr.Length];
                 Buffer.BlockCopy(_latestHdr, 0, copy, 0, copy.Length * sizeof(float));
                 return copy;
             }
@@ -666,6 +713,9 @@ public sealed partial class WgcCaptureService : IDisposable
         // **并没有使用按 hmonitor 找到的那个 adapter** —— 所谓"按显示器匹配适配器"是空转，
         // 每次重建拿到的其实还是同一个默认适配器设备，属于纯破坏性重建。
         // 现改为：只要设备健康就复用（与 hmonitor 无关），仅在设备确实失效时才重建。
+        // ⚠ 2026-10-07：上面那条"匹配是空转"已修 —— 现在真的用匹配到的适配器建（见
+        //   CreateDeviceOnAdapter）。但"设备健康就复用"仍然成立：一个进程内只建一次设备，
+        //   后续显示器切换不再重建（那正是 2026-09-16 这条修复要治的病）。
         if (_d3dDevice is not null)
         {
             try
@@ -687,23 +737,41 @@ public sealed partial class WgcCaptureService : IDisposable
         try
         {
             using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory7>();
+            int adapterCount = 0, outputCount = 0;
             for (uint i = 0; ; i++)
             {
                 if (factory.EnumAdapters1(i, out var adapter).Failure || adapter is null) break;
+                adapterCount++;
                 try
                 {
                     for (uint j = 0; ; j++)
                     {
                         if (adapter.EnumOutputs(j, out var output).Failure || output is null) break;
+                        outputCount++;
                         try
                         {
                             if (output.Description.Monitor == hmonitor)
                             {
-                                _d3dDevice = D3D11.D3D11CreateDevice(
-                                    Vortice.Direct3D.DriverType.Hardware,
-                                    DeviceCreationFlags.BgraSupport);
-                                Log($"[WGC] D3D11 设备创建, 适配器: {adapter.Description.Description.Trim()}");
-                                return _d3dDevice;
+                                // ═══ 2026-10-07：这里原来【找到了适配器却不传给创建函数】═══
+                                // 旧代码是 `D3D11CreateDevice(DriverType.Hardware, BgraSupport)` ——
+                                // 那个简化重载没有适配器形参，拿到的是**默认适配器**；
+                                // 上面这层 for/EnumOutputs 匹配只影响那行日志，对"用哪块卡"零作用。
+                                // 后果（混合显卡机）：默认适配器未必驱动本屏 ⇒ WGC 帧池建在 A 卡上、
+                                // 而画面在 B 卡上，DWM 只能跨适配器拷贝。本机（RTX 5080 是 adapter[0]）
+                                // 恰好命中所以没暴露，但那是运气，不是设计。
+                                // ⚠ Vortice 3.8.3 的简化重载不接受 IDXGIAdapter（见 NvEncoderNative.cs:427
+                                //   的同款结论），故走原生 P/Invoke，driverType 必须 = 0(UNKNOWN)。
+                                _d3dDevice = CreateDeviceOnAdapter(adapter);
+                                if (_d3dDevice is not null)
+                                {
+                                    // ⚠ 必须用 LogInfo（不是 Log）：这行是"到底用了哪块卡"的唯一读数，
+                                    //   而默认日志档位会把 Debug 整层滤掉 ⇒ 旧实现里它从来没落过盘，
+                                    //   于是"匹配失败退到默认适配器"与"匹配成功"在日志上完全一样。
+                                    LogInfo($"[WGC] D3D11 设备创建于匹配到的适配器: {adapter.Description.Description.Trim()}");
+                                    return _d3dDevice;
+                                }
+                                // 指定适配器失败 ⇒ 不 return，继续试下一个（可能还有别的适配器也带这个 output）
+                                LogInfo($"[WGC] 在适配器 {adapter.Description.Description.Trim()} 上创建设备失败，继续枚举");
                             }
                         }
                         finally { output.Dispose(); }
@@ -711,6 +779,9 @@ public sealed partial class WgcCaptureService : IDisposable
                 }
                 finally { adapter.Dispose(); }
             }
+            // ⚠ 必须说出"枚举了几块卡、几个 output"：匹配不到时旧实现只静默落到默认适配器，
+            //   看起来和"匹配成功"一模一样（都是建出一块设备），于是这条腿坏掉也无人察觉。
+            LogInfo($"[WGC] 适配器匹配: 枚举 {adapterCount} 块适配器 / {outputCount} 个 output，未命中 hmonitor=0x{hmonitor:X}");
         }
         catch (Exception ex)
         {
@@ -723,6 +794,60 @@ public sealed partial class WgcCaptureService : IDisposable
         LogInfo("[WGC] D3D11 设备创建于默认适配器（未按显示器匹配到适配器）");
         return _d3dDevice;
     }
+
+    /// <summary>在**指定适配器**上创建 D3D11 设备；失败返回 null（调用方继续枚举下一个）。
+    /// <para>为什么不用 Vortice 的重载：3.8.3 的 <c>D3D11.D3D11CreateDevice</c> 只有
+    /// <c>(DriverType, Flags, …)</c> 简化重载与不可访问的 10 参数原生重载，
+    /// <b>没有</b>接受 <c>IDXGIAdapter</c> 的简化重载 —— 同款结论见
+    /// <c>NvEncoderNative.cs:427</c>（那里为 NVENC 走了同一条 P/Invoke）。</para>
+    /// <para>⚠ 传了适配器时 <c>driverType</c> 必须是 <c>0 (D3D_DRIVER_TYPE_UNKNOWN)</c>，
+    /// 传 Hardware 会被 D3D11 拒绝（E_INVALIDARG）。</para></summary>
+    private static ID3D11Device? CreateDeviceOnAdapter(IDXGIAdapter1 adapter)
+    {
+        try
+        {
+            int hr = D3D11CreateDeviceNative(
+                adapter.NativePointer,
+                0,                                          // D3D_DRIVER_TYPE_UNKNOWN（指定适配器时必须）
+                nint.Zero,                                  // Software (HMODULE) 不用
+                (uint)DeviceCreationFlags.BgraSupport,
+                nint.Zero,                                  // pFeatureLevels = null ⇒ 默认列表
+                0,                                          // FeatureLevels = 0 ⇒ 用默认
+                D3D11SdkVersion,
+                out nint devPtr, out _, out nint ctxPtr);
+
+            if (hr < 0 || devPtr == 0) return null;
+
+            // 立即上下文稍后由 ID3D11Device.ImmediateContext 再取，这里释放原始引用
+            if (ctxPtr != 0) Marshal.Release(ctxPtr);
+            return new ID3D11Device(devPtr);
+        }
+        catch (Exception ex)
+        {
+            LogInfo($"[WGC] CreateDeviceOnAdapter 异常: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private const uint D3D11SdkVersion = 7;
+
+    /// <summary>原生 D3D11CreateDevice。
+    /// <para>⚠ 必须显式 <c>EntryPoint="D3D11CreateDevice"</c>：d3d11.dll 导出的就是该名字，
+    /// 按 C# 方法名查找会抛 <c>EntryPointNotFoundException</c>（同款教训见 NvEncoderNative.cs:405）。</para>
+    /// <para>形参顺序即 D3D11CreateDevice 的 ABI 顺序；<c>pAdapter</c> 非 0 时
+    /// <c>driverType</c> 必须为 0（见 <see cref="CreateDeviceOnAdapter"/>）。</para></summary>
+    [LibraryImport("d3d11.dll", EntryPoint = "D3D11CreateDevice")]
+    private static partial int D3D11CreateDeviceNative(
+        nint pAdapter,
+        int driverType,
+        nint software,
+        uint flags,
+        nint pFeatureLevels,
+        uint featureLevelCount,
+        uint sdkVersion,
+        out nint ppDevice,
+        out int pFeatureLevel,
+        out nint ppImmediateContext);
 
     // ═══════════════════════════════════════
     //  会话池管理
@@ -745,7 +870,11 @@ public sealed partial class WgcCaptureService : IDisposable
             // HDR 显示器上 DWM 自动将 HDR 内容色调映射为 SDR 后交付，输出已是 sRGB gamma 编码。
             var session = new PooledSession(hmonitor, DirectXPixelFormat.B8G8R8A8UIntNormalized, device, _d3dContextLock);
             if (!session.Start())
-                throw new InvalidOperationException($"无法为显示器 0x{hmonitor:X} 创建 WGC 会话");
+                // ⚠ 用 CreateItemForMonitor 留下的那句归因（提权 vs 被挡），而不是复述显示器号：
+                //   旧文案「无法为显示器 0x… 创建 WGC 会话」对用户是零信息 ——
+                //   它既没说为什么，也指不出任何可做的动作（本机 EnableLUA=0 那次就是这么被卡住的）。
+                throw new InvalidOperationException(
+                    TakeItemFailureMessage() ?? $"无法为显示器 0x{hmonitor:X} 创建 WGC 会话");
 
             _sessionPool[key] = session;
             return session;
@@ -1066,14 +1195,17 @@ public sealed partial class WgcCaptureService : IDisposable
         byte[]? sdrPixels = null;
         if (sdrSession.HasFrame)
         {
-            sdrPixels = sdrSession.GetLatestSdr();
+            sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
         }
         else
         {
             Log($"[WGC] SDR 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
             if (sdrSession.WaitForFirstFrame(config.FrameTimeoutMs))
-                sdrPixels = sdrSession.GetLatestSdr();
+                sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
         }
+        // 记下这次实际用的缓冲：尺寸变了（切分辨率）时 GetLatestSdr 会另分配，
+        // 这里跟着更新，下一帧就能继续复用，不会卡在旧尺寸上反复重分配。
+        _reuseSdr = sdrPixels;
 
         if (sdrPixels is null)
             throw new TimeoutException($"SDR 捕获超时（{config.FrameTimeoutMs}ms）。");
@@ -1099,7 +1231,7 @@ public sealed partial class WgcCaptureService : IDisposable
                         hdrSession.WaitForFirstFrame(config.FrameTimeoutMs);
                     }
                     if (hdrSession.HasFrame)
-                        hdrPixels = hdrSession.GetLatestHdr();
+                        hdrPixels = hdrSession.GetLatestHdr(_reuseHdr);
 
                     // ═══ 2026-09-15 P0-A 修复：HDR 会话与 SDR 会话尺寸校验 ═══
                     // 两个会话各自独立创建（CreateItemForMonitor 时机不同，可能取到
@@ -1111,6 +1243,12 @@ public sealed partial class WgcCaptureService : IDisposable
                         LogInfo($"HDR 会话尺寸不匹配 ({hdrSession.Width}x{hdrSession.Height} != {w}x{h})，已回退 SDR");
                         hdrPixels = null;
                     }
+
+                    // ⚠ 缓存更新必须排在尺寸校验【之后】：被丢弃的那份不该进复用槽。
+                    //   放前面也不会出错（GetLatestHdr 的 reuse 长度校验会挡住尺寸不符的复用），
+                    //   但那等于让复用槽长期停在一个"每次都要重新分配"的尺寸上，白付分配。
+                    //   只在"这份缓冲这次真被采用"时更新，槽才能一直跟住会话的真实尺寸。
+                    if (hdrPixels is not null) _reuseHdr = hdrPixels;
 
                     // ═══ 2026-09-19：软冷却记账。口径是「这次到底成没成帧」，不是「最后像素留没留下」═══
                     // 只有"没成帧"才会付满一次 FrameTimeoutMs，那正是冷却要治的东西；
@@ -1580,6 +1718,136 @@ public sealed partial class WgcCaptureService : IDisposable
     }
 
     // ═══════════════════════════════════════
+    //  完整性级别检测（E_ACCESSDENIED 的归因依据）
+    // ═══════════════════════════════════════
+
+    /// <summary>本进程是否以<b>提权</b>（High 完整性 / 管理员）令牌运行。
+    /// <para>═══ 2026-10-06：为什么这件事必须单独判、单独说 ═══</para>
+    /// <para>四条创建路径同灭时全是 <c>E_ACCESSDENIED (0x80070005)</c>，而这个 HRESULT
+    /// 至少有三种互不相干的成因，处置完全不同（降权运行 / 换回正常桌面会话 / 退第三方软件）。
+    /// 不把完整性读出来，日志里这三种长得一模一样，用户只会看到一句
+    /// 「无法为显示器 0x… 创建 WGC 会话」——既说不出原因，也指不出任何可做的动作。</para>
+    /// <para><b>本机实测（2026-10-06，两次独立验证）：</b>一个普通控制台进程（HIGH 完整性）
+    /// 调同一个 <c>CreateForMonitor</c> 得到 <c>S_OK</c>，WGC 完全可用；而本程序被外部
+    /// 以 <b>Low</b> 令牌启动时四路径全灭。⇒ <b>Low 完整性会挡住 WGC 是实测事实；
+    /// 而"HIGH 会被挡"在本机没有成立过</b>（控制台臂就是 HIGH，照样成功）。
+    /// 所以下面只把读数记下来交给上层措辞，不在代码里对成因下定论。</para>
+    /// <para>判据来源是令牌的完整性级别（TokenIntegrityLevel），不是 <c>IsInRole(Administrator)</c>：
+    /// 后者在 UAC 开启时对"未提权的管理员"也会返回 true，会把正常环境误报成故障。</para>
+    /// </summary>
+    private static bool? s_runningElevated;
+
+    /// <summary>本进程是否提权运行（结果缓存：进程生命周期内不变）。</summary>
+    internal static bool IsRunningElevated => s_runningElevated ??= DetectElevation();
+
+    /// <summary>本进程令牌的完整性级别 RID（0x1000=Low / 0x2000=Medium / 0x3000=High / 0x4000=System）。
+    /// <para>0 = 读不到（判据不可用，此时不得据此下任何结论）。</para></summary>
+    internal static int IntegrityRid { get; private set; }
+
+    /// <summary>读当前进程令牌的完整性级别是否为 High 以上。
+    /// <para>═══ 2026-10-06：为什么"提权"与"低完整性"必须分开说 ═══</para>
+    /// <para>受限令牌（<b>Low</b>，沙箱 / 受控宿主 / 某些串流与防护软件会强加）已被实测
+    /// 证明会让 WGC 四路径全灭；<b>High</b> 则在本机实测中完全可用（控制台臂 HIGH ⇒ S_OK）。
+    /// 两者在日志里都是同一个 <c>E_ACCESSDENIED</c>，所以读数必须打出来，
+    /// 由上层按实际读数措辞，而不是在这里预设"提权就一定是凶手"。</para>
+    /// <para>任何一步读失败都返回 false 并把原因写进 <see cref="ElevationDiagnostic"/>：
+    /// "读不到"与"没提权"在布尔上是一样的，不把读数打出来就无法区分。</para>
+    /// </summary>
+    private static bool DetectElevation()
+    {
+        IntegrityRid = 0;
+        nint token = 0;
+        try
+        {
+            if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out token))
+            { ElevationDiagnostic = $"OpenProcessToken 失败 err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}"; return false; }
+            // TokenIntegrityLevel = 25；先问长度再取，避免结构大小写错（写错会拿到 ERROR_BAD_LENGTH）
+            GetTokenInformation(token, TokenIntegrityLevel, 0, 0, out int need);
+            if (need <= 0)
+            { ElevationDiagnostic = $"GetTokenInformation(问长度) need={need} err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}"; return false; }
+            var buf = System.Runtime.InteropServices.Marshal.AllocHGlobal(need);
+            try
+            {
+                if (!GetTokenInformation(token, TokenIntegrityLevel, buf, need, out int got))
+                { ElevationDiagnostic = $"GetTokenInformation(取值) need={need} got={got} err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}"; return false; }
+                // TOKEN_MANDATORY_LABEL { SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes; } }
+                nint sid = System.Runtime.InteropServices.Marshal.ReadIntPtr(buf);
+                if (sid == 0) { ElevationDiagnostic = "SID 指针为 0"; return false; }
+                // SID 布局：rev(1) + subAuthCount(1) + identifierAuthority(6) + subAuthority[](每个 4B)
+                byte count = System.Runtime.InteropServices.Marshal.ReadByte(sid, 1);
+                if (count == 0) { ElevationDiagnostic = "SID 子权威数为 0"; return false; }
+                // 直读最后一个子权威（完整性级别就在那一格）。不走 GetSidSubAuthority：
+                // 多一个 P/Invoke 就多一个"返回指针被误用"的机会，而布局本身是固定的。
+                int rid = System.Runtime.InteropServices.Marshal.ReadInt32(sid, 8 + 4 * (count - 1));
+                IntegrityRid = rid;
+                ElevationDiagnostic = $"完整性 RID=0x{rid:X}（{IntegrityName(rid)}）";
+                return rid >= 0x3000;   // High / System ⇒ WGC 会拒
+            }
+            finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(buf); }
+        }
+        catch (Exception ex) { ElevationDiagnostic = $"异常 {ex.GetType().Name}: {ex.Message}"; return false; }
+        finally { if (token != 0) CloseHandle(token); }
+    }
+
+    private static string IntegrityName(int rid) => rid switch
+    {
+        0x0000 => "Untrusted",
+        0x1000 => "Low（受限令牌，WGC 同样会拒）",
+        0x2000 => "Medium（正常桌面进程）",
+        0x3000 => "High（提权，WGC 会拒）",
+        0x4000 => "System",
+        _ => "未知",
+    };
+
+    /// <summary>提权/完整性检测的内部读数（写进日志与用户提示）。
+    /// <para>判据本身失败时必须能说出卡在哪一步，否则"检测不出来"会被当成"没提权" ——
+    /// 那正好把用户引到错的方向。</para></summary>
+    internal static string ElevationDiagnostic { get; private set; } = "(未运行)";
+
+    private const uint TokenQuery = 0x0008;
+    private const int TokenIntegrityLevel = 25;
+
+    [LibraryImport("kernel32.dll")]
+    private static partial nint GetCurrentProcess();
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool OpenProcessToken(nint process, uint access, out nint token);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetTokenInformation(nint token, int cls, nint info, int len, out int retLen);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(nint h);
+
+    /// <summary>把"四条路径全灭"翻译成一句用户能照做的话。
+    /// <para>三种情形分开说，因为处置完全不同：<b>低完整性/受限令牌</b>（要求换回正常
+    /// 桌面会话——本机实测确认它会挡住 WGC）、<b>提权</b>（常见于 UAC 关闭的机器，
+    /// 此时建议降权运行）、<b>都不是</b>（才轮到"被别的程序/驱动挡住捕获"那条通用解释）。</para>
+    /// <para>⚠ 优先判 Low：本机实测里 Low 是<b>已证实的</b>成因，而 High 那一条是保守建议
+    /// （本机控制台臂在 HIGH 下 WGC 照样成功，所以不能对用户断言"提权必然失败"）。</para>
+    /// </summary>
+    private static string DescribeItemFailure()
+    {
+        if (IntegrityRid is > 0 and < 0x2000)
+            return "无法创建 WGC 捕获会话：本进程运行在【低完整性/受限令牌】下"
+                 + $"（检测读数：{ElevationDiagnostic}），"
+                 + "这种令牌不被允许读取桌面。请从正常桌面会话启动本程序"
+                 + "（不要用沙箱、受限用户或受控宿主启动它）。";
+        if (IsRunningElevated)
+            return "无法创建 WGC 捕获会话：本程序正以【管理员/提权】身份运行"
+                 + $"（检测读数：{ElevationDiagnostic}）。"
+                 + "请以普通身份重新启动本程序（不要右键『以管理员身份运行』）；"
+                 + "若系统关闭了 UAC（EnableLUA=0），所有进程都会是提权令牌，需开启 UAC 后重新登录。";
+        return "无法创建 WGC 捕获会话：系统拒绝了屏幕捕获请求。"
+             + $"（本进程完整性读数：{ElevationDiagnostic}。）"
+             + "常见原因是另一个程序或显示驱动正在阻止捕获（远程串流 / 录屏 / 显卡叠加类软件、虚拟显示器驱动）。"
+             + "可先退出这类程序再试；若仍然失败，请把本次日志一并反馈。";
+    }
+
+    // ═══════════════════════════════════════
     //  静态辅助方法（COM 互操作）
     // ═══════════════════════════════════════
 
@@ -1674,6 +1942,24 @@ public sealed partial class WgcCaptureService : IDisposable
         catch (Exception ex) { LogInfo($"[WGC] 方法3 异常: {ex.Message}"); }
 
         LogInfo("[WGC] ❌ 所有方法均无法创建 GraphicsCaptureItem");
+        // ═══ 2026-10-06：四条路径同灭时，先分辨"低完整性 / 提权 / 被挡" ═══
+        // 三者处置完全不同（换回正常会话 / 降权运行 / 退第三方软件），而在日志里
+        // 长得一模一样（都是 E_ACCESSDENIED）。不做这项分辨就会把用户引向错误方向。
+        // ⚠ 先判 Low：本机实测里 Low 是【已证实】的成因；High 那条是保守建议
+        //   （控制台臂在 HIGH 下 WGC 照样 S_OK，故不能断言"提权必然失败"）。
+        _ = IsRunningElevated;   // 触发检测，填好 IntegrityRid 与 ElevationDiagnostic
+        if (IntegrityRid is > 0 and < 0x2000)
+            LogInfo("[WGC] ⛔ 归因：本进程运行在【低完整性/受限令牌】下 ⇒ 不被允许读取桌面，"
+                  + "四条路径必然全部 E_ACCESSDENIED。请从正常桌面会话启动本程序。"
+                  + $"读数：{ElevationDiagnostic}");
+        else if (IsRunningElevated)
+            LogInfo("[WGC] 归因：本进程【提权运行】⇒ 建议以普通身份重试（本机控制台臂证明 HIGH 下"
+                  + "WGC 也可用，故此处只作建议、不断言必然失败）。"
+                  + $"读数：{ElevationDiagnostic}");
+        else
+            LogInfo($"[WGC] 归因：完整性正常（{ElevationDiagnostic}）⇒ 拒绝来自系统/第三方捕获防护"
+                  + "（串流、录屏、显卡叠加或虚拟显示器驱动）。");
+        s_lastItemFailureMessage = DescribeItemFailure();
         return null;
     }
 

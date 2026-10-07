@@ -77,6 +77,30 @@ public static class NativeAvifEncoder
         _ => ""
     };
 
+    /// <summary>「最小体积」档要下发给 libaom 的高级选项（<c>-a key=value</c>）。
+    /// <para>实测（4K，2026-10-07）：<c>tune=ssim</c> 是唯一真正减小体积的小参 ——
+    /// <b>110.2 → 93.7 KB（−15%）</b>且不额外变慢；其余（aq-mode / sharpness /
+    /// enable-chroma-deltaq）在本内容上零效果，全开还互相干扰（102.5 KB，比只开 ssim 更差）。</para>
+    /// <para>⚠ <b>只在确实会走 libaom 时下发</b>：
+    /// <list type="bullet">
+    /// <item><c>codec == "SvtAv1"</c> 且本机有 SVT ⇒ 走 SVT，aom 的 key 无效（avifenc 会告警）；</item>
+    /// <item><c>codec == "SvtAv1"</c> 但本机无 SVT ⇒ <c>GetCodecArg</c> 返回空串、实际回落 libaom
+    ///   ⇒ 这种"静默降级到 aom"的情形<b>应当</b>下发（否则用户选了最小体积却没拿到收益）；</item>
+    /// <item><c>Auto</c> ⇒ avifenc 默认即 aom ⇒ 下发。</item>
+    /// </list></para></summary>
+    private static string[] BuildAomAdvancedArgs(string codec, CompressionEffort effort)
+    {
+        // 只有"确实会由 aom 编码"时才加。SVT 可用时用户手选的 SVT 走 svt，不认 aom 的 key。
+        bool willUseAom = !(codec == "SvtAv1" && IsSvtAvailable);
+        if (!willUseAom) return [];
+
+        var keys = CompressionEffortMap.AvifencAdvancedArgs(effort);
+        if (keys.Count == 0) return [];
+
+        // CompressionEffortMap 给的是 ("-a","tune=ssim") 这种扁平对，此处逐项透传即可。
+        return [.. keys];
+    }
+
     /// <summary>
     /// 手选 SVT-AV1 但本机 avifenc 没编它时的降级说明；其余情形返回 null。
     /// <para>为什么要有这一条（2026-09-20，交接 §31.3-6）：<c>GetCodecArg</c> 在那种情况下
@@ -101,7 +125,14 @@ public static class NativeAvifEncoder
     //   speed 4 → 1.53s / 322.5 KB
     //   speed 6 → 0.50s / 310.9 KB   ← 又快又小（非单调，调低 speed 并无收益）
     // 4K 下 speed 6 为 0.95s。故 6 是甜点档。
-    private const string SpeedArg = "-s 6";
+    //
+    // ═══ 2026-10-07：改由「压缩强度」三档决定（均衡档仍是 6，故默认行为不变）═══
+    // 4K 真实截图复测（4.66 MB 样张，-q 60 --codec aom）：
+    //   s0 8.46s/127KB   s2 5.71s/128.5KB  s4 2.79s/134.4KB
+    //   s6 0.94s/144.3KB s8 0.61s/157.3KB  s10 0.59s/180.1KB
+    // ⚠ 上面 1080p 那句"非单调"在 4K 上**不成立**：4K 下 speed 越小体积越小、时间越长，是单调的。
+    //   旧结论只对 1080p 成立，故保留原文（历史依据）并在此补 4K 读数，不覆盖。
+    private const string SpeedArgLegacyBalanced = "-s 6";
 
     /// <summary>检测 avifenc 是否可用（先在提取目录查找，再回退到 PATH）。</summary>
     public static bool IsAvailable
@@ -163,7 +194,8 @@ public static class NativeAvifEncoder
     /// </summary>
     public static void Encode(byte[] bgra, int w, int h, string path,
         int crf, bool isHdr, string chroma = "444", int bitDepth = 10, byte[]? iccProfile = null,
-        string? colorSpaceTag = null, string codec = "Auto")
+        string? colorSpaceTag = null, string codec = "Auto",
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用 请将 avifenc.exe 放入 native/ 目录");
@@ -195,8 +227,11 @@ public static class NativeAvifEncoder
 
         // SDR 路径：PNG → avifenc stdin（--stdin --input-format png）
         // 消除临时 PNG 文件 I/O（4K 约 8-16MB 写+读 → 零磁盘 I/O）
+        // ⚠ 「最小体积」档额外下发的 libaom 高级选项（tune=ssim）**只在该 codec 解析为 aom 时加**：
+        //   SVT-AV1 / NVENC 不认 aom 的 key，avifenc 会对未使用的 key 报警告（其帮助文档明说）。
+        string advArgs = JoinArgs(BuildAomAdvancedArgs(codec, effort));
         string commonArgs = JoinArgs(
-            $"-q {q}", SpeedArg, CodecArgNoting(codec), chromaArg, cicpArgs, iccArg, "--stdin --input-format png");
+            $"-q {q}", $"-s {CompressionEffortMap.AvifencSpeed(effort)}", CodecArgNoting(codec), chromaArg, cicpArgs, iccArg, advArgs, "--stdin --input-format png");
 
         try
         {
@@ -338,7 +373,8 @@ public static class NativeAvifEncoder
     /// <param name="codec">avifenc 内部编码器（"LibAom" / "SvtAv1" / "Auto"）。</param>
     public static void EncodeFile(string pngPath, string avifPath, int crf, byte[]? cicp = null,
         string? colorSpaceTag = null, float peakNits = 0, string chroma = "444", string codec = "Auto",
-        int bitDepth = 8, byte[]? iccProfile = null)
+        int bitDepth = 8, byte[]? iccProfile = null,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
@@ -404,6 +440,11 @@ public static class NativeAvifEncoder
         // 复用 GetDepthArg：8-bit 不传（默认），10/12 钳到 avifenc 上限 12。
         string depthArg = bitDepth > 8 ? " " + GetDepthArg(bitDepth).Trim() : "";
 
+        // 「最小体积」档的 libaom 高级选项（tune=ssim）。前导空格按本文件既有约定手工加
+        // （iccArg/clliArg/depthArg 都是这个形状），空串时不留多余空格。
+        var advArgs = BuildAomAdvancedArgs(codec, effort);
+        string advArg = advArgs.Length > 0 ? " " + string.Join(' ', advArgs) : "";
+
         // ═══ 2026-09-20：EncodeFile 也要能把 ICC 交给 avifenc ═══
         // 实测（publish/…/native/avifenc.exe 1.4.2，同一张带 iCCP 的 P3 PNG）：
         //   不给任何色彩参数 → 输出只有 nclx(12,13,6)、**PNG 里的 iCCP 被完全丢弃**；
@@ -433,7 +474,7 @@ public static class NativeAvifEncoder
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = $"-q {q} {SpeedArg} {CodecArgNoting(codec)} {chromaArg} {cicpArgs}{iccArg}{clliArg}{depthArg} \"{pngPath}\" \"{avifPath}\"".Trim(),
+            Arguments = $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} {chromaArg} {cicpArgs}{iccArg}{clliArg}{depthArg}{advArg} \"{pngPath}\" \"{avifPath}\"".Trim(),
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
@@ -461,7 +502,8 @@ public static class NativeAvifEncoder
     /// <see cref="FormatHelper.BuildCicpArgs"/> / <see cref="FormatHelper.AvifMatrixCoefficients"/>
     /// 取值 —— 直接启用本方法会重新造出第二个事实源（交接 §31.3-10 同型问题）。
     /// </remarks>
-    public static void EncodeHdrFromScrgb(float[] scRgbLinear, int w, int h, string path, int crf, string codec = "Auto")
+    public static void EncodeHdrFromScrgb(float[] scRgbLinear, int w, int h, string path, int crf, string codec = "Auto",
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
@@ -492,11 +534,14 @@ public static class NativeAvifEncoder
 
             var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
             int q = CrfToQuality(crf);
+            // HDR 路的 libaom 高级选项（同 EncodeFile：只在确实走 aom 时下发）
+            var advArgsY4m = BuildAomAdvancedArgs(codec, effort);
+            string advArgY4m = advArgsY4m.Length > 0 ? " " + string.Join(' ', advArgsY4m) : "";
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
                 // ═══ 2026-08-10 修复: matrix 9 (BT.2020 NCL) 替代 identity (兼容性) ═══
-                Arguments = $"-q {q} {SpeedArg} {CodecArgNoting(codec)} --depth 10 --cicp 9/16/9 \"{tmpY4m}\" \"{path}\"".Trim(),
+                Arguments = $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} --depth 10 --cicp 9/16/9{advArgY4m} \"{tmpY4m}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

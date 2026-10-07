@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/MainWindow.Settings.cs
 // MainWindow 的"设置加载/应用/保存"职责（partial class 拆分）
@@ -197,6 +197,14 @@ public sealed partial class MainWindow : Window
             UpdateOcrLanguageVisibility(initEngineType);
         // Gain Map 模式
         if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
+
+        // ═══ 压缩强度三档（2026-10-07）═══
+        // 逐格式恢复各自的档位。SetComboByTag 已处理"未实化容器上写 IsSelected 是空操作"
+        // 与"大小写不敏感"两件事，这里直接用即可。
+        if (EffortAvifCbo is not null) SetComboByTag(EffortAvifCbo, _settings.EffortAvif);
+        if (EffortJpegXlCbo is not null) SetComboByTag(EffortJpegXlCbo, _settings.EffortJpegXl);
+        if (EffortWebpCbo is not null) SetComboByTag(EffortWebpCbo, _settings.EffortWebp);
+        if (EffortJpegLiCbo is not null) SetComboByTag(EffortJpegLiCbo, _settings.EffortJpegLi);
     }
 
     private static void SetComboByTag(ComboBox cbo, string tag)
@@ -257,6 +265,32 @@ public sealed partial class MainWindow : Window
         {
             LogService.Error("MainWindow", "打开第三方许可窗口失败", ex);
             SetStatus("❌ 无法打开第三方许可窗口: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 打开隐私政策窗口（2026-10-07）。
+    /// <para>为什么必须有这个入口：微软商店政策 <b>10.5.1</b> 对 Win32 / Desktop Bridge 产品
+    /// <b>强制</b>要求提供隐私政策，且要求"用户能够访问"。官方允许两种方式 ——
+    /// 填 Partner Center 的 URL，或在产品内提供入口。本仓两个都做：
+    /// URL 是提交表单的必填项，而产品内入口不会因域名/托管变化而失效。</para>
+    /// <para>为什么这个应用确实需要（不是走过场）：多数功能在本地，但<b>视觉翻译会把整张截图
+    /// （PNG）上传到用户配置的第三方 LLM</b>（Core/Services/TranslationService.cs:854-855）——
+    /// 这属于"访问个人信息"，正是 10.5.1 要求披露的行为。PRIVACY.md 逐条写明了
+    /// 哪些功能不出设备、哪些模式外发什么、发给谁、如何关闭。</para>
+    /// <para>⚠ 开窗失败必须显式告知：静默失败的表现是"点了没反应"，
+    /// 用户无从判断是没入口还是坏了（同 <see cref="OnOpenThirdPartyNotices"/>）。</para>
+    /// </summary>
+    private void OnOpenPrivacyPolicy(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            PrivacyPolicyWindow.ShowOrActivate();
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("MainWindow", "打开隐私政策窗口失败", ex);
+            SetStatus("❌ 无法打开隐私政策窗口: " + ex.Message);
         }
     }
 

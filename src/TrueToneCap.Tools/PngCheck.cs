@@ -94,6 +94,11 @@ public static class CapturePipelineServiceBridge
     /// </summary>
     public static (byte[] pixels, byte[]? icc, string targetTag) PreparePixelsWithIcc(byte[] bgra, int w, int h, bool bake, string tag)
     {
+        // ⚠ 有意不传第 5 个 format 参数（= null）：本桥接没有"本次要落盘的格式"这个上下文，
+        //    它被调用的目的是把一枚【已存在的 tag】翻译成像素与 ICC，格式由调用方那边的
+        //    PngCheck 自己解析产物后判定。传 OutputFormat.PNG 虽然结果相同（PNG 不在
+        //    ColorDecision.DefaultsToRec709 的白名单里），但那会把"我确实知道这次编的是 PNG"
+        //    写进签名 —— 一个本工具并不掌握的事实。不传 = 维持 2026-10-06 之前的行为。
         var decision = TrueToneCap.Core.Capture.ColorDecision.Build(null, tag, false, false);
         if (!bake || decision.TargetTag is "sRGB") return (bgra, null, decision.TargetTag);
         var targetCs = ColorProfileProvider.MapColorSpaceTag(decision.TargetTag);

@@ -632,8 +632,9 @@ public sealed unsafe class NvEncoderNative : IDisposable
     /// <para>输入<b>始终</b>是 8-bit BGRA：头文件明确 8-bit→10-bit 由硬件内部转换，
     /// 故无需 A2R10G10B10 输入。若请求 10-bit 但拿不到 preset config，本方法抛异常
     /// （不静默降回 8-bit）。</para>
-    public byte[] EncodeAv1(byte[] bgra, int w, int h, int qp, int bitDepth)
-        => EncodeRaw(bgra, w, h, qp, CodecAv1, NV_ENC_BUFFER_FORMAT_ARGB, bitDepth);
+    public byte[] EncodeAv1(byte[] bgra, int w, int h, int qp, int bitDepth,
+                            CompressionEffort effort = CompressionEffort.Balanced)
+        => EncodeRaw(bgra, w, h, qp, CodecAv1, NV_ENC_BUFFER_FORMAT_ARGB, bitDepth, effort);
 
     public byte[] EncodeHevc(byte[] bgra, int w, int h, int qp)
         => EncodeRaw(bgra, w, h, qp, CodecHevc, NV_ENC_BUFFER_FORMAT_ARGB);
@@ -717,19 +718,25 @@ public sealed unsafe class NvEncoderNative : IDisposable
     public byte[] EncodeAv1Argb10(byte[] argb10, int w, int h, int qp)
         => EncodeRaw(argb10, w, h, qp, CodecAv1, NV_ENC_BUFFER_FORMAT_ARGB10, 10);
 
+    /// <summary>同 <see cref="EncodeAv1Argb10"/>，另按「压缩强度」档位选 NVENC preset（2026-10-07 新增）。</summary>
+    public byte[] EncodeAv1Argb10(byte[] argb10, int w, int h, int qp, CompressionEffort effort)
+        => EncodeRaw(argb10, w, h, qp, CodecAv1, NV_ENC_BUFFER_FORMAT_ARGB10, 10, effort);
+
     private byte[] EncodeRaw(byte[] pixels, int w, int h, int qp, Guid codec, uint bufferFormat,
-                            int outputBitDepth = 8)
+                            int outputBitDepth = 8,
+                            CompressionEffort effort = CompressionEffort.Balanced)
     {
         // ═══ 2026-09-17 P1 修复：与 Dispose 互斥（见 _gate 注释）═══
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return EncodeRawCore(pixels, w, h, qp, codec, bufferFormat, outputBitDepth);
+            return EncodeRawCore(pixels, w, h, qp, codec, bufferFormat, outputBitDepth, effort);
         }
     }
 
     private byte[] EncodeRawCore(byte[] pixels, int w, int h, int qp, Guid codec, uint bufferFormat,
-                            int outputBitDepth = 8)
+                            int outputBitDepth = 8,
+                            CompressionEffort effort = CompressionEffort.Balanced)
     {
         // CRF 0 = AV1 的 QP0 = 向硬件请求 lossless，而 NVENC 没有这个模式
         // （本机实测 InitEncoder hr=0x00000008 "Lossless Coding mode not supported"）。
@@ -764,7 +771,7 @@ public sealed unsafe class NvEncoderNative : IDisposable
                 // 正确路径: 见下方主/备两路径。
 
                 // ── 1. preset: 驱动枚举, 官方 P1 优先 ──
-                var preset = PickPresetGuid(codec);
+                var preset = PickPresetForEffort(codec, effort);
 
                 // ── 2. 构造 NV_ENC_INITIALIZE_PARAMS (13.1: VER(7)|1<<31) ──
                 // ═══ Windows GUID 是 4 字节对齐 (Data1=uint32_t), 非 8 字节 ═══
@@ -1202,6 +1209,50 @@ public sealed unsafe class NvEncoderNative : IDisposable
     /// </summary>
     /// <param name="codec">编码器 codec GUID。</param>
     /// <returns>选中的 preset GUID。</returns>
+    /// <summary>按「压缩强度」档位选 preset GUID。NVENC 语义：<b>P1 最快、P7 最慢（同质量更小）</b>。
+    /// <para>2026-10-07 新增：原实现恒选 P1（最快档），用户无法要求"更小"。现按档位在驱动
+    /// 枚举出的 preset 列表里取第 N 个（<see cref="CompressionEffortMap.NvencPresetNumber"/>）。</para>
+    /// <para>⚠ 驱动枚举顺序即 P1..Pn 的顺序（nvEncodeAPI 约定），故"取第 N 个"等价于"取第 PN 个"。
+    /// 若枚举数量不足（老驱动可能只给 P1..P4），则**取最后一个可用档**并记日志 —— 不能因为
+    /// "用户要 P7 而驱动没有"就让编码失败，那会把一次偏好设置变成一次截图丢失。</para>
+    /// <para>⚠ 与 avifenc 的 0..10 不是同一把尺，见 <see cref="CompressionEffortMap"/> 的说明。</para></summary>
+    private unsafe Guid PickPresetForEffort(Guid codec, CompressionEffort effort)
+    {
+        int want = CompressionEffortMap.NvencPresetNumber(effort);   // 1..7
+        try
+        {
+            var countFn = GetFuncDelegate<GetEncodePresetGuidCountFn>(GetFuncPtr(FnGetEncodePresetGuidCount));
+            int hr = countFn(_encoder, codec, out uint count);
+            if (hr != NVENC_SUCCESS || count == 0 || count > 64) return PresetP1;
+
+            var guidsFn = GetFuncDelegate<GetEncodePresetGuidsFn>(GetFuncPtr(FnGetEncodePresetGuids));
+            int bytes = (int)count * 16;
+            nint buf = Marshal.AllocHGlobal(bytes);
+            try
+            {
+                new Span<byte>((void*)buf, bytes).Clear();
+                hr = guidsFn(_encoder, codec, buf, count, out uint actual);
+                if (hr != NVENC_SUCCESS || actual == 0) return PresetP1;
+
+                // 驱动给出的顺序即 P1..Pn。用户要第 want 档：夹到可用范围内（不足则取最后一个）。
+                uint idx = (uint)Math.Clamp(want - 1, 0, (int)actual - 1);
+                if (idx != (uint)(want - 1))
+                {
+                    CoreLog.Info("NVENC",
+                        $"档位请求 P{want}，但驱动只枚举出 {actual} 个 preset ⇒ 实际使用 P{idx + 1}",
+                        LogCategory.Encoding);
+                }
+                return new Guid(new ReadOnlySpan<byte>((void*)(buf + (int)idx * 16), 16));
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+        catch (Exception ex)
+        {
+            CoreLog.Warn("NVENC", "preset 枚举异常", ex, LogCategory.Encoding);
+        }
+        return PresetP1;
+    }
+
     private unsafe Guid PickPresetGuid(Guid codec)
     {
         try
@@ -1427,23 +1478,31 @@ public sealed unsafe class NvEncoderNative : IDisposable
     public byte[] EncodeAv1FromTexture(ID3D11Texture2D texture, int w, int h, int qp, int bitDepth)
         => EncodeRawFromTexture(texture, w, h, qp, CodecAv1, bitDepth);
 
+    /// <summary>同 <see cref="EncodeAv1FromTexture(ID3D11Texture2D,int,int,int,int)"/>，
+    /// 另按「压缩强度」档位选 NVENC preset（2026-10-07 新增）。</summary>
+    public byte[] EncodeAv1FromTexture(ID3D11Texture2D texture, int w, int h, int qp, int bitDepth,
+                                       CompressionEffort effort)
+        => EncodeRawFromTexture(texture, w, h, qp, CodecAv1, bitDepth, effort);
+
     /// <summary>从 D3D11 纹理直接编码 HEVC 帧（GPU 纹理直通路径）。</summary>
     public byte[] EncodeHevcFromTexture(ID3D11Texture2D texture, int w, int h, int qp)
         => EncodeRawFromTexture(texture, w, h, qp, CodecHevc);
 
     private byte[] EncodeRawFromTexture(ID3D11Texture2D texture, int w, int h, int qp, Guid codec,
-                                       int outputBitDepth = 8)
+                                       int outputBitDepth = 8,
+                                       CompressionEffort effort = CompressionEffort.Balanced)
     {
         // ═══ 2026-09-17 P1 修复：与 Dispose 互斥（同 EncodeRaw）═══
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return EncodeRawFromTextureCore(texture, w, h, qp, codec, outputBitDepth);
+            return EncodeRawFromTextureCore(texture, w, h, qp, codec, outputBitDepth, effort);
         }
     }
 
     private byte[] EncodeRawFromTextureCore(ID3D11Texture2D texture, int w, int h, int qp, Guid codec,
-                                       int outputBitDepth = 8)
+                                       int outputBitDepth = 8,
+                                       CompressionEffort effort = CompressionEffort.Balanced)
     {
         qp = Math.Max(qp, AvifEncoderCapabilities.MinCrf(AvifEncoderKind.Nvenc));   // 同 EncodeRawCore
 
@@ -1472,7 +1531,7 @@ public sealed unsafe class NvEncoderNative : IDisposable
                 new Span<byte>((void*)cfgBuf, EncConfigSize).Clear();
                 byte* p = (byte*)initBuf;
 
-                var preset = PickPresetGuid(codec);
+                var preset = PickPresetForEffort(codec, effort);
                 var profile = PickProfileGuid(codec);
                 var profileGuid = profile != Guid.Empty ? profile : CodecAv1ProfileMain;
 
@@ -2487,3 +2546,4 @@ public static class IvfWriter
         s.WriteByte((byte)(v & 0xFF));
     }
 }
+

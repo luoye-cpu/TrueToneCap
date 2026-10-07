@@ -5,21 +5,120 @@
     <OutputType>WinExe</OutputType>
     <!-- 自包含发布（RID/SelfContained 因仅本项目与 LogViewer 需要，故在项目内声明） -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
+    <!-- ⚠️ 这两个 true 是【默认值】，可被下面的 TtcFrameworkDependent 覆盖 —— 见该开关的注释。 -->
+    <SelfContained Condition="'$(TtcFrameworkDependent)' != 'true'">true</SelfContained>
     <!-- <Platform> 会影响输出路径，故在项目内声明（原仓库仅有 App 与 LogViewer 声明） -->
     <Platform>x64</Platform>
     <RootNamespace>TrueToneCap.App</RootNamespace>
     <AssemblyName>TrueToneCap</AssemblyName>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
-    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSDKSelfContained Condition="'$(TtcFrameworkDependent)' != 'true'">true</WindowsAppSDKSelfContained>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationTitle>TrueToneCap</ApplicationTitle>
     <ApplicationId>com.trueonecap.app</ApplicationId>
 
     <!-- ═══ 压制 XAML 运行时绑定裁剪警告（AOT 下日志面板绑定安全） ═══ -->
     <SuppressXamlTrimWarnings>true</SuppressXamlTrimWarnings>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         MSIX 打包开关（2026-10-07）—— 【默认关闭，不影响未打包构建】
+         ═══════════════════════════════════════════════════════════════════
+         用法:  dotnet build src/TrueToneCap.App -c Release -p:Platform=x64 -p:TtcMsixPackage=true
+                （或 .\Publish.ps1 -Msix）
+
+         为什么写成"一个开关带动一整套属性"，而不是把 MSIX 属性直接写死：
+           MSIX 打包 targets 里有一条**二选一的硬规则**（实测自
+           Microsoft.Windows.SDK.BuildTools.MSIX.Packaging.targets:412 附近）：
+             · WindowsPackageType != None 且【没有】AppxManifest 项  => 报错
+             · WindowsPackageType == None 且【有】AppxManifest 项     => 报错
+           即"配置必须成套，不能只改一半"。实测教训：只把 WindowsPackageType 改成 MSIX
+           会【构建成功但不产出任何包】（假成功）；补上 EnableMsixTooling 才会报出
+           "no AppxManifest is specified" 的真实要求。
+           ⇒ 这里用条件块把四个属性 + AppxManifest 项绑在一起，避免出现"半套配置"。
+         ═══════════════════════════════════════════════════════════════════ -->
+    <TtcMsixPackage Condition="'$(TtcMsixPackage)' == ''">false</TtcMsixPackage>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         框架依赖开关（2026-10-07）—— 【默认关闭，保持自包含】
+         ═══════════════════════════════════════════════════════════════════
+         用法:  .\Publish.ps1 -Msix -FrameworkDependent
+                或 dotnet build ... -p:TtcMsixPackage=true -p:TtcFrameworkDependent=true
+
+         为什么需要它 —— 实测体积（同一台机器、同一份源码，只翻这两个属性）:
+           全自包含（默认） 150.90 MB
+           仅 WinAppSDK 框架依赖 121.89 MB   (-29.0)
+           仅 .NET 框架依赖      113.58 MB   (-37.3)
+           两者都框架依赖        84.57 MB   (-66.3，-44%)
+         顺带说明"为什么压缩救不了"：MSIX 用的是 Deflate，且 makeappx 只提供 /nc
+         （关闭压缩）、没有压缩级别参数 ⇒ 已压到 44.5% 就是上限。要瘦身只能"少放东西"。
+
+         ⚠️ 关键取舍 —— 这是【用绿色包的易用性换商店包的体积】：
+           本仓同时维护两条分发路径。改框架依赖后，MSIX 由商店/Windows 自动装运行时依赖，
+           对商店用户无障碍；但**绿色包**（解压即用）会要求用户预装 .NET 与 WinAppSDK 运行时。
+           ⇒ 因此本开关【只该作用于商店包】，绿色包保持自包含。
+             实现方式：开关独立于 TtcMsixPackage，不联动 —— 谁需要谁显式传。
+             若将来想让"绿色包也框架依赖"，须同时提供运行时安装器，那是另一件事。
+
+         ⚠️ 与 TtcMsixPackage 的耦合：不做强制绑定。
+           只传 TtcFrameworkDependent 而不传 TtcMsixPackage 时，会产出一个
+           **框架依赖的未打包构建** —— 那是合法用法（例如本地快速验证依赖是否齐全），
+           故不报错；但发布/上架场景应两者同时传，Publish.ps1 已保证这一点。
+         ═══════════════════════════════════════════════════════════════════ -->
+    <TtcFrameworkDependent Condition="'$(TtcFrameworkDependent)' == ''">false</TtcFrameworkDependent>
   </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TtcFrameworkDependent)' == 'true'">
+    <!-- .NET 运行时交给目标机（商店包由 Windows 自动解析依赖） -->
+    <SelfContained>false</SelfContained>
+    <!-- WinAppSDK 运行时交给框架包（官方文档明确：打包形态下依赖作为包内容，
+         框架依赖形态则由系统/商店安装 Microsoft.WindowsAppRuntime） -->
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <!-- ⚠️ 框架依赖时不能再复用自包含时代的 R2R 复合映像假设：
+         显式关闭 R2R，避免产出"引用自包含运行时布局"的映像。
+         体积上也是净收益（R2R 复合映像本就不进 MSIX 包，见 doc 分析）。 -->
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <PublishReadyToRunComposite>false</PublishReadyToRunComposite>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TtcMsixPackage)' == 'true'">
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <!-- 必须显式开：否则 MSIX 打包 targets 根本不介入（只改 WindowsPackageType 时
+         构建会"成功但不产包"） -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- 本地/CI 出包时关闭签名：商店会在认证通过后用微软证书**自动重签**，
+         所以上架【不需要】购买代码签名证书。侧载/企业分发才需要自签。 -->
+    <AppxPackageSigningEnabled Condition="'$(AppxPackageSigningEnabled)' == ''">false</AppxPackageSigningEnabled>
+    <!-- 没有它，dotnet build 只做编译、不产出 .msix -->
+    <GenerateAppxPackageOnBuild Condition="'$(GenerateAppxPackageOnBuild)' == ''">true</GenerateAppxPackageOnBuild>
+    <!-- 输出目录名（AppPackages/<name>_<ver>_<arch>_Test/）由 SDK 决定，此处不覆写 -->
+    <AppxBundle Condition="'$(AppxBundle)' == ''">Never</AppxBundle>
+    <!-- Identity/@Version 的第四段必须为 0（商店规定）。AssemblyVersion 已是 x.y.z.0 -->
+    <AppxPackageDir Condition="'$(AppxPackageDir)' == ''">$(MSBuildProjectDirectory)\AppPackages\</AppxPackageDir>
+
+    <!-- ═══ 符号包（.appxsym）═══
+         Partner Center 的**崩溃分析**依赖它。缺了不影响提交（官方明确可省略），
+         但出了崩溃就没有可用堆栈 —— 对一个要上架的应用不值得省。
+         ⚠️ 裸 `dotnet build` 下 SDK 找不到 mspdbcmf.exe 并警告
+            "Path to `mspdbcmf.exe` could not be found. A symbols package will not be generated."
+            根因（读 targets 原文得出，非猜测）：`_EnsurePdbCmfExeFullPath` 只从两处找它 ——
+             ① $(VCToolsInstallDir)bin\Host*\x64\  ← 依赖 VC 工具集环境变量
+             ② $(AppxMSBuildToolsPath)\x64\        ← 依赖 $(MSBuildExtensionsPath) 解析到 VS
+            裸 dotnet build（不经过 vcvarsall/dev prompt）两条都落空。
+            ⚠️ 正确的属性名是 **MsPdbCmfExeFullpath**（注意大小写：Fullpath 不是 FullPath）。
+               实测教训：先前按直觉写的 `MspdbcmfPath` 是**无效的** —— 打包仍报警告；
+               因为该 target 的条件是 `'$(MsPdbCmfExeFullpath)' == ''`，名字不对等于没设。
+               设上它，整个解析 target 直接短路，警告消失。
+            实测该文件存在于 VS 的 AppxPackage\x64\ 与 VC\Tools\MSVC\...\Hostx64\x64\ 两处。 -->
+    <_TtcMspdbCmf Condition="'$(_TtcMspdbCmf)' == '' AND Exists('$(MSBuildProgramFiles32)\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\x64\MsPdbCmf.exe')">$(MSBuildProgramFiles32)\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\x64\MsPdbCmf.exe</_TtcMspdbCmf>
+    <_TtcMspdbCmf Condition="'$(_TtcMspdbCmf)' == '' AND Exists('$(ProgramFiles)\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\x64\MsPdbCmf.exe')">$(ProgramFiles)\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\x64\MsPdbCmf.exe</_TtcMspdbCmf>
+    <MsPdbCmfExeFullpath Condition="'$(MsPdbCmfExeFullpath)' == '' AND '$(_TtcMspdbCmf)' != ''">$(_TtcMspdbCmf)</MsPdbCmfExeFullpath>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TtcMsixPackage)' == 'true'">
+    <!-- 与 WindowsPackageType=MSIX 配套，缺一即报 "Improper project configuration" -->
+    <AppxManifest Include="Package.appxmanifest" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />
@@ -79,6 +178,26 @@
   <ItemGroup>
     <Content Include="$(TtcThirdPartyNotices)" Condition="Exists('$(TtcThirdPartyNotices)')"
              CopyToOutputDirectory="PreserveNewest" Visible="false" Link="THIRD-PARTY-NOTICES.md" />
+  </ItemGroup>
+
+  <!-- ═══ 隐私政策 → 输出目录根（与 exe 同目录）═══
+       为什么要有这一条：微软商店政策 10.5.1 对 Win32 / Desktop Bridge 产品【强制】要求
+       提供隐私政策且"用户能够访问"，本应用内入口是 PrivacyPolicyWindow，
+       它的第一查找位置就是 AppContext.BaseDirectory —— 文件不随包分发，入口就只剩降级界面。
+       ⚠ 与 THIRD-PARTY-NOTICES.md 完全同一套约束，逐条同因，不重复解释：
+         · Condition="Exists(...)" 必需（否则缺文件时 MSB3030 直接拖垮构建）；
+         · 必须显式 Link（本项目 LinkBase 对 Content 不生效）；
+         · 路径锚在 $(MSBuildProjectDirectory) 上，不写成 ..\..\（Exists() 的相对路径
+           按 MSBuild 进程当前目录解析，从仓库根构建时会指错 ⇒ 恒 false ⇒ 静默不复制）。
+       单一事实源：仓库根 PRIVACY.md（本仓库拥有它，不存在"由外部流程维护"的情况，
+       故它缺失属于真异常 —— 但这里仍保留 Exists 守卫，理由同许可文件：
+       宁可少一份拷贝并走降级界面，也不要让构建挂掉）。 -->
+  <PropertyGroup>
+    <TtcPrivacyPolicy>$(MSBuildProjectDirectory)\..\..\PRIVACY.md</TtcPrivacyPolicy>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(TtcPrivacyPolicy)" Condition="Exists('$(TtcPrivacyPolicy)')"
+             CopyToOutputDirectory="PreserveNewest" Visible="false" Link="PRIVACY.md" />
   </ItemGroup>
 
   <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发）。
@@ -175,7 +294,29 @@
        AVIF / JPEG XL / WebP / JPEG LI 四种格式在开发构建上必走保底 —— 2026-10-01 实机轮就因此
        把"选 JPEG XL 拿到 PNG"读成了产品行为（其实是布局缺件）。
        单一事实源仍是 Core/Resources/（Publish.ps1 的 $toolsSrc 同一个目录），这里只是多拷一份到开发输出，
-       不是第二份事实。计数写成硬断言：少一枚就是布局坏了，不许静默少拷。 -->
+       不是第二份事实。计数写成硬断言：少一枚就是布局坏了，不许静默少拷。
+
+       ═══ 2026-10-07 MSIX 打包修复：从"只 Copy"改为"声明 Content 项 + Copy" ═══
+       ⚠️ 原实现只用 `<Copy DestinationFolder="$(OutDir)native">` —— 那是**文件系统动作**，
+          而 **MSIX 打包枚举的是 MSBuild 声明的项（items），不是输出目录里的文件**。
+          实测后果（解包核对）：native/ 下 4 枚 exe **全部漏在包外**，
+          而 OCR 模型（走 <Content Include="Models\*.onnx">）能进包 —— 因为后者是声明的项。
+          ⇒ AVIF / JPEG XL / WebP / JPEG LI 四种格式在 MSIX 包里会整体失效，
+            而 build / publish / 打包**全程绿灯**（典型的"构建成功但功能坏了"）。
+       ⇒ 现在把同一批文件**声明为 Content 项**（Link 到 native\%(Filename)%(Extension)），
+         MSIX 打包即可枚举到；同时 `CopyToOutputDirectory=PreserveNewest` 保留原有的
+         "开发构建输出里也有 native/" 行为，不必再依赖下面的 Copy 动作。
+       ⚠️ 保留下面的 Copy 作为兜底（SkipUnchangedFiles 使其在 Content 已复制时近乎零成本），
+          并保留 4 枚的硬断言 —— 断言现在同时覆盖 Build 与打包两条路径。 -->
+  <ItemGroup>
+    <!-- 单一事实源：Core/Resources/。Link 必须写到 native/ 子目录，
+         因为 NativeLibraryResolver 只在 BaseDirectory/native 下找（见其 :61）。 -->
+    <Content Include="..\TrueToneCap.Core\Resources\*.exe"
+             Link="native\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             Visible="false" />
+  </ItemGroup>
+
   <Target Name="CopyNativeToolsToDevOutput" AfterTargets="Build">
     <ItemGroup>
       <TtcNativeTools Include="..\TrueToneCap.Core\Resources\*.exe" />

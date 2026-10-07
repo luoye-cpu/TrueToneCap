@@ -155,7 +155,7 @@ public sealed class JpegLiEncoder : ImageEncoder
             if (!JpegLiNative.IsAvailable)
                 throw new InvalidOperationException("JPEG LI 编码需要 cjpegli.exe (Google jpegli)，请将 cjpegli.exe 放入 native/ 目录、PLAN/tools/ 目录或系统 PATH。");
 
-            var jpegBytes = JpegLiNative.Encode(px, w, h, s.Quality, s.ChromaSubsampling, icc);
+            var jpegBytes = JpegLiNative.Encode(px, w, h, s.Quality, s.ChromaSubsampling, icc, effort: s.Effort);
             File.WriteAllBytes(path, jpegBytes);
         }, ct);
     }
@@ -238,7 +238,7 @@ public sealed class JpegXlEncoder : ImageEncoder
                 byte[]? jxlIcc = csTag is "DisplayP3" or "DCI_P3"
                     ? ColorManagement.ColorProfileProvider.GetHdrStandardIccProfile(csTag)
                     : null;
-                NativeJxlEncoder.EncodeHdr(pq16, f.Width, f.Height, path, s.Quality, jxlIcc, intensityTarget, csTag, s.ChromaSubsampling);
+                NativeJxlEncoder.EncodeHdr(pq16, f.Width, f.Height, path, s.Quality, jxlIcc, intensityTarget, csTag, s.ChromaSubsampling, s.Effort);
             }, ct);
         }
         else
@@ -286,7 +286,7 @@ public sealed class JpegXlEncoder : ImageEncoder
                     var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
                     // ═══ 2026-09-19：色度开关此前从未抵达 cjxl（本仓库默认位深 10 ⇒ 走的就是这条），
                     // 界面上的 4:4:4 / 4:2:0 改了产物字节完全相同。映射见 NativeJxlEncoder.BuildResamplingArg。
-                    NativeJxlEncoder.Encode16Bgra16(px16, f.Width, f.Height, path, s.Quality, s.OutputBitDepth, icc, s.ChromaSubsampling, s.ColorSpaceTag);
+                    NativeJxlEncoder.Encode16Bgra16(px16, f.Width, f.Height, path, s.Quality, s.OutputBitDepth, icc, s.ChromaSubsampling, s.ColorSpaceTag, s.Effort);
                 }, ct);
                 return;
             }
@@ -321,7 +321,7 @@ public sealed class JpegXlEncoder : ImageEncoder
             var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
             // 有可嵌 ICC 就走 ICC；没有时由 NativeJxlEncoder 按【目标标签】选 cjxl 的 color_space
             // IDE 名（过去这里等价于"没 ICC 就一律声明 sRGB"，会把 BT.2020 的产物主动写错）。
-            NativeJxlEncoder.Encode(px, w, h, path, s.Quality, s.OutputBitDepth, icc, s.ChromaSubsampling, s.ColorSpaceTag);
+            NativeJxlEncoder.Encode(px, w, h, path, s.Quality, s.OutputBitDepth, icc, s.ChromaSubsampling, s.ColorSpaceTag, s.Effort);
         }, ct);
     }
 }
@@ -427,7 +427,7 @@ public sealed class AvifEncoder : ImageEncoder
                     NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr, csTag, peakNits,
                         chroma: s.ChromaSubsampling,
                         codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
-                        bitDepth: hdrDepth);
+                        bitDepth: hdrDepth, effort: s.Effort);
                 }
                 finally { try { File.Delete(tmpPng); } catch { } }
             }, ct);
@@ -483,6 +483,7 @@ public sealed class AvifEncoder : ImageEncoder
                             colorSpaceTag: s.ColorSpaceTag ?? "sRGB", chroma: s.ChromaSubsampling,
                             codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
                             bitDepth: avifDepth,
+                            effort: s.Effort,
                             // ⚠ 必须显式传：avifenc【不会】从中转 PNG 的 iCCP 继承 ICC（2026-09-20 实测），
                             //   漏传就等于软件路的广色域 AVIF 只剩 nclx，与硬件路的 prof+nclx 不一致。
                             iccProfile: icc);
@@ -554,7 +555,7 @@ public sealed class WebPEncoder : ImageEncoder
             try
             {
                 var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
-                NativeWebPEncoder.Encode(px, w, h, path, s.Quality, s.Quality >= 100, icc);
+                NativeWebPEncoder.Encode(px, w, h, path, s.Quality, s.Quality >= 100, icc, s.Effort);
             }
             catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException))
             {
@@ -814,13 +815,13 @@ public sealed class LibAomAvifBackend : IAvifEncoder
     public LibAomAvifBackend(string codec = "Auto") => _codec = codec;
     public AvifEncoderBackend Backend => AvifEncoderBackend.LibAom;
     public bool IsAvailable => NativeAvifEncoder.IsAvailable;
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null, CompressionEffort effort = CompressionEffort.Balanced)
     {
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
             var icc = (colorSpaceTag is not (null or "System" or "sRGB")) ? iccProfile : null;
-            NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag, codec: _codec);
+            NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag, codec: _codec, effort: effort);
         }, ct);
     }
 }
@@ -840,7 +841,8 @@ file static class MftAvifEncode
 
     /// <param name="tag">崩溃隔离与日志用的标签（"QSV_MFT" / "MFT"），便于区分两条调用来源。</param>
     public static async Task EncodeAsync(string tag, byte[] bgra, int w, int h, int crf, string path,
-        CancellationToken ct, string chroma, int displayBitDepth, string? colorSpaceTag, byte[]? iccProfile)
+        CancellationToken ct, string chroma, int displayBitDepth, string? colorSpaceTag, byte[]? iccProfile,
+        CompressionEffort effort)
     {
         await Task.Run(() =>
         {
@@ -920,8 +922,8 @@ public sealed class QsvAvifBackend : IAvifEncoder
     /// </summary>
     public bool IsAvailable => MftEncoderNative.IsAv1MftAvailable;
 
-    public Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
-        => MftAvifEncode.EncodeAsync("QSV_MFT", bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+    public Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null, CompressionEffort effort = CompressionEffort.Balanced)
+        => MftAvifEncode.EncodeAsync("QSV_MFT", bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort);
 }
 
 public sealed class NvencAvifBackend : IAvifEncoder
@@ -1113,7 +1115,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
         return false;
     }
 
-    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
+    public async Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null, CompressionEffort effort = CompressionEffort.Balanced)
     {
         await Task.Run(() =>
         {
@@ -1231,7 +1233,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
                 {
                     using var nv = new NvEncoderNative(device!, hwCicp);
                     var sw = System.Diagnostics.Stopwatch.StartNew();
-                    var bs = nv.EncodeAv1FromTexture(texture, w, h, crf, nvencBitDepth);
+                    var bs = nv.EncodeAv1FromTexture(texture, w, h, crf, nvencBitDepth, effort);
                     CoreLog.Debug("AVIF", $"✅ NVENC 纹理直通: {w}x{h} CRF={crf} {nvencBitDepth}-bit {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB", LogCategory.Encoding);
                     return bs;
                 });
@@ -1276,7 +1278,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
                 //   ② 本处、下方 N 卡设备重试路径，以及上方纹理路径的 chroma != "422" 守卫。
                 // 位深：由 outputBitDepth 决定（见上方 2026-09-17 注释），输入恒为 8-bit ARGB，
                 // 硬件在内部完成 8→10 转换，不需要把像素先扩成 16-bit。
-                var bs = nv.EncodeAv1(bgra, w, h, crf, nvencBitDepth);
+                var bs = nv.EncodeAv1(bgra, w, h, crf, nvencBitDepth, effort);
                 CoreLog.Debug("AVIF", $"✅ NVENC AV1: {w}x{h} 色度={chroma} CRF={crf} {nvencBitDepth}-bit {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB", LogCategory.Encoding);
                 return bs;
             });
@@ -1299,7 +1301,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
                         var sw = System.Diagnostics.Stopwatch.StartNew();
                         // 同上方共享设备路径（2026-09-17）：422 分派已移除，统一 EncodeAv1。
                         // 若日后恢复 422，此处必须与能力表的 Supports422 同步放开（不可只改一处）。
-                        var bs = nv.EncodeAv1(bgra, w, h, crf, nvencBitDepth);
+                        var bs = nv.EncodeAv1(bgra, w, h, crf, nvencBitDepth, effort);
                         CoreLog.Debug("AVIF",
                             $"✅ NVENC AV1 (N 卡设备): {w}x{h} 色度={chroma} CRF={crf} {nvencBitDepth}-bit {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB",
                             LogCategory.Encoding);
@@ -1607,8 +1609,8 @@ public sealed class MftAvifBackend : IAvifEncoder
     // 与 QsvAvifBackend 共用 MftAvifEncode（审查 P3 去重）：两者同为 MFT 路径，
     // 仅崩溃隔离标签不同。旧的重复实现里那份多出的 Debug.WriteLine 计时无实际价值，
     // 与 QSV 保持一致后不再保留。
-    public Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null)
-        => MftAvifEncode.EncodeAsync("MFT", bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+    public Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null, CompressionEffort effort = CompressionEffort.Balanced)
+        => MftAvifEncode.EncodeAsync("MFT", bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort);
 }
 
 // ────── AVIF 回退辅助 ──────
@@ -1616,13 +1618,14 @@ file static class AvifFallbackHelper
 {
     /// <summary>安全回退到 libaom 软件编码。libaom 本身也做异常隔离，防止回退链断裂。</summary>
     public static void FallbackToLibAom(byte[] bgra, int w, int h, int crf, string path,
-        CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null)
+        CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         ct.ThrowIfCancellationRequested();
         try
         {
             var icc = (colorSpaceTag is not (null or "System" or "sRGB")) ? iccProfile : null;
-            NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag);
+            NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag, effort: effort);
         }
         catch (Exception ex)
         {

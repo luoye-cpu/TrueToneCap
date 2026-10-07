@@ -1,6 +1,7 @@
-﻿<Window x:Class="TrueToneCap.App.ThirdPartyNoticesWindow"
+<local:MarkdownDocumentWindow x:Class="TrueToneCap.App.ThirdPartyNoticesWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:TrueToneCap.App"
     Title="TrueToneCap 第三方许可"
     Closed="OnClosed">
 
@@ -8,7 +9,7 @@
          建窗/DPI/主题/字体沿用 OcrPreviewWindow 的现成范式（同属独立窗口族）。
          ⚠ 本文件【不出现任何硬编码 Color / Brush 字面量】：颜色全部走 ThemeResource 键，
            且键集合限定在主窗口已在用的那几个（Light / Dark / OLED 三套主题下都可读）。 -->
-    <Grid x:Name="RootGrid" RowDefinitions="Auto,*,Auto">
+    <Grid x:Name="RootGridControl" RowDefinitions="Auto,*,Auto">
 
         <!-- ── 顶部：标题 + 关闭 ── -->
         <Border Grid.Row="0" Padding="16,10" Background="{ThemeResource CardBackgroundFillColorDefault}"
@@ -34,23 +35,23 @@
              横向也需要滚动是给等宽表格行用的，而 ScrollViewer 一旦允许横向滚动，
              就会用无限宽度去量内容 ⇒ 正文的 TextWrapping 失效（长段永不折行、看起来像"没换行"）。
              解法是把内容面板的 MinWidth 钉在视口宽度上，代码里随 SizeChanged 同步。 -->
-        <ScrollViewer x:Name="BodyScroll" Grid.Row="1" Padding="16,12"
+        <ScrollViewer x:Name="BodyScrollControl" Grid.Row="1" Padding="16,12"
                       Background="{ThemeResource SolidBackgroundFillColorBase}"
                       IsTabStop="True"
                       VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Auto"
                       HorizontalScrollMode="Auto" HorizontalScrollBarVisibility="Auto">
-            <StackPanel x:Name="ContentPanel" Spacing="4"/>
+            <StackPanel x:Name="ContentPanelControl" Spacing="4"/>
         </ScrollViewer>
 
         <!-- ── 降级：文件找不到时明确说出来（不抛异常、也不静默留白）── -->
-        <Border x:Name="MissingPanel" Grid.Row="1" Visibility="Collapsed" Padding="24"
+        <Border x:Name="MissingPanelControl" Grid.Row="1" Visibility="Collapsed" Padding="24"
                 Background="{ThemeResource SolidBackgroundFillColorBase}">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="8" MaxWidth="720">
-                <TextBlock x:Name="MissingTitleTxt" Text="未找到 THIRD-PARTY-NOTICES.md"
+                <TextBlock x:Name="MissingTitleTxtControl" Text="未找到 THIRD-PARTY-NOTICES.md"
                            FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                <TextBlock x:Name="MissingHintTxt" FontSize="12" TextWrapping="Wrap"
+                <TextBlock x:Name="MissingHintTxtControl" FontSize="12" TextWrapping="Wrap"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                <TextBlock x:Name="MissingPathsTxt" FontSize="11" TextWrapping="Wrap"
+                <TextBlock x:Name="MissingPathsTxtControl" FontSize="11" TextWrapping="Wrap"
                            FontFamily="Consolas" Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
             </StackPanel>
         </Border>
@@ -58,9 +59,9 @@
         <!-- ── 底部：实际读到的文件与规模（用户/审计需要确认"看的就是包里这份"）── -->
         <Border Grid.Row="2" Padding="16,8" Background="{ThemeResource CardBackgroundFillColorDefault}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
-            <TextBlock x:Name="FooterTxt" FontSize="11" TextWrapping="Wrap"
+            <TextBlock x:Name="FooterTxtControl" FontSize="11" TextWrapping="Wrap"
                        IsTextSelectionEnabled="True"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
         </Border>
     </Grid>
-</Window>
+</local:MarkdownDocumentWindow>

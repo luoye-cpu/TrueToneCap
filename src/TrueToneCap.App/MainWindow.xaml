@@ -1,4 +1,4 @@
-﻿<Window x:Class="TrueToneCap.App.MainWindow"
+<Window x:Class="TrueToneCap.App.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
@@ -172,6 +172,21 @@
                                      且编码器支持真 10-bit 输入时才保留源精度，否则是容器级升位深。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
                                     Text="位深按所选编码器能力生效（软件 ≤12-bit、NVENC ≤10-bit、QSV 8-bit），不支持的档位已隐藏；HDR 至少 10-bit，软件编码器（libaom）在 HDR 下还可选 12-bit。8-bit 兼容性最广；&gt;8-bit 仅在源为 Float16（HDR/高级颜色采集）时保留真精度，普通 8-bit 截图恒输出 8-bit。"/>
+                                <!-- 压缩强度（2026-10-07）：软件路改 avifenc 的 -s，硬件路改 NVENC 的 preset -->
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="EffortAvifCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <!-- ═══ 2026-10-07：这一档同时作用于两条路，但两把尺不同 ═══
+                                     软件路 = avifenc 的 speed（0 最慢）+ libaom 的 tune=ssim；
+                                     硬件路 = NVENC 的 preset（P1 最快）。二者【不可横向比较】。
+                                     "最小体积"档在软件路上会明显变慢（实测 4K：0.3 s → 7.1 s），
+                                     体积降约 24%（123.4 → 93.7 KB），必须在界面上说清代价。 -->
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="只改变编码耗时，不影响质量设置。软件编码器（libaom）差异很大：实测 4K 下最小体积约 7.1 秒 / 93.7 KB、均衡约 0.3 秒 / 123.4 KB、最快约 0.1 秒 / 148.8 KB。最小体积档会同时启用 libaom 的 tune=ssim 以求更小。硬件编码（NVENC）三档都很快，差异小得多。"/>
                             </StackPanel>
                         </Border>
 
@@ -188,6 +203,23 @@
                                 </Grid>
                                 <TextBlock x:Name="ChromaJpegLiNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
                                     Text="采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小（截图里的文字边缘最容易看出差别）。增益图开与不开共用这一项。"/>
+                                <!-- 压缩强度（2026-10-07）：改 cjpegli 的 xyb 开关（色彩空间） -->
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="EffortJpegLiCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <!-- ═══ 2026-10-07：为什么 JPEG LI 也加这一栏（与"只有三个格式加"的初版口径不同）═══
+                                     初版把 JPEG LI 排除在外，理由写的是"它的压缩强度与质量是同一个旋钮"。
+                                     但 xyb 开关换的是**色彩空间**、不是质量，且实测在两张真实截图 ×
+                                     -d 0.5/1.0/2.0/3.0 以及 GainMap 的 Baseline 路上**一律更小**
+                                     （1.5%~4.7%，无一例外）—— 是本仓所有编码器小参里唯一
+                                     "在所有测过的内容与质量上都为正"的开关。用户据实测要求纳入 ⇒ 加。
+                                     代价只有时间，正是这一栏管的轴。 -->
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="只改变编码耗时，不影响质量设置。实测 4K 截图：最小体积档约 0.16~0.28 秒、均衡约 0.10~0.17 秒；最小体积档体积小约 2%~5%（它改用 XYB 色彩空间，同样的观感质量下码率更低）。最快档与均衡档的产物相同（本格式没有更快的档位可用）。"/>
                                 <!-- ═══ 增益图开关 ═══
                                      2026-09-26（用户口径）：GainMap 不再是输出格式下拉里的一项，
                                      而是"JPEG LI 的另一个形态"。打开后编码走 JPEG_GAINMAP 那条路，
@@ -197,7 +229,7 @@
                                 <CheckBox x:Name="GainMapEnableChk" Content="附带增益图（输出 Ultra HDR 照片）"
                                           Checked="OnGainMapToggled" Unchecked="OnGainMapToggled"/>
                                 <TextBlock x:Name="GainMapOptionsDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
-                                    Text="底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。打开此开关时 HDR 输出锁定为开。"/>
+                                    Text="底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。这条口径不只管增益图：JPEG 与 WebP 两族格式的默认目标同样是 Rec.709，只有你亲手选 Rec.2020 才产出 Rec.2020。打开此开关时 HDR 输出锁定为开。"/>
                                 <Grid x:Name="GainMapModeRow" ColumnDefinitions="120,*">
                                     <TextBlock x:Name="GainMapModeLabelTxt" Text="增益图模式" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="GainMapModeCbo" Grid.Column="1" SelectionChanged="OnGainMapModeChanged">
@@ -258,6 +290,20 @@
                                         <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
+                                <!-- 压缩强度（2026-10-07）：只动 cjxl 的 -e，不动质量（-d） -->
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="EffortJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <!-- ═══ 2026-10-07：这一档为什么是 7/5/3，且为什么"最小体积"不更高 ═══
+                                     实测两张真实 4K 截图：样张 A 上 e8 省 5.4%，样张 B 上 e8 反而涨 8.9%
+                                     ⇒ cjxl 的高 effort 对体积的方向【随内容而变】，无法承诺"拉满一定更小"。
+                                     故最高档停在 e7，并把"本档价值在时间"写进界面，不假称能省体积。 -->
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="三档只改变编码耗时（cjxl 的 effort），与上方的质量设置无关。实测 4K 截图：最小体积约 0.4~0.9 秒、均衡约 0.3~0.8 秒、最快约 0.3~0.6 秒。⚠ 本格式的档位主要影响速度而非体积：更高的 effort 对部分内容更小、对另一部分反而更大，因此最高档停在 e7，不提供更慢的档位。"/>
                                 <!-- ═══ 2026-09-26：这一格为什么只有两档（用户问"JXL 缺 4:2:2"）═══
                                      不是没接线：cjxl 的 resampling 参数只有 1/2/4/8 且各向同性；
                                      码流虽有逐轴 YCbCrChromaSubsampling，编码器只在转码 JPEG 时写它，
@@ -280,6 +326,20 @@
                                      留一个选了也不改变任何东西的下拉 = 界面撒谎，所以撤控件、把事实写在这里。 -->
                                 <TextBlock x:Name="WebPChromaNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
                                     Text="有损 WebP 恒 4:2:0（格式定义）；无损为 RGB。本格式无色度可选，也没有对应设置项。"/>
+                                <!-- 压缩强度（2026-10-07）：改 cwebp 的 -m（压缩方法） -->
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="EffortWebpCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
+                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <!-- ═══ 2026-10-07：如实说明这一档对 WebP 收益有限 ═══
+                                     实测 4K：m0 0.39s/306KB、m2 0.42s/268KB、m4 0.74s/258KB、m6 0.95s/248KB。
+                                     总跨度只有约 0.4→1.0 秒、体积差约 20%，远小于 AVIF/JXL 的档位跨度。
+                                     不夸大：这一栏的价值在于"可控"，不在于"省很多"。 -->
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="只改变编码耗时，不影响质量设置。WebP 的档位差异比 JPEG XL / AVIF 小：实测 4K 下三档约 0.4 / 0.7 / 1.0 秒，体积相差约两成。"/>
                             </StackPanel>
                         </Border>
                         <!-- TIFF 选项卡片 -->
@@ -603,6 +663,24 @@
                                 <TextBlock x:Name="LicensesTitle" Text="第三方许可" FontSize="14" FontWeight="SemiBold"/>
                                 <TextBlock x:Name="LicensesDescTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="随本应用一并再分发的第三方组件及其许可证全文。"/>
                                 <Button x:Name="OpenLicensesBtn" Content="查看第三方许可" Click="OnOpenThirdPartyNotices"
+                                        HorizontalAlignment="Left" Height="36" Padding="14,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- ═══ 隐私政策（商店合规入口，2026-10-07）═══
+                             为什么必须有：微软商店政策 10.5.1 对 Win32 / Desktop Bridge 产品
+                             【强制】要求提供隐私政策，且要求「用户能够访问」——
+                             原文允许两种方式：填进 Partner Center 的 URL，或在产品内提供入口。
+                             这里做产品内入口（更可靠：URL 会随域名/托管变化，产品内入口不会）。
+                             ⚠️ 本应用是"本地优先"，但【视觉翻译会把整张截图上传到第三方 LLM】——
+                               这正是必须披露的个人信息处理行为，不能因为"大部分功能在本地"就省略。
+                             内容从磁盘读 PRIVACY.md，渲染与降级都在 PrivacyPolicyWindow 里。
+                             文案运行时由 ApplyLocale() 覆盖（XAML 里只是设计器兜底）。 -->
+                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock x:Name="PrivacyTitle" Text="隐私政策" FontSize="14" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="PrivacyDescTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="截图与文字识别均在本机完成。仅在你使用翻译功能时会向第三方发送内容——视觉翻译会上传整张截图，请阅读详情。"/>
+                                <Button x:Name="OpenPrivacyBtn" Content="查看隐私政策" Click="OnOpenPrivacyPolicy"
                                         HorizontalAlignment="Left" Height="36" Padding="14,0"/>
                             </StackPanel>
                         </Border>

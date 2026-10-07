@@ -51,9 +51,16 @@ jobs:
 
     steps:
       - name: 检出
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0 # build-info.json 需要 commit sha（SourceLink），浅克隆会拿到空值
+        # ⚠ checkout v5+ 改用 Node 24 运行时（v4 是 node20）。
+        #   GitHub 已于 **2026-09-23** 从 runner 中移除 Node 20（官方 changelog：
+        #   "will only work until we upgrade the runner and remove Node20 on September 23rd, 2026"）。
+        #   ⇒ 继续用 v4 不再是"保守"，而是【已过期】——node20 action 随时可能直接跑不起来。
+        #   ⇒ 自托管 runner 必须 ≥ **v2.335.0**（该版本加入 node24 支持；v2.333.0 起为 node24 enforcement）。
+        #     实测 runner 版本不在本机，无法代查 —— 首次跑 CI 前请确认
+        #     `./config.cmd` 所在目录的 runner 版本，低于 v2.335.0 需先升级 runner。
 
       # ─────────────────────────────────────────────────────────────
       # 前置检查：把"环境缺件"变成一条可读的报错，而不是一堆莫名其妙的编译错误

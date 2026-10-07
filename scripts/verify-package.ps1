@@ -157,11 +157,18 @@ Write-Host ""
 #  [2/6] 原生工具链
 # ══════════════════════════════════════════════════════════════
 Write-Host "[2/6] 原生工具链 (native/)..."
+# 尺寸下限的作用是"挡住截断/空文件/占位"，不是"断言体积应当多大"——
+# 所以取下限时要贴着【当前真实体积】的量级，否则一次合法的瘦身就会把发布拦死。
+# ⚠️ 2026-10-07 实测教训：cjpegli 原本是 libjxl 预编译件（5.13 MB），下限 1MB 合适；
+#    但该次把 cjpegli 改为从 google/jpegli 自编译后体积降到 0.72 MB
+#    （不再链接 sjpeg/skcms/brotli/libpng/libjpeg-turbo ⇒ 700KB 上下），
+#    于是 1MB 下限把一次**完全正常**的发布拦了下来。
+#    ⇒ 已按新体积调整，并在注释里写清依据，避免下次又当"回归"去查。
 $nativeTools = @(
-    @{ File = "avifenc.exe"; Min = 1MB },
-    @{ File = "cjpegli.exe"; Min = 1MB },
-    @{ File = "cjxl.exe";    Min = 1MB },
-    @{ File = "cwebp.exe";   Min = 64KB }
+    @{ File = "avifenc.exe"; Min = 1MB },      # 实测 ~15.7 MB（自编译，含 aom+svt）
+    @{ File = "cjpegli.exe"; Min = 256KB },    # 实测 ~0.72 MB（自编译，不链 libpng/libjpeg-turbo）
+    @{ File = "cjxl.exe";    Min = 1MB },      # 实测 ~5.0 MB（libjxl 预编译件）
+    @{ File = "cwebp.exe";   Min = 64KB }      # 实测 ~0.71 MB
 )
 $nativeOk = @{}
 foreach ($t in $nativeTools) {
@@ -276,10 +283,13 @@ Check-File -RelPath "THIRD-PARTY-NOTICES.md" -MinBytes 512 | Out-Null
 # ③ licenses/ 目录: 至少 $minLicenseFiles 个非空许可全文
 #    真实下限远高于此 —— src/TrueToneCap.Core/Resources/tools-manifest.json 里四个工具的
 #    licenseFiles 去重后已有 20 份，且 licenses/ 还含 .NET 运行时 / WinAppSDK / ONNX Runtime /
-#    PaddleOCR 等组件的文本（实测目录内 42 个 .txt）。
+#    PaddleOCR 等组件的文本（实测目录内 43 个 .txt，2026-10-07 迁 WinML 后 +1）。
 #    门禁取 6 是【刻意保守】: 只拦"整个目录没复制进来""只放了 INDEX.json""全是占位空文件"
 #    这类真实故障，不拦"清单与目录条目数不一致"那种需要人工判断的漂移 —— 后者交给 INDEX.json。
 #    ⚠️ 改了 tools-manifest.json 的许可映射，这里要跟着复核。
+#    ⚠️ 2026-10-07 迁 WinML：新增 microsoft-winml-LicenseRef-Microsoft-EULA.txt。
+#       Windows ML Runtime 的 EULA 与通用 WindowsAppSDK EULA、以及 WindowsAppSDK.ML 2.1.74
+#       的 EULA 是【三份不同文本】（哈希互不相同），不可互相顶替。
 $licDir = Join-Path $PackageDir "licenses"
 $minLicenseFiles = 6
 $minLicenseBytes = 200

@@ -87,15 +87,9 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 | 组件 | 版本 | SPDX | 许可全文 | 再分发义务 |
 |---|---|---|---|---|
 | Google Highway (hwy, libjxl SIMD 抽象层) | libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag） | `Apache-2.0` | `licenses/highway-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。 |
-| brotli (libjxl 编入的容器压缩) | libjxl v0.11.2 的 submodule gitlink 36533a866ed1ca4b75cf049f4521e4ec5fe24727（未解析成 tag） | `MIT` | `licenses/brotli-MIT.txt` | MIT：随拷贝保留版权声明与许可声明；cjxl/cjpegli 里有 BrotliEncoder* 符号，确认静态链入。 |
-| libjpeg-turbo (libjxl 编入) | libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1（未解析成 tag） | `BSD-3-Clause` | `licenses/libjpeg-turbo-libjxl-pin-BSD-3-Clause.txt` | 同 avifenc 那份的 roll-up 义务：静态链接发行时文档须写 “This software is based in part on the work of the Independent JPEG Group” 并附 Modified BSD 全文。 |
-| libjpeg-turbo / IJG 基础代码 (libjxl 编入) | libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1 | `IJG` | `licenses/libjpeg-turbo-libjxl-pin-IJG.txt` | IJG 第 2 条（只分发可执行代码时须在文档声明基于 IJG 工作）；与 libavif 的 3.1.4.1 版本分属不同 revision，故各留一份。 |
+| Little CMS (lcms2) — 经 google/jpegli 的 third_party/lcms submodule 静态链入 cjpegli.exe | 取自 google/jpegli 的 submodule 提交 mm2/Little-CMS（2026-10-07 clone 时点，上游未给该 submodule tag） | `MIT` | `licenses/lcms-MIT.txt` | MIT：Copyright (c) 2023 Marti Maria Saguer。二进制再分发须保留版权声明与许可全文。 ⚠️ 2026-10-07 新增：cjpegli 由 libjxl 预编译件改为从 google/jpegli 自编译后，链接集合发生变化 —— 新增 lcms（经 jpegli_cms.lib），同时**不再**链接 sjpeg / skcms / brotli / libpng / libjpeg-turbo（二进制内实测 0 处相关符号，体积亦从 5.13 MB 降至 0.72 M... |
 | libjxl (JPEG XL) | 0.11.2 | `BSD-3-Clause` | `licenses/libjxl-BSD-3-Clause.txt` | BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。 |
 | libjxl (JPEG XL) | 0.11.2 | `LicenseRef-Google-BSD-plus-Patents` | `licenses/libjxl-LicenseRef-Google-Patent-Grant.txt` | Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。 |
-| libpng (libjxl 编入，PNG 输入) | libjxl v0.11.2 的 submodule gitlink 872555f4ba910252783af1507f9e7fe1653be252（glennrp/libpng）；文本内版权年份 1995-2025，未解析成 tag | `libpng-2.0` | `licenses/libpng-libjxl-pin-libpng-2.0.txt` | libpng License v2 第 3 条：版权声明不得从再分发中移除或改动；二进制内有 png_write_info 符号，确认链入。 |
-| sjpeg (libjxl 编入的 JPEG 编码器) | libjxl v0.11.2 的 submodule gitlink 94e0df6d0f8b44228de5be0ff35efb9f946a13c9（未解析成 tag） | `Apache-2.0` | `licenses/sjpeg-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发须附许可副本、保留 NOTICE 与源文件里的版权头、改动须标注；⚠️ 该仓 COPYING 是未填年份的 Apache 模板（无项目专属 Copyright 行），真正的版权头在 src/*.h 里，署名时不能只引这份文件。 |
-| skcms (libjxl 的 ICC 色彩变换) | libjxl v0.11.2 的 submodule gitlink b2e692629c1fb19342517d7fb61f1cf83d075492 | `BSD-3-Clause` | `licenses/skcms-BSD-3-Clause.txt` | BSD-3：二进制再分发须复制 “Copyright (c) 2018 Google Inc.” 声明与免责；⚠️ 上游 remote 是 skia.googlesource.com（本环境不可达），全文取自 GitHub 上的 google/skcms 同一 commit 镜像。 |
-| zlib (libjxl 编入) | libjxl v0.11.2 的 submodule gitlink 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf；文本内版权年份为 1995-2022，未解析成 tag | `Zlib` | `licenses/zlib-libjxl-pin-Zlib.txt` | zlib 第 2/3 条同 avifenc 那份；注意 libjxl 里的 revision 与 libavif 的 v1.3.2 版权年份不同，所以两份文本分开落盘、不互相顶替。 |
 
 ### JPEG XL 工具 cjxl.exe
 
@@ -137,8 +131,8 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 | Microsoft.Web.WebView2 SDK | 1.0.3719.77 | `NOASSERTION` | `licenses/webview2-notice.txt` | SDK 自带 THIRD-PARTY-NOTICES（Antlr、ICU 等），再分发时须一并保留。 |
 | Microsoft.WindowsAppSDK.WinUI (WinUI 框架) | 2.3.6 | `NOASSERTION` | `licenses/microsoft-winui-third-party-notices.txt` | WinUI 投影集自带的第三方声明，与上一份是不同文件（内容是其子集），Microsoft.UI.Xaml*.dll / Microsoft.WinUI.dll 再分发时一并放出。 |
 | Microsoft.WindowsDesktop.App 11 运行时 | 11.0.0-rc.1.26425.128 | `MIT` | `licenses/dotnet-windowsdesktop-runtime-MIT.txt` | MIT：WindowsBase.dll 等 WinForms/WPF 子集随包分发时须保留许可副本；该 LICENSE 与 netcore 那份措辞略有差异，故单独一份。 |
-| ONNX Runtime (Microsoft.ML.OnnxRuntime.DirectML / .Managed) | 1.24.4 | `MIT` | `licenses/onnxruntime-MIT.txt` | MIT：onnxruntime.dll / onnxruntime_providers_shared.dll / Microsoft.ML.OnnxRuntime.dll 随包再分发须保留声明。 |
-| ONNX Runtime (含 Microsoft.WindowsAppSDK.ML 2.1.74 内的同一份副本) | 1.24.4（与 windowsappsdk.ml 的 ThirdPartyNotices.txt 字节完全相同，只落一份） | `NOASSERTION` | `licenses/onnxruntime-third-party-notices.txt` | onnxruntime.dll 静态链入 protobuf/abseil/nsync/re2 等众多组件，各自署名义务只在这份 331 KB 汇总里，必须整份放出。 |
+| ONNX Runtime (Microsoft.Windows.AI.MachineLearning / .Managed —— 2026-10-07 迁 WinML 后由该包分发) | 1.24.4（迁 WinML 前由 Microsoft.ML.OnnxRuntime.DirectML 分发）；迁后随 WinML 2.4.89 分发 ORT 1.27.x | `MIT` | `licenses/onnxruntime-MIT.txt` | MIT：onnxruntime.dll / onnxruntime_providers_shared.dll / Microsoft.ML.OnnxRuntime.dll 随包再分发须保留声明。⚠ 2026-10-07 起 onnxruntime.dll 改由 WinML 提供（实测版本 1.27.20260711），但仍是同一 MIT 项目、义务不变，故不另落文件。 |
+| ONNX Runtime (含 Microsoft.Windows.AI.MachineLearning 2.4.89 内的同一份副本) | 331,175 B；实测 Microsoft.ML.OnnxRuntime.DirectML 1.24.4 与 Microsoft.Windows.AI.MachineLearning 2.4.89 两包内该文件【字节完全相同】(sha256 fb0af774…a8866)，故只落一份 | `NOASSERTION` | `licenses/onnxruntime-third-party-notices.txt` | onnxruntime.dll 静态链入 protobuf/abseil/nsync/re2 等众多组件，各自署名义务只在这份 331 KB 汇总里，必须整份放出。 |
 | SharpGen.Runtime / SharpGen.Runtime.COM (SharpGenTools) | 2.4.2-beta（nuspec repository commit 6990bcafe124a4c22515ad19cee5a081da8db67b） | `MIT` | `licenses/sharpgen-MIT.txt` | MIT：SharpGen.Runtime(.COM).dll 随包分发须保留声明；版权头是 “Alexandre Mutel, 2017 Jeremy Koritzinsky”。 |
 | Vortice.Windows (DXGI / Direct3D11 / DirectX / Mathematics) | Vortice.DXGI 3.8.3、Vortice.Direct3D11 3.8.3、Vortice.DirectX 3.8.3（commit 9e609cb9439c9872aa1b339f177e40ec96f77239）；Vortice.Mathematics 2.1.0 同仓不同 tag，未单独取 LICENSE | `MIT` | `licenses/vortice-MIT.txt` | MIT：Vortice.*.dll 确实随包分发（不是纯编译期依赖），须保留声明；包内无许可文件，全文取自 nuspec repository 记录的 commit。 |
 
@@ -147,6 +141,8 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 | 组件 | 版本 | SPDX | 许可全文 | 再分发义务 |
 |---|---|---|---|---|
 | PaddleOCR (PP-OCRv6_medium det/rec 权重来源) | 权重为 PP-OCRv6 medium；LICENSE 取自 PaddleOCR tag v3.3.0（v3.2.0 与 v3.3.0 的 LICENSE 字节一致，但未确认发模型的确切 release） | `Apache-2.0` | `licenses/paddleocr-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发 ONNX 权重须附带许可副本、保留来源的 NOTICE/版权头、改动文件（FP16/FP32 导出）须加显著标注；data/Models/ 三个件（PP-OCRv6_medium_det.onnx、_rec.onnx、ppocrv6_dict.txt 词表）同受此条约束；下载记录见 download_models.ps1（huggingface.co/RapidAI/RapidOCR，两模型已在脚本内固化 SHA256），HF 侧的 license 元数据本环境连不上... |
+
+> ⚠️ 有 1 份许可全文没有归到任何产物桶：['microsoft-winml-LicenseRef-Microsoft-EULA.txt']
 
 ### 产物级 SPDX 表达式（来自 `src/TrueToneCap.Core/Resources/tools-manifest.json`）
 
@@ -1753,10 +1749,117 @@ Copyright notice:
 
 ---
 
+### Little CMS (lcms2) — 经 google/jpegli 的 third_party/lcms submodule 静态链入 cjpegli.exe — MIT
+
+- 版本：取自 google/jpegli 的 submodule 提交 mm2/Little-CMS（2026-10-07 clone 时点，上游未给该 submodule tag）
+- 随包于：cjpegli.exe
+- 来源：上游源码树内的 `LICENSE`（libavif v1.4.2 的 CMake FetchContent 拉取的固定版本，各依赖的 tag 见 `src/TrueToneCap.Core/Resources/tools-manifest.json` 的 upstream 字段）
+- 本地副本：`licenses/lcms-MIT.txt`（SHA256 `bc1ba06a8fdf54466daa2b9a927fdca7c4d626a598045b2da62494a556491af6`）
+
+~~~text
+MIT License
+
+Copyright (c) 2023 Marti Maria Saguer
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the 
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to 
+permit persons to whom the Software is furnished to do so, subject
+to the following conditions:
+
+The above copyright notice and this permission notice shall be 
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF 
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+~~~
+
+---
+
+### libjxl (JPEG XL) — BSD-3-Clause
+
+- 版本：0.11.2
+- 随包于：cjxl.exe, cjpegli.exe
+- 来源：https://api.github.com/repos/libjxl/libjxl/contents/LICENSE?ref=v0.11.2
+- 本地副本：`licenses/libjxl-BSD-3-Clause.txt`（SHA256 `8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede`）
+
+~~~text
+Copyright (c) the JPEG XL Project Authors.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+~~~
+
+---
+
+### libjxl (JPEG XL) — LicenseRef-Google-BSD-plus-Patents
+
+- 版本：0.11.2
+- 随包于：cjxl.exe, cjpegli.exe
+- 来源：https://api.github.com/repos/libjxl/libjxl/contents/PATENTS?ref=v0.11.2
+- 本地副本：`licenses/libjxl-LicenseRef-Google-Patent-Grant.txt`（SHA256 `91915f8ae056a68a3c5bdf05d9f6f78bb6903e27a8ca3a8434c9e4ac87300575`）
+
+~~~text
+Additional IP Rights Grant (Patents)
+
+"This implementation" means the copyrightable works distributed by
+Google as part of the JPEG XL project.
+
+Google hereby grants to You a perpetual, worldwide, non-exclusive,
+no-charge, royalty-free, irrevocable (except as stated in this section)
+patent license to make, have made, use, offer to sell, sell, import,
+transfer and otherwise run, modify and propagate the contents of this
+implementation of JPEG XL, where such license applies only to those patent
+claims, both currently owned or controlled by Google and acquired in
+the future, licensable by Google that are necessarily infringed by this
+implementation of JPEG XL.  This grant does not include claims that would be
+infringed only as a consequence of further modification of this
+implementation.  If you or your agent or exclusive licensee institute or
+order or agree to the institution of patent litigation against any
+entity (including a cross-claim or counterclaim in a lawsuit) alleging
+that this implementation of JPEG XL or any code incorporated within this
+implementation of JPEG XL constitutes direct or contributory patent
+infringement, or inducement of patent infringement, then any patent
+rights granted to you under this License for this implementation of JPEG XL
+shall terminate as of the date such litigation is filed.
+~~~
+
+---
+
 ### brotli (libjxl 编入的容器压缩) — MIT
 
 - 版本：libjxl v0.11.2 的 submodule gitlink 36533a866ed1ca4b75cf049f4521e4ec5fe24727（未解析成 tag）
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe
 - 来源：https://api.github.com/repos/google/brotli/contents/LICENSE?ref=36533a866ed1ca4b75cf049f4521e4ec5fe24727
 - 本地副本：`licenses/brotli-MIT.txt`（SHA256 `3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94`）
 
@@ -1787,7 +1890,7 @@ THE SOFTWARE.
 ### libjpeg-turbo (libjxl 编入) — BSD-3-Clause
 
 - 版本：libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1（未解析成 tag）
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe
 - 来源：https://api.github.com/repos/libjpeg-turbo/libjpeg-turbo/contents/LICENSE.md?ref=8ecba3647edb6dd940463fedf38ca33a8e2a73d1
 - 本地副本：`licenses/libjpeg-turbo-libjxl-pin-BSD-3-Clause.txt`（SHA256 `60c756742db3ad1913304e8b13f0e86e22e51adb50cc0b3333c163f7e45ceec1`）
 
@@ -1931,7 +2034,7 @@ that were granted to the IJG for code derived from their software.
 ### libjpeg-turbo / IJG 基础代码 (libjxl 编入) — IJG
 
 - 版本：libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe
 - 来源：https://api.github.com/repos/libjpeg-turbo/libjpeg-turbo/contents/README.ijg?ref=8ecba3647edb6dd940463fedf38ca33a8e2a73d1
 - 本地副本：`licenses/libjpeg-turbo-libjxl-pin-IJG.txt`（SHA256 `4b7b9f8c03bb8d60270dfd12684e70ab21e4abfd27e73905cd1a7c4cae6f5cdb`）
 
@@ -2198,83 +2301,10 @@ Please send bug reports, offers of help, etc. to jpeg-info@jpegclub.org.
 
 ---
 
-### libjxl (JPEG XL) — BSD-3-Clause
-
-- 版本：0.11.2
-- 随包于：cjxl.exe, cjpegli.exe
-- 来源：https://api.github.com/repos/libjxl/libjxl/contents/LICENSE?ref=v0.11.2
-- 本地副本：`licenses/libjxl-BSD-3-Clause.txt`（SHA256 `8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede`）
-
-~~~text
-Copyright (c) the JPEG XL Project Authors.
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-~~~
-
----
-
-### libjxl (JPEG XL) — LicenseRef-Google-BSD-plus-Patents
-
-- 版本：0.11.2
-- 随包于：cjxl.exe, cjpegli.exe
-- 来源：https://api.github.com/repos/libjxl/libjxl/contents/PATENTS?ref=v0.11.2
-- 本地副本：`licenses/libjxl-LicenseRef-Google-Patent-Grant.txt`（SHA256 `91915f8ae056a68a3c5bdf05d9f6f78bb6903e27a8ca3a8434c9e4ac87300575`）
-
-~~~text
-Additional IP Rights Grant (Patents)
-
-"This implementation" means the copyrightable works distributed by
-Google as part of the JPEG XL project.
-
-Google hereby grants to You a perpetual, worldwide, non-exclusive,
-no-charge, royalty-free, irrevocable (except as stated in this section)
-patent license to make, have made, use, offer to sell, sell, import,
-transfer and otherwise run, modify and propagate the contents of this
-implementation of JPEG XL, where such license applies only to those patent
-claims, both currently owned or controlled by Google and acquired in
-the future, licensable by Google that are necessarily infringed by this
-implementation of JPEG XL.  This grant does not include claims that would be
-infringed only as a consequence of further modification of this
-implementation.  If you or your agent or exclusive licensee institute or
-order or agree to the institution of patent litigation against any
-entity (including a cross-claim or counterclaim in a lawsuit) alleging
-that this implementation of JPEG XL or any code incorporated within this
-implementation of JPEG XL constitutes direct or contributory patent
-infringement, or inducement of patent infringement, then any patent
-rights granted to you under this License for this implementation of JPEG XL
-shall terminate as of the date such litigation is filed.
-~~~
-
----
-
 ### libpng (libjxl 编入，PNG 输入) — libpng-2.0
 
 - 版本：libjxl v0.11.2 的 submodule gitlink 872555f4ba910252783af1507f9e7fe1653be252（glennrp/libpng）；文本内版权年份 1995-2025，未解析成 tag
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe
 - 来源：https://api.github.com/repos/glennrp/libpng/contents/LICENSE?ref=872555f4ba910252783af1507f9e7fe1653be252
 - 本地副本：`licenses/libpng-libjxl-pin-libpng-2.0.txt`（SHA256 `16d9daaafbf63a31a5bdc91d4600972548fef5aaa1244202393288dbd079c49a`）
 
@@ -2420,7 +2450,7 @@ be appreciated.
 ### sjpeg (libjxl 编入的 JPEG 编码器) — Apache-2.0
 
 - 版本：libjxl v0.11.2 的 submodule gitlink 94e0df6d0f8b44228de5be0ff35efb9f946a13c9（未解析成 tag）
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe
 - 来源：https://api.github.com/repos/webmproject/sjpeg/contents/COPYING?ref=94e0df6d0f8b44228de5be0ff35efb9f946a13c9
 - 本地副本：`licenses/sjpeg-Apache-2.0.txt`（SHA256 `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`）
 
@@ -2634,7 +2664,7 @@ be appreciated.
 ### skcms (libjxl 的 ICC 色彩变换) — BSD-3-Clause
 
 - 版本：libjxl v0.11.2 的 submodule gitlink b2e692629c1fb19342517d7fb61f1cf83d075492
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe
 - 来源：https://api.github.com/repos/google/skcms/contents/LICENSE?ref=b2e692629c1fb19342517d7fb61f1cf83d075492
 - 本地副本：`licenses/skcms-BSD-3-Clause.txt`（SHA256 `e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36`）
 
@@ -2675,7 +2705,7 @@ be appreciated.
 ### zlib (libjxl 编入) — Zlib
 
 - 版本：libjxl v0.11.2 的 submodule gitlink 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf；文本内版权年份为 1995-2022，未解析成 tag
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe
 - 来源：https://api.github.com/repos/madler/zlib/contents/LICENSE?ref=51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
 - 本地副本：`licenses/zlib-libjxl-pin-Zlib.txt`（SHA256 `845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243`）
 
@@ -6612,9 +6642,9 @@ SOFTWARE.
 
 ---
 
-### ONNX Runtime (Microsoft.ML.OnnxRuntime.DirectML / .Managed) — MIT
+### ONNX Runtime (Microsoft.Windows.AI.MachineLearning / .Managed —— 2026-10-07 迁 WinML 后由该包分发) — MIT
 
-- 版本：1.24.4
+- 版本：1.24.4（迁 WinML 前由 Microsoft.ML.OnnxRuntime.DirectML 分发）；迁后随 WinML 2.4.89 分发 ORT 1.27.x
 - 随包于：runtime
 - 来源：NuGet 包 `microsoft.ml.onnxruntime.directml` 版本 `1.24.4` 内的 `LICENSE`
 - 本地副本：`licenses/onnxruntime-MIT.txt`（SHA256 `c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674`）
@@ -6645,11 +6675,11 @@ SOFTWARE.
 
 ---
 
-### ONNX Runtime (含 Microsoft.WindowsAppSDK.ML 2.1.74 内的同一份副本) — NOASSERTION
+### ONNX Runtime (含 Microsoft.Windows.AI.MachineLearning 2.4.89 内的同一份副本) — NOASSERTION
 
-- 版本：1.24.4（与 windowsappsdk.ml 的 ThirdPartyNotices.txt 字节完全相同，只落一份）
+- 版本：331,175 B；实测 Microsoft.ML.OnnxRuntime.DirectML 1.24.4 与 Microsoft.Windows.AI.MachineLearning 2.4.89 两包内该文件【字节完全相同】(sha256 fb0af774…a8866)，故只落一份
 - 随包于：runtime
-- 来源：NuGet 包 `microsoft.ml.onnxruntime.directml` 版本 `1.24.4` 内的 `ThirdPartyNotices.txt`
+- 来源：NuGet 包 `microsoft.windows.ai.machinelearning` 版本 `2.4.89` 内的 `ThirdPartyNotices.txt`
 - 本地副本：`licenses/onnxruntime-third-party-notices.txt`（SHA256 `fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866`）
 
 > ⚠️ 这份有 323 KB，未在此内联（否则本文件会被微软那族 third-party notices 撑到 1 MB，应用内也翻不动）。**完整原文仍随包分发**，路径 `licenses/onnxruntime-third-party-notices.txt`。
