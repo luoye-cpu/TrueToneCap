@@ -178,6 +178,15 @@ if (args.Length >= 1 && args[0] == "--avif-ladder")
         return;
     }
 
+    // ═══ WinML 迁移压力回归 (--winml-stress [iterations] [modelDir]) ═══
+    // 驱动真实 OnnxOcrEngine，双 EP × 多尺寸 × 多轮 + 并发调用。
+    // 用途: winml 迁移验收 A4/A5；也可作为 ORT/运行时升级后的常驻回归。
+    if (args.Length >= 1 && args[0] == "--winml-stress")
+    {
+        Environment.ExitCode = WinMlStress.RunAsync(args).GetAwaiter().GetResult();
+        return;
+    }
+
 // ═══ 标准 ICC 空间实测验证 (--icc-check) ═══
 if (args.Length >= 1 && args[0] == "--icc-check")
 {

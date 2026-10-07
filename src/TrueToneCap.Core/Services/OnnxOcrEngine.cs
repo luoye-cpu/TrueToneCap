@@ -128,6 +128,28 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     // 用 SemaphoreSlim(1,1) 串行化整个识别过程, 后续调用排队等待。
     private readonly SemaphoreSlim _inferGate = new(1, 1);
 
+    // ═══ LayerNorm fusion workaround 的生效状态（2026-10-07 可观测化）═══
+    // 背景: `optimization.disable_simplified_layer_norm_fusion` 曾用 `catch {}` 静默吞掉失败。
+    //   实测（2026-10-07, ORT 1.27/WinML）：该配置在旧版 ORT 上是【必需】的（不设它时
+    //   SimplifiedLayerNormFusion 会破坏 PP-OCRv6 输出 → det 近似全 0 → 识别全空），
+    //   但在新版上可能已不再需要。静默吞掉意味着：升级 ORT 后【无法从日志判断它是否仍在生效】，
+    //   一旦某个 ORT 版本开始拒绝该 key，OCR 会静默失效而日志里没有任何线索。
+    // ⇒ 记录三态并回传，供日志与自检断言使用。
+    /// <summary>LayerNorm fusion workaround 的应用结果。</summary>
+    public enum LayerNormWorkaroundState
+    {
+        /// <summary>尚未创建过 SessionOptions。</summary>
+        NotAttempted,
+        /// <summary>配置已被 ORT 接受（预期状态）。</summary>
+        Applied,
+        /// <summary>ORT 拒绝该配置（本版本不支持）—— 需排查是否导致输出异常。</summary>
+        Rejected,
+    }
+
+    /// <summary>本引擎实例最近一次 SessionOptions 创建时 LayerNorm workaround 的结果。</summary>
+    public LayerNormWorkaroundState LayerNormWorkaround { get; private set; }
+        = LayerNormWorkaroundState.NotAttempted;
+
     // ── byte→float LUT (2026-08-09: 消除预处理每像素 /255f 除法, 内存带宽优化) ──
     private static readonly float[] s_byteToFloat = BuildByteToFloatLut();
 
@@ -199,6 +221,15 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
             _dict = File.ReadAllLines(dictPath);
             CoreLog.Info("模型加载", $"字典: {Path.GetFileName(dictPath)} ({_dict.Length} 字符)", LogCategory.OCR);
+
+            // ⚠ LayerNorm workaround 的生效状态必须留在【信息级】日志里：
+            //   它是"OCR 是否能出正确结果"的隐性前提，只在 Debug 级会随日志级别被过滤掉，
+            //   而升级 ORT/切换运行时（如迁 WinML）后正是靠这一行判断是否需要它。
+            CoreLog.Info("模型加载",
+                $"LayerNorm fusion workaround: {LayerNormWorkaround}" +
+                (LayerNormWorkaround == LayerNormWorkaroundState.Rejected
+                    ? " ⚠ 未被接受 —— 若出现 det 输出近全 0 / 识别全空，即为此因" : ""),
+                LogCategory.OCR);
 
             CoreLog.Info("模型加载", $"PP-OCRv6 medium 就绪 ({_provider}, FP16)", LogCategory.OCR);
             return true;
@@ -281,11 +312,25 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         //   ⚠ 与 ORT_DISABLE_ALL 相比, 预期 DirectML 推理从 10s+ 恢复至 <500ms。
         opts.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_BASIC;
         // 显式禁用 SimplifiedLayerNormFusion (ORT 官方配置项, 破坏 PP-OCRv6 输出的元凶)
+        //
+        // ⚠ 2026-10-07: 原实现是 `catch { }` 静默吞掉。后果 —— 升级 ORT 后如果一个版本开始
+        //   拒绝这个 key，OCR 会静默失效（det 近似全 0 → 识别全空），而日志里没有任何线索。
+        //   实测 WinML/ORT 1.27 上该配置已非必需，说明"是否需要它"会随版本变化 ⇒ 必须可观测。
+        //   现在：成功记 Debug，失败记 Warn（含原因）并落到 LayerNormWorkaround 状态位。
         try
         {
             opts.AddSessionConfigEntry("optimization.disable_simplified_layer_norm_fusion", "1");
+            LayerNormWorkaround = LayerNormWorkaroundState.Applied;
+            CoreLog.Debug("OCR", "LayerNorm fusion workaround 已生效", LogCategory.OCR);
         }
-        catch { /* ORT 版本不支持该配置时忽略 */ }
+        catch (Exception ex)
+        {
+            LayerNormWorkaround = LayerNormWorkaroundState.Rejected;
+            CoreLog.Warn("OCR",
+                $"LayerNorm fusion workaround 被 ORT 拒绝（{ex.GetType().Name}）—— " +
+                "本版本可能不再支持该配置项；若随后出现 det 输出接近全 0 / 识别全空，即为此因",
+                ex, LogCategory.OCR);
+        }
 
         // ── FP16 优化 ──
         // 启用内存模式加速 FP16 tensor 分配

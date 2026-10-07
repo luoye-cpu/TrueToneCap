@@ -4,30 +4,17 @@
     "net11.0-windows10.0.26100": {
       "System.Drawing.Common": {
         "type": "Direct",
-        "requested": "[10.0.11, )",
-        "resolved": "10.0.11",
-        "contentHash": "Schxw0FzXMAwa+If/oVxqjrmmiyUbw9KUAeqJOPnjsdAzkmUZXSZWNRLHZye2boFYlbMRkeBY6dba5hs8Mu4OQ==",
+        "requested": "[10.0.12, )",
+        "resolved": "10.0.12",
+        "contentHash": "FBUxiucg2gsnyItbpGgyXI5u8FYLcqdLKS1XJkHHTj3RK1c6kpsJr/Y9i4edUNF7LqCYFrHqpHEvpt8/lNBe9w==",
         "dependencies": {
-          "Microsoft.Win32.SystemEvents": "10.0.11"
-        }
-      },
-      "Microsoft.AI.DirectML": {
-        "type": "Transitive",
-        "resolved": "1.15.4",
-        "contentHash": "UblWBtQxcXcxwcn+jh0pfbq4zv2b6w7ThJ35qUV9gd8niGofrFWzVqZ6yqYDMiE+IJf8LRpG+H1cZpswceOeiA=="
-      },
-      "Microsoft.ML.OnnxRuntime.Managed": {
-        "type": "Transitive",
-        "resolved": "1.24.4",
-        "contentHash": "e5jsEo0HcCKDMkuRsMSievKoMv10Odv4MGmxbCin8SEm4Pto1qTpwti47xRwMtk9I/zVvfAiFIWquOq/0+22DA==",
-        "dependencies": {
-          "System.Numerics.Tensors": "9.0.0"
+          "Microsoft.Win32.SystemEvents": "10.0.12"
         }
       },
       "Microsoft.Win32.SystemEvents": {
         "type": "Transitive",
-        "resolved": "10.0.11",
-        "contentHash": "WXGazuzGf3eX24z1qgiGwP2df3t2T28QeZvMjlRqdjNuewQyLfbOb6rEXmk6Xs++gOQClmw90pkjPd9j/hNWDw=="
+        "resolved": "10.0.12",
+        "contentHash": "kdj5cqOwgZCMltEhQ4+WVUoFkMHG08EJfy1MDyS9H+FBg66vTTFyX8YcNl8IQh5wRQv79P+iduQgDGY8ucBR+w=="
       },
       "SharpGen.Runtime": {
         "type": "Transitive",
@@ -65,19 +52,18 @@
       "truetonecap.core": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.ML.OnnxRuntime.DirectML": "[1.24.4, )",
+          "Microsoft.Windows.AI.MachineLearning": "[2.4.89, )",
           "Vortice.DXGI": "[3.8.3, )",
           "Vortice.Direct3D11": "[3.8.3, )"
         }
       },
-      "Microsoft.ML.OnnxRuntime.DirectML": {
+      "Microsoft.Windows.AI.MachineLearning": {
         "type": "CentralTransitive",
-        "requested": "[1.24.4, )",
-        "resolved": "1.24.4",
-        "contentHash": "rXEy9biJdgr55TdDaHrhl35K0FRXRCbvyRUv4S4C3jTxyxrqSh8YcEp5bzw4S9UlcqQKNfpb3sE+VWvO2DZY6A==",
+        "requested": "[2.4.89, )",
+        "resolved": "2.4.89",
+        "contentHash": "uc+Lej0vmZJprvHEuNJs7xMegoParROM9pZ2a7uMeXQiELva42V1wAUoYHCsw/u5ho/nwkYasiSFWZ95ABot3A==",
         "dependencies": {
-          "Microsoft.AI.DirectML": "1.15.4",
-          "Microsoft.ML.OnnxRuntime.Managed": "1.24.4"
+          "System.Numerics.Tensors": "9.0.0"
         }
       },
       "Vortice.Direct3D11": {

@@ -132,7 +132,11 @@ public static class SelfTest
         if (bgra is null) { sb.AppendLine($"    [{label}] 无 8-bit 像素 ⇒ 跳过"); return; }
         try
         {
-            var decision = TrueToneCap.Core.Capture.ColorDecision.Build(d, tag, d.IsHdr, acm);
+            // 本样本落盘的格式恒为 PNG（下面 settings.Format 与 ManagedPngEncoder 都是 PNG）
+            // ⇒ 决定按 PNG 构造，让"决定"与"它服务的那个容器"同源。PNG 不属于
+            // "默认档 = Rec.709"那一族（白名单只有 JPEG LI / GainMap / WebP）⇒ 读数与旧行为一致。
+            var decision = TrueToneCap.Core.Capture.ColorDecision.Build(
+                d, tag, d.IsHdr, acm, TrueToneCap.Core.Encoding.OutputFormat.PNG);
             var (px, icc, degraded) = CapturePipelineService.PreparePixelsWithIcc(
                 bgra, cap.Width, cap.Height, decision);
             var settings = new TrueToneCap.Core.Encoding.EncodingSettings
@@ -355,10 +359,15 @@ public static class SelfTest
                 // 所以审计里这一行就是产物会怎么写的那一行 —— 两侧不一致已经不可能发生。
                 try
                 {
+                    // 这两行是"两档下拉各自解析成什么"的格式无关读数 ⇒ 显式按 PNG 构造。
+                    // 为什么不传 null：本卡片的用途是与界面那张卡对照，而界面那张卡读的决定带格式
+                    // （MainWindow.ColorManagement 传 ui.Format）。用 PNG 这个【不属于 Rec.709 默认档】
+                    // 的成员，读到的正是"未受格式口径收口"的解析结果 —— 两档各自的差异才看得清；
+                    // 换 JPEG/WebP 的话两行都会被格式收口成 sRGB，反而看不出下拉本身解析成了什么。
                     var dec = TrueToneCap.Core.Capture.ColorDecision.Build(
-                        d, "System", d.IsHdr, state.acm);
+                        d, "System", d.IsHdr, state.acm, TrueToneCap.Core.Encoding.OutputFormat.PNG);
                     var decExplicit = TrueToneCap.Core.Capture.ColorDecision.Build(
-                        d, "BT2020", d.IsHdr, state.acm);
+                        d, "BT2020", d.IsHdr, state.acm, TrueToneCap.Core.Encoding.OutputFormat.PNG);
                     sb.AppendLine("  色彩决定(源色域→目标=声明，像素路与声明路共用):");
                     sb.AppendLine($"    下拉=跟随显示器 → {dec.Describe()}");
                     sb.AppendLine($"    下拉=Rec.2020    → {decExplicit.Describe()}");
@@ -388,18 +397,22 @@ public static class SelfTest
                     sb.AppendLine("  交付形态(=界面卡片那行箭头; HDR 开关按开、两档目标色域各问一次):");
                     foreach (var (name, f) in fmts)
                     {
+                        // 决定带【本格自己的格式】：JPEG / WebP 的默认档是 Rec.709，
+                        // 不带 f 的话这两格会印出 PNG 才有的行为 ⇒ 这张卡就不再是界面卡片的镜像。
                         var sSrgb = TrueToneCap.Core.Encoding.FormatColorFacts.Delivery(
-                            TrueToneCap.Core.Capture.ColorDecision.Build(d, "sRGB", true, state.acm), f);
+                            TrueToneCap.Core.Capture.ColorDecision.Build(d, "sRGB", true, state.acm, f), f);
                         var sWide = TrueToneCap.Core.Encoding.FormatColorFacts.Delivery(
-                            TrueToneCap.Core.Capture.ColorDecision.Build(d, "BT2020", true, state.acm), f);
+                            TrueToneCap.Core.Capture.ColorDecision.Build(d, "BT2020", true, state.acm, f), f);
                         sb.AppendLine($"    {name,-17} Rec.709⇒{sSrgb,-19} Rec.2020⇒{sWide}");
                     }
                     // 声明通道逐格式一句：同一枚目标色域在不同容器里长什么样（BT.709 只出现在 matrix 那一维）
                     sb.AppendLine("  声明通道(=界面卡片那句灰字; 目标按本屏解析):");
                     foreach (var (name, f) in fmts)
                     {
+                        // 同样带本格的格式：这条印的是"目标色域按本屏解析后，装进这个容器长什么样"，
+                        // 而目标色域本身就受格式口径影响（JPEG/WebP 默认档 Rec.709）⇒ 决定与容器必须同源。
                         var dec = TrueToneCap.Core.Capture.ColorDecision.Build(
-                            d, "System", true, state.acm);
+                            d, "System", true, state.acm, f);
                         var del = TrueToneCap.Core.Encoding.FormatColorFacts.Delivery(dec, f);
                         sb.AppendLine($"    {name,-17} " + TrueToneCap.Core.Encoding.FormatColorFacts.Declaration(
                             f, dec.TargetTag, del == TrueToneCap.Core.Encoding.HdrDelivery.PqContainer));
@@ -436,7 +449,10 @@ public static class SelfTest
                     foreach (var p in probes)
                     {
                         bool hdrScreen = d is { IsHdr: true };
-                        var dcd = TrueToneCap.Core.Capture.ColorDecision.Build(d, p.Tag, true, state.acm);
+                        // 带 p.Fmt：这 4 条探针走的正是产品那条路（决定 → BuildEncodingSettings），
+                        // 而路径上的格式口径收口（JPEG 家族/WebP 的 Rec.709 默认档）就发生在决定里
+                        // ⇒ 不带格式的话，探针量到的色域/形态与真实产物不是同一份输入。
+                        var dcd = TrueToneCap.Core.Capture.ColorDecision.Build(d, p.Tag, true, state.acm, p.Fmt);
                         var es = probePipeline.BuildEncodingSettings(
                             p.Fmt, true, null, snap, p.Tag, state.acm, dcd);
                         var es0 = probePipeline.BuildEncodingSettings(

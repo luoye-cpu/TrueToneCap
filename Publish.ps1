@@ -13,7 +13,9 @@
 #   .\Publish.ps1                              # 默认发布（版本取自 csproj）
 #   .\Publish.ps1 -Version v0.3.4-beta         # 指定版本
 #   .\Publish.ps1 -NoReadyToRun                # 禁用 ReadyToRun
-#   .\Publish.ps1 -CoreAot                     # 试验性 Core AOT
+#   .\Publish.ps1 -CoreAot                     # 试验性 Core AOT（当前为占位，见下）
+#   .\Publish.ps1 -Msix                        # 追加产出 MSIX（商店/侧载），并做内容核对
+#   .\Publish.ps1 -Msix -FrameworkDependent    # 商店包：框架依赖，实测 150.9 → 84.6 MB（-44%）
 #   .\Publish.ps1 -Force                       # 允许强制终止运行中的 TrueToneCap.exe
 
 param(
@@ -28,6 +30,22 @@ param(
 
     [switch]$CoreAot = $false,
     [switch]$NoReadyToRun = $false,
+
+    # ═══ MSIX 打包（2026-10-07）═══
+    # 追加产出 .msix / .appxsym，供微软商店提交或侧载。
+    # 不影响既有的绿色包产物 —— 两者并行生成。
+    # ⚠️ 该开关只是把 -p:TtcMsixPackage=true 透传给 App 项目；
+    #    MSIX 属性的"成套"约束（WindowsPackageType + EnableMsixTooling + AppxManifest）
+    #    全部封装在 App.csproj 里，避免在这里出现半套配置。
+    [switch]$Msix = $false,
+
+    # ═══ 框架依赖（2026-10-07）═══
+    # 只在 -Msix 下有意义：把 .NET 与 WinAppSDK 运行时交给目标机/商店，
+    # 实测 MSIX 从 150.90 MB 降到 84.57 MB（-44%）。
+    # ⚠️ 不加 -Msix 单独用本开关会产出一个框架依赖的未打包构建（合法但不适合分发：
+    #    绿色包的价值就是"解压即用"）。故这里显式告警，而不是静默照做。
+    # 理由与实测数字详见 TrueToneCap.App.csproj 的 TtcFrameworkDependent 注释。
+    [switch]$FrameworkDependent = $false,
 
     # 允许强制终止正在运行的 TrueToneCap.exe（默认拒绝，防止误杀造成用户数据丢失）
     [switch]$Force = $false,
@@ -369,7 +387,15 @@ Write-Host ""
 # ══════════════════════════════════════════════════════════════
 $extraArgs = @()
 
-if (-not $NoReadyToRun) {
+# ⚠️ 框架依赖时**强制关闭 R2R**，且不受 -NoReadyToRun 影响之外的选择。
+# 理由（2026-10-07 实测）：R2R 编译产物与**目标运行时**绑定。
+#   自包含时 R2R 映像里含的是自包含布局的引用；改成框架依赖后仍打 R2R，
+#   会产出一个 122 MB 的 TrueToneCap.r2r.dll（实测 MSIX 因此从 84.6 MB 反弹到 175.8 MB），
+#   既与"瘦身"目标相反，也让映像与框架依赖布局不匹配。
+#   ⇒ 框架依赖 = 纯 JIT（这也是官方对 framework-dependent 的常规做法）。
+if ($FrameworkDependent) {
+    Write-Host "   🐢 ReadyToRun 已禁用（框架依赖模式下强制；R2R 映像与框架依赖布局不匹配）" -ForegroundColor DarkGray
+} elseif (-not $NoReadyToRun) {
     $extraArgs += "-p:PublishReadyToRun=true"
     $extraArgs += "-p:PublishReadyToRunComposite=true"
     Write-Host "   ⚡ ReadyToRun 已启用 (复合映像)"
@@ -393,6 +419,35 @@ if ($CoreAot) {
 
 # 版本号注入（覆盖 Directory.Build.props 的默认值；已剥离 v 前缀）
 $extraArgs += "-p:Version=$VersionForMsBuild"
+
+# ═══ MSIX 打包开关透传（2026-10-07）═══
+# 只传这一个属性：MSIX 的"成套"约束（WindowsPackageType=MSIX + EnableMsixTooling
+# + AppxManifest 项）全部在 App.csproj 的条件块里，由它一处决定，避免半套配置。
+# 实测教训（写在这里防止以后"优化"掉）：若只设 WindowsPackageType=MSIX 而漏掉
+# EnableMsixTooling，`dotnet build` 会**成功退出但一个包都不产出**（假成功），
+# 而 MSIX 自己的 targets 也会因 AppxManifest 项缺失而报 "Improper project configuration"。
+if ($Msix) {
+    $extraArgs += "-p:TtcMsixPackage=true"
+    Write-Host "   📦 MSIX 打包已启用（产出 .msix + .appxsym；与绿色包并行）" -ForegroundColor Cyan
+}
+
+# ═══ 框架依赖透传（2026-10-07）═══
+# 实测体积：自包含 150.90 MB → 框架依赖 84.57 MB（-66.3 MB / -44%）。
+# ⚠️ 只传属性、不做联动：TtcMsixPackage 与 TtcFrameworkDependent 在 App.csproj 里
+#    是【两个独立开关】（只传后者会得到框架依赖的未打包构建，那是合法用法）。
+#    但发布场景下两者应当配套 —— 否则产出的绿色包要求用户预装运行时，与"解压即用"矛盾。
+#    故这里在"没开 -Msix 却开了 -FrameworkDependent"时明确告警。
+if ($FrameworkDependent) {
+    $extraArgs += "-p:TtcFrameworkDependent=true"
+    if ($Msix) {
+        Write-Host "   🪶 框架依赖已启用：MSIX 体积显著减小（实测 150.9 → 84.6 MB）" -ForegroundColor Cyan
+        Write-Host "      代价：目标机需有 .NET 与 WinAppSDK 运行时（商店包由 Windows 自动解析）" -ForegroundColor DarkGray
+    } else {
+        Write-Host "   ⚠️ -FrameworkDependent 但未加 -Msix" -ForegroundColor Yellow
+        Write-Host "      绿色包将变成【框架依赖】：用户解压后若没装 .NET / WinAppSDK 运行时则无法启动，" -ForegroundColor Yellow
+        Write-Host "      与'解压即用'的定位冲突。发布绿色包请去掉本开关。" -ForegroundColor Yellow
+    }
+}
 
 # ══════════════════════════════════════════════════════════════
 #  [0.5/6] 校验依赖锁定文件存在（保证可复现还原）
@@ -602,10 +657,25 @@ Write-Host "[2/6] 编译并发布 ($Configuration / $Runtime)..."
 
 Push-Location $RepoRoot
 try {
+    # ═══ 自包含开关必须在这里按开关组装，不能在 csproj 里写死 ═══
+    # 实测教训（2026-10-07）：命令行的 -p: 优先级**高于** csproj 里的属性。
+    # 这里原本硬编码 `--self-contained true -p:WindowsAppSDKSelfContained=true`，
+    # 于是 App.csproj 里为 TtcFrameworkDependent 写的 false **被完全覆盖** ——
+    # 表现为"开了框架依赖，MSIX 反而更大（175.82 MB）"：既没瘦身，
+    # 又因 @extraArgs 里的 PublishReadyToRun=true 多进了一个 122 MB 的复合 R2R 映像。
+    # ⇒ 改为按 $FrameworkDependent 组装，让开关真正生效。
+    $scArgs = @()
+    if ($FrameworkDependent) {
+        $scArgs += "--self-contained"; $scArgs += "false"
+        $scArgs += "-p:WindowsAppSDKSelfContained=false"
+    } else {
+        $scArgs += "--self-contained"; $scArgs += "true"
+        $scArgs += "-p:WindowsAppSDKSelfContained=true"
+    }
+
     & dotnet publish $AppProj `
         -c $Configuration -r $Runtime `
-        --self-contained true `
-        -p:WindowsAppSDKSelfContained=true `
+        @scArgs `
         @extraArgs `
         -o $OutputDir
     if ($LASTEXITCODE -ne 0) { throw "编译失败 (dotnet publish 退出码 $LASTEXITCODE)" }
@@ -647,6 +717,14 @@ try {
 #      因此与 .NET 运行时的符号解析路径也无交集。
 # 来源: App.csproj 的 CopyPriAndXbf Target 用 $(PublishDir)*.pdb 通配「所有」pdb 搬进 data/，
 #       于是把 Microsoft.AI.DirectML 包里的私有符号一并搬进了发布产物（约 12.3 MB / 占包体积 3%）。
+#
+# ⚠ 2026-10-07 迁 WinML 后的现状（实测）：ONNX Runtime 依赖由 Microsoft.ML.OnnxRuntime.DirectML
+#    换成了 Microsoft.Windows.AI.MachineLearning 2.4.89，`microsoft.ai.directml` 已【不再出现在
+#    依赖图里】，发布目录中第三方 .pdb 数量实测为 0 ⇒ 下面这段目前是【空转】。
+#    保留它而不是删掉，理由：这是一道"防止第三方私有符号混进发布包"的通用闸门，
+#    未来任何包（含 WinML 后续版本、或新增的厂商 EP 包）重新带上 .pdb 时它仍然拦得住；
+#    删掉则会静默恢复成"谁带进来就发出去"。
+#    上面的 12.3 MB 是历史实测值，保留作文档，不代表当前体积。
 # 范围: 只剔第三方。TrueToneCap*.pdb 是本项目的托管符号，留着 —— 它们是用户报障时
 #       异常堆栈能带上行号的唯一依据，删了反而伤害可支持性。
 # 放在 [3/6]~[6/6] 之前：既让 [5.5/6] 冒烟看到的就是清理后的目录，
@@ -808,6 +886,29 @@ if (-not (Test-Path $smokeScript)) {
     Write-Host "   ✅ 冒烟验证通过"
 }
 Write-Host ""
+
+# ══════════════════════════════════════════════════════════════
+#  [5.6/6] MSIX 内容核对（仅 -Msix 时）
+# ══════════════════════════════════════════════════════════════
+# 为什么单独一步：MSIX 是**与绿色包不同的容器**，verify-package.ps1 核对的是发布目录，
+# 看不见包内。2026-10-07 实测过这个盲区 —— 打出的 MSIX 里 4 枚原生编码器全部缺失，
+# 而编译/发布/打包/冒烟**全程绿灯**（OCR 模型在、原生工具不在，因为前者是声明的 Content 项、
+# 后者当时只是 Copy 动作）。⇒ 必须解包核对，且必须在盖章前失败。
+if ($Msix) {
+    Write-Host "[5.6/6] MSIX 内容核对..." -ForegroundColor Cyan
+    $msixGate = Join-Path $RepoRoot "scripts\verify-msix.ps1"
+    if (-not (Test-Path $msixGate)) {
+        throw "缺少 $msixGate —— -Msix 已启用但核对脚本不存在，拒绝出包"
+    }
+    & $msixGate
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "❌ MSIX 核对未通过 —— 拒绝为该产物生成校验和与构建元数据。" -ForegroundColor Red
+        Write-Host "   典型原因：原生工具/OCR 资产未进包（见 scripts/verify-msix.ps1 文件头）。" -ForegroundColor Yellow
+        throw "MSIX 内容核对失败 (退出码 $LASTEXITCODE)"
+    }
+    Write-Host ""
+}
 
 # ══════════════════════════════════════════════════════════════
 #  [5.8/6] 打版本标签（可选）

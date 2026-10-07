@@ -47,7 +47,8 @@ public static class NativeWebPEncoder
 
     /// <summary>编码 BGRA 像素为 WebP 文件。</summary>
     public static void Encode(byte[] bgra, int w, int h, string path,
-        float quality = 90f, bool lossless = false, byte[]? iccProfile = null)
+        float quality = 90f, bool lossless = false, byte[]? iccProfile = null,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         if (!IsAvailable)
             throw new DllNotFoundException("[WebP] cwebp.exe 不可用");
@@ -66,7 +67,13 @@ public static class NativeWebPEncoder
             var exePath = NativeLibraryResolver.GetExePath("cwebp.exe");
             var qualityArg = lossless ? "-lossless" : $"-q {(int)quality}";
             var iccArg = FormatHelper.IsEmbeddableIcc(iccProfile) ? "-metadata icc" : "";
-            var args = $"{qualityArg} {iccArg} -mt \"{tmpPng}\" -o \"{path}\"";
+            // ═══ 2026-10-07：新增 `-m`（压缩方法）—— 原来根本不传，即一直吃 cwebp 默认值 4 ═══
+            // 4K 真实截图实测：m0 0.39s/306KB  m2 0.42s/268KB  m4 0.74s/258KB  m6 0.95s/248KB。
+            // ⚠ 如实说明：三档之间的差别**远小于** AVIF/JXL（总跨度只有 0.39→0.95 s、306→248 KB），
+            //   所以这一栏对 WebP 的实际收益有限。仍然提供，是因为"用户能否控制"与"收益大不大"是两件事。
+            // ⚠ 默认档 = m4，与改动前 cwebp 的默认值**相同** ⇒ WebP 的默认产物不变。
+            var methodArg = $"-m {CompressionEffortMap.WebPMethod(effort)}";
+            var args = $"{qualityArg} {methodArg} {iccArg} -mt \"{tmpPng}\" -o \"{path}\"";
 
             var psi = new System.Diagnostics.ProcessStartInfo
             {

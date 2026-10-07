@@ -92,9 +92,12 @@ public static class JpegLiNative
     /// <param name="chromaSubsampling">色度采样: "444" / "422" / "420"。</param>
     /// <param name="iccProfile">可选 ICC Profile。</param>
     /// <param name="forceBaseline">强制 Baseline Sequential (SOF0)。Gain Map Base JPEG 需要此模式。</param>
+    /// <param name="effort">压缩强度档位。只有「最小体积」档会加 <c>--xyb</c>（实测在所有内容与质量上
+    /// 一律更小 2.4–4.7%，代价约 1.5–1.8× 时间）。见 <see cref="CompressionEffortMap.JpegLiUseXyb"/>。</param>
     /// <returns>JPEG 字节流 (FFD8...FFD9)。</returns>
     public static byte[] Encode(byte[] bgra, int width, int height, float distance = 1.0f,
-        string chromaSubsampling = "444", byte[]? iccProfile = null, bool forceBaseline = false)
+        string chromaSubsampling = "444", byte[]? iccProfile = null, bool forceBaseline = false,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         var exePath = GetExePath();
 
@@ -132,10 +135,20 @@ public static class JpegLiNative
             // --progressive_level 2: 默认 Progressive，体积小 5-10%
             // --progressive_level 0: Baseline，Gain Map 兼容性要求
             string progArg = forceBaseline ? " --progressive_level 0" : ""; // 默认 Progressive(2) 更省体积
+
+            // ═══ 2026-10-07：「最小体积」档加 --xyb ═══
+            // 实测（两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）**一律更小**：
+            //   样张 A −4.7% / −2.9% / −3.8% / −4.6%   样张 B −4.0% / −2.4% / −3.5%
+            //   GainMap Baseline 路 −1.5%
+            // 这是本仓所有编码器小参里唯一"在所有测过的内容与质量上都为正"的开关。
+            // 机理：XYB 是感知均匀色彩空间，量化误差按人眼敏感度分布 ⇒ 同感知质量下码率更低。
+            // ⚠ 只在最小体积档：代价约 1.5–1.8× 时间，且默认档必须与改动前逐字节一致。
+            string xybArg = CompressionEffortMap.JpegLiXybArg(effort);
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {distArg}{progArg}{chromaArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"--distance {distArg}{progArg}{xybArg}{chromaArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -263,7 +276,8 @@ public static class JpegLiNative
     ///   - 3 分量 RGB → 每通道独立增益 (即使像素相等也可能被当作多通道处理 → 偏色)
     /// 输入: 单通道灰度像素 (每像素 1 byte), 写 PPM P5 → cjpegli 输出 YCbCr400。</summary>
     public static byte[] EncodeGray(byte[] gray, int width, int height,
-        float distance = 1.0f, bool forceBaseline = false)
+        float distance = 1.0f, bool forceBaseline = false,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         var exePath = GetExePath();
         var tmpPpm = Path.Combine(Path.GetTempPath(), $"ttc_jpegli_gray_{Guid.NewGuid():N}.pgm");
@@ -281,10 +295,12 @@ public static class JpegLiNative
 
             float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
             string progArg = forceBaseline ? " --progressive_level 0" : "";
+            // 增益图（灰度）同样受益：实测 -p 0 路 --xyb 省 1.5%
+            string xybArg = CompressionEffortMap.JpegLiXybArg(effort);
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {clampedDist:F4}{progArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"--distance {clampedDist:F4}{progArg}{xybArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

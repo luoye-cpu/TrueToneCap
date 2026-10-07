@@ -76,6 +76,16 @@ public sealed class EncodingSettings
     /// 跳过 GPU→CPU 回读再上传的往返开销。</summary>
     public ID3D11Texture2D? GpuTexture { get; set; }
 
+    /// <summary>压缩强度（三档）。只影响 AVIF / JPEG XL / WebP 的 effort/speed 旋钮，
+    /// <b>不动质量参数</b> —— 两者是正交的两根轴（质量决定"丢多少信息"，强度决定
+    /// "花多少时间去找更好的编码方式"）。JPEG LI / PNG 不读它（它们没有独立旋钮，见
+    /// <see cref="CompressionEffort"/> 的文件头说明）。
+    /// <para>默认 <see cref="CompressionEffort.Balanced"/>：这是 2026-10-07 用户口径
+    /// （"一档中间"为默认），并且对 AVIF/WebP 而言**恰好等于改动前的硬编码值**
+    /// （avifenc `-s 6`、cwebp 默认 `-m 4`）⇒ 这两个格式的产物不变；
+    /// 只有 JPEG XL 从 `-e 9`（实测 25 s）变成 `-e 5`（实测 0.82 s）—— 那正是用户要的"顺带提速"。</para></summary>
+    public CompressionEffort Effort { get; set; } = CompressionEffort.Balanced;
+
     /// <summary>
     /// 【换格式保底】的总闸：本次编码后端失败时，允不允许把这张图改存成 PNG（而不是什么都不落）。
     /// <para>产品默认是【开】（截图工具的失败模式应该是"无损但格式不对"，不是"按下热键什么都没发生"），
@@ -211,7 +221,12 @@ public interface IAvifEncoder
     /// </param>
     /// <param name="texture">GPU 纹理（可选）。纹理是 BGRA8 打包格式，但 10-bit 请求不受影响：
     /// 位深由 outputBitDepth 控制而非输入格式，故纹理路径同样可产出 10-bit。</param>
-    Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null);
+    /// <param name="effort">压缩强度三档（2026-10-07 新增）。只映射到各后端的 effort/speed 旋钮，
+    /// <b>不改变质量参数</b>。默认 <see cref="CompressionEffort.Balanced"/> 与改动前行为一致
+    /// （avifenc 软件路仍是 <c>-s 6</c>、NVENC 路仍是 P1 档位附近的均衡值）。
+    /// 加在接口上而不是塞进 <c>EncodingSettings</c> 传参：四个后端（libaom/qsv/nvenc/mft）
+    /// 都要各自映射到不同刻度，集中在一个映射表里（<see cref="CompressionEffortMap"/>）。</param>
+    Task EncodeAsync(byte[] bgra, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null, ID3D11Texture2D? texture = null, CompressionEffort effort = CompressionEffort.Balanced);
 
     /// <summary>
     /// 以 **真 10-bit 输入**（A2R10G10B10 打包，每像素 4 字节）编码。

@@ -42,6 +42,12 @@
          JPEG 编码实际走 JpegLiNative → cjpegli.exe 子进程, 与 mozjpeg 无关。) -->
     <PackageReference Include="Vortice.Direct3D11" />
     <PackageReference Include="Vortice.DXGI" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" />
+    <!-- ═══ 2026-10-07: ONNX 推理运行时改用 WinML ═══
+         原: Microsoft.ML.OnnxRuntime.DirectML 1.24.4
+         新: Microsoft.Windows.AI.MachineLearning 2.4.89（WinML，内含 ORT 1.27）
+         理由与取舍见 ../../Directory.Packages.props 该条目的完整注释。
+         ⚠ 不要再把 Microsoft.ML.OnnxRuntime.DirectML 加回来 —— WinML 已自带托管 API
+           与原生运行时，两包并存会造成托管/原生版本错配。 -->
+    <PackageReference Include="Microsoft.Windows.AI.MachineLearning" />
   </ItemGroup>
 </Project>

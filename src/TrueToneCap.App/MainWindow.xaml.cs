@@ -174,7 +174,7 @@ public sealed partial class MainWindow : Window
             Hint: "✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。目标色域就是【底图】的色彩空间：Rec.709 或显式 Rec.2020（三件一起搬，底图本身仍是 SDR）。"),
         [OutputFormat.JPEG_LI] = new(OutputFormat.JPEG_LI,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
-            Hint: "✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；Rec.2020 目标只靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"),
+            Hint: "✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709 —— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020。Rec.2020 目标靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"),
         [OutputFormat.JPEG_XL] = new(OutputFormat.JPEG_XL,
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "✅ 新一代格式，Modular 模式对截图极优。支持 HDR (Rec.2100 PQ) + 广色域。16-bit 走 16-bit PNG 中转（cjxl 无 -b 参数，sBIT=16 声明实际精度）。"),
@@ -189,7 +189,7 @@ public sealed partial class MainWindow : Window
             Hint: "✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"),
         [OutputFormat.WebP] = new(OutputFormat.WebP,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
-            Hint: "⚠ 仅 8-bit、容器没有 HDR 通道；广色域目标靠 ICC 声明（Rec.709 目标不写声明）。适合简单分享场景。"),
+            Hint: "⚠ 仅 8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709（不写声明）—— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020（靠 ICC 声明）。适合简单分享场景。"),
         [OutputFormat.TIFF] = new(OutputFormat.TIFF,
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"),
@@ -593,9 +593,15 @@ public sealed partial class MainWindow : Window
                 // 可选目标色域 2026-09-19 起只剩 sRGB / BT.2020（P3、Adobe RGB 已从界面移除），
                 // 而"ICC 烘焙开关"2026-09-22 也删了 —— 原先那句还在教用户去开一个不存在的开关、
                 // 选一个选不到的色域。"Gain Map"现在也不是格式而是 JPEG LI 下的开关，不能列进"换格式"的建议里。
+                // ⚠ 2026-10-06：原来那句"广色域目标仍然生效"已不准确 —— JPEG 与 WebP 的默认档
+                //   从这轮起就是 Rec.709（Core 的 ColorDecision.DefaultsToRec709），「跟随显示器」
+                //   解析成广色域【不会】让它们输出 Rec.2020。所以这里必须把条件说全：
+                //   宽色域只在你亲手选 Rec.2020 时才生效。
                 fmtHdrWarn = _hdrHardwareSupported
                     ? "\n🔒 当前格式没有 HDR 通道（容器写不了 PQ）— HDR 开关已禁用，产物是 8-bit SDR。"
-                      + (cap.SupportsWideGamut ? " 广色域目标仍然生效（这类格式只靠 ICC 声明）。" : "")
+                      + (cap.SupportsWideGamut
+                          ? " Rec.2020 目标仍然生效（这类格式只靠 ICC 声明）—— 但只有亲手选 Rec.2020 才会输出 Rec.2020，默认档「跟随显示器」一律按 Rec.709 输出。"
+                          : "")
                       + " 要 HDR 请选 PNG / JPEG XL / AVIF / TIFF，或在 JPEG 下打开「附带增益图」。"
                     : "\n🔒 此显示器不支持 HDR — HDR 开关已禁用。";
             }
@@ -657,7 +663,8 @@ public sealed partial class MainWindow : Window
             {
                 HdrHintTxt.Text = _hdrSystemHint
                     + "\n🔒 增益图为 Ultra HDR：HDR 输出锁定开启。上面「目标色域」决定底图与增益图共用哪套原色"
-                    + " —— Rec.709 ⇒ 两者同在 Rec.709 原色；Rec.2020 ⇒ 底图、增益比、声明三件同搬 Rec.2020。"
+                    + " —— 默认档 Rec.709（「跟随显示器」解析成广色域也一样）⇒ 两者同在 Rec.709 原色；"
+                    + "只有亲手选 Rec.2020，才是底图、增益比、声明三件同搬 Rec.2020。"
                     + "底图本身恒为 SDR，HDR 由增益图还原，不写在底图的声明里。";
             }
         }
@@ -1167,10 +1174,14 @@ public sealed partial class MainWindow : Window
         "JPEG：只有 ICC 一条声明通道，没有代码点 —— ",
         "{0} 原色嵌 APP2/ICC（实测产物里 ICC_PROFILE 与 acsp 都在）。",
         "{0} 目标【什么都不写】，靠 JFIF 默认。",
+        "本格式的默认目标就是 Rec.709：跟随显示器也好、默认档也好，都不会自动升到 Rec.2020 —— ",
+        "只有用户把目标【显式】选成 Rec.2020 时才会写出 Rec.2020 原色。",
         "容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。",
         "WebP：同样只有 ICC 一条通道 —— ",
         "{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。",
         "{0} 目标【什么都不写】（实测对照组无 ICCP）。",
+        "本格式的默认目标同样是 Rec.709：跟随显示器或默认档都只给 Rec.709，",
+        "要 Rec.2020 得由用户【显式】指定 —— 与 JPEG 同一条规则，两族格式不再各自为政。",
         "无 HDR 通道 ⇒ HDR 开关落空成 8-bit SDR，但原色声明照常；缺 cwebp.exe 时整份产物会换成 PNG。",
         "TIFF：没有代码点通道 ⇒ 只靠 ICC，连 Rec.709 也老实嵌一份（不像 JPEG/WebP 能省）。",
         "HDR 用带 PQ TRC 的 ICC 声明。",
@@ -1562,7 +1573,7 @@ public sealed partial class MainWindow : Window
                 // QSV 还会被改写 avifenc、并为一次【非 HDR】截图弹"不支持 HDR 输出"的提示。
                 // 场景的定义是"这次真的走 HDR 直通吗"——由用户开关与格式决定，与源精度无关。
                 bool hdrScenario = hdrOutput || format == OutputFormat.JPEG_GAINMAP;
-                var decision = DecisionFor(captureResult, colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected);
+                var decision = DecisionFor(captureResult, colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected, format);
                 var settings = BuildEncodingSettings(format, hdrScenario, meta, ui, decision);
                 settings.IccProfile ??= captureResult.IccProfile;
 
@@ -1615,7 +1626,7 @@ public sealed partial class MainWindow : Window
                 }
                 LogService.Info("SilentCapture", $"SDR 帧捕获成功: {fw}x{fh}");
 
-                var decision = DecisionFor(captureResult, colorSpaceTag, false, ui.Settings.AcmeDetected);
+                var decision = DecisionFor(captureResult, colorSpaceTag, false, ui.Settings.AcmeDetected, format);
                 var settings = BuildEncodingSettings(format, false, meta, ui, decision);
                 settings.IccProfile ??= captureResult.IccProfile;
                 // 纹理直通与否交给管线按"这次要不要搬色"决定（见 EncodeAndSaveAsync 里那条判据）
@@ -1941,9 +1952,11 @@ public sealed partial class MainWindow : Window
             // 不能把"有浮点像素"当"要输出 HDR"传，否则 HDR 关时 AVIF 位深被 HDR 协商钉成 10。
             bool hdrScenario = hdrOutput || format == OutputFormat.JPEG_GAINMAP;
             // 本入口的源是"内存里的一块 Float16"，没有 CaptureResult ⇒ 只能按光标屏决定（同旧行为）。
+            // 格式必须传：本入口是"把内存里那一帧重新编码成 format"，容器口径（JPEG 家族/WebP 的
+            // Rec.709 默认档）与下面 BuildEncodingSettings 收的是同一个 format。
             var decision = ColorDecision.Build(
                 DisplayEnumerator.FindDisplayByMonitor(cursorMonitor),
-                colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected);
+                colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected, format);
             var settings = BuildEncodingSettings(format, hdrScenario, meta, ui, decision);
             // 注入调用方带进来的 ICC（色彩管理不可关 ⇒ 不再有"仅烘焙开启时"这个条件）
             settings.IccProfile ??= iccProfile;
@@ -2568,7 +2581,7 @@ public sealed partial class MainWindow : Window
                 // D-2（同 ExecuteSilentEncodeAsync）：源精度事实 ≠ 编码场景。传 hdrScenario，
                 // 否则 HDR 关时 AVIF 的容器位深会被 HDR 协商无条件钉成 10-bit。
                 bool hdrScenario = hdrOutput || format == OutputFormat.JPEG_GAINMAP;
-                var decision = DecisionFor(captureResult, colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected);
+                var decision = DecisionFor(captureResult, colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected, format);
                 var settings = BuildEncodingSettings(format, hdrScenario, meta, ui, decision);
                 settings.IccProfile ??= captureResult.IccProfile;
 
@@ -2611,7 +2624,7 @@ public sealed partial class MainWindow : Window
                 if (sdrPixels is null) throw new InvalidOperationException("无法获取显示像素");
                 LogService.Info("MainWindow", $"SDR 帧捕获: {fw}x{fh}");
 
-                var decision = DecisionFor(captureResult, colorSpaceTag, false, ui.Settings.AcmeDetected);
+                var decision = DecisionFor(captureResult, colorSpaceTag, false, ui.Settings.AcmeDetected, format);
                 var settings = BuildEncodingSettings(format, false, meta, ui, decision);
                 settings.IccProfile ??= captureResult.IccProfile;
                 // 纹理直通交给管线判：要搬色就必须过 CPU 矩阵（P1-2 那条"烘焙开启就禁直通"的规则
@@ -2793,11 +2806,16 @@ public sealed partial class MainWindow : Window
     private ColorDecision DecisionForCursorScreen(EncodingUiState ui, bool hdrOutput)
         => ColorDecision.Build(
             DisplayEnumerator.FindDisplayByMonitor(DisplayEnumerator.GetMonitorUnderCursor()),
-            ui.ColorSpaceTag, hdrOutput, ui.Settings.AcmeDetected);
+            ui.ColorSpaceTag, hdrOutput, ui.Settings.AcmeDetected, ui.Format);
 
-    /// <summary>有捕获结果时：色彩决定按<b>被截那块屏</b>算一次，像素路与声明路共用同一份。</summary>
-    private static ColorDecision DecisionFor(CaptureResult captureResult, string? tag, bool hdrOutput, bool acm)
-        => ColorDecision.Build(captureResult.SourceDisplay, tag, hdrOutput, acm);
+    /// <summary>有捕获结果时：色彩决定按<b>被截那块屏</b>算一次，像素路与声明路共用同一份。
+    /// <para><paramref name="format"/> 是本次要落盘的那个格式，必须由调用方给：JPEG 家族 / WebP
+    /// 的"默认档 = Rec.709"是<b>格式口径</b>（Core 的 <c>ColorDecision.DefaultsToRec709</c>），
+    /// 与源屏证据无关。每个调用点手里的 <c>format</c> 都是同一个 <c>ui.Format</c> 快照 ——
+    /// 也正是随后 BuildEncodingSettings 收下的那一个 ⇒ 决定与容器同源。</para></summary>
+    private static ColorDecision DecisionFor(CaptureResult captureResult, string? tag, bool hdrOutput,
+        bool acm, OutputFormat format)
+        => ColorDecision.Build(captureResult.SourceDisplay, tag, hdrOutput, acm, format);
 
     private EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta,
         EncodingUiState ui, ColorDecision? decision = null)
@@ -2950,6 +2968,15 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(AvifChromaCbo)) _settings.ChromaAvif = tag;
             else if (cb.Name == nameof(ChromaJpegXlCbo)) _settings.ChromaJpegXl = tag;
             else if (cb.Name == nameof(ChromaJpegLiCbo)) _settings.ChromaJpegLi = tag;
+            // ═══ 2026-10-07：压缩强度三档（AVIF / JPEG XL / WebP）═══
+            // ⚠ 必须写管线真正读的那三个字段（EffortAvif / EffortJpegXl / EffortWebp）——
+            //   写个同义的别名字段就会重现上面 ChromaAvif 那次"改成功了但不生效"的失效。
+            //   写坏值不抛：CompressionEffortMap.Parse 回落到均衡档，不会变成最慢档。
+            else if (cb.Name == nameof(EffortAvifCbo)) _settings.EffortAvif = tag;
+            else if (cb.Name == nameof(EffortJpegXlCbo)) _settings.EffortJpegXl = tag;
+            else if (cb.Name == nameof(EffortWebpCbo)) _settings.EffortWebp = tag;
+            // JPEG LI 与增益图共用这一栏（管线对 JPEG_GAINMAP 也读 EffortJpegLi）
+            else if (cb.Name == nameof(EffortJpegLiCbo)) _settings.EffortJpegLi = tag;
             // 2026-09-26：原 GainMapChromaCbo 分支已删除 —— 增益图并入 JPEG LI 后，
             //   色度就是上面 ChromaJpegLiCbo 那一条（管线对 JPEG_GAINMAP 也改读 ChromaJpegLi）。
             //   两个下拉写同一个字段 = 刚被合并掉的那种分裂。
