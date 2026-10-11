@@ -244,6 +244,8 @@
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
                                 <TextBlock Text="截图" FontSize="14" FontWeight="SemiBold"/>
+                                <CheckBox x:Name="VSCapModeChk" Content="VS-Cap 模式（当前屏幕选区、编辑与贴图）" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
+                                <Button Content="贴图剪贴板图片（Ctrl+Alt+T）" Click="OnVSCapPasteClick"/>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="快捷键" VerticalAlignment="Center"/><TextBox x:Name="HotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+S" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="CaptureHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnCaptureHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="无感截图快捷键" VerticalAlignment="Center"/><TextBox x:Name="SilentHotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+Q" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="SilentHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnSilentHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <CheckBox x:Name="PreviewChk" Content="截图后右下角缩略图预览" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>

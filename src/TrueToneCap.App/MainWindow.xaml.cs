@@ -203,6 +203,9 @@ public sealed partial class MainWindow : Window
         _trayIcon.OnCaptureHotkey = () => DispatcherQueue.TryEnqueue(() => StartSelectionCapture());
         _trayIcon.OnExitApp = () => _isExiting = true;
         _trayIcon.RegisterCaptureHotkey(_settings.Hotkey);
+        if (!HotkeyManager.RegisterNamed(this, "vscap-pin", "Ctrl+Alt+T",
+            () => DispatcherQueue.TryEnqueue(async () => await PasteVSCapAsync())))
+            SetStatus("⚠ 贴图快捷键 Ctrl+Alt+T 已被占用，请使用截图设置中的贴图按钮");
 
         // 注册无感截图热键
         HotkeyManager.RegisterNamed(this, "silent", _settings.SilentHotkey,
@@ -1309,6 +1312,12 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
+            if (_settings.UseVSCap)
+            {
+                await StartVSCapCaptureAsync();
+                return;
+            }
+
             // 获取虚拟桌面坐标
             var displays = DisplayEnumerator.EnumerateDisplays();
             int vx = displays.Count > 0 ? displays.Min(d => d.X) : 0;
@@ -2021,6 +2030,7 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(MinimizeTrayChk)) _settings.MinimizeToTray = cb.IsChecked == true;
             else if (cb.Name == nameof(UiAnimationsChk)) _settings.EnableUiAnimations = cb.IsChecked == true;
             else if (cb.Name == nameof(PreviewChk)) _settings.ShowPreview = cb.IsChecked == true;
+            else if (cb.Name == nameof(VSCapModeChk)) _settings.UseVSCap = cb.IsChecked == true;
         }
         try { SaveSettingsQuiet(); } catch { }
     }

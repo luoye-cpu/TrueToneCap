@@ -54,6 +54,7 @@ public sealed partial class MainWindow : Window
         AutoStartChk.IsChecked = _settings.AutoStart;
         PreviewChk.IsChecked = _settings.ShowPreview;
         MinimizeTrayChk.IsChecked = _settings.MinimizeToTray;
+        VSCapModeChk.IsChecked = _settings.UseVSCap;
         UiAnimationsChk.IsChecked = _settings.EnableUiAnimations;
         ToastCaptureChk.IsChecked = _settings.ToastOnCapture;
         ToastSilentChk.IsChecked = _settings.ToastOnSilentCapture;
@@ -133,6 +134,7 @@ public sealed partial class MainWindow : Window
             _settings.AutoStart = AutoStartChk.IsChecked == true;
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.MinimizeToTray = MinimizeTrayChk.IsChecked == true;
+            _settings.UseVSCap = VSCapModeChk.IsChecked == true;
             _settings.EnableUiAnimations = UiAnimationsChk.IsChecked == true;
             _settings.ToastOnCapture = ToastCaptureChk.IsChecked == true;
             _settings.ToastOnSilentCapture = ToastSilentChk.IsChecked == true;

@@ -1,4 +1,4 @@
-# shaders/CompileShaders.ps1
+﻿# shaders/CompileShaders.ps1
 # 使用 fxc (SM5.0) 编译 HLSL 着色器为 CSO 字节码
 # 2026-08-11: dxc → fxc。dxc 强制 SM6/DXIL，D3D11 CreateShader 报 E_INVALIDARG；
 #            fxc 产出 SM5.0 DXBC，D3D11/Vortice 全兼容。

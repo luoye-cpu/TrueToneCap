@@ -2,6 +2,14 @@
 
 > **v0.3.3-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
 
+## 本地 VS-Cap 模式（2026-10-11）
+
+在“截图与录制”中勾选“VS-Cap 模式”，区域截图使用 TTC 的 WGC 捕获，再进入 VS-Cap 的选区与编辑工具栏。关闭该选项恢复 TTC 原有界面；既有配置默认关闭。
+
+新增剪贴板贴图按钮与 `Ctrl+Alt+T`。贴图沿用 VS-Cap 的文字、绘图、统一撤销、原像素显示、滚轮等比最近邻缩放和右键菜单；编辑工具栏的“✓”收起工具栏。截图的“✓”复制图像，同时自动保存 PNG；PNG / AVIF 保存按钮调用 TTC 原编码管线，使用 TTC 对应格式的设置。
+
+本地测试入口：`publish/local-test/TrueToneCap.exe`。移植源码、构建步骤、验证结果和 HDR / 多屏验证边界见 [VS-Cap 接入记录](docs/vscap-mode.md)。
+
 TrueToneCap 是一把为像素而生的手术刀。
 
 在这个 HDR 显示器逐渐普及、但截图工具仍停留在 SDR 时代的间隙里，TrueToneCap 选择了不同的路——从 DXGI 底层直接捕获显示器的 Float16 浮点帧缓冲，保留每一尼特的光照信息，再用 GPU 色调映射将其优雅地落入人眼可见的范围。
@@ -69,6 +77,12 @@ dotnet run --project src\TrueToneCap.App -c Release
 ---
 
 ## Changelog / 更新日志
+
+### 本地移植 — 2026-10-11
+
+- 从上游 `0916a2a` 拉取 v0.3.3-beta，新增可选 VS-Cap 模式、剪贴板贴图按钮和 `Ctrl+Alt+T`。
+- 原样带入 VS-Cap 1.0.10 的编辑与贴图源码；TTC 捕获、色彩、ICC 与编码实现保持原样。只增加入口、设置和跨进程像素交接。
+- 核心测试 47 项、编辑工作流 11 项、接入测试 5 项通过，C# / Qt 双向验证浮点与透明度；用户确认手动测试通过。着色器脚本仅补 UTF-8 BOM，以兼容 Windows PowerShell 5.1。
 
 ### v0.3.3-beta — 2026-08-29 ~ 08-31
 
