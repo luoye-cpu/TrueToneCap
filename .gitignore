@@ -44,6 +44,26 @@ project.assets.json
 *.appxsym
 *.eappxsym
 
+# ── MSIX 打包产物 ──
+# 2026-10-07 补齐：此前只有 *.appxsym 被忽略，而 `*.msix` 与整个 AppPackages/ 目录没有规则。
+# 后果实测：一次 `dotnet build -p:TtcMsixPackage=true` 就把
+#   src/TrueToneCap.App/AppPackages/…/*.msix（150 MB）连同 Add-AppDevPackage.ps1 等
+#   18 个文件带进了索引 —— 151.5 MB 构建产物被 commit。
+# 为什么必须忽略（不只是"体积不好看"）：
+#   · 150 MB 二进制会永久留在 git 历史里，克隆代价陡增，且 clone 是用户看项目的第一印象；
+#   · 包内那份 .msix 是**某次**构建的旧产物，留在库里会被误当成"发布产物"取用；
+#   · AppPackages 里还含微软提供的 Add-AppDevPackage.ps1，仓库只应放自己的东西。
+# ⚠️ 需要 AppPackages 里的东西时（如装机验证）用当前构建现场生成，不要从库里取。
+#   生成命令：dotnet build src/TrueToneCap.App -c Release -p:Platform=x64 -p:TtcMsixPackage=true
+# 注：`!` 放行规则刻意不加 —— 该目录下没有任何需要入库的源码或模板。
+src/TrueToneCap.App/AppPackages/
+*.msix
+*.msixbundle
+*.msixupload
+*.appx
+*.appxbundle
+*.appxupload
+
 # ── Shader Compilation (keep .hlsl source, ignore compiled) ──
 *.cso
 *.dxbc
@@ -111,6 +131,9 @@ tests/manual/cse-probe/*
 !tests/manual/diag_ttc_window.ps1
 !tests/manual/smoke-anno-test.ps1
 !tests/manual/test_hang.ps1
+# 2026-10-20 补点名：此文件早已跟踪入库却漏了这一行，与上面「那一行就是审查点」的自定契约不符，
+# 也让 git ls-files -i --exclude-standard 长期挂着一个"已跟踪但命中忽略"的项。它是 scripts/verify.ps1:553 的活判据。
+!tests/manual/combo_locale_coverage_measure.py
 # ⚠ glm_* 三个脚本【已于 2026-09-26 删除】（它们的输入根目录 Pictures\TrueToneCap 整个不在了，
 #   且三份各硬编码一把活的 GLM API Key —— 账本 §5359 记着这件事）。删除只是移除了本机上的明文副本，
 #   【密钥本身仍需在智谱侧撤销】，撤销前它还是活的。

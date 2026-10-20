@@ -168,7 +168,18 @@ public static class LogService
     /// <summary>初始化日志服务。</summary>
     public static void InitializeFileLog(string? logDir = null)
     {
-        s_logDir = logDir ?? Path.Combine(AppContext.BaseDirectory, "log");
+        // ═══ 2026-10-07：按运行形态选日志目录 ═══
+        // MSIX 包的安装目录是【只读】的（官方："Write inside the package — Not allowed.
+        // The package is read-only."）。未打包时日志写在 <程序目录>\log 属于"便携"语义，
+        // 但打包后那里写不进去 —— 原实现会走下面的 catch 落到 %TEMP%\TrueToneCap_logs：
+        // 不至于丢日志，但位置反直觉（用户在程序目录找不到 log/，也不知道去了哪儿）。
+        // ⇒ 打包形态直接写 %LOCALAPPDATA%\TrueToneCap\log，与设置/密钥同一处，用户找得到。
+        // ⚠️ 刻意不动未打包形态：绿色包用户仍在程序目录看到 log/。
+        s_logDir = logDir ?? (TrueToneCap.Core.Settings.PackageRuntime.IsPackaged
+            ? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "TrueToneCap", "log")
+            : Path.Combine(AppContext.BaseDirectory, "log"));
         try
         {
             Directory.CreateDirectory(s_logDir);

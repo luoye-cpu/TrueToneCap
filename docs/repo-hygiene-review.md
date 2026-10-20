@@ -117,3 +117,22 @@ git status 显示 `M src/TrueToneCap.App/Services/HDRPreviewWindow.cs`，但本�
 > **2026-09-14 更新**：仓库实际仍为 **170 MB**（即使已解除 models 跟踪），
 > 因为**历史 blob 未回收**。解除 `publish/PLAN/tools/` + 一次历史重写后可达 ~40MB 目标。
 > 详见 `docs/git-tracking-audit-2026-09-14.md`。
+
+---
+
+## 状态更新（2026-10-17 复核，逐条实测）
+
+本文是无日期的活文档，按本仓规则有义务跟代码同步；以下只改**仍然为假的那几句**，原文其余部分不动。
+
+| 出处 | 原文说法 | 实测现状 |
+|---|---|---|
+| `:111` | `HDRPreviewWindow.cs`"文件仍存在" | **已删除**（`a54bb5c` = v0.3.7-beta，B 档覆盖层改 CPU-only）。反向锁在位：`Test_Overlay_HasNoGpuBackgroundPath`（调用 `CorePipelineTests.cs:156`，定义 `:4689`）⇒ 这一格不用再去"核实行尾噪音" |
+| `:110` | "现已有 17 个文档，建议提交前整理 docs/ 8 个文档 → 合并为 3-4 个主题文档" | 现有 **63 份 / 29,779 行**；且这条**行动方向已被规则推翻**：带日期的 `.md` 是取证快照，**不合并、不回写**。分层改由新建的 `docs/README.md` 索引承担（零引用改写的代价换清晰） |
+| `:108/:115-119` | 仓库 168→170 MB，解除跟踪 + 历史重写后可降到 <40 MB | 本机 `.git` 实测 **252 MB**；GitHub API `size = 160,196 KB`（≈156 MB）。目标未达成，原因仍是**历史 blob 未回收** |
+
+顺带两条**本次核过、确认不是问题**的（避免下一轮又被当成缺陷报回来）：
+
+- `:60` 提的 `ocr-real-bench.txt` → 该建议**已执行**，磁盘实名 `tests/manual/ocr-real-bench-20260825-seed20260825.txt`；
+  该目录整体已被 `.gitignore:203` 一类规则覆盖（实测未跟踪未忽略文件 = 0）。
+- `:66` 标题里的 `src/Core/Resources` 只是**标题缩写**，紧跟的正文写的是正确的
+  `src/TrueToneCap.Core/Resources/` ⇒ 不是断链，别去"修路径"。

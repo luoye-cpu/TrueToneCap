@@ -27,14 +27,16 @@
 > **文档原未列出、当前确实存在**（已在下方结构树中补入 `FormatEncoders.cs`、
 > `OverlayComposite.hlsl`、两个 `.props`；`ShaderLoader.cs` 曾补入、2026-10-01 已删除；**仍未补入**的有）：
 > `Encoding/IccStore.cs`、`Encoding/NativeEncoderGuard.cs`、
-> `Encoding/ManagedBmpEncoder.cs`、`Encoding/ManagedTiffEncoder.cs`、
+> `Encoding/ManagedTiffEncoder.cs`、
 > `Encoding/AvifHardwareProbe.cs`、`Encoding/GpuCapability.cs`、`src/*/packages.lock.json`。
+> （这一行原先还把 `Encoding/ManagedBmpEncoder.cs` 算作"当前确实存在"：它已于 `4368eed`(v0.3.6) 删除，
+> 且 `CorePipelineTests.cs:4063-4065` 有一条反向断言禁止该文件与 `"BMP"` 字面量再出现 —— 2026-10-17 核对。）
 >
 > **结构树中带 `✗` 前缀的条目表示「该文件已不存在」**，其后注明现在的承担者，勿再按原名查找。
 >
 > 其余章节（管线流程、色彩管理、编码架构）经抽查仍与实际代码一致，可继续参考。
 
-> **目标系统**：Windows 11 24H2+ | **技术栈**：C# 14 / WinUI 3 / .NET 11 / WindowsAppSDK 2.4.0 / Vortice.D3D11
+> **目标系统**：Windows 11 24H2+ | **技术栈**：C# 14 / WinUI 3 / .NET 11 / WindowsAppSDK 2.5.1（2026-10-07 由 2.4.0 升级，见 `Directory.Packages.props:22`）/ Vortice.D3D11
 >
 > **管线审查日期**：2026-08-01（内容基准 v0.3.1-beta）| **总测试**：192/192 ✅ 100%（待核实）
 >

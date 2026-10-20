@@ -132,6 +132,9 @@ public static class CorePipelineTests
         Test_ReviewRoundFixes_HaveTeeth();
         Test_LlmConfig_InjectsYoudaoCredentials();
         Test_StartupManager_ReadHandlesQuotedCommand();
+        Test_StartupManager_PackagedUsesStartupTask();
+        Test_OcrPreviewTranslation_CancellationAndSnapshot();
+        Test_LogDirectory_PackagedBranch();
 
         // D3D 设备丢失判定（重建逻辑的判据，必须可单测）
         Test_D3DDeviceLost_HResultClassification();
@@ -144,6 +147,7 @@ public static class CorePipelineTests
         Test_QualityPanelProgrammaticWrite_SourceSentinels();
         Test_SettingsWriteSites_AllPersist();
         Test_SettingsWriteProbe_RealProbe();
+        Test_PackageRuntime_UnpackagedDefault();
         Test_SettingsPersistence_BlockedPath_Sentinels();
         Test_GainMapMerged_FormatIndexMigration();
         Test_HdrPngDepthNegotiation_SourceSentinels();
@@ -2739,6 +2743,99 @@ public static class CorePipelineTests
     }
 
     /// <summary>
+    /// 预览窗翻译扇出的两处加固（2026-10-07 全仓审查发现并修复）。
+    /// <para><b>① 取消</b>：<c>TranslateAsync</c> 的签名接受 <c>CancellationToken</c>，但调用点
+    /// 从来没传过，窗口内也没有任何 CTS，<c>OnClosed</c> 还是空的 ⇒ 关掉预览窗后，
+    /// 最多 N 行请求继续跑到各自超时（Google/Bing 每端点 5 s），并一直占着
+    /// <c>SemaphoreSlim(4)</c> 的槽位。实测影响：不崩、不损坏数据（UI 更新走
+    /// <c>TryEnqueue</c> 安全 no-op），纯粹浪费网络与并发槽位。</para>
+    /// <para><b>② 快照</b>：原先 <c>_translatedLines</c> 与 <c>_showTranslation</c> 分两处写，
+    /// 渲染端可能读到"有译文但标志未置位"或反之的半成品。改为一次性发布不可变对象。</para>
+    /// <para>各条各咬一种退化；这些都是**运行期行为**，文本级断言只能钉住接线形态，
+    /// 因此这里刻意把"接线是否存在"写清楚（而不是断言行为本身）。</para>
+    /// </summary>
+    static void Test_OcrPreviewTranslation_CancellationAndSnapshot()
+    {
+        var win = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml.cs"));
+        if (win is null) { Skip("预览窗翻译扇出加固", "未找到 OcrPreviewWindow.xaml.cs"); return; }
+
+        string CodeOf(string path) => string.Join("\n",
+            File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("//") && !l.TrimStart().StartsWith("*")));
+        var code = CodeOf(win);
+
+        // ── ① 取消 ──
+        Assert("预览窗必须持有 CancellationTokenSource",
+            code.Contains("CancellationTokenSource"), "没有 CTS ⇒ 关窗后无法取消在途翻译");
+        Assert("关窗（OnClosed）必须调用 Cancel",
+            Regex.IsMatch(code, @"OnClosed[\s\S]{0,400}?\.Cancel\(\)"),
+            "OnClosed 为空 ⇒ 关窗后在途请求继续跑到各自超时");
+        Assert("行翻译必须把 token 传进 TranslateAsync（第 4 个实参）",
+            Regex.IsMatch(code, @"TranslateAsync\([^)]*,\s*null\s*,\s*ct\s*\)"),
+            "不传 ct ⇒ 请求不会随窗口关闭而中止");
+        Assert("信号量等待必须带 token（否则关窗后仍在排队等槽位）",
+            code.Contains("WaitAsync(ct)"), "漏 token ⇒ 扇出要等前一批跑完才退出");
+        Assert("视觉路也要传 token",
+            Regex.IsMatch(code, @"TranslateImageWithVisionAsync\([^)]*ct\s*\)"),
+            "视觉路不传 ct ⇒ 上传大图时关窗无法中止");
+
+        // ⚠️ 关键：行级 catch 若先吞掉 OperationCanceledException，
+        //    取消会被当成"这一行翻译失败"，firstError 写成"操作已取消"，
+        //    关窗于是在状态栏显示成"某行失败"。这条正是我修第一版时漏掉的。
+        Assert("行级 catch 必须让 OperationCanceledException 先抛出去（不许被当成行失败）",
+            Regex.IsMatch(code, @"catch\s*\(\s*OperationCanceledException\s*\)\s*\{\s*throw;\s*\}"),
+            "取消被通用 catch 吞掉 ⇒ 关窗被报成'某行翻译失败'");
+        Assert("扇出外层要有 OperationCanceledException 分支（取消不是错误，别报成翻译失败）",
+            Regex.IsMatch(code, @"catch\s*\(\s*OperationCanceledException\s*\)"));
+
+        // ── ② 快照 ──
+        // ⚠️ 2026-10-07 变异测试发现的弱点：原先这条写成
+        //      code.Contains("record TranslationSnapshot") && code.Contains("_translation = new TranslationSnapshot(")
+        //    把类型名改掉（record TranslationSnapshotRenamed）时，第一子句失败但第二子句
+        //    因为 "new TranslationSnapshot(" 是 "new TranslationSnapshotRenamed(" 的前缀**仍然为真**
+        //    ⇒ 整体判据保持绿色。两子句不是独立证据，&& 被前缀关系击穿。
+        //    改为对**类型名本身**做词边界匹配，让"改名字"这类变异必红。
+        Assert("译文与显示标志必须合成一个不可变快照（不再分两处写）",
+            Regex.IsMatch(code, @"\brecord\s+TranslationSnapshot\b")
+            && Regex.IsMatch(code, @"new\s+TranslationSnapshot\s*\("),
+            "退回两个独立字段 ⇒ 渲染端可能读到半成品");
+        Assert("不得再直接读写 _translatedLines（已全部迁移到快照）",
+            !code.Contains("_translatedLines"),
+            "残留 _translatedLines ⇒ 两条数据源并存");
+        Assert("取消后不得再发布结果（窗口已关，发布了也只是改内存）",
+            code.Contains("ThrowIfCancellationRequested"));
+    }
+
+    /// <summary>
+    /// 日志目录必须按运行形态分支（2026-10-07 补）。
+    /// <para><b>为什么补这条</b>：我改了 <c>LogService</c> 让它按 <c>PackageRuntime.IsPackaged</c>
+    /// 选目录，却**没有为它加任何判据** —— 这是变异测试抓出来的：把
+    /// <c>PackageRuntime.IsPackaged</c> 替换成常量 <c>false</c>（等于废掉整个修复）后，
+    /// 单元测试**仍然全绿**。一条没有判据保护的修复，下次重构就会被无声删掉。</para>
+    /// <para>背景：MSIX 包目录只读，原来日志写 <c>&lt;程序目录&gt;\log</c> 会失败并落到
+    /// <c>%TEMP%</c> 兜底 —— 不丢日志但位置反直觉（用户在程序目录找不到 log/）。
+    /// 修复后打包形态写 <c>%LOCALAPPDATA%\TrueToneCap\log</c>。</para>
+    /// </summary>
+    static void Test_LogDirectory_PackagedBranch()
+    {
+        var f = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LogService.cs"));
+        if (f is null) { Skip("日志目录按运行形态分支", "未找到 LogService.cs"); return; }
+
+        // 滤掉注释：否则判据会被说明文字里的同名字样满足（这是本仓多次踩过的坑）
+        var code = string.Join("\n",
+            File.ReadAllLines(f).Where(l => !l.TrimStart().StartsWith("//") && !l.TrimStart().StartsWith("*")));
+
+        Assert("日志目录必须按 PackageRuntime.IsPackaged 分支",
+            code.Contains("PackageRuntime.IsPackaged"),
+            "不分支 ⇒ MSIX 下仍写包目录（只读）⇒ 退化成 %TEMP% 兜底，位置反直觉");
+        Assert("打包形态的日志目录落在 %LOCALAPPDATA%\\TrueToneCap\\log（与设置/密钥同处）",
+            code.Contains("LocalApplicationData") && code.Contains("\"log\""),
+            "日志若写别处，用户按文档找不到");
+        Assert("未打包形态仍写程序目录下的 log（绿色包语义不变）",
+            code.Contains("BaseDirectory") && code.Contains("\"log\""),
+            "改掉这一支会破坏绿色包的'日志跟着程序走'语义");
+    }
+
+    /// <summary>
     /// LLM 后端的失败原因要分类：401/403 是配置问题、429 是额度、只有没有状态码才算连不上。
     /// <para>历史缺陷：LLM 是【唯一】不把原因写进 _lastBackendNote 的后端，最终提示又固定缀一句
     /// "多半是网络、额度或接口变更，不是没配置" ⇒ 密钥填错的用户被告知去查网线。
@@ -4116,6 +4213,68 @@ public static class CorePipelineTests
     }
 
     /// <summary>
+    /// 打包形态（MSIX）的开机自启必须走 StartupTask，而不是注册表。
+    /// <para>为什么必须有这条：MSIX 下对 HKCU 的写入被重定向到包专属 hive（官方："All writes under
+    /// HKCU are copied on write to a private per-user, per-app location."）⇒ 那条 <c>Run</c> 项
+    /// <b>对系统启动无效</b>。而症状最具欺骗性：界面开关能勾、注册表里也读得到值，
+    /// <b>只有重启后才发现不会自动启动</b>。2026-10-07 复核时确认清单里早就声明了
+    /// <c>startupTask</c>，但代码一直没接这个 API —— 即"声明了但没实现"。</para>
+    /// <para>四条各咬一种退化：① 有没有按形态分支；② 打包分支是否真的用 StartupTask；
+    /// ③ TaskId 与清单是否一致（写错就静默不生效）；④ 读端是否也走同一分支
+    /// （只改写端会让界面显示与实际相反）。</para>
+    /// </summary>
+    static void Test_StartupManager_PackagedUsesStartupTask()
+    {
+        var src = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "StartupManager.cs"));
+        var manifest = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Package.appxmanifest"));
+        if (src is null || manifest is null)
+        { Skip("打包形态的开机自启", "未找到 StartupManager.cs / Package.appxmanifest"); return; }
+
+        var text = StripLineComments(File.ReadAllText(src));
+
+        Assert("StartupManager: 按运行形态分支（打包用 StartupTask、未打包用注册表）",
+            text.Contains("PackageRuntime.IsPackaged"));
+
+        Assert("StartupManager: 打包分支调用 StartupTask.GetAsync",
+            text.Contains("StartupTask") && text.Contains("GetAsync"));
+
+        Assert("StartupManager: 启用走 RequestEnableAsync（而不是直接写注册表）",
+            text.Contains("RequestEnableAsync"));
+        Assert("StartupManager: 禁用走强类型 Disable() 调用",
+            text.Contains(".Disable()"));
+
+        // ═══ 2026-10-07 跟进：禁止退回反射 ═══
+        // 背景（自查发现的真缺陷）：我最初用反射调 StartupTask（理由是"不想让未打包形态沾 WinRT"），
+        // 那版有 3 个 bug，且**全部指向同一后果 —— 打包形态自启永远不生效、只留一行 Warn**：
+        //   ① MakeGenericMethod(typeof(int)) 对两个不同返回类型是错的
+        //      （GetAsync→IAsyncOperation<StartupTask>，RequestEnableAsync→IAsyncOperation<StartupTaskState>）；
+        //   ② 对**开放泛型**参数调 IsAssignableFrom 恒为 false ⇒ 每个 AsTask 重载都被跳过；
+        //   ③ 于是 AsTask 永远返回 null，调用方全部提前 return。
+        // 实测证明反射本就不必要：本工程 TFM 是 net11.0-windows10.0.26100.0，
+        // `using System;` 之后 `await StartupTask.GetAsync(...)` **直接编译通过**。
+        // ⇒ 这条断言把"用编译期类型、别用反射"钉住：编译期能查出的错，不该推迟到装机后才暴露。
+        Assert("StartupManager: 打包分支不得再用反射（那版反射恒失败 ⇒ 自启静默不生效）",
+            !text.Contains("MakeGenericMethod") && !text.Contains("GetAssemblies")
+            && !text.Contains("ResolveStartupTaskType"));
+
+        // TaskId 必须与清单逐字一致 —— 不一致时 API 返回 null，且没有任何报错
+        var manifestText = File.ReadAllText(manifest);
+        var m = Regex.Match(manifestText, @"StartupTask\s+TaskId=""([^""]+)""");
+        Assert("清单里声明了 startupTask 且能解析出 TaskId", m.Success);
+        if (m.Success)
+        {
+            var taskId = m.Groups[1].Value;
+            Assert($"StartupManager 的 StartupTaskId 与清单一致（{taskId}）",
+                text.Contains($"\"{taskId}\""),
+                "两处不一致时 StartupTask.GetAsync 返回 null，自启静默失效且无报错");
+        }
+
+        // 读端也必须分支：只改写端会导致"界面显示已禁用、实际已启用"（或反之）这种谎报
+        var getter = text.Contains("Packaged") && text.Contains("IsEnabledPackaged");
+        Assert("StartupManager: 读端也走打包分支（否则界面与实际状态相反）", getter);
+    }
+
+    /// <summary>
     /// 提取 XAML 中指定 ComboBox 块内的 ComboBoxItem Tag。
     /// <para>锚点用 <c>x:Name="X"</c> 而不是裸名字：XAML 里 <c>ColorCbo</c> 是
     /// <c>OverlayColorCbo</c> / <c>BorderColorCbo</c> 的子串，按裸名"取第一次命中"一旦别人把
@@ -4438,6 +4597,29 @@ public static class CorePipelineTests
     }
 
     /// <summary>
+    /// MSIX 包身份判定（2026-10-07，商店上架核查时补）。
+    /// <para>为什么必须有：MSIX 包目录只读（官方原文："Write inside the package — Not allowed.
+    /// The package is read-only."）。设置若仍写程序同目录，<c>CanPersist</c> 为 false
+    /// ⇒ 全程按默认值表运行 ⇒ <b>用户改的每一项设置重启即丢</b>，界面上只有日志一行提示。
+    /// <c>SettingsService.SettingsPath</c> 因此按本判据分支 —— 判据错了，整个修复就是空的。</para>
+    /// <para>⚠️ 本测试【只能验未打包这一侧】：打包侧需要真的装一次 MSIX 才有包身份，
+    /// 在这台开发机上造不出来。故这里锁住"未打包必须判 false"（保守方向）——
+    /// 若哪天它翻成 true，绿色包用户的设置会被悄悄挪去 LocalAppData，
+    /// 而那正是本判据最该拦住的方向。</para>
+    /// </summary>
+    static void Test_PackageRuntime_UnpackagedDefault()
+    {
+        var isPackaged = TrueToneCap.Core.Settings.PackageRuntime.IsPackaged;
+        Assert("未打包进程必须判为无包身份（否则绿色包的设置会被挪去 LocalAppData）",
+            !isPackaged,
+            $"IsPackaged={isPackaged}；若本测试确实跑在已安装的 MSIX 里，请改为断言 true 并说明环境");
+
+        // 判据由静态初始化缓存，但必须可重复读且稳定（不能"第一次之外都乱答"）
+        Assert("包身份判定稳定（两次读取一致）",
+            TrueToneCap.Core.Settings.PackageRuntime.IsPackaged == isPackaged);
+    }
+
+    /// <summary>
     /// App 侧接线：不可写时的口径是「记日志 + 按默认值」，且<b>只认同目录这一个位置</b>。
     /// <para>为什么还要钉源码：这套判定发生在进程启动早期（静态属性初始化），Test 引用的 Core
     /// 只能测判据本身，测不到 App 有没有照它办。三条各咬一种退化。</para>
@@ -4450,9 +4632,28 @@ public static class CorePipelineTests
         { Skip("不可写时的落盘口径", "未找到 SettingsService.cs / App.xaml.cs"); return; }
         var svc = StripLineComments(File.ReadAllText(svcPath));
 
-        Assert("路径唯一事实源 = 软件同目录（不再有「降级到别处」的第二答案）",
-            svc.Contains("Path.Combine(AppContext.BaseDirectory, SettingsFileName)")
+        // ⚠️ 2026-10-07 改判据形态：SettingsPath 现在按运行形态三目选目录，
+        //    不再是单一的 `Path.Combine(AppContext.BaseDirectory, SettingsFileName)`。
+        //    这里钉的【意图】不变 —— "路径只有一个表达式、没有第二答案、没有 ResolveSettingsPath"：
+        //      · 未打包分支仍必须落到 AppContext.BaseDirectory；
+        //      · 目录由三目表达式一处决定（不散落、不依赖运行时探测结果）。
+        Assert("路径唯一事实源 = 一个表达式按运行形态确定性选目录（不再是「探测失败才换」的第二答案）",
+            svc.Contains("public static string SettingsPath { get; } =")
+            && svc.Contains("? Path.Combine(")
+            && svc.Contains(": AppContext.BaseDirectory")
             && !svc.Contains("ResolveSettingsPath"));
+        // ═══ 2026-10-07 新增：打包形态必须改写到可写位置 ═══
+        // 背景（商店上架核查时实测发现）：MSIX 包目录只读（官方："Write inside the package —
+        // Not allowed. The package is read-only."）。若仍写程序同目录，CanPersist 为 false
+        // ⇒ 全程按默认值表运行 ⇒ 用户改的每一项设置重启即丢，界面上只有日志一行提示。
+        // 这三条各咬一种退化：① 有没有按包身份分支；② 打包时去不去 LocalAppData；
+        // ③ 判定是否走那个 P/Invoke 帮助类（而不是散落的内联调用）。
+        Assert("设置路径必须按 PackageRuntime.IsPackaged 分支（否则 MSIX 下设置无处可写）",
+            svc.Contains("PackageRuntime.IsPackaged"));
+        Assert("打包形态下设置落到 %LOCALAPPDATA%\\TrueToneCap（包目录只读，写不进去）",
+            svc.Contains("SpecialFolder.LocalApplicationData") && svc.Contains("\"TrueToneCap\""));
+        Assert("包身份判定集中在 PackageRuntime（不在 SettingsService 里内联 P/Invoke）",
+            svc.Contains("TrueToneCap.Core.Settings.PackageRuntime"));
         Assert("Load/Save 都必须先问 CanPersist（存不下就不读也不写，整体按默认值）",
             svc.Contains("if (!CanPersist)") && svc.Contains("if (!CanPersist) { LogPersistBlocked(); return; }"));
         Assert("SaveQuiet 必须把失败写进日志（不许再有空吞）",

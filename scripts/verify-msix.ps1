@@ -113,6 +113,18 @@ foreach ($m in $models) {
 if (Test-Path (Join-Path $tmp "TrueToneCap.exe")) { Ok "TrueToneCap.exe" }
 else { Fail "TrueToneCap.exe 缺失 ⇒ 包不可运行" }
 
+# 合规文档（都要随包分发，应用内必须有可见入口 —— 缺了入口就只能显示降级界面）
+#   PRIVACY.md           → 微软商店政策 10.5.1 对 Win32/Desktop Bridge 产品强制要求
+#   THIRD-PARTY-NOTICES  → BSD/Apache 系列要求再分发时向最终用户展示许可全文
+foreach ($doc in @(
+    @{ Rel = "PRIVACY.md";               Why = "商店政策 10.5.1 要求 Win32 产品提供隐私政策" },
+    @{ Rel = "THIRD-PARTY-NOTICES.md";   Why = "BSD/Apache 要求再分发时展示许可全文" }
+)) {
+    $p = Join-Path $tmp $doc.Rel
+    if (Test-Path $p) { Ok ("{0,-30} {1,8:N1} KB" -f $doc.Rel, ((Get-Item $p).Length / 1KB)) }
+    else { Fail "$($doc.Rel) 缺失 ⇒ $($doc.Why)（应用内入口会退化成降级界面）" }
+}
+
 Write-Host ""
 
 # ══════════════════════════════════════════════════════════════

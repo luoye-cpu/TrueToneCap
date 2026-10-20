@@ -21,8 +21,18 @@ using TrueToneCap.Core.Logging;
 namespace TrueToneCap.Core.Services;
 
 /// <summary>
+/// <summary>
 /// 原生可执行文件解析器 — 从嵌入资源提取到 native/ 目录。
-/// 支持: avifenc.exe (AVIF), cwebp.exe (WebP)
+/// 支持: avifenc.exe (AVIF), cjxl.exe (JPEG XL), cjpegli.exe (JPEG LI), cwebp.exe (WebP)
+/// <para>⚠️ 2026-10-07 商店上架核查时确认：本类会<b>尝试写入</b> <c>BaseDirectory\native</c>，
+/// 而 MSIX 包目录是<b>只读</b>的（官方："Write inside the package — Not allowed."）。
+/// 在打包形态下这不会出问题，理由是<b>两个条件同时成立</b>：
+/// ① 4 枚 exe 已作为 <c>Content</c> 随包分发，<c>File.Exists(targetPath)</c> 先命中并 <c>continue</c>，
+///    根本走不到写分支（实测解包确认 native\ 下 4 枚俱在）；
+/// ② 即便真的去写，整个方法体在 <c>try/catch</c> 内，失败只记录 <see cref="LastError"/> 并告警，
+///    不会让启动崩溃。
+/// ⇒ <b>不需要为 MSIX 改动本类</b>；但若将来把 native 工具改成"不随包分发、运行时提取"，
+///    这两个条件会同时失效，那时必须改为提取到可写目录（如 %LOCALAPPDATA%）。</para>
 /// </summary>
 public static class NativeLibraryResolver
 {

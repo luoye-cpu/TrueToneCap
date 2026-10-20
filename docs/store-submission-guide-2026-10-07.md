@@ -104,32 +104,107 @@
 > **披露给哪些第三方**、**用户有哪些控制权**、以及**如何访问自己的信息**。
 
 📄 **已补**：仓库根新增 [`PRIVACY.md`](../PRIVACY.md)（中英双语），逐条对应上述要求。
-⚠️ 但政策**要求填 Partner Center 的 URL**，所以还需把该文件**托管到公网**
-（GitHub 仓库的 raw/Pages 链接即可），或自建页面。
+并且**应用内已有可见入口** —— 设置页「隐私政策」卡片 → `PrivacyPolicyWindow`（见 §3.1c）。
 
-### 3.1b 🔴 实测发现的第二个 MSIX 阻断项：**设置不会保存**
+#### 关于"托管"：**不需要另找托管，GitHub 仓库本身就是公网托管**
 
-这一条是核查隐私政策（"数据如何存储"）时**顺带查出来的**，严重程度高于隐私政策本身。
+> ⚠️ 我先前把这一步写成"需托管到公网"，措辞过重了。**实测澄清**：本仓已是**公开仓库**，
+> GitHub 直接提供匿名可访问的 URL，**不需要 Pages、不需要自建站点、不需要任何额外服务**。
 
-`SettingsService.cs` 的设计是**便携优先**：设置只写**程序同目录**（`AppContext.BaseDirectory`），
+**实测证据**（2026-10-07）：
+
+| 检查 | 结果 |
+|---|---|
+| `github.com/luoye-cpu/TrueToneCap` | **HTTP 200** |
+| 同一仓库同一分支的 `README.md`（raw） | **HTTP 200，11797 字节** |
+| 同上，**用全新无凭据会话**再取一次 | **HTTP 200** ⇒ 匿名可访问 = 公开仓库 |
+| `PRIVACY.md` 当前 | HTTP 404 —— **仅因为还没 commit/push** 而已 |
+
+⇒ `PRIVACY.md` commit + push 之后，下面的 URL 立刻可用（**无需任何额外操作**）：
+
+```
+https://github.com/luoye-cpu/TrueToneCap/blob/main/PRIVACY.md      ← 填这个
+```
+
+**该填哪个 URL**：Partner Center 的隐私政策 URL 是给**用户与审核员点击**的普通网页链接，
+所以用 `github.com/.../blob/...`（渲染成可读网页），**不要**用 `raw.githubusercontent.com`
+（返回纯文本、没有页面导航，体验差且不像"一个政策页面"）。
+
+> 💡 两个可选增强（都不是必须）：
+> - **固定版本号**：把链接指向 tag（如 `blob/v0.3.7-beta/PRIVACY.md`），
+>   政策快照就不会随 `main` 变动 —— 审核期间尤其稳妥。但**改功能后必须记得同步更新**该链接指向。
+> - **更容易记的地址**：给仓库开 GitHub Pages，或把链接写进 README 顶部，
+>   用户从商店页跳过来更容易找到。
+>
+> ⚠️ **唯一真正需要保证的是"匿名可访问"**：如果哪天仓库转成 private，
+> 该 URL 会变成 404，审核直接失败。上面的实测方法（无凭据会话取一次）可随时复查。
+
+### 3.1c ✅ 已实现：产品内隐私入口（渲染逻辑与许可窗口共用）
+
+| 项 | 实现 |
+|---|---|
+| 文件 | `PRIVACY.md`（仓库根，中英双语） |
+| 窗口 | `PrivacyPolicyWindow`（设置页「隐私政策」卡片 → 按钮） |
+| 随包分发 | `App.csproj` 里注册为 `Content`，与 `THIRD-PARTY-NOTICES.md` 同一套写法 |
+| 交付校验 | `scripts/verify-msix.ps1` 新增断言：包里必须有 `PRIVACY.md` 与 `THIRD-PARTY-NOTICES.md` |
+| 实测 | MSIX 内含 `PRIVACY.md`（8.0 KB），且与仓库副本 **sha256 逐字节相同** |
+
+**顺带做的一次重构（避免第二份渲染器）**：原 `ThirdPartyNoticesWindow` 是 467 行、
+自带 Markdown 渲染 + 路径上溯 + 降级界面 + 生命周期清理的完整实现。
+隐私窗口要做同样的事 —— 直接复制会产生"同一种渲染、两处维护"的分叉。
+⇒ 抽出基类 **`MarkdownDocumentWindow`**，渲染/上溯/降级/清理只有一份；
+两个窗口各自只剩：声明读哪个文件 + 中英文案 + 单实例登记。
+
+> 💡 重构中踩到并记录在代码里的两点：
+> ① 子类 XAML 的根元素必须写成**自定义基类**（`<local:MarkdownDocumentWindow …>`），
+>    否则 XAML 编译器生成的那半会以 `Window` 为基类 ⇒ CS0263「分部声明指定了不同基类」；
+> ② `x:Name` 生成的字段属于**子类** partial，基类看不见；基类声明抽象属性、
+>    子类逐个转发（并把 XAML 里的名字加 `Control` 后缀避免 CS0108 隐藏）。
+>    选这套写法而非"反射按名找控件"，是因为**漏掉控件会编译期报错**，
+>    而不是界面上少一块还不报错。
+
+
+### 3.1b ✅ 已修复：MSIX 下**设置不会保存**（原为两个实质缺口之一）
+
+这一条是核查隐私政策（"数据如何存储"）时顺带查出来的，严重程度高于隐私政策本身。
+
+**问题**：`SettingsService` 的设计是**便携优先**：设置只写**程序同目录**（`AppContext.BaseDirectory`），
 且**刻意删掉了"不可写就降级到 %LOCALAPPDATA%"那条路**（源码注释给了理由：两个位置会让用户与代码各信一个）。
-不可写时的口径是 —— **记一条日志 + 全程按默认值运行，不换位置存**。
+而 MSIX 包安装到 `C:\Program Files\WindowsApps\…`，官方原文：
 
-**问题**：MSIX 包安装到 `C:\Program Files\WindowsApps\…`，该目录**对应用只读**。
-⇒ 打成 MSIX 后 `CanPersist` 会为 false ⇒ **用户改的每一项设置重启后都会回到默认**，
+> **Write inside the package — Not allowed. The package is read-only.**
+> — [Understanding how packaged desktop apps run](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes)
+
+⇒ 打成 MSIX 后 `CanPersist` 为 false ⇒ **用户改的每一项设置重启后都会回到默认**，
 而界面不会有任何提示（只有日志里一行）。
 
 **实测确认**：全仓 grep `Windows.Storage.ApplicationData` / `Package.Current` / `IsPackaged`
-—— **不存在任何"打包感知"的存储分支**（命中的 `Windows.Storage` 都是文件选择器，与设置无关）。
+—— **不存在任何"打包感知"的存储分支**。
 
-⇒ **上架前必须补**：给 `SettingsService` 增加打包分支，
-打包形态写 `ApplicationData.Current.LocalSettings`（或 `LocalFolder`），
-未打包形态维持现状（便携语义不变）。**这是功能性问题，不修的话商店版是残的。**
+**修法**（`PackageRuntime` + `SettingsService`）：
 
-> 📌 这也说明：**"能打包"与"打包后能用"是两件事**。
-> 本仓 MSIX 已能出包、内容核对全绿、WACK 也 PASS，
-> 但真机上跑起来会丢失设置 —— 与我先前标注的"沙箱内未实机验证"是同一个盲区，
-> 现在有了**具体的、可复现的**失败点。
+| 形态 | 设置位置 |
+|---|---|
+| 未打包（绿色包） | `AppContext.BaseDirectory`（**语义完全不变**） |
+| **已打包（MSIX）** | **`%LOCALAPPDATA%\TrueToneCap\`**（可写，且与密钥同一处） |
+
+**⚠️ 这不是把 2026-09-25 删掉的"降级"又加回来** —— 那条路的问题在于**探测失败才换位置**，
+于是"设置存哪"依赖运行时可写性、同一次安装里都能变，用户还看不出来。
+新实现是**按运行形态静态决定**：打包就是打包、未打包就是未打包，**一个环境一个答案，不随写失败漂移**。
+
+**判定方式**：`PackageRuntime.IsPackaged` 用 `GetCurrentPackageFullName`（P/Invoke，
+不引入 WinRT 依赖），`15700` = 无包身份。**刻意保守**：拿不准一律当"未打包"
+（维持程序同目录的原语义，绝不会更糟）；误判成"已打包"才会挪走绿色包的设置。
+
+**顺带修的第二处同类问题**：`LogService` 原本写 `<程序目录>\log` —— MSIX 下同样写不进去。
+原实现有 `%TEMP%` 兜底（不至于丢日志），但位置反直觉。现在打包形态直接写
+`%LOCALAPPDATA%\TrueToneCap\log`，与设置/密钥同处，用户找得到。
+
+**已核查、确认无需改动的第三处**：`NativeLibraryResolver` 会**尝试写** `BaseDirectory\native`，
+但打包形态下两个条件同时成立使其无害 ——
+① 4 枚 exe 已随包分发（实测解包确认 `native\` 下俱在）⇒ `File.Exists` 先命中并跳过写；
+② 整个方法体在 `try/catch` 内，失败只记 `LastError` 并告警，不会崩启动。
+已在源码注释里写明"若将来改成运行时提取，这两个条件会同时失效，必须改到可写目录"。
 
 ### 3.2 `Identity/@Publisher` 必须替换为商店给的值
 
@@ -167,7 +242,7 @@ Publisher="CN=PLACEHOLDER-REPLACE-WITH-PARTNER-CENTER-IDENTITY"
 ### 4.1 出提交用的包
 
 ```powershell
-# 推荐：框架依赖，体积减半（实测 175.82 → 84.57 MB）
+# 推荐：框架依赖，体积减半（最终实测 175.85 → 85.12 MB，−51.6%）
 .\Publish.ps1 -Msix -FrameworkDependent
 
 # 或：完全自包含，开箱即用
@@ -281,14 +356,23 @@ DirectML.dll 包含对 "reg" 的不可执行引用  …（共 19 条）
 |---|---|---|
 | 1 | **从 storedeveloper.microsoft.com 申请免费个人账号**（备好证件+自拍） | ⏳ 你做 |
 | 2 | **预留应用名称**，拿到 **Publisher 标识** | ⏳ 你做 |
-| 3 | 🔴 **写隐私政策**并托管到公网 URL（必须披露截图可能上传第三方） | ❌ **待做（本仓缺口）** |
-| 4 | 把 `Publisher` 填回 `Package.appxmanifest`，更新门禁断言 | ⏳ 待做 |
-| 5 | 准备商店素材：截图、中英文描述、支持信息 | ⏳ 待做 |
-| 6 | `.\Publish.ps1 -Msix -FrameworkDependent` 出包 | ✅ 已验证可用 |
-| 7 | 本机 WACK 复跑确认（本次已 PASS） | ✅ 已完成 |
-| 8 | 提交前想清：`WindowsAppSDKSelfContained` 用哪种（影响体积与用户要求） | ✅ 开关已就绪 |
+| 3 | ~~写隐私政策~~ | ✅ **已完成**（`PRIVACY.md` + 应用内入口 + 随包分发 + 门禁断言） |
+| 3b | **把 `PRIVACY.md` commit + push 到仓库**（GitHub 公开仓库即公网托管，无需另找），把 `blob/main/PRIVACY.md` 填进 Partner Center | ⏳ 你做（只需一次 push） |
+| 4 | ~~修 MSIX 设置不保存~~ | ✅ **已完成**（`PackageRuntime` 分支 + 日志目录一并修 + 测试覆盖） |
+| 5 | 把 `Publisher` 填回 `Package.appxmanifest` | ⏳ 待做 |
+| 6 | 准备商店素材：截图（1366×768+）、中英文描述、支持信息 | ⏳ 待做 |
+| 7 | `.\Publish.ps1 -Msix -FrameworkDependent` 出包 | ✅ 已验证可用（85.12 MB） |
+| 8 | 本机 WACK 复跑确认（本次已 PASS） | ✅ 已完成 |
 | 9 | 提交，填好 `Notes for certification`（§4.3） | ⏳ |
 | 10 | 等 ≤3 工作日认证；通过后 ~15 分钟上架 | ⏳ |
+
+> ✅ **代码侧的阻断项已清空**（原 §3.1b 的设置丢失已修，并有测试锁住）。
+> 现在只剩**流程性/人工**的三件事：**push 一次拿到隐私政策 URL**、填 Publisher、准备商店素材。
+>
+> ⚠️ 唯一**仍未实机验证**的一环：把 MSIX 装到**没有 .NET/WinAppSDK 运行时的干净机器**上跑一遍
+> （包内已附带 `Add-AppDevPackage.ps1`）。本次修复针对的正是"打包后才暴露"的那类问题，
+> 因此这一步值得在提交前做掉 —— 它会一次性验证：设置持久化、日志落点、子进程 + `%TEMP%`、
+> 以及四种编码格式在沙箱内是否可用。
 
 ---
 

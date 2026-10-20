@@ -27,9 +27,47 @@ public sealed partial class OcrPreviewWindow : Window
     private readonly OcrResult _ocr;            // Lines/Words 坐标已归一化到原图
     private readonly LlmConfig _translationConfig;
     private Func<byte[], int, int, Task>? _saveHandler; // 主窗口注入的保存逻辑（按主UI设置）
-    private List<string>? _translatedLines;     // 与 _ocr.Lines 一一对应；null = 尚未翻译
-    private bool _showTranslation;
     private bool _translating;
+
+    /// <summary>
+    /// 翻译结果快照 —— <b>一次性发布</b>，替代原先分两处写的
+    /// <c>_translatedLines</c> + <c>_showTranslation</c>（2026-10-07 审查加固）。
+    /// <para>为什么合成一个对象：原先是"先写 <c>_translatedLines</c>、再在另一个
+    /// <c>TryEnqueue</c> 里写 <c>_showTranslation = true</c>"。当前调用顺序恰好正确
+    /// （先 <c>await Task.WhenAll</c>，再整体入队），但渲染端只要有人在
+    /// <c>WhenAll</c> 之前读一次，就会拿到"有译文但还没显示"或"显示了但译文是旧的"这种半成品。
+    /// 合成一个不可变快照后，"译文与显示标志永远同时可见"由类型本身保证，
+    /// 不再依赖调用方的书写顺序。</para>
+    /// </summary>
+    private sealed record TranslationSnapshot(
+        IReadOnlyList<string> Lines,
+        int? DefiniteFailed,
+        string? FirstError);
+
+    private TranslationSnapshot? _translation;
+
+    /// <summary>
+    /// <b>显示哪一边</b>（true = 显示译文，false = 显示原文）。
+    /// <para>⚠️ 与"有没有译文"是两件事：前者是用户的视图选择，后者由 <see cref="_translation"/>
+    /// 是否存在决定。原先只有这一个字段，"有没有译文"要用 <c>_translatedLines != null</c> 现推，
+    /// 于是两个概念在 20 处调用点里被混着用 —— 这正是加固时拆开的原因。</para>
+    /// </summary>
+    private bool _showTranslation;
+
+    /// <summary>是否已有可显示的翻译结果（等价于原先靠 <c>_translatedLines != null</c> 现推的判据）。</summary>
+    private bool HasTranslation => _translation is not null;
+
+    /// <summary>
+    /// 本窗口在途工作的取消源（2026-10-07 审查修复）。
+    /// <para>修的是什么：<c>TranslateAsync</c> 的签名<b>接受</b> <c>CancellationToken</c>，
+    /// 但本窗口从来没传过，窗口内也没有任何 CTS，<c>OnClosed</c> 还是空的 ⇒
+    /// 关掉预览窗后，最多 N 行翻译请求会继续跑到各自的内部超时
+    /// （Google/Bing 每端点 5 s、LLM 视配置），并一直占着 <c>SemaphoreSlim(4)</c> 的槽位。</para>
+    /// <para>影响等级（实测确认，不夸大）：<b>不崩、不损坏数据</b> —— 最终 UI 更新走
+    /// <c>DispatcherQueue.TryEnqueue</c>，窗口已关时安全 no-op。纯粹是浪费网络与并发槽位。
+    /// 但"用户已经关窗了、程序还在替他发请求"，既费流量也让日志里出现无来源的失败记录。</para>
+    /// </summary>
+    private CancellationTokenSource? _workCts;
 
     /// <summary>主窗口注入的保存逻辑（按主UI设置）</summary>
     public Func<byte[], int, int, Task>? SaveHandler
@@ -208,21 +246,25 @@ public sealed partial class OcrPreviewWindow : Window
             if (rect.Width <= 0 || rect.Height <= 0) continue;
 
             double cx = rect.X * sx, cy = rect.Y * sy, cw = rect.Width * sx, ch = rect.Height * sy;
-            bool hasTranslation = _translatedLines is not null && i < _translatedLines.Count;
-            string displayText = _showTranslation && hasTranslation
-                ? _translatedLines![i]
+            // 快照式读取：译文与"是否显示译文"来自同一个不可变对象，不会再出现
+            // "标志已置位但译文还是旧的"这类半成品（见 TranslationSnapshot 的说明）。
+            var snap = _translation;
+            bool showTranslation = snap is not null;
+            bool hasTranslation = snap is not null && i < snap.Lines.Count;
+            string displayText = showTranslation && hasTranslation
+                ? snap!.Lines[i]
                 : line.Text;
             // 原文模式下若译文已就绪，ToolTip 显示译文
             string tooltipText = hasTranslation
-                ? $"原文: {line.Text}\n译文: {_translatedLines![i]}"
+                ? $"原文: {line.Text}\n译文: {snap!.Lines[i]}"
                 : line.Text;
 
             // 高亮背景块 (原文模式=半透明蓝, 译文模式=深色不透明)
-            byte bgA = _showTranslation ? (byte)235 : (byte)80;
-            var bgColor = _showTranslation
+            byte bgA = showTranslation ? (byte)235 : (byte)80;
+            var bgColor = showTranslation
                 ? Windows.UI.Color.FromArgb(235, 15, 23, 42)    // 深色不透明
                 : Windows.UI.Color.FromArgb(80, 56, 120, 210);  // 半透明蓝
-            var borderColor = _showTranslation
+            var borderColor = showTranslation
                 ? Windows.UI.Color.FromArgb(120, 56, 189, 248)  // 蓝边框
                 : Windows.UI.Color.FromArgb(100, 100, 180, 255); // 浅蓝边框
 
@@ -259,7 +301,7 @@ public sealed partial class OcrPreviewWindow : Window
             {
                 overlay.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 56, 189, 248));
                 overlay.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(
-                    _showTranslation ? (byte)255 : (byte)120, 30, 60, 180));
+                    showTranslation ? (byte)255 : (byte)120, 30, 60, 180));
             };
             overlay.PointerExited += (_, _) =>
             {
@@ -316,8 +358,9 @@ public sealed partial class OcrPreviewWindow : Window
 
     private void CopyLine(int idx)
     {
-        string text = (_showTranslation && _translatedLines is not null && idx < _translatedLines.Count)
-            ? _translatedLines[idx]
+        var snap = _translation;
+        string text = (snap is not null && idx < snap.Lines.Count)
+            ? snap.Lines[idx]
             : _ocr.Lines[idx].Text;
         SetClipboard(text);
         InfoTxt.Text = $"📋 已复制: {Truncate(text, 40)}";
@@ -333,8 +376,9 @@ public sealed partial class OcrPreviewWindow : Window
 
     private string CurrentFullText()
     {
-        if (_showTranslation && _translatedLines is not null)
-            return string.Join("\n", _translatedLines);
+        var snap = _translation;
+        if (snap is not null)
+            return string.Join("\n", snap.Lines);
         return _ocr.Text;
     }
 
@@ -353,7 +397,7 @@ public sealed partial class OcrPreviewWindow : Window
 
         var dialog = new ContentDialog
         {
-            Title = _showTranslation ? "📝 译文内容" : "📝 原文内容",
+            Title = HasTranslation ? "📝 译文内容" : "📝 原文内容",
             Content = new ScrollViewer { Content = textBox, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
             PrimaryButtonText = "复制全部",
             SecondaryButtonText = "复制选中",
@@ -387,7 +431,9 @@ public sealed partial class OcrPreviewWindow : Window
     private void OnModeToggleChanged(object sender, RoutedEventArgs e)
     {
         bool want = ModeToggle.IsChecked == true;
-        if (want && (_translatedLines is null || _translatedLines.Count == 0))
+        // "有没有译文"看快照，"显示哪一边"看这个开关 —— 两者刻意分开：
+        // 快照一旦发布就不再变（不可变），而用户可以在原文/译文之间来回切。
+        if (want && !HasTranslation)
         {
             // 译文尚未就绪 → 触发翻译，完成后自动切到译文模式
             ModeToggle.IsChecked = false;
@@ -432,6 +478,15 @@ public sealed partial class OcrPreviewWindow : Window
             InfoTxt.Text = "🌐 翻译中...";
         });
 
+        // ═══ 本次翻译的取消源（2026-10-07 审查修复）═══
+        // 关窗（OnClosed）会 Cancel 它 ⇒ 在途 HTTP 请求立即结束，
+        // 不再"用户已经关窗了、程序还在替他发请求"。
+        // 每次翻译新建一个：上次已完成的 CTS 不该复用（复用会让新工作一开始就处于已取消态）。
+        var cts = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _workCts, cts);
+        try { previous?.Dispose(); } catch { /* 已被关窗路径释放过：忽略 */ }
+        var ct = cts.Token;
+
         // ═══ 先问一句"到底配了后端没有"（2026-09-21 告知整改）═══
         // 扇出 N 行之前不先判断，N 行各自注定失败，而下面的行级容错会把原因全吞掉 ——
         // 用户看到的就是"⚠ 翻译完成（N/N 行失败，已保留原文）"：既没原因，也没出路。
@@ -451,6 +506,7 @@ public sealed partial class OcrPreviewWindow : Window
             var lines = _ocr.Lines;
             string? firstError = null;      // 行级容错不许吞掉原因，留一份给状态栏
             int? definiteFailed = null;     // 非 null = 这条路自己知道失败了几行，不必靠"译文==原文"猜
+            List<string> translated;
 
             if (TranslationService.VisionConfigured(_translationConfig))
             {
@@ -465,8 +521,8 @@ public sealed partial class OcrPreviewWindow : Window
                 {
                     throw new TranslationException($"截图编码 PNG 失败，无法走视觉路：{ex.Message}");
                 }
-                _translatedLines = (await translator.TranslateImageWithVisionAsync(
-                    png, _translationConfig.TargetLanguage, lines.Count)).ToList();
+                translated = (await translator.TranslateImageWithVisionAsync(
+                    png, _translationConfig.TargetLanguage, lines.Count, ct)).ToList();
                 // 视觉路要么整批交出 N 行、要么抛异常（见 TranslateImageWithVisionAsync），
                 // 所以这里不存在"某行失败"。不显式记这一笔的话，下面那句按
                 // "译文 == 原文"数失败的兜底统计会把专有名词/同语言的正常行算成失败。
@@ -485,8 +541,15 @@ public sealed partial class OcrPreviewWindow : Window
                 var lineText = lines[i].Text;
                 tasks[i] = Task.Run(async () =>
                 {
-                    await sem.WaitAsync();
-                    try { return await translator.TranslateAsync(lineText, _translationConfig.TargetLanguage); }
+                    // ⚠️ WaitAsync 必须带 token：否则关窗后仍会排队等槽位，
+                    //    整个扇出要等前一批请求跑完才退出（这正是本次要修的行为）。
+                    await sem.WaitAsync(ct);
+                    try { return await translator.TranslateAsync(lineText, _translationConfig.TargetLanguage, null, ct); }
+                    // ⚠️ 取消必须【先于】通用 catch —— 否则 OperationCanceledException 会被
+                    //    当成"这一行翻译失败"，把 firstError 写成"操作已取消"，
+                    //    于是关窗在状态栏里显示成"某行失败"。取消不是行级失败，要让它抛上去，
+                    //    由 TranslateAndShowAsync 的 catch(OperationCanceledException) 静默收尾。
+                    catch (OperationCanceledException) { throw; }
                     // 行级容错保留（P-4/R-5：一行失败不许带走全部译文），但原因要记下来
                     catch (Exception ex)
                     {
@@ -497,8 +560,18 @@ public sealed partial class OcrPreviewWindow : Window
                 });
             }
             await Task.WhenAll(tasks);
-            _translatedLines = tasks.Select(t => t.Result).ToList();
+            translated = tasks.Select(t => t.Result).ToList();
             }
+
+            // ═══ 取消后不要再发布结果 ═══
+            // 窗口已关/已取消时发布快照没有意义，而且会让"关窗后仍在改状态"这件事
+            // 从"浪费网络"升级成"改内存 + 入队"。真正的干净退出点在这里。
+            ct.ThrowIfCancellationRequested();
+
+            // ═══ 一次性发布（2026-10-07 加固）═══
+            // 译文、失败行数、首个错误合成一个不可变对象，赋值是单次引用写入 ⇒
+            // 渲染端读到的永远是"完整的一份"，不会再出现半成品。
+            _translation = new TranslationSnapshot(translated, definiteFailed, firstError);
 
 DispatcherQueue.TryEnqueue(() =>
             {
@@ -506,12 +579,14 @@ DispatcherQueue.TryEnqueue(() =>
                 ModeToggle.IsChecked = true;
                 ModeToggle.Content = "显示原文";
                 RenderOverlay();
-                int total = _translatedLines.Count;
+                var snap = _translation;
+                if (snap is null) return;                 // 理论不可达（上面刚赋值），但读快照而非字段更稳
+                int total = snap.Lines.Count;
                 // "译文 == 原文"只是文本路的近似判据：同语言或专有名词会被算成失败。
                 // 视觉路自己知道结果（整批成功或整批抛异常），走 definiteFailed。
-                int failed = definiteFailed ??
-                    _translatedLines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
-                string why = firstError is null ? "" : $"（原因示例：{firstError}）";
+                int failed = snap.DefiniteFailed ??
+                    snap.Lines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
+                string why = snap.FirstError is null ? "" : $"（原因示例：{snap.FirstError}）";
                 InfoTxt.Text = failed switch
                 {
                     0 => $"✅ 翻译完成（{total} 行），点击文字块可复制译文",
@@ -520,6 +595,13 @@ DispatcherQueue.TryEnqueue(() =>
                     _ => $"⚠ 翻译完成（{failed}/{total} 行失败，已保留原文）{why}，点击文字块可复制",
                 };
             });
+        }
+        catch (OperationCanceledException)
+        {
+            // ═══ 关窗导致的取消：不是错误，不要报成"翻译失败" ═══
+            // 这条分支若也走下面的通用文案，用户会看到"❌ 翻译服务暂时不可用"——
+            // 而事实是他自己关掉了窗口。实测这条路径原先不存在，取消会落进 catch(Exception)。
+            LogService.Info("OcrPreviewWindow", "翻译已取消（窗口关闭）");
         }
         catch (Exception ex)
         {
@@ -562,7 +644,22 @@ DispatcherQueue.TryEnqueue(() =>
     }
 
     private void OnCloseClick(object sender, RoutedEventArgs e) => this.Close();
-    private void OnClosed(object sender, WindowEventArgs args) { }
+
+    /// <summary>
+    /// 关窗时取消在途翻译（2026-10-07 审查修复）。
+    /// <para>原先这里是空的 —— 于是关掉预览窗后，最多 N 行翻译请求会继续跑到各自的内部超时
+    /// （Google/Bing 每端点 5 s、LLM 视配置），并一直占着 <c>SemaphoreSlim(4)</c> 的槽位。
+    /// 用户已经关窗、程序还在替他发请求，既费流量也在日志里留下无来源的失败记录。</para>
+    /// <para>⚠️ 只 Cancel 不 Dispose：翻译链仍在跑（正在 await 这些请求），
+    /// 此刻 Dispose 会让它们抛 <see cref="ObjectDisposedException"/> 而不是
+    /// <see cref="OperationCanceledException"/> —— 那就把"用户主动取消"变成了"异常"。
+    /// 由链自己在 finally 里收尾（下次翻译会换新 CTS，旧的在那里释放）。</para>
+    /// </summary>
+    private void OnClosed(object sender, WindowEventArgs args)
+    {
+        try { _workCts?.Cancel(); }
+        catch (ObjectDisposedException) { /* 已释放：无需再取消 */ }
+    }
 
     // ═══════════════════════════════════════
     //  工具

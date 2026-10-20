@@ -15,15 +15,29 @@ namespace TrueToneCap.App.Services;
 public sealed class SettingsService
 {
     /// <summary>
-    /// 设置文件路径：<b>只有</b>软件同目录这一个位置（便携/绿色用法：设置跟着程序走）。
-    /// 2026-09-25 起删掉"不可写就降级到 %LOCALAPPDATA%"那条路，理由见 <see cref="CanPersist"/>。
+    /// 设置文件路径 —— <b>按运行形态确定性地选一个位置，每个环境下仍只有一个答案</b>。
+    /// <list type="bullet">
+    /// <item><b>未打包（绿色包 / 便携用法）</b>：软件同目录，设置跟着程序走（本仓一贯语义）。</item>
+    /// <item><b>已打包（MSIX / 商店）</b>：<c>%LOCALAPPDATA%\TrueToneCap\</c>。
+    /// 因为包目录在 MSIX 下是<b>只读</b>的（官方原文："Write inside the package — Not allowed.
+    /// The package is read-only."，见 desktop-to-uwp-behind-the-scenes）。</item>
+    /// </list>
+    /// <para>⚠️ 这不是把 2026-09-25 删掉的"降级"又加回来 —— 那条路的问题在于<b>探测失败才换位置</b>，
+    /// 于是"设置存哪"依赖运行时的可写性，同一次安装里都能变，且用户看不出来。这里是
+    /// <b>按运行形态静态决定</b>：打包就是打包、未打包就是未打包，一个环境一个答案，不随写失败漂移。</para>
+    /// <para>为什么必须区分：MSIX 下若仍写包目录，<c>CanPersist</c> 会为 false ⇒
+    /// 程序按默认值表运行 ⇒ <b>用户改的每一项设置重启即丢</b>，而界面上只有日志里一行提示。
+    /// 2026-10-07 核查商店上架时实测发现该缺陷（全仓不存在任何"打包感知"的存储分支）。</para>
+    /// <para>⚠️ 本属性仍是唯一事实源：其他地方要读设置文件都必须引用它，并同时问 <see cref="CanPersist"/>。</para>
     /// </summary>
-    /// <remarks>
-    /// ⚠️ 本属性是【唯一事实源】：任何其他地方需要读设置文件（如 App 构造期加载主题）
-    ///    都必须引用它，且同时问一次 <see cref="CanPersist"/> —— 历史上一度出现注释说 BaseDirectory、
-    ///    代码却拼 LocalApplicationData 的不一致。
-    /// </remarks>
-    public static string SettingsPath { get; } = Path.Combine(AppContext.BaseDirectory, SettingsFileName);
+    public static string SettingsPath { get; } =
+        Path.Combine(
+            TrueToneCap.Core.Settings.PackageRuntime.IsPackaged
+                ? Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "TrueToneCap")
+                : AppContext.BaseDirectory,
+            SettingsFileName);
 
     private const string SettingsFileName = "TrueToneCap.settings.json";
 
@@ -35,22 +49,35 @@ public sealed class SettingsService
     /// 恰恰是"文件还不存在"的形态 ⇒ 探测一路放行，随后每次 <c>Save()</c> 抛异常，
     /// 而调用方全走 <c>SaveQuiet()</c>（原先是空的 <c>catch { }</c>，连日志都不记）
     /// ⇒ 症状恰好就是那段防护声称要防的"用户改了设置 → 重启后回到默认，且毫无线索"。</para>
-    /// <para>为什么降级这条路本身也要拆：设置存在哪一旦有两个答案，同目录那份与 LocalAppData 那份
-    /// 内容可以完全不同，用户与代码各信一个 —— 那比"不保存"更难查。</para>
+    /// <para>为什么"探测失败再降级"这条路要拆：设置存在哪一旦取决于探测结果，同目录那份与
+    /// LocalAppData 那份内容可以完全不同，用户与代码各信一个 —— 那比"不保存"更难查。
+    /// ⚠️ 注意 <see cref="SettingsPath"/> 现在按<b>运行形态</b>选位置，与这里探测的
+    /// "这个位置此刻写不写得进去"是两件事：前者静态、一个环境一个答案；后者只用来决定
+    /// "要不要整体退回默认值表"。二者不构成第二事实源。</para>
     /// </summary>
     public static bool CanPersist { get; } =
         TrueToneCap.Core.Settings.SettingsWriteProbe.CanPersistSettings(SettingsPath);
 
-    /// <summary>迁移前的旧位置（%LOCALAPPDATA%\TrueToneCap\）。</summary>
+    /// <summary>
+    /// 未打包形态下的历史位置（%LOCALAPPDATA%\TrueToneCap\）。
+    /// <para>用途有二：① 从"旧版本用 LocalAppData"迁移到"绿色包用同目录"（那条迁移一直存在）；
+    /// ② 打包形态下 <see cref="SettingsPath"/> 本身就落在这里，此时它等于 SettingsPath ——
+    /// 调用方必须先比对相等再决定要不要搬（见 <see cref="MigrateFromLegacyLocation"/>）。</para>
+    /// </summary>
     public static string LegacySettingsPath =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TrueToneCap", SettingsFileName);
 
     /// <summary>
-    /// 从旧位置迁移设置文件到软件同目录。
-    /// 不做这件事的话，改用同目录存储会让老用户【已有的全部设置看起来消失】——
-    /// 程序静默回到默认值，而旧文件还好好躺在 LocalApplicationData，极难察觉。
+    /// <summary>
+    /// 把设置从"旧位置"迁到"当前位置"。旧位置恒为 <c>%LOCALAPPDATA%\TrueToneCap\</c>
+    /// （2026-09-25 之前本程序写在那里）。
+    /// <para>不做这件事的话，改用同目录存储会让老用户【已有的全部设置看起来消失】——
+    /// 程序静默回到默认值，而旧文件还好好躺在 LocalApplicationData，极难察觉。</para>
+    /// <para>⚠️ 打包形态下当前位置【就是】旧位置（见 <see cref="SettingsPath"/>），
+    /// 此时下面的相等判定会让它直接返回 —— 这是对的：那时文件已在该目录，
+    /// 再"搬一次"只会变成自己拷自己。</para>
     /// 只在新位置尚无文件时搬一次；旧文件保留，便于回退。
     /// </summary>
     private static void MigrateFromLegacyLocation()
@@ -58,13 +85,13 @@ public sealed class SettingsService
         try
         {
             if (File.Exists(SettingsPath)) return;
-            if (SettingsPath == LegacySettingsPath) return;   // 已降级到旧位置，无需迁移
+            if (SettingsPath == LegacySettingsPath) return;   // 打包形态 / 已在旧位置：无需迁移
             if (!File.Exists(LegacySettingsPath)) return;
 
             var dir = Path.GetDirectoryName(SettingsPath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             File.Copy(LegacySettingsPath, SettingsPath, overwrite: false);
-            LogService.Info("SettingsService", $"已将设置迁移到软件同目录: {SettingsPath}");
+            LogService.Info("SettingsService", $"已将设置迁移到当前位置: {SettingsPath}");
         }
         catch (Exception ex)
         {

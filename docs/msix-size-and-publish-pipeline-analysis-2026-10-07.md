@@ -429,3 +429,32 @@ WinAppSDK 原生件（`Microsoft.ui.xaml.dll`）**已按预期移除**。
 2. **`Identity/@Publisher` 仍是占位符**（同前）。
 3. **MSIX 缺 R2R 对启动时间的影响未量化** —— 若实测启动明显变慢，
    可考虑为框架依赖包单独打开 R2R（但那会抵消部分体积收益，需权衡）。
+
+---
+
+## 9. ⚠️ 体积数字更正（2026-10-07 完整验证时实测）
+
+**本文件正文里的体积为当时（实现当日）测量值。之后同日又加入了隐私政策窗口与若干修复，
+代码量增加 ⇒ 数字已小幅上移。以下为**最终验证时的实测值**，以本节为准。**
+
+| 模式 | 本文件正文旧值 | **最终实测值** | 差异 |
+|---|---|---|---|
+| `dotnet build`（自包含） | 150.90 MB | **150.91 MB** | +0.01 |
+| `dotnet publish`（自包含，默认） | 175.82 MB | **175.85 MB** | +0.03 |
+| `dotnet publish`（**框架依赖**） | 84.57 MB | **85.12 MB** | +0.55 |
+
+⇒ **真实收益：175.85 → 85.12 MB = −90.73 MB（−51.6%）**（原记 −52%，差异可忽略）。
+
+**为什么框架依赖那档涨得相对多（+0.55 MB）**：
+本次新增了 `PrivacyPolicyWindow`、抽出 `MarkdownDocumentWindow`（360 行）、
+`TranslationSnapshot`、`PackageRuntime`，并把 `StartupManager` 从反射改为
+**强类型引用 `Windows.ApplicationModel.StartupTask` / `StartupTaskState`** ——
+后者会引入 WinRT 投影的 TypeRef/MemberRef 元数据，而反射版本没有这些引用。
+**这是为"可编译期校验"付的合理代价**（换来的是消除了 3 个静默 bug）。
+
+> 复现命令：
+> ```powershell
+> .\Publish.ps1 -Msix -FrameworkDependent -SkipTests -AllowDirty   # => 85.12 MB
+> .\Publish.ps1 -Msix -SkipTests -AllowDirty                       # => 175.85 MB
+> dotnet build src\TrueToneCap.App -c Release -p:Platform=x64 -p:TtcMsixPackage=true  # => 150.91 MB
+> ```

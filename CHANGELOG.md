@@ -15,6 +15,7 @@
 
 ---
 
+
 ## [0.3.9-beta] — 2026-10-21：识字/翻译必崩修好；外接屏的色域判定不再读错屏
 
 ### 修复：点"识字"或"翻译"整个软件直接消失（无弹窗、无报错、无日志）
@@ -53,11 +54,382 @@
   并把那句"（进程没起来）"的假因果从打印里去掉。
 - 断言规模：地板 1787 → 本轮实测 **1841**（`--unit-tests` 1253 → 1278）。
 
+
+## [未发布] — 2026-10-07：真机安装 MSIX 实测（关闭"打包后才暴露"的验证盲区）
+
+> 报告：`docs/realmachine-msix-verification-2026-10-07.md`
+
+### 突破：把"装不了"变成"能装"
+
+先前多处文档写"需真装 MSIX 才能验证"，理由是**包身份无法伪造**。本次打通了完整路径：
+
+**启用开发者模式 → 建自签名证书（Subject 与清单 Publisher 逐字一致）→ 装入
+`LocalMachine\TrustedPeople` + `Root` → `signtool` 签名 → `Add-AppxPackage` → 安装成功**
+（`TrueToneCap_0.3.7.0_x64__4vm2c64tkcgbr`，`Status=Ok`）。
+
+> 这条路径本身就证明：**本仓产出的 MSIX 是真能装、能跑的**，
+> 不只是"能被 WACK 解析"。
+
+### ✅ 实测结果：6 项"未验证"中 5 项通过
+
+| 项 | 结果 |
+|---|---|
+| **安装目录确实只读**（设置修复的前提） | ✅ 写入被拒 ⇒ 证实"必须改写到别处"非臆测 |
+| **设置与日志落到 `%LOCALAPPDATA%`** | ✅ 应用自己的日志显示已写入该处；只读安装目录中**没有**设置文件 |
+| **沙箱内子进程 + `%TEMP%`** | ✅ `.jxl`/`.webp`/`.avif`/`.jpg` **四种原生编码器全部成功**，`selftest fail=0` |
+| **`StartupTask` 读/写/回读** | ✅ `Disabled(0)` → `RequestEnableAsync` → **`Enabled(2)`**，应用回读到 `2`；注册表独立佐证 |
+| **取消是否真的立即中止** | ✅ **实测 16–30 ms 内中止**（300ms→330ms、800ms→816ms、预取消→0ms） |
+| **框架依赖包安装流程** | ✅ 能装、能跑、完成完整 selftest（本机有 22 个 WinAppSDK 框架包） |
+
+**这直接证伪了反射版**：反射版会在 `AsTask` 返回 `null`、只留一行 Warn；
+现在实测拿到 `State=0`、成功翻转到 `Enabled(2)`、并回读为 `2`。
+
+顺带确认：`HKCU\...\SystemAppData\<PFN>\TrueToneCapStartup` 键**存在本身**即证明
+**清单 `TaskId` 与代码请求的 ID 一致**（不一致时该键不会被建立）。
+
+取消测试同时验证了翻译链路可用：**基线不取消时成功返回真实译文**（1289 ms → `你好，世界。`）。
+
+### ⚠️ 仍未验证（1 项，已说明原因）
+
+`RequestEnableAsync` 被 **`DisabledByUser`** 拒绝的实际路径 ——
+需要人工到「设置 → 应用 → 启动」关掉再调 API，属 GUI 交互 + 故意制造拒绝态。
+该分支代码已如实记日志，但**未在真机触发过**。
+**我不会为了测这一格往出货源码里加诊断代码。**
+
+### 清理
+
+禁用 StartupTask、卸载包、移除测试证书（3 个存储）、无进程残留、
+**开发者模式已还原为原状**（原先即未设置，故删除该两个值而非置 0）—— 机器已完全还原。
+
+> **唯一保留**：`%LOCALAPPDATA%\TrueToneCap\`（应用真机运行时正常写下的用户数据，
+> settings.json + 日志）。这是应用数据而非测试残留，删除与否由你决定。
+
+---
+
+## [未发布] — 2026-10-07：完整验证（从零重建）+ 修掉 2 条"没有牙"的判据
+
+> 报告：`docs/complete-verification-report-2026-10-07.md`
+
+### 验证方法与结论
+
+**删除全部 `obj/`、`bin/`、`AppPackages/` 后从零重建**，逐项复跑，并复核我自己写下的每条声明。
+
+| 项 | 结果 |
+|---|---|
+| 5 项目 Release 构建 | ✅ **0 警告 0 错误**（`TreatWarningsAsErrors=true`） |
+| `dotnet restore --locked-mode`（CI 关键路径） | ✅ 通过；`packages.lock.json` 无漂移 |
+| 8 套件测试 | ✅ **1872 通过 / 0 失败**（2 跳过） |
+| `--selftest` | ✅ 通过，产出**真实**编码文件（TIFF/JPEG LI/AVIF/PNG） |
+| MSIX 构建 + 内容门禁 | ✅ 150.91 MB / 566 文件，门禁全绿 |
+| WACK | ✅ `OVERALL_RESULT=PASS`，**0 项阻断性失败** |
+| 仓库卫生 | ✅ 构建产物已不被跟踪，`git add -A` 不再收入 |
+
+### 🔍 交付物级核实：我写的代码确实在包里
+
+不看源码、不 grep 字节，而是用 `System.Reflection.Metadata` **真读程序集**：
+
+- ✅ **在**：`TrueToneCapStartup`（#US 堆字面量）、`Windows.ApplicationModel.StartupTask`、
+  `StartupTaskState`、`RequestEnableAsync`、`Disable`、`AsTask`、`PackageRuntime`、`TranslationSnapshot`
+- ✅ **不在**：`MakeGenericMethod`、`ResolveStartupTaskType`
+  ⇒ **反射版的 3 个 bug 所依赖的代码路径，在交付物里已不存在**
+
+> 附带纠正我自己的一个错误结论：初次用"字节扫描找 UTF-16"查 `TrueToneCapStartup` 得到
+> "未找到"，一度怀疑被内联；改用 `MetadataReader` 枚举 `ldstr` 后确认**它就在 #US 堆里**。
+> **教训：字节级 grep 查托管程序集不可靠，要用元数据读取器。**
+
+### ⚠️ 新增 `scripts/mutation-verify.ps1` —— 查出 2 条判据"没有牙"
+
+思路：**故意把实现改坏，期望单元测试报红；若仍全绿，说明这条判据是假保护**。
+
+第一轮查出 **2 条无牙判据**（这是本次验证最重要的产出）：
+
+**① 快照判据被"前缀关系"击穿**
+原判据 `Contains("record TranslationSnapshot") && Contains("new TranslationSnapshot(")` ——
+把类型名改成 `TranslationSnapshotRenamed` 时，**第一子句失败但第二子句仍为真**
+（`"new TranslationSnapshot("` 是 `"...Renamed("` 的前缀）⇒ `&&` 被绕过。
+**修法**：改用词边界正则 `\brecord\s+TranslationSnapshot\b`。
+
+**② `LogService` 的修复完全没有判据保护**
+我改了 `LogService` 按 `PackageRuntime.IsPackaged` 选目录，**却没加任何测试** ——
+把 `IsPackaged` 换成常量 `false`（**等于废掉整个修复**）后单元测试**仍然全绿**。
+⇒ 一条没有判据保护的修复，**下次重构会被无声删掉**。
+**修法**：新增 `Test_LogDirectory_PackagedBranch`（3 条断言，含"未打包形态仍写程序目录"以防破坏绿色包语义）。
+
+**第二轮：6/6 判据全部有牙，`guards without teeth: 0`。**
+
+> 前 5 项全绿时很容易收工，但 **"判据全绿"与"判据有效"是两件事** ——
+> 只能靠变异测试区分。这再次印证本轮审查的核心教训：
+> **通过了测试，不等于测试测到了东西。**
+
+### ⚠️ 更正 31 处过期体积数字
+
+复跑 `Publish.ps1` 发现文档数字与实测不符（测于实现当日，之后同日又加入了若干代码）：
+
+| 模式 | 文档旧值 | **实测** |
+|---|---|---|
+| `dotnet build`（自包含） | 150.90 MB | **150.91 MB** |
+| `dotnet publish`（自包含） | 175.82 MB | **175.85 MB** |
+| `dotnet publish`（框架依赖） | 84.57 MB | **85.12 MB** |
+
+⇒ **真实收益：175.85 → 85.12 MB = −90.73 MB（−51.6%）**。
+已在 4 份文档更正/加注，并在分析文档新增 §9 记录**测量时点与漂移原因**
+（体积数字必须能追溯到"什么时候量的"），而不是把旧数字悄悄改掉。
+
+### 仍未验证（诚实边界）
+
+6 项**需真机/真装 MSIX** 才能验证，且全部属于"打包后才暴露"这一类 ——
+本会话的严重缺陷正产生于这个盲区：打包形态 `StartupTask` 真实行为、
+MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即中止等。
+**建议：装一次 MSIX 可一次性覆盖其中 4 项。**
+
+---
+
+## [未发布] — 2026-10-07：全仓管线审查 + 修掉自查发现的自启严重缺陷
+
+> 审查报告：`docs/pipeline-implementation-review-2026-10-07.md`
+
+### 🔴 严重（自查发现并修复）：上一轮我写的反射自启恒失败且静默
+
+**上一轮我"实现"的打包形态自启，实际上是坏的。** 那版用反射调 `StartupTask`，
+有 **3 个 bug，且全部指向同一后果 —— 打包形态自启永远不生效、只在日志留一行 Warn**：
+
+| # | Bug | 后果 |
+|---|---|---|
+| ① | `MakeGenericMethod(typeof(int))` 写死 | `GetAsync`→`IAsyncOperation<StartupTask>`、`RequestEnableAsync`→`IAsyncOperation<StartupTaskState>`，**都不是 `int`** ⇒ `Invoke` 抛 `ArgumentException` |
+| ② | 对**开放泛型**参数调 `IsAssignableFrom` | 恒为 `false` ⇒ 每个 `AsTask` 重载都被跳过 |
+| ③ | `AsTask` 永远返回 `null` | 调用方全部提前 `return` |
+
+**修法**：改为**强类型直接调用**。实测（两个 10 行探针工程）证明反射本就不必要 ——
+本工程 TFM 是 `net11.0-windows10.0.26100.0`，`using System;` 之后
+`await StartupTask.GetAsync(...)` **直接编译通过**，无需任何额外包引用。
+⇒ 编译期即可查出签名错误，那 3 个 bug 一个都活不下来。
+
+**防复发**：新增断言禁止在该分支出现 `MakeGenericMethod`/`GetAssemblies`/`ResolveStartupTaskType`，
+并做**变异测试**（塞回反射 ⇒ 立即报红）。
+
+> ⚠️ **为什么上一轮"自测通过"没发现**：单元测试当时只断言源码里**含有 `RequestEnableAsync` 字样**
+> （正向锚点），而反射版**确实含有那个字样**。**文本级断言验证不了运行期行为。**
+> 教训：**能用编译期类型就别用反射** —— 反射把错误从编译期推迟到运行时，
+> 而那条路径**只有装机后才会走到**。我当初为一个"假想约束"（不想沾 WinRT）引入了真风险。
+
+### 🟢 复核通过（审查确认无需改动）
+
+| 项 | 结论 |
+|---|---|
+| D3D11 共享设备加锁纪律 | ✅ 全部 14 处访问都在 `s_deviceLock` 内（L1477/L1569 初看裸露，实为在锁块内） |
+| 捕获回调在途计数 | ✅ 递减在 `finally` 里，覆盖全部 5 个提前 `return` |
+| 捕获 `Dispose` 顺序 | ✅ 取消订阅 → 置标志 → 等排空(2s) → 释放资源，是最佳实践 |
+| 临时文件清理 | ✅ 4 个原生编码器创建/删除严格配对，且**全在 `finally`** |
+| 设备丢失检测 | ✅ `D3DDeviceLost` 是纯函数，且**真的被接入**（每 30 帧主动轮询 + 异常路径） |
+| 静默失败分级 | ✅ 165 处空 `catch` 逐一分类，绝大多数正当（日志追加/UI 派发/级联回退）；翻译失败最终**抛异常而非伪装成功** |
+
+### 🟠 中等（已修）：审查发现的两项
+
+**① 翻译扇出缺 `CancellationToken`**
+
+`TranslateAsync` 的签名接受 `CancellationToken`，但调用点从未传过；窗口内也没有任何 CTS，
+`OnClosed` 还是空的 ⇒ 关掉预览窗后，最多 N 行翻译请求继续跑到各自内部超时
+（Google/Bing 每端点 5 s），并一直占着 `SemaphoreSlim(4)` 的槽位。
+实测影响：**不崩、不损坏数据**（UI 更新走 `TryEnqueue` 安全 no-op），纯属浪费网络与并发槽位。
+
+修法：窗口持有 `_workCts`（每次翻译新建，不复用已完成的），token 传进
+`TranslateAsync` / `TranslateImageWithVisionAsync` / `sem.WaitAsync`；
+`OnClosed` 里 `Cancel()`（**只 Cancel 不 Dispose** —— 链仍在 await，此刻 Dispose 会抛
+`ObjectDisposedException` 而非 `OperationCanceledException`，把"用户主动取消"变成"异常"）；
+新增 `catch (OperationCanceledException)` 分支，取消**不报成"翻译失败"**。
+
+> ⚠️ **修第一版时我自己漏了一格，被新加的判据当场抓住**：行级 `catch (Exception)` 会先吞掉
+> `OperationCanceledException`，把它当成"这一行翻译失败"⇒ 关窗在状态栏显示成"某行失败"。
+> 已改为把 `catch (OperationCanceledException) { throw; }` **置于通用 catch 之前**。
+> 教训：**取消语义穿越多层 catch 时，顺序就是正确性。**
+
+**② 译文发布非原子**
+
+`_translatedLines`（数据）与 `_showTranslation`（标志）分两处写，中间隔着一次 `TryEnqueue` ⇒
+渲染端可能读到半成品。改为不可变 `TranslationSnapshot` **单次引用写入**，
+并把原先混用的两个概念显式拆开：**"有没有译文"看快照是否存在，"显示哪一边"看视图开关**。
+
+**防复发**：新增 `Test_OcrPreviewTranslation_CancellationAndSnapshot`（10 条断言），
+并对两条最关键的做了**变异测试**（去掉 re-throw / 清空 `OnClosed` ⇒ 均报红）。
+
+> 诚实边界：这些是**文本级接线断言** —— 能证明接线存在，不能证明取消真的生效。
+> 运行期行为已列入"需真机验证"清单。
+
+### 验收读数（本轮最终）
+
+| 项 | 结果 |
+|---|---|
+| 5 项目 Release 构建 | ✅ 0 警告 0 错误 |
+| 8 套件测试 | ✅ **1869 通过 / 0 失败** |
+| MSIX 构建 + 内容门禁 | ✅ 通过 |
+| `--selftest` | ✅ 通过 |
+
+---
+
+## [未发布] — 2026-10-07：打包形态开机自启 + 仓库卫生修复
+
+> 上架就绪度复核见 `docs/store-readiness-gap-analysis-2026-10-07.md`。
+
+### 修复：MSIX 打包后开机自启不生效（声明了但没实现）
+
+- **问题**：`StartupManager` 写 `HKCU\...\Run`。而 MSIX 下对 HKCU 的写入被
+  **重定向到包专属 hive**（官方："All writes under HKCU are copied on write to a private
+  per-user, per-app location."）⇒ 那条 `Run` 项**对系统启动无效**。
+  **症状最具欺骗性**：界面开关能勾、注册表里也读得到值，**只有重启后才发现不会自动启动**。
+  清单里 `Package.appxmanifest` 早已声明 `windows.startupTask`，但代码从未接入该 API。
+- **修法**：按运行形态分支 ——
+  | 形态 | 机制 |
+  |---|---|
+  | 未打包（绿色包） | `HKCU\...\Run`（**原实现逐字未改**） |
+  | 已打包（MSIX） | 清单的 `startupTask` + `Windows.ApplicationModel.StartupTask` API（`GetAsync` / `RequestEnableAsync` / `Disable`） |
+- **如实上报被拒**：`RequestEnableAsync` 可能返回 `DisabledByUser`（用户曾在
+  「设置 → 应用 → 启动」关过）且 API **不会**替你改回来 —— 这是系统有意的保护。
+  故把最终状态记进日志，而不是让界面显示"已启用"而实际没启用。
+- **不引入编译期 WinRT 依赖**：该分支用反射（`Type.GetType` + 方法调用），
+  使未打包形态不必走 WinRT 初始化；反射路径全程 `try/catch`，失败按"不支持自启"处理而不崩。
+- **测试**：新增 `Test_StartupManager_PackagedUsesStartupTask`（4 组断言，含
+  **TaskId 与清单一致性**）。已做**变异测试**：把 `StartupTaskId` 改错后判据立即报红。
+
+### 修复：151.5 MB 构建产物被误提交进 git
+
+- **问题**：`.gitignore` 里**只有** `*.appxsym`，没有 `*.msix` 与 `AppPackages/`。
+  一次 `dotnet build -p:TtcMsixPackage=true` 就把
+  `src/TrueToneCap.App/AppPackages/…`（18 个文件、**151.5 MB**，含 `.msix`）带进了索引并提交。
+- **为什么必须修**：150 MB 二进制会永久留在 git 历史里；包内那份 `.msix` 是**某次**构建的旧产物，
+  会被误当成"发布产物"取用；该目录还含微软提供的 `Add-AppDevPackage.ps1`。
+- **修法**：`.gitignore` 补齐 MSIX 产物规则（`AppPackages/` + `*.msix`/`*.msixbundle`/
+  `*.msixupload`/`*.appx`/`*.appxbundle`/`*.appxupload`）+ `git rm -r --cached`（**保留磁盘文件**）。
+- ✅ **实测**：该批文件在**本地 HEAD**（18 个）但**不在 `origin/main`** ⇒ **从未 push**，
+  故清理只需一条命令，**无需 `git filter-repo` 改写历史**。
+  修复后 tracked 归零、`git add -A` 不会再收进来、MSIX 仍能正常构建。
+- ⚠️ 清理只在索引层，那 18 个文件仍在本地 HEAD 里 —— **下次提交必须包含这次删除**，
+  否则会随 push 进入远端历史。
+
+### 验收读数
+
+| 项 | 结果 |
+|---|---|
+| 5 项目 Release 构建 | ✅ 0 警告 0 错误 |
+| 8 套件测试 | ✅ **1858 通过 / 0 失败**（含 7 条新增断言） |
+| MSIX 构建 + 内容门禁 | ✅ 通过 |
+| `AppPackages` 被跟踪文件数 | ✅ **0**（规则生效，`git add -A` 不再收入） |
+
+---
+
+## [未发布] — 2026-10-07：修复 MSIX 下设置与日志写不进去
+
+> 上架核查的延续，见 `docs/store-submission-guide-2026-10-07.md` §3.1b。
+
+### 修复：MSIX 打包后**用户改的设置重启即丢**
+
+- **问题**：设置一贯写在"程序同目录"（便携语义）。而 MSIX 包安装在
+  `C:\Program Files\WindowsApps\…`，官方明确 **"Write inside the package — Not allowed.
+  The package is read-only."** ⇒ `CanPersist` 为 false ⇒ 全程按默认值表运行
+  ⇒ **改的每一项设置重启后回到默认**，界面无任何提示（只有日志一行）。
+- **修法**：新增 `PackageRuntime.IsPackaged`（`GetCurrentPackageFullName` P/Invoke，
+  不引入 WinRT 依赖），`SettingsPath` 按运行形态**静态**选位置：
+
+  | 形态 | 位置 |
+  |---|---|
+  | 未打包（绿色包） | `AppContext.BaseDirectory` —— **语义完全不变** |
+  | 已打包（MSIX） | `%LOCALAPPDATA%\TrueToneCap\` |
+
+- **⚠️ 这不是把 2026-09-25 删掉的"降级"加回来**：那条路是**探测失败才换位置**
+  （同一次安装里都能变、用户看不出来）。现在是**按运行形态静态决定，一个环境一个答案**。
+- **判定刻意保守**：拿不准一律当"未打包"（维持原语义，绝不会更糟）；
+  误判成"已打包"才会挪走绿色包用户的设置 —— 那正是最该拦住的方向。
+- **测试**：既有源码哨兵改为钉新形态（不再是"只认同目录"而是"按形态确定性选一个位置、
+  仍无 `ResolveSettingsPath`"），新增 `Test_PackageRuntime_UnpackagedDefault`
+  锁住"未打包必须判 false"。
+
+### 修复：同类问题 —— 日志目录也写不进去
+
+- `LogService` 原本写 `<程序目录>\log`，MSIX 下同样只读。原实现有 `%TEMP%` 兜底
+  （不至于丢日志），但位置反直觉（用户在程序目录找不到 `log/`，也不知道去了哪儿）。
+- 现在打包形态直接写 `%LOCALAPPDATA%\TrueToneCap\log`，与设置/密钥同处，用户找得到。
+  **未打包形态行为不变**（绿色包用户仍在程序目录看到 `log/`）。
+
+### 已核查、确认无需改动
+
+- `NativeLibraryResolver` 会**尝试写** `BaseDirectory\native`，但打包形态下两个条件
+  使其无害：① 4 枚 exe 已随包分发（实测解包确认俱在）⇒ `File.Exists` 先命中并跳过写；
+  ② 整个方法体在 `try/catch` 内，失败只记 `LastError` 并告警，不崩启动。
+  已在源码注释写明："若将来改成运行时提取，这两个条件会同时失效，必须改到可写目录。"
+
+### 验收读数
+
+| 项 | 结果 |
+|---|---|
+| 5 项目 Release 构建 | ✅ 0 警告 0 错误 |
+| 8 套件测试 | ✅ **1851 通过 / 0 失败**（含 2 条新增） |
+| `--selftest` | ✅ 通过 |
+
+> ⚠️ **仍未实机验证**：把 MSIX 装到没有 .NET/WinAppSDK 运行时的干净机器上跑一遍。
+> 本次修的正是"打包后才暴露"的那类问题，故建议提交前补这一步 ——
+> 它会一次性验证设置持久化、日志落点、子进程 + `%TEMP%`、以及四种编码格式。
+
+---
+
+## [未发布] — 2026-10-07：隐私政策（商店政策 10.5.1 合规）
+
+> 上架准备见 `docs/store-submission-guide-2026-10-07.md`（含免费账号申请流程与 WACK 实测结果）。
+
+### 新增：`PRIVACY.md` + 应用内隐私入口
+
+- **为什么必须有**：微软商店政策 **10.5.1** 对 Win32 / Desktop Bridge 产品**强制**要求提供
+  隐私政策，且要求"用户能够访问"（官方允许填 Partner Center URL，或在产品内提供入口）。本仓**两个都做**。
+- **为什么这个应用真的需要**（不是走过场）：多数功能在本地，但**视觉翻译会把整张截图（PNG）
+  上传到用户配置的第三方 LLM**（`TranslationService.cs:854-855`）—— 这属于"访问个人信息"。
+- `PRIVACY.md`（仓库根，中英双语）逐条写明：哪些功能**完全不出设备**、哪些翻译模式**外发什么**、
+  发给谁、单次上限（6 MB）、以及**用户如何关闭**（不使用翻译即零外发）。
+- 设置页新增「隐私政策」卡片 → `PrivacyPolicyWindow`；`PRIVACY.md` 注册为 `Content` 随包分发。
+
+### 重构：抽出 `MarkdownDocumentWindow`，避免第二份渲染器
+
+- 原 `ThirdPartyNoticesWindow` 是 467 行、自带 Markdown 渲染 + 路径上溯 + 降级界面 + 生命周期清理。
+  隐私窗口要做同样的事，直接复制会产生"同一种渲染、两处维护"的分叉。
+- ⇒ 抽出基类，渲染/上溯/降级/清理**只有一份**；两个窗口各自只剩
+  「读哪个文件 + 中英文案 + 单实例登记」。
+- 实现细节（已记录在代码里，避免下次重踩）：
+  ① 子类 XAML 根元素须写成自定义基类，否则 XAML 生成的那半以 `Window` 为基类 ⇒ **CS0263**；
+  ② `x:Name` 字段属于子类 partial、基类看不见 ⇒ 基类声明抽象属性、子类转发
+     （XAML 名加 `Control` 后缀避免 **CS0108**）。选它而非"反射按名找控件"，
+     是因为**漏控件会编译期报错**，而不是界面上少一块还不报错。
+
+### 打包门禁：新增合规文档断言
+
+- `scripts/verify-msix.ps1` 现在断言包内必须有 `PRIVACY.md` 与 `THIRD-PARTY-NOTICES.md`
+  （缺了会让应用内入口退化成降级界面）。
+- 实测：MSIX 内含 `PRIVACY.md`（8.0 KB），与仓库副本 **sha256 逐字节相同**。
+
+### 验收读数
+
+| 项 | 结果 |
+|---|---|
+| 5 项目 Release 构建 | ✅ 0 警告 0 错误 |
+| 8 套件测试 | ✅ **1846 通过 / 0 失败** |
+| `--selftest` | ✅ 通过 |
+| MSIX 内容核对 | ✅ 4 原生工具 + 3 OCR 资产 + **2 份合规文档** + 清单身份 |
+
+> ⚠️ **顺带查出一个更严重的 MSIX 阻断项（未修，已登记）**：
+> `SettingsService` 把设置只写**程序同目录**，且刻意**不降级到 %LOCALAPPDATA%**；
+> MSIX 包目录对应用只读 ⇒ **打包后用户改的设置重启即丢**（只有日志里一行提示）。
+> 已实测全仓不存在任何"打包感知"的存储分支。**这必须在提交商店前修掉** ——
+> 详见 `docs/store-submission-guide-2026-10-07.md` §3.1b。
+
+---
+
+
+
 ## [未发布] — 2026-10-07：MSIX 框架依赖开关（商店包体积减半）
 
 > 分析见 `docs/msix-size-and-publish-pipeline-analysis-2026-10-07.md`（含实测体积矩阵与实现记录）。
 
 ### 新增：`-FrameworkDependent`（商店包 MSIX 从 175.82 MB → **84.57 MB**，−52%）
+
+> ⚠️ **体积数字已在后续验证中更正**：同日又加入隐私政策窗口与若干修复后，代码量增加 ⇒
+> 最终实测为 **175.85 MB → 85.12 MB（−51.6%）**，build 口径 150.91 MB。
+> 详见 `docs/msix-size-and-publish-pipeline-analysis-2026-10-07.md` §9。下表保留当日原始测量值。
 
 - 用法：`.\Publish.ps1 -Msix -FrameworkDependent`
 - 把 .NET 与 WinAppSDK 运行时交给目标机（商店包由 Windows 自动解析依赖），
