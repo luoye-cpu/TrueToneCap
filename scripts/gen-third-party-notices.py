@@ -222,12 +222,17 @@ def main() -> int:
             print("[FAIL] THIRD-PARTY-NOTICES.md 不存在")
             return 1
         cur = open(OUT, "rb").read()
-        if cur != data:
+        # 比"内容同步"，不比"盘上字节"：`.gitattributes` 给 `*.md` 打了 text，本机
+        # `core.autocrlf=true` ⇒ 干净 checkout 会把这份 LF 换成 CRLF（实测 398,817 → 405,781 B），
+        # 于是 CI / 新机器 / 新 worktree 上这条【必然判红】，而红的是换行不是同步。
+        # 生成侧本来就 `.replace("\r\n","\n")` ⇒ 判侧同一条归一，两边才对称。
+        cur_n = cur.replace(b"\r\n", b"\n")
+        if cur_n != data:
             print(f"[FAIL] THIRD-PARTY-NOTICES.md 与 licenses/ + INDEX.json 不同步："
-                  f"现有 {len(cur)} B / 应为 {len(data)} B")
+                  f"现有 {len(cur_n)} B（去 EOL 后）/ 应为 {len(data)} B")
             print("       修复：py scripts/gen-third-party-notices.py")
             return 1
-        print(f"[RESULT] PASS — THIRD-PARTY-NOTICES.md 与清单同步（{len(data)} B）")
+        print(f"[RESULT] PASS — THIRD-PARTY-NOTICES.md 与清单同步（{len(data)} B，比对前两侧都按 LF 归一）")
         return 0
     with open(OUT, "wb") as f:
         f.write(data)
