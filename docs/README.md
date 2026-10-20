@@ -24,9 +24,9 @@
 
 | 文件 | 行 | 状态 |
 |---|---|---|
-| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,887 | §编号已到 **70**，最后追加 2026-10-21；698,988 B，**占 `docs/` 总字节的 31.5%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 382 KB）。任务账本、拍板记录、被推翻结论都在这里 |
+| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,887 | §编号已到 **70**，最后追加 2026-10-21；691,101 B，**占 `docs/` 总字节的 30.6%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
 | `handoff-avif-encoder-refactor-2026-09-16.md` | 406 | 前一阶段的交接，已收尾 |
-| `CHANGELOG.md`（仓库根） | 215 KB | 变更流水；发布记录与 tag 对账也记在这 |
+| `CHANGELOG.md`（仓库根） | 216,238 B（blob） | 变更流水；发布记录与 tag 对账也记在这 |
 
 要找"某件事当时为什么这么做/后来怎么翻的"，先在这三份里搜，别去审计快照里找结论。
 
@@ -70,22 +70,24 @@
 `gpu-acceleration-availability-09-16` `root-cause-hdr-multimonitor-09-16` `capture-source-regression-09-16`
 `release-review-09-16` `windows-system-notification-09-16` `pending-changes-triage-09-14`。
 
-**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **60 份 / 28,973 行 / 2.11 MB**（2026-10-21 在**本提交树**内实测；
-主工作树里还有未跟踪/未提交的本地文档，那里的数会更大），
-其中带日期 50 份、无日期 10 份（即 §三 那 10 份活文档）。含本索引则是 61 份 / 29,142 行 —— 这个数会随我改这份索引而变，所以一律以上面那组为准。
-（上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.89 倍**，
-那份计数已过期，别拿它做体积或成本判断。）
+**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,334 行 / 2,257,559 B（2.15 MiB）**（2026-10-21 在 `f0fc56c` 提交树内实测；
+字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,275,008 B，虚高 0.77%），
+其中带日期 54 份、无日期 10 份（即 §三 那 10 份活文档）。含本索引是 65 份，行数要加上本文件自己的当前行数；
+本文件会被继续编辑，所以"含本索引"的行数不给死数。
+（上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.90 倍**，那份计数已过期，别拿它做体积或成本判断。
+同一天更早一次记的"60 份 / 28,973 行"在 `36374ac` 树里是真数，`f0fc56c` 把 4 份 10-07 快照落了地 ⇒ +4 份 / +1,361 行。）
 
 ## 五、孤儿（零入站引用，但仍是证据）
 
-没有任何跟踪文件点名它们（`git grep` 实测，排除 bin/obj/artifacts/publish 的构建副本）：
+判据 = 除本索引外没有任何跟踪文件写出它的全名（`git ls-files` 全文匹配，2026-10-21 在 `f0fc56c` 树内重跑）：
 
 `aot-and-store-publishing-analysis` · `compression-effort-3tier-design` · `docs-staleness-audit`
-· `pipeline-independent-review` · `pipeline-review-e2e` · `pipeline-review-plan` · `real-machine-test-report`
-· `release-review` · `upstream-pr1-review` · `windows-system-notification`（均带各自日期后缀）
+· `pipeline-independent-review` · `pipeline-review-e2e` · `pipeline-review-plan` · `release-review`
+· `windows-system-notification`（均带各自日期后缀）
 
-⚠ 两个别扭处：`docs-staleness-audit-2026-09-14.md` 点名了 11 份本仓文档（实测，不含它自己），却没人引用它——
-它就是当年那次"文档体检"的结论，**要查历史判定先看它**；`upstream-pr1-review-2026-10-16.md` 随 v0.3.9-beta 入库（此前是本地未跟踪件）。
+⚠ 两处别扭：`docs-staleness-audit-2026-09-14.md` 自己点名了一堆本仓文档，却只被本索引提到——
+它就是当年那次"文档体检"的结论，**要查历史判定先看它**；`real-machine-test-report-2026-09-14` 与 `upstream-pr1-review-2026-10-16`
+本轮从孤儿名单里摘掉（前者被 `docs/roadmap-v0.4.md` 点名 1 处，后者被主台账 + `roadmap-v0.4.md` + 本索引共 4 处点名，随 v0.3.9-beta 入库后已不再无人引用）。
 
 ## 六、断链：曾经只有一条，已修
 
@@ -116,8 +118,10 @@
 
 ## 七、待你拍的六件（都是取舍，不是清理）
 
-1. **54 份快照要不要真挪进 `docs/reviews/<族>/`**：实测成本 = **92 处 `docs/<文件名>` 路径引用 / 跨 34 个跟踪文件**
-   （`CHANGELOG.md` 20、主台账 12、`handoff-avif-encoder-refactor` 7）。台账 §54.4 记的"22 处"已过期 4 倍。
+1. **54 份快照要不要真挪进 `docs/reviews/<族>/`**：实测成本 = **94 处 `docs/<文件名>` 路径引用 / 跨 35 个跟踪文件**
+   （`CHANGELOG.md` 20、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `f0fc56c` 树内按 `git ls-files` 全文重跑，
+   只数写成 `docs/<带日期文件名>` 的引用，"文件指自己"已排除——本索引列的是不带前缀的短名，所以它自己贡献 0 处）。
+   台账 §54.4 记的"22 处"已过期 4 倍。
    现状=不挪，靠本索引分层（零引用改写）。
 2. **`TrimmerRoots.xml` + `App.csproj:131-136` 这一对**：csproj 无条件 `<TrimmerRootDescriptor Include=…>`，
    但全仓 `PublishTrimmed/PublishAot/TrimMode/IsAotCompatible` **零命中**，`Publish.ps1:408-409` 自己写明
@@ -125,8 +129,12 @@
    ⇒ 今天完全不起作用。要么成对摘掉（改构建输入，6 行 + 1 文件），要么把 `-CoreAot` 真接通让它有意义。
    ⚠ 不能只删 xml——csproj 那行会指向空路径。
 3. **一次性脚本归置**：`migrate_forensic_paths.py`（文档自述"一次性脚本"，`.workbuddy-ai` 引用已 21→0）、
-   `add-spdx-headers.py`（464 个跟踪文件都已带头）、`migrate-net11.ps1`（net11 迁移已完成；它的断链本轮已修）
-   —— 退役进 `scripts/retired/` 还是原地留着当可复跑工具。
+   `add-spdx-headers.py`（⚠ 本轮重测：按它自己的口径 `.c/.cs/.h/.hlsl/.ps1/.py` 命中 **262 个跟踪文件，其中 87 个没有 SPDX 头**——
+   含 `src/` 下 4 个 `.cs`（`MarkdownDocumentWindow` / `PrivacyPolicyWindow.xaml.cs` / `ThirdPartyNoticesWindow.xaml.cs` / `CoreLog`）
+   和我自己写的 `gen-third-party-notices.py`、`mutation-verify.ps1`；门禁没有任何一格管 SPDX 头，`CorePipelineTests.cs:3035` 那条管的是
+   `licenses/INDEX.json` 的表达式，不是源码头。原先这里写的"464 个跟踪文件都已带头"是错的）
+   、`migrate-net11.ps1`（net11 迁移已完成；它的断链本轮已修）
+   —— 退役它之前要么先把它跑完补齐那 87 个，要么原地留着当可复跑工具；直接退役等于把缺口永久留在原地。
    ⚠ `export_onnx_fp32.py` 文档里**一次都没提**，而配套的 `onnx_fp16_quantize.py` 有 3 处文档记录 ⇒ 要么补出处要么一起处置。
 4. **`scripts/verify-package-content.ps1` 零调用点**（CI 两份 workflow 都不引用）：接进 `release.yml`，
    还是从 README 的规范段摘出去——它 2026-09-26 是"从临时目录提升入库"的，删它等于自食那个决定。
@@ -141,10 +149,13 @@
 ## 八、这些数字怎么重跑
 
 ```bash
-ls docs/*.md | wc -l                                   # 份数
-cat docs/*.md | wc -l                                  # 行数
-ls docs/*.md | grep -vE '2026-[0-9]{2}-[0-9]{2}'       # 活文档名单
-# 入站引用 / 孤儿：把每个 docs/<名> 在所有跟踪文本文件里搜一遍（排除构建副本）
+# 份数（不含本索引）= 64
+ls docs/*.md | grep -vc '^docs/README.md$'                        # 磁盘口径；docs/README.md 自己不数
+# 行数 / 字节（blob 口径，与 §四 那组 30,334 行 / 2,257,559 B 逐字相等，2026-10-21 实跑对过）
+for f in $(git ls-files docs | grep -v '^docs/README.md$'); do git cat-file blob "HEAD:$f"; done | wc -l -c
+# 活文档（无 2026-MM-DD 后缀）：上面这条给 11 是含了本索引，去掉就是 §四 的 10 份
+ls docs/*.md | grep -v '2026-[0-9][0-9]-[0-9][0-9]'
+# 入站引用 / 孤儿：把每个 docs/<名> 在所有跟踪文本文件里搜一遍（排除构建副本、排除文件指自己）
 # 断链：文中 token 命中 + 目标存在性两条一起判，只命中一条会误报
 ```
 
@@ -166,6 +177,6 @@ ls docs/*.md | grep -vE '2026-[0-9]{2}-[0-9]{2}'       # 活文档名单
 | 同上 | `licenses/*.txt` 44 份 | 全部被 `licenses/INDEX.json` 点名（未点名 0 份） |
 | 惯例读取，非"无引用" | `.gitattributes`、`NuGet.config`、`.editorconfig`、`global.json` | git/MSBuild/NuGet 按约定读它们，不会有文本引用 ⇒ "零引用"对这类文件没有意义 |
 | 有出处的工具，未动 | `gen-msix-assets.py`、`publish-with-prebuilt.ps1`、`onnx_fp16_quantize.py`、`verify-package-content.ps1`、`migrate-net11.ps1` | 文档分别记为"可复现生成 / 新增入口 / 正式工具 / 产物内容核对 / 仅 2 个正式工具之一"。`verify-package-content.ps1` 的问题是**没有调用方**（§七-4），不是该删 |
-| 设计如此 | `tests/manual/**`(111 跟踪)、`scripts/probes/**`(21)、`scripts/precision/**`(26) | 手动取证件，本来就"无人调用"；`tests/manual` 磁盘 233 文件里未跟踪未忽略 = **0**（122 个是 `__pycache__`/输出，已被忽略规则覆盖） |
+| 设计如此 | `tests/manual/**`(82 跟踪)、`scripts/probes/**`(16)、`scripts/precision/**`(21) | 手动取证件，本来就"无人调用"；计数口径 = `git ls-files`（`f0fc56c` 从 `tests/manual` 删掉 29 份零调用 harness，之前是 111）。`tests/manual` 磁盘 `os.walk` 195 文件 = 82 跟踪 + 113 生成件（`__pycache__`/输出），其中**未跟踪且未忽略 = 0**（`git ls-files --others --exclude-standard` 实测） |
 
 ⇒ 结论：**这个仓没有成片的死文件**。剩下的"精简"都是**取舍**而不是清理，全部列在 §七 等你拍。
