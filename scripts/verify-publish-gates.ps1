@@ -126,9 +126,15 @@ function Invoke-Scenario {
 
     $thrown = $null
     try {
-        if ($AllowDirty -and $SkipTests) { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty -SkipTests }
-        elseif ($AllowDirty)             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty }
-        else                             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun }
+        # -NoVSCap 是【本 harness 的既定条件】，不是被测分支的一部分：
+        #   Publish.ps1 [0/6] 的 VS-Cap 前置检查（2026-10-17 新加）看的是
+        #   build\vscap-runtime\ttc-vscap.exe 在不在盘上，而 harness 跑在任何机器上
+        #   都可能没编 Qt 侧车 ⇒ 不传 -NoVSCap 时 A 之外的四个场景全部提前死在
+        #   "依赖校验失败"，[1.5/6] 测试门禁根本没被执行（实测 4/5 场景不符）。
+        #   这一格自身的回归由下面的静态顺序检查 F 兜住。
+        if ($AllowDirty -and $SkipTests) { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty -SkipTests -NoVSCap }
+        elseif ($AllowDirty)             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty -NoVSCap }
+        else                             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -NoVSCap }
     } catch { $thrown = $_.Exception.Message }
 
     $script:results += [pscustomobject]@{
@@ -165,6 +171,28 @@ Invoke-Scenario 'D 测试通过 → 应放行到发布步骤' `
 
 Invoke-Scenario 'E -SkipTests → 应跳过门禁' `
     -GitMode 'dirty' -DotnetRunExit 1 -ExpectThrow 'STUB_STOP_AT_PUBLISH' -ExpectDotnetRuns 0 -AllowDirty -SkipTests
+
+# ── 场景 F：静态顺序检查（不跑子进程）──────────────────────────
+# [0/6] 的 VS-Cap 前置必须排在 [1/6]「准备输出目录」之前。
+#   为什么要单独钉：[1/6] 里含一次 Remove-Item -Recurse（对着输出目录），
+#   顺序一旦颠倒，"没编侧车"的一次发布会先把同版本号的历史包删掉再报错。
+#   上面 A~E 因为统一传了 -NoVSCap，走不到这一格 ⇒ 只能这样判。
+#   （2026-10-17 那次 [5.5/6]"永远判不到"是同一类错误，只是方向相反：
+#    判据跑在被判对象写出之前。）
+$pubSrc   = Get-Content -LiteralPath $pub -Raw
+$idxVSCap = $pubSrc.IndexOf('$vscapRuntime = Join-Path $RepoRoot "build\vscap-runtime"')
+$idxPurge = $pubSrc.IndexOf('Write-Host "[1/6] 准备输出目录..."')
+$lineOf   = { param($i) if ($i -lt 0) { -1 } else { ($pubSrc.Substring(0, $i) -split "`n").Count } }
+$orderOk  = ($idxVSCap -ge 0) -and ($idxPurge -ge 0) -and ($idxVSCap -lt $idxPurge)
+$script:results += [pscustomobject]@{
+    Scenario      = 'F 侧车前置检查排在删输出目录之前（静态）'
+    Threw         = if ($orderOk) { "顺序正确 (L$(& $lineOf $idxVSCap) < L$(& $lineOf $idxPurge))" }
+                    else { "两个锚点取不到或颠倒 (vscap=L$(& $lineOf $idxVSCap), prepare=L$(& $lineOf $idxPurge))" }
+    ExpectedThrow = 'VS-Cap 检查行号 < [1/6] 准备输出目录行号'
+    DotnetRuns    = 0
+    ExpectRuns    = 0
+    Pass          = $orderOk
+}
 
 # ── 汇总 ──────────────────────────────────────────────────────
 Write-Host ""

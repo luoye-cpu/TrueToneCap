@@ -126,6 +126,7 @@ public sealed partial class MainWindow : Window
         AutoStartChk.IsChecked = _settings.AutoStart;
         PreviewChk.IsChecked = _settings.ShowPreview;
         MinimizeTrayChk.IsChecked = _settings.MinimizeToTray;
+        VSCapModeChk.IsChecked = _settings.UseVSCap;
         UiAnimationsChk.IsChecked = _settings.EnableUiAnimations;
         // 换格式保底开关（2026-09-29）：默认勾上 = 与这次改动之前的行为一致
         PngFallbackChk.IsChecked = _settings.PngFallbackEnabled;
@@ -314,6 +315,7 @@ public sealed partial class MainWindow : Window
             _settings.AutoStart = AutoStartChk.IsChecked == true;
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.MinimizeToTray = MinimizeTrayChk.IsChecked == true;
+            _settings.UseVSCap = VSCapModeChk.IsChecked == true;
             _settings.EnableUiAnimations = UiAnimationsChk.IsChecked == true;
             _settings.PngFallbackEnabled = PngFallbackChk.IsChecked == true;
             _settings.ToastOnCapture = ToastCaptureChk.IsChecked == true;

@@ -446,6 +446,48 @@ public partial class App : Application
             }
             catch { }
             window.Activate();
+            // ── --window-probe：逐扇"运行期才建的 XAML 窗"各真建一次（2026-10-21，台账 §70）──
+            // 为什么要有这一档：识字/翻译那扇窗的加载失败原先【1836 条断言一条都抓不到】——
+            // 它只在真机上、真走到那一步才现形，而且抛在 DispatcherQueue 回调里，
+            // 升级成原生 fail-fast 后连托管日志都没有。构造一次只要 50 ms，判据=退出码。
+            if (Environment.GetCommandLineArgs().Any(a =>
+                    string.Equals(a, "--window-probe", StringComparison.OrdinalIgnoreCase)))
+            {
+                _ = window.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await Task.Delay(1500);
+                    int bad = 0;
+                    // 对照臂：裸 Window（不读任何 .xaml）—— 它要是也失败，说明问题在运行时/时机，不在某一扇窗
+                    try { var bare = new Microsoft.UI.Xaml.Window(); bare.Close(); }
+                    catch (Exception ex)
+                    {
+                        bad++;
+                        LogService.Error("WindowProbe", $"对照臂：裸 Window 构造失败 {ex.GetType().Name} HR=0x{ex.HResult:X8}",
+                            ex, LogCategory.UI);
+                    }
+                    // 被试臂：OCR/翻译预览窗（2026-10-20 实测每次真用必崩的那一扇）
+                    try
+                    {
+                        const int pw = 64, ph = 48;
+                        var px = new byte[pw * ph * 4];
+                        for (int i = 0; i < px.Length; i += 4) { px[i] = 255; px[i + 1] = 255; px[i + 2] = 255; px[i + 3] = 255; }
+                        var ocr = new TrueToneCap.Core.Services.OcrResult { Text = "probe" };
+                        ocr.Lines.Add(new TrueToneCap.Core.Services.OcrLine { Text = "probe", X = 2, Y = 2, Width = 30, Height = 16 });
+                        var probe = new OcrPreviewWindow(px, pw, ph, ocr,
+                            new TrueToneCap.Core.Services.LlmConfig(), false, null);
+                        probe.Close();
+                        LogService.Info("WindowProbe", "OcrPreviewWindow 构造成功", LogCategory.UI);
+                    }
+                    catch (Exception ex)
+                    {
+                        bad++;
+                        LogService.Error("WindowProbe", $"OcrPreviewWindow 构造失败 {ex.GetType().Name} HR=0x{ex.HResult:X8} {ex.Message}",
+                            ex, LogCategory.UI);
+                    }
+                    LogService.Info("WindowProbe", bad == 0 ? "全部窗口构造通过" : $"★ 构造失败 {bad} 扇", LogCategory.UI);
+                    Environment.Exit(bad == 0 ? 0 : 1);
+                });
+            }
         }
         // 开机启动：不显示窗口，由 MainWindow 构造函数中自动缩放到托盘
         LogService.Info("App", isAutostart ? "开机自启动模式，不显示窗口" : "窗口已激活");

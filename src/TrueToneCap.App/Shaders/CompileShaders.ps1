@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # shaders/CompileShaders.ps1
 # 使用 fxc (SM5.0) 编译 HLSL 着色器为 CSO 字节码

@@ -298,6 +298,7 @@ public sealed partial class MainWindow : Window
         _trayIcon.OnCaptureHotkey = () => DispatcherQueue.TryEnqueue(() => StartSelectionCapture());
         _trayIcon.OnExitApp = () => _isExiting = true;
         _trayIcon.RegisterCaptureHotkey(_settings.Hotkey);
+        ApplyVSCapGate();   // 「VS-Cap 模式」关着就不该抢注全局 Ctrl+Alt+T（见 MainWindow.VSCap.cs）
 
         // 注册无感截图热键
         HotkeyManager.RegisterNamed(this, "silent", _settings.SilentHotkey,
@@ -2061,6 +2062,12 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
+            if (_settings.UseVSCap)
+            {
+                await StartVSCapCaptureAsync();
+                return;
+            }
+
             // 获取虚拟桌面坐标
             var displays = DisplayEnumerator.EnumerateDisplays();
             int vx = displays.Count > 0 ? displays.Min(d => d.X) : 0;
@@ -2423,8 +2430,16 @@ public sealed partial class MainWindow : Window
 
         DispatcherQueue.TryEnqueue(() =>
         {
-            OpenOcrPreviewWindow(pixels, w, h, result, autoTranslate: false);
-            StatusTxt.Text = "📝 已打开文字预览窗口";
+            // 回调体【不在】上面那个 try/catch 里 —— 那个只包住"入队"这个动作。
+            // 2026-10-21 的崩溃就是这么走的：开窗异常从这里逃出去 → 没人接 → 升级成原生 fail-fast，
+            // 托管侧连一行日志都没有（台账 §70）。这里接住它，至少让失败可见。
+            try
+            {
+                OpenOcrPreviewWindow(pixels, w, h, result, autoTranslate: false);
+                StatusTxt.Text = "📝 已打开文字预览窗口";
+            }
+            catch (Exception ex)
+            { LogService.Error("MainWindow", $"打开文字预览窗失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
         });
         }
         catch (Exception ex) { LogService.Error("MainWindow", $"OCR 失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
@@ -2460,8 +2475,14 @@ public sealed partial class MainWindow : Window
 
         DispatcherQueue.TryEnqueue(() =>
         {
-            OpenOcrPreviewWindow(pixels, w, h, ocrResult, autoTranslate: true);
-            StatusTxt.Text = "🌐 已打开翻译预览窗口";
+            // 与识字那路同一条纪律：回调体不受外层 try/catch 保护，逃出去就是原生 fail-fast（台账 §70）。
+            try
+            {
+                OpenOcrPreviewWindow(pixels, w, h, ocrResult, autoTranslate: true);
+                StatusTxt.Text = "🌐 已打开翻译预览窗口";
+            }
+            catch (Exception ex)
+            { LogService.Error("MainWindow", $"打开翻译预览窗失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
         });
         }
         catch (Exception ex) { LogService.Error("MainWindow", $"翻译识别失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
@@ -2804,9 +2825,16 @@ public sealed partial class MainWindow : Window
     /// 且它与"用户正在看哪块屏"在这些场景下确实同义。全窗口只有这一处猜光标屏。</para>
     /// </summary>
     private ColorDecision DecisionForCursorScreen(EncodingUiState ui, bool hdrOutput)
+        => DecisionForDisplay(null, ui, hdrOutput, ui.Format);
+
+    /// <summary>色彩决定按<b>给定的那块屏</b>算一次；<paramref name="source"/> 为 null 才退回光标屏。
+    /// <para>像素在进程外绕了一圈回来的入口（VS-Cap 侧车）手里可能带着源屏（截图路），也可能真没有
+    /// （剪贴板贴图路）。两条路必须共用同一个 <c>Build</c> 调用点，且 <paramref name="format"/> 由调用方给
+    /// —— 侧车工具栏点名要 PNG/AVIF，跟 <c>ui.Format</c> 不是一回事，用后者会让决定与容器不同源。</para></summary>
+    private ColorDecision DecisionForDisplay(DisplayInfo? source, EncodingUiState ui, bool hdrOutput, OutputFormat format)
         => ColorDecision.Build(
-            DisplayEnumerator.FindDisplayByMonitor(DisplayEnumerator.GetMonitorUnderCursor()),
-            ui.ColorSpaceTag, hdrOutput, ui.Settings.AcmeDetected, ui.Format);
+            source ?? DisplayEnumerator.FindDisplayByMonitor(DisplayEnumerator.GetMonitorUnderCursor()),
+            ui.ColorSpaceTag, hdrOutput, ui.Settings.AcmeDetected, format);
 
     /// <summary>有捕获结果时：色彩决定按<b>被截那块屏</b>算一次，像素路与声明路共用同一份。
     /// <para><paramref name="format"/> 是本次要落盘的那个格式，必须由调用方给：JPEG 家族 / WebP
@@ -2945,6 +2973,7 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(UiAnimationsChk)) _settings.EnableUiAnimations = cb.IsChecked == true;
             else if (cb.Name == nameof(PngFallbackChk)) _settings.PngFallbackEnabled = cb.IsChecked == true;
             else if (cb.Name == nameof(PreviewChk)) _settings.ShowPreview = cb.IsChecked == true;
+            else if (cb.Name == nameof(VSCapModeChk)) { _settings.UseVSCap = cb.IsChecked == true; ApplyVSCapGate(); }
         }
         try { SaveSettingsQuiet(); } catch { }
     }

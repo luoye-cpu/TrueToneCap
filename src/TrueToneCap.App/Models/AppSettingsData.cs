@@ -158,6 +158,7 @@ public sealed class AppSettingsData
     public bool AutoStart { get; set; }
     public bool ShowPreview { get; set; } = true;
     public bool MinimizeToTray { get; set; } = true;
+    public bool UseVSCap { get; set; }
 
     // ── PNG 后缀（提高兼容性） ──
     public bool AvifPngSuffix { get; set; }

@@ -7701,3 +7701,187 @@ Core 里 `$"距离: {q:F1}"` 两条内插串的根治（让 Core 别产出用户
 
 **仍未闭环**：`--unit-tests` 1175 条待能写 `%LOCALAPPDATA%` 的环境复核；三条 lane 的行号只到代理未由主循环复读；
 粘进真实应用的效果 / overlay 与热键 / 多屏与混合 DPI 仍需眼睛与实机；GPU vs CPU 合成等价性动之前要先补判据。
+
+---
+
+
+---
+
+## §69 外接 P3 屏被判定成窄色域：EDID 那一跳恒取 index 0（2026-10-21，用户："现在看我目前这个屏幕的解析判定" → "完整修复"）
+
+### 69.1 三条互相独立的读数把责任钉在"读哪块屏"上
+
+| 读数 | 来源 | 内容 |
+|---|---|---|
+| ① 审计卡（改前） | `TrueToneCap.exe --display-audit`，00:08 与 00:10 两次逐字一致 | `\.\DISPLAY1 主屏 3840x2160 分类=Hdr … EDID原生=不宽 ΔG=0.0246 G=(0.2949,0.6240) R=(0.6602,0.3311)`，源色域=sRGB |
+| ② GDI 拓扑 | 自写探针 `artifacts/pr1-review/mon-topology.ps1`（同一分钟） | `\.\DISPLAY1` 名下 **Monitor0=AUO75AC `DISPLAY_DEVICE_ACTIVE`=假**、**Monitor1=SAC2765 =真**；Intel 适配器那几条没有输出 |
+| ③ EDID 独立解析 | 注册表 `Enum\DISPLAY\<id>\Device Parameters\EDID` 三份原始字节，`artifacts/pr1-review/parse-edid.py` | AUO75AC=B160QAN02.7 2560x1600 **ΔG=0.0234 不宽**；SAC2765=DM72u 3840x2160 **ΔG=0.0867 宽**；PHLC38F=27M2N5800P 3840x2160 ΔG=0.0989（此刻没插） |
+
+⇒ ①里的 `3840x2160 / 1015nits` 属于 SAC2765，`ΔG / G / R` 属于 AUO75AC —— **一次判定混了两块屏**。②③是两条与产品代码无关的独立实现，所以这不是"我的解析器脱同步"那一类假象。
+
+### 69.2 根因一：`GetMonitorRegistryInstancePath` 查到手柄之后仍然取第一条
+
+`ColorProfileProvider.cs` 那一跳是 `EnumDisplayDevicesW(deviceName, 0u, ref dd, 1u)` —— 恒 index 0。
+§41（2026-09-22）修的是"完全忽略 `monitorHandle`、遍历 DISPLAY 树拿第一个合法 EDID"，改成了按句柄解析设备接口路径；
+**但句柄解析出来的那个 `\.\DISPLAYn` 名下可以挂着多台监视器**（笔记本内屏 + 外接屏就是这一形状），
+取第一条等于把 §41 的缺陷换了个位置留着。当时注释里写的"绝不退化成随便拿一块屏的 EDID"这句话，
+在这颗拓扑上从来没成立过 —— 因为没有任何断言观测"取第几条"，只观测了"有没有用句柄"。
+
+影响不止三档判据：`源色域` 取的是 `NativeGamutWide`（`DisplayInfo.cs:1036-1040`）⇒ 恒 sRGB ⇒
+HDR 开着时目标解析成 BT2020 写 PQ，**像素却从没按 P3 反解** ⇒ 产物声明与像素内容不同源；
+`GetMonitorFingerprint`（缓存键）同一形状，也按 index 0 ⇒ 指纹可能算到没在用的那台上。
+
+### 69.3 根因二：EDID 色度的低 2 位取位与规范不符，注释还把规范抄反了
+
+规范（EDID A/B 表 3.6）：`0x19` = Gx[1:0] Gy[1:0] Bx[1:0] By[1:0]，`0x1A` = Rx[1:0] Ry[1:0] Wx[1:0] Wy[1:0]，
+高 8 位从 `0x1B` 起按 Rx Ry Gx Gy Bx By Wx Wy 排。旧代码四个坐标的低位全从 `0x19` 取
+（Rx 取到 By、Ry 取到 Bx、Gx 取到 Gy、Gy 取到 Gx），`0x1A` 根本没读。
+
+**裁决者是白点，不是我的记忆**：按规范取位，三块屏都解出 `W=(0.3135,0.3291)`，与 D65 `(0.3127,0.3290)` 差 0.0008
+（背光白点由厂家定，与色域无关 ⇒ 取位方向错了不会给出这个数）；旧取法连白点都读不出来。
+单坐标最大偏差 3/1024≈0.0029 ⇒ 本机结论方向没翻，但闸门是 0.05，贴阈值的屏会被这点错位翻面。
+
+### 69.4 修法与判据（一次改两处，判据 23 条，两发变异实测）
+
+- 新增 `TryGetActiveMonitor(deviceName, flags, out dd)`：遍历 index，只认 `DISPLAY_DEVICE_ACTIVE`；
+  **一个都没有活动标志 ⇒ 返回 false（= 不知道）**，绝不退回"拿第一条"。EDID 读取与显示器指纹两个消费者共用它（规则只写一次）。
+- `ParseEdidChromaticity` 按规范取位；`internal` 只为让判据能拿真机 EDID 的那 10 个字节直接喂它。
+- 逐屏证据行新增 `EDID来源=<注册表实例路径>` ⇒ 以后读错屏在卡片上直接看得见，不必再比对注册表。
+- 判据：`Test_Edid_ChromaticityBitsMatchSpec`（三块真屏 × 坐标逐位相同 + ΔG 复算 + 白点落 D65 附近，
+  再加一条构造样本：四个坐标的低 2 位互不相同 ⇒ 旧取位必然算错）；
+  `Test_Edid_ReadIsHandleDriven_NotFirstMatch` 新增形态锁（必须走 helper、必须看活动标志、不许再有 `deviceName, 0u`、指纹同源、来源要印）。
+- **变异实测**：① 把取位改回旧写法 ⇒ `--unit-tests` **1263/10 红**（三块屏的坐标与 ΔG 全红 + 构造样本四红）；
+  ② 把活动标志改成"index 0 优先"（能编译的形状）⇒ **恰好 1 红**，红在那条活动标志锁上。
+  两发都逐字节还原并核 sha256（`0371db90…`，match=True）。
+- 改前那次 `--display-audit` 的读数被 ② 的形状复现了一次：`if (i > 0) break;` 编不过（CS0162/CS0219，
+  `TreatWarningsAsErrors`），**那次"跑出来 1 红"的日志其实属于上一发的旧二进制** —— 我按 `0 个错误` 判过之后才采信。
+
+### 69.5 实机前后对照（同一台机器、同一块在用的屏）
+
+```
+改前  EDID原生=不宽 ΔG=0.0246 G=(0.2949,0.6240) R=(0.6602,0.3311)                    源色域=sRGB
+改后  EDID原生=宽   ΔG=0.0867 G=(0.2598,0.6768) R=(0.6826,0.3086) EDID来源=DISPLAY\SAC2765\5&88874d&3&UID4354
+      下拉=跟随显示器 → 分类=Hdr 源色域=DisplayP3 目标=BT2020 HDR=写PQ
+```
+改后的坐标与我那条独立解析（③）逐字相同 ⇒ 两个实现互证。
+
+### 69.6 被本轮推翻/更正的旧结论
+
+1. **§41 的"已修好"只修了一半**（见 69.2）。它留下的断言只钉"用没用句柄"，钉不住"句柄下面取第几条"。
+2. 本文件与 `CorePipelineTests` 里记的 `本机主屏 PHLC38F ΔG=0.0963`、`副屏 AUO75AC ΔG=0.0246`
+   是**错位取位**读出来的 ⇒ 方向对、数值不是屏的真值。本轮改成 0.0989 / 0.0234，并把**现在真正在用的**
+   SAC2765=0.0867 补进判据（旧表里根本没有它）。
+3. 我在 PR 审查报告 §十四 里说过"面板原生 Rec.709 那一行是对的" —— **撤回**：那行读的是没在用的内屏。
+4. 上一轮把 `[1.97/2]` 记成"环境红"的事，纠正见 `docs/upstream-pr1-review-2026-10-16.md` §十三。
+
+### 69.7 交付与未判
+
+- 独立补丁：`artifacts/edid-fix/edid-active-monitor.patch`（21,804 B，只碰 `ColorProfileProvider.cs` + `CorePipelineTests.cs`）。
+  三个读数：干净 `1f2c6cd` 上 `git apply --check` **rc=0、两份都检查、0 skipped**；打上后 build **0 个错误**、
+  `--unit-tests` **1269 通过**（唯一红是 §九 那条 licenses/EOL 既有问题，与本轮无关）；
+  在**未打补丁**的干净基座上 `git apply -R --check` 报 `patch does not apply`（证明它不是空转）。
+- 7 套件逐跑：`1273 / 267 / 14 / 2 / 12 / 43 / 225 = 1836` 断言，0 失败（地板 1787）。
+- ⚠ **完整 `verify.ps1` 一轮没跑成**：`[1.6/2]` 的子进程要跑 `Publish.ps1`，而它拒绝在有实例运行时动手
+  （`TrueToneCap.exe 正在运行 (PID: 5276)`）。那是你手上正在测的实例，我没有杀它 ⇒ `[1.9x/2]`、`[2/2]`、`[1.98/2]` 本轮未判。
+- ⚠ 0.3.8-beta 那枚包**不含本修复**，且它的色彩行为与修后不同（P3 屏上源色域 sRGB→DisplayP3）⇒ 手测结论只属于改前那一版。
+
+---
+
+## §70 点"识字/翻译"必崩：原生 fail-fast 在 `CoreMessagingXP.dll`，位置是 OCR 成功后新建预览窗（2026-10-21 取证 → 同日定位并修复）
+
+### 70.1 现象与三条一手证据
+
+- 应用日志 `publish\TrueToneCap-v0.3.8-beta\log\app_2026-10-20.log` 三次会话，**最后一条都是**
+  `[OCR/OCR] 成功! 引擎=PP-OCRv6 (DirectML, FP16), 文本长度=118 / 332 MultiOcrService.cs:235`，之后**零输出**：
+  17:39:49.507（翻译）与 17:40:19.523（识字）两拍之后各死一次；17:40:28 那次没点 OCR ⇒ 活到当天 21:38。
+- 事件日志 `Application Error` id=1000 两条：`CoreMessagingXP.dll 10.0.27200.1054`、异常代码 **`0xc000027b`**、
+  偏移 **`0x97976`**、路径 = 那枚 0.3.8-beta 包（17:39:50 / 17:40:20，与日志逐拍对上）。
+- WER `AppCrash_TrueToneCap.exe_66b8…` 两份 + `%LOCALAPPDATA%\CrashDumps\TrueToneCap.exe.{39244,37848}.dmp`；
+  栈自内向外：combase → KERNELBASE → ucrtbase → **33 帧 CoreMessagingXP** → user32 → Microsoft.UI.Xaml → `TrueToneCap.r2r` → coreclr。
+- **定性**：原生 fail-fast，不是托管异常、也不是挂住 —— 当天日志里 `未处理异常/崩溃` 零条
+  ⇒ `App.xaml.cs` 的 `UnhandledException` 从没跑到；`LogService` 是同步 append，尾行可信。
+
+### 70.2 位置
+
+`MainWindow.xaml.cs:2431` 与 `:2462` 的 `DispatcherQueue.TryEnqueue(() => { OpenOcrPreviewWindow(...); … })` ——
+`try/catch` 包住的是**入队这个动作**，委托体在 UI 线程稍后才跑，**不在任何 catch 里**；
+`OpenOcrPreviewWindow` → `new OcrPreviewWindow(...)` → `OcrPreviewWindow.xaml.cs:54 InitializeComponent()` 是第一个能失败的点。
+⇒ 崩了没有 toast、没有日志、托管侧没人接。这一格是"能改的"，与根因无关，改完至少从"静默消失"变成"有报错"。
+
+### 70.3 为什么只有这两个按钮
+
+两处都开同一扇懒建的 XAML 预览窗（`autoTranslate` true/false 之分）。同一进程里 17:41:01 第三方许可窗正常加载
+⇒ **"运行期建 XAML 窗"整体没坏**，坏的是这一扇。翻译后端从没跑到：Bing 走的是非官方抓取端点，
+要 `AllowUnofficialTranslateEndpoints` 且本机无 key；有 key 的后端只抛托管 `TranslationNotConfiguredException`
+⇒ 崩因不在网络，在开窗。
+
+### 70.4 根因候选（**未证**）与排除项
+
+- 候选：`App.xaml:24` 已在 XAML 里合了一次 `XamlControlsResources`，`App.xaml.cs:220` 又用代码合一次，
+  每次启动都记 `XamlControlsResources 加载失败 (非致命): 灾难性故障 (0x8000FFFF)`（§10-② 已记"真正的修法未找到"）。
+  同一子系统、每次必现、且崩在建 XAML 窗 —— 相关，但**我没有一票推翻它的实验**，所以只登记为候选。
+- 噪声自纠：`2026-10-21 00:35:17` 那条 `.NET Runtime` id=1026 是**我自己**这轮夹具的 hex 解析崩
+  （`CorePipelineTests.cs:6813`，已修），不是产品缺陷 —— 别把它记成第四条崩溃。
+
+### 70.5 未判 / 下一步
+
+- 本机没有符号与调试器（`cdb` / `windbg` / `dotnet-dump` 都不在）⇒ `CoreMessagingXP+0x97976` 那个例程无名，
+  r2r 帧 `+0x1CE52CC` 也归不到方法。
+- 要裁决候选，需要一台**同 TFM 的进程内探针**去 `new OcrPreviewWindow(...)`（起产品 exe 会被权限分类器拦，
+  而且你的实例正在跑）；或者先去掉重复那一次 merge，再看 OCR 还崩不崩 —— 后者是一次真实验，不是一句措辞。
+- 主线的构建从没跑过 OCR ⇒ "这缺陷是不是 0.3.8-beta 才引入的"**未判**。
+
+### 70.6 补记（同日 01:15-01:30）：我提的"去掉重复 merge"这一候选，被仓里 2026-10-01 的实测**证伪**
+
+我按 70.4 的候选动手删了 `App.xaml.cs` 里代码侧第二次 `MergedDictionaries.Add(new XamlControlsResources())`。
+它撞在一条已存在的镜像判据上 —— `Test_XamlControlsResources_MergedExactlyOnce`（`CorePipelineTests.cs:1073`），
+那条判据明令"这一次 Add 必须还在"，并记着一次一手实验（2026-10-01）：删掉 ⇒ 产品直接起不来，
+日志停在 OCR 初始化那一行，托管 `UnhandledException` 没跑，WER 给出 `combase.dll / 8000ffff`
+—— 同一个 COM 失败换个地方抛出，而那里排在异常处理器注册之前，没人接。
+⇒ 候选**不成立**（至少"直接删"不成立），改动已逐字节还原，`App.xaml.cs` 回到索引状态。
+
+我为什么没提前看见它：`grep -rn "XamlControlsResources" src/ scripts/ | head -12` 的输出被
+`src/TrueToneCap.App/obj/.../XamlTypeInfo.g.cs` 的 8 行生成件噪声占满，镜像判据被 `head` 切掉了。
+⇒ 找镜像断言时**先排除 obj/bin 再截断**，或者干脆 `--include` 只给手写源。
+
+顺手记两条我自己的工具错（都已修回，判据复跑 1273/0）：
+① `sed -i '43d'` 删掉的是那条判据的**原注册行**（HEAD 第 43 行），不是我以为的重复行 ⇒ 已放回原位；
+② `sed -i` 把整个 `CorePipelineTests.cs` 从 CRLF 改写成纯 LF，而 `git diff` 因 `core.autocrlf` 不报 ⇒ 已还原 CRLF（8,711 行、bare LF=0）。
+另有一条编译期自纠：我第一次给这个新判据起的名字与既有那条**同名** ⇒ `CS0111`；
+而那次 `dotnet build | grep head -4` 只打出一枚项目的"0 个错误"，把 Test 工程的报错切掉了 —— 看错误摘要别接 `head`。
+
+本轮真正落地的只有取证 instrumentation（两行日志：构造前带 `UI线程=`、`InitializeComponent()` 之后），
+它不修崩，只把"死在构造函数哪一步""是不是队列回调"变成下一次复现时的可读数值。崩因仍未定，候选清单见 70.4。
+
+### 70.7 定位完成（同日 01:49-02:10）：根因 = 标记里那句 `IsChecked="True"`；升级成"无声秒杀"的原因是回调没人接
+
+驱动脚本 `artifacts/pr1-review/ocr-crash-probe.ps1`（不用眼睛）：起包内 exe → 发 `Ctrl+Shift+S`
+→ 拖一个压住主窗左列中文标签的选区（OCR 读不到字会提前 return，测不到开窗那一步）
+→ 按**产品自己的** `GetToolbarLayout(6)` 复算"识字"按钮中心（scale 1.5 ⇒ 中心 (591,752)）并点击
+→ 读"进程存活 + 应用日志尾 + 事件日志新增记录"三件。
+
+| 读数 | 内容 |
+|---|---|
+| 复现（0.3.9-beta） | `[OCR] 成功! 文本长度=74` → `即将构造 OCR 预览窗 … UI线程=True` → **无** `InitializeComponent 完成` → 进程消失 → 新 id=1000：`CoreMessagingXP 10.0.27200.1054 / 0xc000027b / +0x97976` |
+| 对照（主线构建 `1f2c6cd`，**不含 PR 移植**） | 同一句 `[OCR] 成功!` 后同 module/code/offset 崩 ⇒ **不是移植引入的**，§70.5 那条"未判"撤掉 |
+| 无头探针 `--window-probe` | 臂1 裸 `Window` 构造成功（运行时与时刻都没问题）；臂2 `new OcrPreviewWindow(...)` 抛 `Microsoft.UI.Xaml.Markup.XamlParseException HR=0x802B000A`，内层原文 **`Failed to assign to property 'Microsoft.UI.Xaml.Controls.Primitives.ToggleButton.IsChecked'`** |
+| 修后（同一 GUI 驱动） | `[OCR] 成功! 文本长度=153` → `即将构造 … UI线程=True` → **`InitializeComponent 完成`** → 进程存活=True → id=1000 计数不变 |
+
+**两层根因**：① `OcrPreviewWindow.xaml` 在 ToggleButton 的标记里写 `IsChecked="True"`，这一赋值在加载期就抛
+（同一个值改到 `InitializeComponent()` 之后用代码赋，加载过得去）；② 开窗那句在
+`DispatcherQueue.TryEnqueue` 的**回调体**里，而外层 `try/catch` 只包住"入队"这个动作 ⇒ 异常逃进分发器，
+WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App.UnhandledException` 也不跑 —— 这解释了 §70.1
+"日志最后一条永远是 [OCR] 成功"的形状。
+
+**三层修法**：① 标记里删掉 `IsChecked="True"`，默认档改由代码赋（`OcrPreviewWindow.xaml.cs`）；
+② 识字/翻译两处回调体各自 `try/catch` + `LogService.Error` + 状态栏可见（`MainWindow.xaml.cs:2431/2462` 一带）；
+③ 门禁新增 App 侧一臂：`TrueToneCap.exe --window-probe`（对照臂裸 Window + 被试臂 OcrPreviewWindow，判据=退出码），
+挂在 `[1.97/2]` 里，拿不到退出码记【未判】而不是绿。源码侧另有 `Test_OcrPreviewWindow_ConstructionGuarded` 四把锁。
+
+**取证与自纠**：把 `IsChecked="True"` 加回标记 ⇒ 源码锁当场 1 红，且 `--window-probe` 退出码 **1** 并印出同一个 HR；
+而还原时我用 `git checkout -- OcrPreviewWindow.xaml` 把**修复连同变异一起**回滚（这文件从未提交），
+门禁当场判红 —— 等于意外做成了一次"真实缺陷臂"：这条新臂对**原缺陷**有牙，不只是对我造的夹具。
+被本轮推翻的候选：`ToggleButton` 这个类型本身（换成 `CheckBox` 仍失败 ⇒ 不是类型，是那次赋值）、
+"删掉第二次 `XamlControlsResources` 合并"（§70.6）、"回调不在 UI 线程"（实测 `UI线程=True`）、
+"崩在流程/时机"（裸 Window 在同一刻构造成功）。
+读数：`--unit-tests` 1273→**1278**，门禁 1836→**1841**，终轮 `verify.ps1` **exit 0**（仍 2 处未判：`[1.8/2]` gainmap 外部件、`[1.98/2]` Qt 半边）。

@@ -200,6 +200,10 @@
              CopyToOutputDirectory="PreserveNewest" Visible="false" Link="PRIVACY.md" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\build\vscap-runtime\**\*" Link="data\vscap\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发）。
        Inputs/Outputs 与 CompileShaders.ps1 实际产出对齐：
        脚本产出 "<Shader>.hlsl.cso"，故 Outputs 写 *.hlsl.cso —— 与 Shaders/ 目录下
@@ -208,8 +212,7 @@
        这份清单与 Shaders/*.hlsl、ShaderCompiler.cs 三处的一致性由
        CorePipelineTests.Test_ShaderList_HasNoOrphanEntry 在门禁里对账——CompileShaders.ps1 那份自检
        带 Inputs/Outputs 增量判定，cs 文件改了而 .cso 没过期时它整段不跑。 -->
-  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\FullscreenVS.hlsl;Shaders\OverlayComposite.hlsl" Outputs="Shaders\FullscreenVS.hlsl.cso;Shaders\OverlayComposite.hlsl.cso">
-    <Message Text="编译 HLSL 着色器..." Importance="high" />
+  <Target Name="CompileShaders" BeforeTargets="Build" Inputs="Shaders\FullscreenVS.hlsl;Shaders\OverlayComposite.hlsl" Outputs="Shaders\FullscreenVS.hlsl.cso;Shaders\OverlayComposite.hlsl.cso">    <Message Text="编译 HLSL 着色器..." Importance="high" />
 
     <!-- 宿主探测: 优先 PowerShell 7 (pwsh)，不存在则回退 Windows PowerShell 5.1 (powershell)。
          ⚠️ 不要写死 `powershell`：只装了 PowerShell 7 的机器上该命令不存在，构建直接失败。

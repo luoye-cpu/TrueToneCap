@@ -1012,6 +1012,13 @@ try {
         -PassThru -WorkingDirectory $appExe.DirectoryName `
         -RedirectStandardOutput (Join-Path $appModeOut 'stdout.txt') `
         -RedirectStandardError (Join-Path $appModeOut 'stderr.txt')
+    # ⚠ 2026-10-17：必须在这一行就 EnableRaisingEvents，否则下面的 ExitCode 恒为空。
+    #   实测三臂（同一 exe、同一形状）：不设 ⇒ WaitForExit(60000)=True、HasExited=True、
+    #   但 .ExitCode 取回空 ⇒ 这一格落进"拿不到退出码"分支，报的"进程没起来"是假话
+    #   （探针臂里 PID 有值、progress.txt 也被写了）；设了 ⇒ App 读回 0（连跑两次）、
+    #   cmd /c exit 3 读回 3、cmd /c exit 0 读回 0 ⇒ 既不是恒 0 也不是恒 null。
+    #   原先写"环境问题"的那条结论作废：红的是这一行的取码方式，不是这台机器。
+    $appProc.EnableRaisingEvents = $true
     if (-not $appProc.WaitForExit($appModeTimeoutSec * 1000)) {
         $appTimedOut = $true
         try { $appProc.Kill() } catch { }
@@ -1053,8 +1060,10 @@ if ($appTimedOut) {
     exit 1
 }
 if ($null -eq $appCode) {
-    Write-Host "   ❌ 拿不到退出码（进程没起来）⇒ 这一格【没判】，按失败处理" -ForegroundColor Red
-    $script:GateGaps += "[1.97/2] --settings-migration 进程未启动 ⇒ 未判"
+    # 措辞纠正（2026-10-17）：原先写"进程没起来"是凭这条红编的因果，实测进程起了、也退了，
+    # 起不来的是取码那一行 ⇒ 红的话只能说到"码没拿到"，不能替机器说"进程没起来"。
+    Write-Host "   ❌ 拿不到退出码 ⇒ 这一格【没判】，按失败处理" -ForegroundColor Red
+    $script:GateGaps += "[1.97/2] --settings-migration 退出码为空 ⇒ 未判"
     exit 1
 }
 if ($appCode -ne 0) {
@@ -1074,9 +1083,92 @@ if (-not (Test-Path -LiteralPath $progressFile)) {
     exit 1
 }
 Write-Host "   ✅ App 侧设置迁移: 退出码 0（$($appSw.ElapsedMilliseconds)ms，上限 ${appModeTimeoutSec}s）｜ $($appExe.Name)｜--out 落 $appModeOut"
+
+# ── 同一格里第二条 App 侧判据：把"运行期才建的 XAML 窗"真建一次（2026-10-21，台账 §70）──
+# 起因：点识字/翻译必崩那个缺陷，1836 条断言一条都抓不到 —— 它只在真走到那一步、
+# 且抛在 DispatcherQueue 回调里时现形，最后升级成原生 fail-fast，托管侧连日志都没有。
+# 构造一次约 50 ms，判据 = 退出码（0=全通过，1=有窗构造失败），与 --settings-migration 同一口径。
+$winOut = Join-Path $RepoRoot "tests\output\app-window-probe"
+New-Item -ItemType Directory -Force -Path $winOut | Out-Null
+$winCode = $null
+try {
+    $wp = Start-Process -FilePath $appExe.FullName -ArgumentList @('--window-probe') `
+        -PassThru -WorkingDirectory $appExe.DirectoryName `
+        -RedirectStandardOutput (Join-Path $winOut 'stdout.txt') `
+        -RedirectStandardError (Join-Path $winOut 'stderr.txt')
+    $wp.EnableRaisingEvents = $true
+    if ($wp.WaitForExit($appModeTimeoutSec * 1000)) { $winCode = $wp.ExitCode }
+    else { try { $wp.Kill() } catch { } }
+} catch {
+    Write-Host "   ❌ 起 --window-probe 失败：$($_.Exception.Message)" -ForegroundColor Red
+}
+if ($null -eq $winCode) {
+    Write-Host "   ❌ --window-probe 拿不到退出码 ⇒ 这一格【没判】，按失败处理" -ForegroundColor Red
+    $script:GateGaps += "[1.97/2] --window-probe 退出码为空 ⇒ 未判"
+    exit 1
+}
+if ($winCode -ne 0) {
+    Write-Host "   ❌ --window-probe 退出码 $winCode ⇒ 有运行期 XAML 窗构造失败，去 $((Split-Path -Parent $appExe.FullName))\log 里找 WindowProbe 行" -ForegroundColor Red
+    exit 1
+}
+Write-Host "   ✅ 运行期 XAML 窗构造探针: 退出码 0（对照臂裸 Window + OcrPreviewWindow）"
 Write-Host ""
 
 # ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+#  [1.98/2] VS-Cap 像素交接对撞（上游 PR #1）
+# ══════════════════════════════════════════════════════════════
+# 这条抓的是"两种语言各自以为对方读对了"那一类：TTC1 帧由 C# 写 → Qt 读并回写 → C# 再逐字节验。
+# PR 原来只有 vscap-bridge-tests 一条，且因为没设 TTC_VSCAP_FIXTURES 恒 QSKIP，
+# 而 QtTest 的 SKIP 退出码是 0 ⇒ 表现成"桥接测试通过"而实际零跨语言判定。
+# C# 这半边不需要 Qt，所以它能常驻门禁；Qt 那半边缺件时记【未判】，不记绿。
+Write-Host "[1.98/2] VS-Cap 像素交接对撞..."
+$interopProj = Join-Path $RepoRoot "tests\VSCapInterop\VSCapInterop.csproj"
+if (-not (Test-Path $interopProj)) {
+    Write-Host "   ❌ 未找到 tests\VSCapInterop 工程 ⇒ 这一格【没判】，按失败处理（不许静默放行）" -ForegroundColor Red
+    $script:GateGaps += "[1.98/2] 缺 tests/VSCapInterop 工程 ⇒ 像素交接未判"
+    exit 1
+}
+$interopFixtures = Join-Path $RepoRoot "build\vscap-fixtures-gate"
+if (Test-Path $interopFixtures) { Remove-Item -LiteralPath $interopFixtures -Recurse -Force }
+$ioOut = & dotnet run --project $interopProj -c $Configuration -- $interopFixtures 2>&1 | Out-String
+$ioRc = $LASTEXITCODE
+$ioPass = ([regex]::Matches($ioOut, '(?m)^PASS ')).Count
+if ($ioRc -ne 0 -or $ioPass -lt 4) {
+    Write-Host "   ❌ C# 侧像素交接自检 rc=$ioRc，PASS=$ioPass（期望 ≥4）⇒ 按失败处理" -ForegroundColor Red
+    ($ioOut -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 3) | ForEach-Object { Write-Host "      $_" }
+    $script:GateGaps += "[1.98/2] C# 侧像素交接自检失败 rc=$ioRc PASS=$ioPass"
+    exit 1
+}
+Write-Host "   ✅ C# 侧 $ioPass 条通过（SDR/HDR 往返 + 拒绝截断帧 + 拒绝坏像素）"
+$bridgeExe = Join-Path $RepoRoot "build\vscap\vscap-bridge-tests.exe"
+if (Test-Path $bridgeExe) {
+    $env:TTC_VSCAP_FIXTURES = $interopFixtures
+    $bOut = & $bridgeExe 2>&1 | Out-String
+    $bRc = $LASTEXITCODE
+    Remove-Item Env:\TTC_VSCAP_FIXTURES -ErrorAction SilentlyContinue
+    if ($bOut -match 'SKIP.*crossLanguagePixels') {
+        Write-Host "   ❌ 跨语言那条被 SKIP ⇒ 这一格没判，按失败处理（SKIP 的退出码是 0，只看 rc 会被骗）" -ForegroundColor Red
+        $script:GateGaps += "[1.98/2] crossLanguagePixels 被 SKIP ⇒ Qt 半边未判"
+        exit 1
+    }
+    if ($bRc) {
+        Write-Host "   ❌ vscap-bridge-tests rc=$bRc" -ForegroundColor Red
+        $script:GateGaps += "[1.98/2] 桥接测试失败 rc=$bRc"
+        exit 1
+    }
+    & dotnet run --project $interopProj -c $Configuration -- --verify-qt $interopFixtures | Out-Null
+    if ($LASTEXITCODE) {
+        Write-Host "   ❌ Qt 回写的像素与 C# 原始值不一致（通道序 / alpha / 浮点位级任一处错都算）" -ForegroundColor Red
+        $script:GateGaps += "[1.98/2] Qt→C# 像素不一致"
+        exit 1
+    }
+    Write-Host "   ✅ Qt 半边三步闭合（C# 写 → Qt 读写 → C# 验回写）"
+} else {
+    Write-Host "   ⚠️ 未构建侧车（build\vscap\vscap-bridge-tests.exe 不在）⇒ Qt 那半边【没判】，不是通过" -ForegroundColor Yellow
+    $script:GateGaps += "[1.98/2] 无 vscap-bridge-tests ⇒ Qt 半边未判（本机无 Qt / CI 常态）"
+}
+
 #  [2/2] 逐套件执行
 # ══════════════════════════════════════════════════════════════
 Write-Host "[2/2] 测试..."

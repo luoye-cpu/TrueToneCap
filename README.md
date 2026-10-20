@@ -57,6 +57,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | 🔤 **OCR** | PP-OCRv6 (ONNX, DirectML/CPU) + Windows OCR fallback · zh/en strongest, ja needs ≥24px, ko unsupported | PP-OCRv6（ONNX，DirectML/CPU）+ Windows OCR 兜底 · 中/英文最准，日文需字高 ≥24px，韩文不支持（转系统 OCR） |
 | 🌐 **Translate** | Custom LLM → Youdao official API → (opt-in) Bing / Google web endpoints | 自定义 LLM → 有道官方开放平台 →（需显式勾选）必应 / Google 网页端点 |
 | ⌨️ **Hotkeys** | Recordable · tray minimize · autostart | 可录制 · 托盘最小化 · 开机启动 |
+| 🧩 **VS-Cap mode** (opt-in) | Optional Qt sidecar editor: selection annotation, unified undo, always-on-top pinning, clipboard-pin hotkey | 可选 Qt 侧车编辑器：选区标注、统一撤销、置顶贴图、剪贴板贴图热键 |
 
 ---
 
@@ -231,6 +232,11 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 > NVENC 结构体偏移、GUID 实测值、容器布局等细节，**权威出处是代码自身的注释**
 > （`NvEncoderNative.cs` 的偏移表与 GUID 段、`ManagedTiffEncoder.cs`、`MftEncoderNative.cs` 等），
 > 完整叙述另见 `docs/pipeline-review-*.md` 与 git 历史。
+
+### 上游 PR #1 — VS-Cap 模式（2026-10-11 提交，2026-10-16 合入）
+
+- 新增可选 VS-Cap 模式（默认关闭）：区域截图交给 Qt 侧车做选区与编辑，另加剪贴板贴图按钮与 `Ctrl+Alt+T`。
+- 侧车源码在 `src/TrueToneCap.VSCap/`，构建入口 `scripts/BuildVSCap.ps1`；接入记录与验证边界见 [docs/vscap-mode.md](docs/vscap-mode.md)。
 
 ### v0.3.6-beta
 

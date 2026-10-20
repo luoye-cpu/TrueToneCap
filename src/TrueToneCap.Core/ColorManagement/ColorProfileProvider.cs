@@ -441,8 +441,9 @@ public static partial class ColorProfileProvider
             monitorInfo.cbSize = (uint)Marshal.SizeOf<MONITORINFOEXW>();
             if (!GetMonitorInfoW(monitorHandle, ref monitorInfo)) return "";
 
-            var dd = new DISPLAY_DEVICEW { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICEW>() };
-            if (!EnumDisplayDevicesW(monitorInfo.szDevice, 0, ref dd, 0)) return "";
+            // 与 EDID 读取同一条纪律：一个设备名下可能挂着多台监视器（内屏 + 外接），
+            // 取 index 0 会把指纹算到没在用的那一台上 ⇒ 缓存键跟着错（见 TryGetActiveMonitor）。
+            if (!TryGetActiveMonitor((monitorInfo.szDevice ?? "").Trim(), 0u, out var dd)) return "";
 
             string deviceId = dd.DeviceID ?? "";
             string pnpId = "";
@@ -1304,13 +1305,15 @@ public static partial class ColorProfileProvider
     {
         try
         {
-            var edid = ReadEdidFromRegistry(monitorHandle);
+            var edid = ReadEdidFromRegistry(monitorHandle, out var edidSource);
             if (edid is null || edid.Length < 128) return (false, false, "sRGB", "无 EDID");
             var (rx, ry, gx, gy) = ParseEdidChromaticity(edid);
             if (rx <= 0 && gx <= 0) return (false, false, "sRGB", "EDID 原色字段为空");
             double dg = GreenStretchFromGreen(gx, gy);
+            // EDID 来源要跟着读数一起出：读错屏时，卡片上就能看见这份原色是从哪个设备实例拿的
+            // （2026-10-21 那次"外接 P3 屏被判成窄色域"，缺的就是这一格读数）。
             return (true, dg >= GreenStretchForWide, NativeGamutTagFor(rx, ry, gx, gy),
-                    $"ΔG={dg:F4} G=({gx:F4},{gy:F4}) R=({rx:F4},{ry:F4})");
+                    $"ΔG={dg:F4} G=({gx:F4},{gy:F4}) R=({rx:F4},{ry:F4}) EDID来源={edidSource}");
         }
         catch (Exception ex)
         {
@@ -1345,15 +1348,20 @@ public static partial class ColorProfileProvider
     /// 的真 P3）读到的是副屏（AUO75AC，ΔG≈0.025 的普通 sRGB）的原色。这与 0.3.3 那次
     /// "TryCreateFromDisplayId 忽略入参、恒取 DisplayArea.Primary" 是同一形状的缺陷；
     /// 影响面不止三档判据，<see cref="GetDisplayNativeGamutTag"/> 一直在吃这份错数据。</para>
-    /// <para>匹配链：HMONITOR → <c>GetMonitorInfo</c> 取 "\.\DISPLAYn" → <c>EnumDisplayDevices</c>
+    /// <para>匹配链：HMONITOR → <c>GetMonitorInfo</c> 取 "\.\DISPLAYn" → <see cref="TryGetActiveMonitor"/>
     /// （<c>EDD_GET_DEVICE_INTERFACE_NAME</c>）取 <c>\\?\DISPLAY#厂商型号#实例路径#{GUID}</c> →
     /// 换成注册表路径 <c>DIRECTORY\厂商型号\实例路径</c>。取不到就返回 null（= 不知道），
     /// <b>绝不退化成"随便拿一块屏的 EDID"</b> —— 拿错比拿不到危险得多。</para>
+    /// <para><paramref name="source"/> 回给调用方"这份 EDID 是从哪个设备实例读的"，
+    /// 由 <see cref="ProbeNativeWideGamut"/> 打进逐屏证据行 ⇒ 读错屏在卡片上就看得见，
+    /// 不必再靠人去比对注册表。</para>
     /// </summary>
-    private static byte[]? ReadEdidFromRegistry(nint monitorHandle)
+    private static byte[]? ReadEdidFromRegistry(nint monitorHandle, out string source)
     {
+        source = "";
         var instancePath = GetMonitorRegistryInstancePath(monitorHandle);
         if (instancePath is null) return null;
+        source = instancePath;
         try
         {
             using var devParams = Registry.LocalMachine.OpenSubKey(
@@ -1367,6 +1375,33 @@ public static partial class ColorProfileProvider
         catch { return null; }
     }
 
+    /// <summary>
+    /// 取 "\.\DISPLAYn" 这个 GDI 设备名下<b>当前活动</b>那一台监视器的信息。
+    /// <para>为什么不许再取 index 0（2026-10-21 本机实测）：一个设备名下可以挂多台监视器，
+    /// 笔记本 + 外接屏就是这一形状 —— <c>\\.\DISPLAY1</c> 的 Monitor0 是 <c>AUO75AC</c>
+    /// （<c>DISPLAY_DEVICE_ACTIVE</c> 为<b>假</b>，内屏此刻没在用），Monitor1 才是
+    /// <c>SAC2765</c>（活动）。按 index 0 读 ⇒ 外接 P3 屏吃到了内屏的 EDID，
+    /// 三档判据把"宽"判成"不宽"，色域搬运的源矩阵跟着取错。</para>
+    /// <para>一个都没有活动标志 ⇒ 返回 false（= 不知道）。调用方一律走"不知道"那条路，
+    /// 不许退回"拿第一条"。</para>
+    /// </summary>
+    /// <param name="flags">0 = 要 <c>DeviceID="MONITOR\…"</c> 形态；
+    /// <c>EDD_GET_DEVICE_INTERFACE_NAME(1)</c> = 要 <c>\\?\DISPLAY#…#{GUID}</c> 接口路径形态。</param>
+    private static bool TryGetActiveMonitor(string deviceName, uint flags, out DISPLAY_DEVICEW active)
+    {
+        const uint DisplayDeviceActive = 0x00000001;
+        for (uint i = 0; i < 8; i++)
+        {
+            var dd = new DISPLAY_DEVICEW { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICEW>() };
+            if (!EnumDisplayDevicesW(deviceName, i, ref dd, flags)) break;
+            if ((dd.StateFlags & DisplayDeviceActive) == 0) continue;
+            active = dd;
+            return true;
+        }
+        active = default;
+        return false;
+    }
+
     /// <summary>HMONITOR → <c>DISPLAY\厂商型号\实例路径</c>；任一环节失败返回 null。</summary>
     private static string? GetMonitorRegistryInstancePath(nint monitorHandle)
     {
@@ -1377,9 +1412,8 @@ public static partial class ColorProfileProvider
             var deviceName = (mi.szDevice ?? "").Trim();
             if (deviceName.Length == 0) return null;
 
-            var dd = new DISPLAY_DEVICEW { cb = (uint)Marshal.SizeOf<DISPLAY_DEVICEW>() };
             // EDD_GET_DEVICE_INTERFACE_NAME = 1 ⇒ DeviceID 是 \\?\DISPLAY#...#{GUID} 形态的设备接口路径
-            if (!EnumDisplayDevicesW(deviceName, 0u, ref dd, 1u)) return null;
+            if (!TryGetActiveMonitor(deviceName, 1u, out var dd)) return null;
             var id = (dd.DeviceID ?? "").Trim();
             if (id.StartsWith(@"\\?\")) id = id[4..];
             int hash = id.IndexOf("#{", StringComparison.Ordinal);
@@ -1390,21 +1424,29 @@ public static partial class ColorProfileProvider
         catch { return null; }
     }
 
-    /// <summary>解析 EDID 1.x 色度数据 (block 0, bytes 0x19-0x26)。</summary>
-    private static (float rx, float ry, float gx, float gy) ParseEdidChromaticity(byte[] edid)
+    /// <summary>解析 EDID 1.x 色度数据 (block 0, bytes 0x19-0x22)。
+    /// <para>internal 只为让判据能拿真机 EDID 的那 10 个字节直接喂它 —— 这套取位原先没有任何
+    /// 断言观测，改错了不会有人知道（<c>Test_Edid_ChromaticityBitsMatchSpec</c>）。</para></summary>
+    internal static (float rx, float ry, float gx, float gy) ParseEdidChromaticity(byte[] edid)
     {
-        // EDID 1.3/1.4 规范:
-        // byte 0x19: bits 1-0 = Rx LSB, bits 3-2 = Ry LSB, bits 5-4 = Gx LSB, bits 7-6 = Gy LSB
-        // byte 0x1A: bits 1-0 = Bx LSB, bits 3-2 = By LSB, bits 5-4 = Wx LSB, bits 7-6 = Wy LSB
-        // 0x1B: Rx MSB (8-bit), 0x1C: Ry MSB, 0x1D: Gx MSB, 0x1E: Gy MSB
-        // 最终值: (MSB << 2) | LSB, 除以 1024
+        // EDID A/B 表 3.6「Chromaticity Coordinates」的排法（每个坐标 10 位 = 高 8 位 + 低 2 位）:
+        //   0x19: 7-6 = Gx[1:0]  5-4 = Gy[1:0]  3-2 = Bx[1:0]  1-0 = By[1:0]
+        //   0x1A: 7-6 = Rx[1:0]  5-4 = Ry[1:0]  3-2 = Wx[1:0]  1-0 = Wy[1:0]
+        //   0x1B..0x22 的高 8 位依次是 Rx Ry Gx Gy Bx By Wx Wy
+        // ⚠ 这一版之前这里把四个低 2 位全从 0x19 里取（Rx 取到 By、Ry 取到 Bx、Gx 取到 Gy、
+        //   Gy 取到 Gx），且注释把规范抄反了 —— 于是"低位"实际是别人的低位。
+        // 判据（<c>Test_Edid_ChromaticityBitsMatchSpec</c>）用一条物理事实裁决两种取法：
+        // 本机三块真屏（AUO75AC / PHLC38F / SAC2765）按本版解出的白点都是 W=(0.3135,0.3291)，
+        // 与 D65 (0.3127,0.3290) 差 0.0008；旧取法读不出白点，且把 ΔG 报成 0.0246/0.0963/0.0880
+        // （本版 0.0234/0.0989/0.0867）。单坐标最大偏差 3/1024≈0.0029 —— 闸门是 0.05，
+        // 贴着阈值的屏会被这点错位翻面，所以它不是"误差不大就不用管"。
+        float Low(int hiByte, int loByte, int shift)
+            => (edid[hiByte] * 4 + ((edid[loByte] >> shift) & 0x03)) / 1024.0f;
 
-        uint b19 = edid[0x19];
-
-        float rx = ((edid[0x1B] << 2) | (int)(b19 & 0x03)) / 1024.0f;
-        float ry = ((edid[0x1C] << 2) | (int)((b19 >> 2) & 0x03)) / 1024.0f;
-        float gx = ((edid[0x1D] << 2) | (int)((b19 >> 4) & 0x03)) / 1024.0f;
-        float gy = ((edid[0x1E] << 2) | (int)((b19 >> 6) & 0x03)) / 1024.0f;
+        float rx = Low(0x1B, 0x1A, 6);
+        float ry = Low(0x1C, 0x1A, 4);
+        float gx = Low(0x1D, 0x19, 6);
+        float gy = Low(0x1E, 0x19, 4);
 
         return (rx, ry, gx, gy);
     }

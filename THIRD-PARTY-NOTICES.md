@@ -142,7 +142,7 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 |---|---|---|---|---|
 | PaddleOCR (PP-OCRv6_medium det/rec 权重来源) | 权重为 PP-OCRv6 medium；LICENSE 取自 PaddleOCR tag v3.3.0（v3.2.0 与 v3.3.0 的 LICENSE 字节一致，但未确认发模型的确切 release） | `Apache-2.0` | `licenses/paddleocr-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发 ONNX 权重须附带许可副本、保留来源的 NOTICE/版权头、改动文件（FP16/FP32 导出）须加显著标注；data/Models/ 三个件（PP-OCRv6_medium_det.onnx、_rec.onnx、ppocrv6_dict.txt 词表）同受此条约束；下载记录见 download_models.ps1（huggingface.co/RapidAI/RapidOCR，两模型已在脚本内固化 SHA256），HF 侧的 license 元数据本环境连不上... |
 
-> ⚠️ 有 1 份许可全文没有归到任何产物桶：['microsoft-winml-LicenseRef-Microsoft-EULA.txt']
+> ⚠️ 有 3 份许可全文没有归到任何产物桶：['microsoft-winml-LicenseRef-Microsoft-EULA.txt', 'qt-LGPL-3.0.txt', 'vs-cap-MIT.txt']
 
 ### 产物级 SPDX 表达式（来自 `src/TrueToneCap.Core/Resources/tools-manifest.json`）
 

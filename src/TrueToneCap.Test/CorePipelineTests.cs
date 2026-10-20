@@ -196,6 +196,8 @@ public static class CorePipelineTests
         // 上一条只看源码形态；这两条补行为：逐屏能力真值表（Core 纯函数）+ 探针判据"会红"哨兵
         Test_Display_PerMonitorCapabilityTruthTable();
         Test_Edid_ReadIsHandleDriven_NotFirstMatch();
+        Test_Edid_ChromaticityBitsMatchSpec();
+        Test_OcrPreviewWindow_ConstructionGuarded();
         Test_ColorDecision_SingleSourceOfTruth();
         Test_HdrDelivery_FiveShapesAndPerFormatChannel();
         Test_Xaml_HardcodedChineseIsLocalized();
@@ -6717,14 +6719,28 @@ public static class CorePipelineTests
 
         // 形态判据：钉住缺陷本体（忽略入参 + 全树扫描 + 取第一个合法值）。
         Assert("ReadEdidFromRegistry 把入参句柄解析成注册表实例路径",
-            code.Contains("ReadEdidFromRegistry(nint monitorHandle)") &&
+            code.Contains("ReadEdidFromRegistry(nint monitorHandle, out string source)") &&
             code.Contains("GetMonitorRegistryInstancePath(monitorHandle)"));
         Assert("注册表键由解析出的实例路径拼出（不是硬编码遍历 DISPLAY 树）",
             code.Contains(@"Enum\{instancePath}\Device Parameters"));
         Assert("不再存在『遍历 DISPLAY 子键取第一个合法 EDID』的写法",
             !code.Contains("foreach (var subKeyName in displayKey.GetSubKeyNames())"));
+        // ═══ 2026-10-21：光"按句柄查"还不够 —— 查下去之后恒取 index 0 仍然会拿错屏 ═══
+        // 本机实测：\\.\DISPLAY1 名下 Monitor0=AUO75AC(DISPLAY_DEVICE_ACTIVE 为假)、
+        // Monitor1=SAC2765(活动)。旧写法取 index 0 ⇒ 外接 P3 屏吃的是没在用的内屏 EDID，
+        // ΔG 从 0.0867 被读成 0.0234 ⇒ "宽"翻成"不宽"，源矩阵跟着取错。
+        Assert("设备接口路径那一跳必须走『挑活动那一台』的helper（不再直接按 index 0 调）",
+            code.Contains("TryGetActiveMonitor(deviceName, 1u, out var dd)") &&
+            !code.Contains("EnumDisplayDevicesW(deviceName, 0u"));
+        Assert("挑活动那一台时看的是 DISPLAY_DEVICE_ACTIVE，且没有活动项就返回 false（= 不知道）",
+            code.Contains("if ((dd.StateFlags & DisplayDeviceActive) == 0) continue;") &&
+            code.Contains("active = default;") && code.Contains("return false;"));
+        Assert("显示器指纹（缓存键）同一条纪律：也走 TryGetActiveMonitor，不再各写一遍 index 0",
+            code.Contains("TryGetActiveMonitor((monitorInfo.szDevice ?? \"\").Trim(), 0u, out var dd)"));
         Assert("HMONITOR→设备接口路径这一步失败时返回 null（拿不到，而非拿错）",
-            code.Contains("if (!EnumDisplayDevicesW(deviceName, 0u, ref dd, 1u)) return null;"));
+            code.Contains("if (!TryGetActiveMonitor(deviceName, 1u, out var dd)) return null;"));
+        Assert("逐屏证据行带 EDID 来源实例路径 ⇒ 读错屏在卡片上直接看得见",
+            code.Contains("EDID来源={edidSource}"));
 
         // ═══ 闸门与标签【同源】：直接拿真机量到的原色坐标喂判据本身 ═══
         // 为什么这一段必须存在：2026-09-22 审查轮做突变实验时，"把闸门整个去掉"跑出来是
@@ -6733,10 +6749,17 @@ public static class CorePipelineTests
         // 判据不可测 = 判据不存在。现在闸门单独成函数，下面这些行才拿得动它。
         var gate = new System.Func<double, double, double, double, string>(
             TrueToneCap.Core.ColorManagement.ColorProfileProvider.NativeGamutTagFor);
-        Assert("★ 本机副屏实测原色（AUO75AC，ΔG=0.0246）⇒ 标签只能是 sRGB",
-            gate(0.6602, 0.3311, 0.2949, 0.6240) == "sRGB");
-        Assert("★ 本机主屏实测原色（PHLC38F，ΔG=0.0963）⇒ 标签确证为宽",
-            gate(0.6826, 0.3193, 0.2598, 0.6875) != "sRGB");
+        // ═══ 本机三块屏的实测原色（2026-10-21 用修正后的取位从注册表 EDID 复算）═══
+        // 旧版这里记的 0.0246 / 0.0963 是【错位取位】读出来的（见 Test_Edid_ChromaticityBitsMatchSpec），
+        // 结论方向没变，但坐标不是屏的真值 ⇒ 换成规范取位的读数，并把"现在正在用的那块"补进来。
+        Assert("★ 本机内屏实测原色（AUO75AC / B160QAN02.7，ΔG=0.0234）⇒ 标签只能是 sRGB",
+            gate(0.6621, 0.3311, 0.2959, 0.6230) == "sRGB");
+        Assert("★ 本机外接屏实测原色（SAC2765 / DM72u，ΔG=0.0867）⇒ 标签确证为宽",
+            gate(0.6826, 0.3086, 0.2598, 0.6768) != "sRGB");
+        Assert("★ 本机外接屏（SAC2765）细标签就是 DisplayP3 ⇒ 源矩阵取的是 P3，不是 sRGB",
+            gate(0.6826, 0.3086, 0.2598, 0.6768) == "DisplayP3");
+        Assert("★ 上一代外接屏实测原色（PHLC38F / 27M2N5800P，ΔG=0.0989）⇒ 标签确证为宽",
+            gate(0.6807, 0.3174, 0.2578, 0.6895) != "sRGB");
         // 这一格是旧宽松阈值（rx>0.65 且 gx≤0.30）的照妖镜：红点偏宽、绿点【一点没动】
         var onlyRedStretch = gate(0.680, 0.320, 0.3000, 0.6000);
         Assert("★ 只把红点做宽、绿点与 709 完全重合的面板 ⇒ 判窄（旧判据在这里误报 P3）",
@@ -6755,11 +6778,149 @@ public static class CorePipelineTests
         Assert("BT.2020 绿点的 ΔG 实测复算 = 0.2360",
             Near(TrueToneCap.Core.ColorManagement.ColorProfileProvider
                     .GreenStretchFromGreen(0.170, 0.797), 0.2360));
-        Assert("门限两侧留量：确证窄(0.0246) 与确证宽(0.0963) 都在 0.05 的正确一侧",
+        Assert("门限两侧留量：确证窄(0.0234) 与确证宽(0.0867/0.0989) 都在 0.05 的正确一侧",
             TrueToneCap.Core.ColorManagement.ColorProfileProvider
-                    .GreenStretchFromGreen(0.2949, 0.6240) < ColorProfileProvider.GreenStretchForWide
+                    .GreenStretchFromGreen(0.2959, 0.6230) < ColorProfileProvider.GreenStretchForWide
             && TrueToneCap.Core.ColorManagement.ColorProfileProvider
-                    .GreenStretchFromGreen(0.2598, 0.6875) > ColorProfileProvider.GreenStretchForWide);
+                    .GreenStretchFromGreen(0.2598, 0.6768) > ColorProfileProvider.GreenStretchForWide
+            && TrueToneCap.Core.ColorManagement.ColorProfileProvider
+                    .GreenStretchFromGreen(0.2578, 0.6895) > ColorProfileProvider.GreenStretchForWide);
+    }
+
+    /// <summary>
+    /// EDID 色度那 10 个字节的<b>取位</b>判据（2026-10-21）。
+    /// <para>为什么单独一条：这一版之前 <c>ParseEdidChromaticity</c> 把四个坐标的低 2 位全从 0x19 里取
+    /// （Rx 取到 By、Ry 取到 Bx、Gx 取到 Gy、Gy 取到 Gx），注释还把规范抄反了，而<b>没有任何断言
+    /// 观测这个函数</b> —— 它错了 3 年没人知道。误差 ≤3/1024≈0.0029/坐标，本机结论方向没翻，
+    /// 但闸门是 0.05，贴阈值的屏会被这点错位翻面。</para>
+    /// <para>夹具是两块屏的<b>真字节</b>（本机注册表 EDID 的 0x19-0x22）加一条构造的极端样本：
+    /// 构造样本故意让每个坐标的低 2 位互不相同，旧取位与规范取位因此给出不同的数 ——
+    /// 这就是这条判据的牙（做完变异实测：把取位改回旧写法，本条立刻红）。</para>
+    /// </summary>
+    static void Test_Edid_ChromaticityBitsMatchSpec()
+    {
+        var parse = new System.Func<byte[], (float rx, float ry, float gx, float gy)>(
+            TrueToneCap.Core.ColorManagement.ColorProfileProvider.ParseEdidChromaticity);
+        var dg = new System.Func<double, double, double>(
+            TrueToneCap.Core.ColorManagement.ColorProfileProvider.GreenStretchFromGreen);
+
+        // ── 真机字节（本机三块屏，从 HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\<id>\Device Parameters\EDID 取）──
+        static byte[] WithChroma(string hex10)
+        {
+            var e = new byte[128];
+            for (int i = 0; i < 7; i++) e[i] = 0xFF;   // 合法头
+            e[0] = 0x00; e[7] = 0x00;
+            var compact = hex10.Replace(" ", "");
+            for (int i = 0; i < 10; i++)
+                e[0x19 + i] = System.Convert.ToByte(compact.Substring(i * 2, 2), 16);
+            return e;
+        }
+        (float, float, float, float) Expect(string hex10)
+        {
+            var e = WithChroma(hex10);
+            float V(int hi, int lo, int shift) => (e[hi] * 4 + ((e[lo] >> shift) & 3)) / 1024f;
+            return (V(0x1B, 0x1A, 6), V(0x1C, 0x1A, 4), V(0x1D, 0x19, 6), V(0x1E, 0x19, 4));
+        }
+        bool Same((float rx, float ry, float gx, float gy) a, (float rx, float ry, float gx, float gy) b)
+            => System.Math.Abs(a.rx - b.rx) < 1e-6 && System.Math.Abs(a.ry - b.ry) < 1e-6
+            && System.Math.Abs(a.gx - b.gx) < 1e-6 && System.Math.Abs(a.gy - b.gy) < 1e-6;
+
+        foreach (var (name, hex, wantDg, wide) in new (string, string, double, bool)[]
+        {
+            ("AUO75AC 内屏", "EC B5 A9 54 4B 9F 24 0E 50 54", 0.0234, false),
+            ("SAC2765 外接", "9D C5 AE 4F 42 AD 23 0D 50 54", 0.0867, true),
+            ("PHLC38F 外接", "2F 55 AE 51 42 B0 24 0E 50 54", 0.0989, true),
+        })
+        {
+            var got = parse(WithChroma(hex));
+            Assert($"★ {name}：按规范取位解出的坐标与独立复算逐位相同", Same(got, Expect(hex)));
+            Assert($"★ {name}：ΔG 复算 = {wantDg:F4}（{(wide ? "过" : "不过")} 0.05 闸门）",
+                System.Math.Abs(dg(got.gx, got.gy) - wantDg) < 0.0005
+                && (dg(got.gx, got.gy) >= 0.05) == wide);
+            // 白点是这条判据的裁决者：三块屏都该落在 D65 附近（背光白点由厂家定，与色域无关）。
+            var e = WithChroma(hex);
+            float wX = (e[0x21] * 4 + ((e[0x1A] >> 2) & 3)) / 1024f;
+            float wY = (e[0x22] * 4 + (e[0x1A] & 3)) / 1024f;
+            Assert($"★ {name}：白点解出来落在 D65 附近（取位方向对了才会有这个数）",
+                System.Math.Abs(wX - 0.3127f) < 0.005f && System.Math.Abs(wY - 0.3290f) < 0.005f);
+        }
+
+        // ── 构造样本：四个坐标的低 2 位互不相同 ⇒ 旧取法（全从 0x19 取）必然算错 ──
+        // Rx=0.6406(低2位=3) Ry=0.3311(2) Gx=0.3008(1) Gy=0.6006(0) Bx=0.1504(1) By=0.0605(3)
+        var synth = WithChroma("FF 00 00 00 00 00 00 00 00 00");
+        synth[0x19] = 0b01_00_01_11;   // Gx=01 Gy=00 Bx=01 By=11
+        synth[0x1A] = 0b11_10_00_00;   // Rx=11 Ry=10 Wx=00 Wy=00
+        synth[0x1B] = 164; synth[0x1C] = 84; synth[0x1D] = 76; synth[0x1E] = 150;
+        var s = parse(synth);
+        Assert("构造样本：Rx 的低 2 位取自 0x1A 的 7-6（旧写法会取到 By 的位）",
+            System.Math.Abs(s.rx - (164 * 4 + 3) / 1024f) < 1e-6);
+        Assert("构造样本：Ry 的低 2 位取自 0x1A 的 5-4",
+            System.Math.Abs(s.ry - (84 * 4 + 2) / 1024f) < 1e-6);
+        Assert("构造样本：Gx 的低 2 位取自 0x19 的 7-6（旧写法会取到 Gy 的位）",
+            System.Math.Abs(s.gx - (76 * 4 + 1) / 1024f) < 1e-6);
+        Assert("构造样本：Gy 的低 2 位取自 0x19 的 5-4",
+            System.Math.Abs(s.gy - (150 * 4 + 0) / 1024f) < 1e-6);
+        // 变异对照：旧写法把 Gy 的低位(0x19 的 7-6 = 1)安到 Gy 上 ⇒ 差 1/1024，本条能分辨
+        Assert("构造样本与旧取位不同 ⇒ 这条判据真的有牙（旧写法会给出 gy=+1 LSB）",
+            System.Math.Abs(s.gy - (150 * 4 + 1) / 1024f) > 1e-6);
+    }
+
+
+    /// <summary>
+    /// 识字/翻译预览窗那一次必崩的三把锁（2026-10-21，台账 §70）。
+    /// <para>缺陷形状：<c>OcrPreviewWindow.xaml</c> 的标记里写了 <c>IsChecked="True"</c>，
+    /// 加载期抛 <c>XamlParseException / 0x802B000A</c>，内层原文
+    /// "Failed to assign to property 'Microsoft.UI.Xaml.Controls.Primitives.ToggleButton.IsChecked'"；
+    /// 而开窗那句在 <c>DispatcherQueue.TryEnqueue</c> 的<b>回调体</b>里 —— 外层那个 try/catch
+    /// 只包住"入队"这个动作，接不到回调里抛的东西 ⇒ 异常逃进分发器，升级成原生 fail-fast
+    /// （<c>0xc000027b</c> @ CoreMessagingXP+0x97976），进程直接消失、托管侧零日志。</para>
+    /// <para>三把锁各钉一层，少一层都会回到"崩了没人知道"：①标记里不许再有那个赋值（改到代码里赋）；
+    /// ②回调体自己必须 try/catch；③门禁必须真把这两扇窗各建一次（<c>--window-probe</c>，判据=退出码）。</para>
+    /// </summary>
+    static void Test_OcrPreviewWindow_ConstructionGuarded()
+    {
+        var xamlP = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml"));
+        var ctorP = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml.cs"));
+        var mwP = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var gateP = FindRepoFile(Path.Combine("scripts", "verify.ps1"));
+        Assert("找到预览窗两份源 + 主窗 + 门禁脚本（缺件=本卡失明）",
+            xamlP is not null && ctorP is not null && mwP is not null && gateP is not null);
+        if (xamlP is null || ctorP is null || mwP is null || gateP is null) return;
+
+        var xaml = File.ReadAllText(xamlP);
+        Assert("★ 标记里【不许】给 ToggleButton 赋 IsChecked（2026-10-21 实测：加载期 0x802B000A）",
+            !System.Text.RegularExpressions.Regex.IsMatch(xaml, @"<ToggleButton[^>]*IsChecked",
+                System.Text.RegularExpressions.RegexOptions.Singleline));
+
+        var ctor = ReadSourceNormalized(ctorP);
+        int initAt = ctor.IndexOf("this.InitializeComponent();", StringComparison.Ordinal);
+        int codeAt = ctor.IndexOf("OverlayToggle.IsChecked = true;", StringComparison.Ordinal);
+        Assert("默认档改到代码里赋，且排在 InitializeComponent 之后", initAt >= 0 && codeAt > initAt);
+
+        var mw = ReadSourceNormalized(mwP);
+        int guarded = 0, opened = 0, at = 0;
+        while (true)
+        {
+            at = mw.IndexOf("DispatcherQueue.TryEnqueue(() =>", at, StringComparison.Ordinal);
+            if (at < 0) break;
+            int end = mw.IndexOf("});", at, StringComparison.Ordinal);
+            if (end < 0) break;
+            var body = mw.Substring(at, end - at);
+            if (body.Contains("OpenOcrPreviewWindow("))
+            {
+                opened++;
+                if (body.Contains("try") && body.Contains("catch (Exception")) guarded++;
+            }
+            at = end + 3;
+        }
+        Assert($"两处「开窗」回调各自带 try/catch（实得 {guarded}/{opened}）",
+            opened == 2 && guarded == 2,
+            "回调体不受外层 try/catch 保护 ⇒ 异常逃进分发器就变成原生 fail-fast，托管侧一行日志都没有");
+
+        var gate = File.ReadAllText(gateP);
+        Assert("门禁把这两扇窗真建一次：--window-probe 已接线，且拿不到退出码记【未判】而不是绿",
+            gate.Contains("'--window-probe'") && gate.Contains("--window-probe 退出码为空 ⇒ 未判")
+            && gate.Contains("运行期 XAML 窗构造探针: 退出码 0"));
     }
 
     /// <summary>
@@ -7110,6 +7271,28 @@ public static class CorePipelineTests
         Assert("光标屏顶替只允许出现在确实无源屏信息的入口，且集中成一个辅助函数",
             System.Text.RegularExpressions.Regex.Matches(mw, "GetMonitorUnderCursor\\(\\)").Count
             <= System.Text.RegularExpressions.Regex.Matches(mw, "DecisionForCursorScreen").Count + 3);
+        // ═══ 上游 PR #1（VS-Cap 侧车）合入时必须带的两条牙 ═══
+        // 侧车是"像素出进程、编辑完再回来"的入口：TTC1 头里只有 x/y，且 C++ 回写时恒填 0，
+        // 所以源屏身份只能由宿主自己带 —— 让它退回"保存那一刻的光标屏"就是 §41.4 那个缺口的翻版。
+        var vsCap = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.VSCap.cs"))!);
+        Assert("VS-Cap 导出沿用被截那块屏；只有剪贴板贴图路才退回光标屏",
+            vsCap.Contains("ExportVSCapAsync(f, avif, dest, display)")
+            && vsCap.Contains("ExportVSCapAsync(f, avif, dest, null)")
+            && vsCap.Contains("DecisionForDisplay(display, ui, hdrScenario, format)")
+            && !vsCap.Contains("DecisionForCursorScreen"));
+        // PR 原文在构造函数里无条件 RegisterNamed("vscap-pin") ⇒ 功能默认关着也抢注一个系统级热键，
+        // 与它自述的 "off by default; the original TTC workflow is preserved" 相反。
+        Assert("VS-Cap 关着就不注册 Ctrl+Alt+T，且关掉时真的注销",
+            System.Text.RegularExpressions.Regex.IsMatch(vsCap, @"bool on = .*_settings\.UseVSCap")
+            && vsCap.Contains("HotkeyManager.UnregisterNamed(\"vscap-pin\")")
+            && !mw.Contains("if (!HotkeyManager.RegisterNamed(this, \"vscap-pin\""));
+        // 侧车走的是 csproj 一条 glob：构建机上没有 Qt ⇒ 0 个条目 ⇒ 构建打包全绿而功能根本不存在。
+        // 那时还把开关摆着，等于给用户一个点了只会收到 FileNotFoundException 的按钮。
+        Assert("侧车不在包里时整个入口收起（开关+按钮+热键），并留一条可读日志",
+            vsCap.Contains("VSCapEditor.IsAvailable")
+            && vsCap.Contains("VSCapModeChk.Visibility = available ? Visibility.Visible : Visibility.Collapsed")
+            && File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "VSCapEditor.cs"))!)
+                   .Contains("public static bool IsAvailable"));
         // ═══ GainMap 两模式（§45）：模式判定只有一处，两条路共用 ═══
         var gmSrc = File.ReadAllText(FindRepoFile(Path.Combine(
             "src", "TrueToneCap.Core", "Encoding", "JpegGainMapEncoder.cs"))!);

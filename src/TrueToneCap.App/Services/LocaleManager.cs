@@ -361,6 +361,8 @@ public static class LocaleManager
             ["开机自动启动"] = "Start with Windows",
             ["关闭时最小化到托盘"] = "Minimize to tray on close",
             ["日志详细度"] = "Log verbosity",
+            ["VS-Cap 模式（当前屏幕选区、编辑与贴图）"] = "VS-Cap Mode (on-screen selection, editing and pinning)",
+            ["贴图剪贴板图片（Ctrl+Alt+T）"] = "Pin Clipboard Image (Ctrl+Alt+T)",
             ["就绪"] = "Ready",
             // ── 以下 67 条来自五个副窗口（标注 / OCR 预览 / 选区覆盖层 / 截图缩略图 toast / 第三方许可）：
             //    原先一条英文都没有，英文模式下整窗留中文（2026-09-26，交接 §55）。

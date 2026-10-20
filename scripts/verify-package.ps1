@@ -35,6 +35,13 @@ param(
     # 防止"目录名是一个版本、程序集里还是另一个版本"这类版本漂移。
     [string]$ExpectedVersion = "",
 
+    # 本次发布是否声明带 VS-Cap 侧车：由 Publish.ps1 直接把决定传进来。
+    # ⚠ 必须是入参而不是"去包里读 build-info.json" —— build-info.json 是 Publish 的 [6/6]
+    #   才写出来的，冒烟验证跑在它之前 ⇒ 只读文件的话这一格在正常发布流程里永远是"未判定"
+    #   （2026-10-17 第一次实跑就是这么暴露的）。留空 = 事后独立复查一个已完成的包，
+    #   那时 build-info.json 已经在包里，才以它为准。
+    [string]$VSCapDeclared = "",
+
     # 期望的源码 commit。提供时会比对「二进制里内嵌的 commit」(ProductVersion 的 +sha 后缀，
     # 由 SourceLink 注入) 与该值 —— 这是唯一能把"磁盘上的 exe"和"仓库里的某次提交"
     # 绑在一起的检查，可拦住"声称 HEAD=X、实际代码是 Y"这类不可复现产物。
@@ -348,6 +355,54 @@ if ($strayPdbs.Count -gt 0) {
 Write-Host ""
 
 # ══════════════════════════════════════════════════════════════
+# ════════════════════════════════════
+#  [5.5/6] VS-Cap 侧车：声明 ↔ 包内实际
+# ════════════════════════════════════
+# 侧车由 App.csproj 一条 glob 进包；构建机上没有 Qt 时该目录不存在 ⇒ glob 展开成 0 个条目 ⇒
+# 构建、打包、7 套件【全绿】而功能根本不在包里。这条判据把"没带侧车"从静默事故，
+# 变成必须是 Publish.ps1 -NoVSCap 显式声明过的状态。
+Write-Host "[5.5/6] VS-Cap 侧车一致性（build-info 声明 ↔ 包内实际）..."
+$vscapDir = Join-Path $PackageDir 'data\vscap'
+$hasVSCapExe = Test-Path (Join-Path $vscapDir 'ttc-vscap.exe')
+$qtDlls = @(Get-ChildItem $vscapDir -Filter 'Qt6*.dll' -Recurse -ErrorAction SilentlyContinue)
+$vscapLic = @(Get-ChildItem $vscapDir -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '(?i)license' -or $_.Name -match '^Qt-.*\.txt$' })
+$biPath = Join-Path $PackageDir 'build-info.json'
+$haveDecl = $false
+$declared = $null
+if ($VSCapDeclared -ne '') {
+    $declared = ($VSCapDeclared -match '^(?i:true|1)$'); $haveDecl = $true; $declHow = "发布流程传入 VSCapDeclared=$VSCapDeclared"
+} elseif (Test-Path $biPath) {
+    $declared = (Get-Content $biPath -Raw -Encoding UTF8 | ConvertFrom-Json).vscapIncluded
+    $haveDecl = ($null -ne $declared); $declHow = '包内 build-info.json'
+}
+if (-not $haveDecl) {
+    $warns.Add("既无 -VSCapDeclared 入参、也读不到可用的 build-info.vscapIncluded ⇒ 侧车是否入包【未判定】")
+    Write-Host "   ⚠️ 无声明来源 ⇒ 这一格未判定（不是通过）" -ForegroundColor Yellow
+} else {
+    Write-Host "   声明来源：$declHow"
+    if ($declared -eq $true) {
+        if (-not $hasVSCapExe) {
+            $failures.Add("声明带侧车，包内却没有 data\vscap\ttc-vscap.exe") }
+        if ($qtDlls.Count -eq 0) {
+            $failures.Add("声明带侧车却没有任何 Qt6*.dll ⇒ windeployqt 没跑或没进包（exe 起不来）") }
+        if ($vscapLic.Count -eq 0) {
+            $failures.Add("声明带侧车却没有任何 VS-Cap/Qt 许可文本 ⇒ LGPL 义务没随包履行") }
+        if ($hasVSCapExe -and $qtDlls.Count -gt 0 -and $vscapLic.Count -gt 0) {
+            Write-Host ("   ✅ ttc-vscap.exe + {0} 个 Qt DLL + {1} 份许可文本，与声明一致" -f $qtDlls.Count, $vscapLic.Count)
+        }
+    } elseif ($declared -eq $false) {
+        if ($hasVSCapExe) {
+            $failures.Add("声明不出侧车，包内却有 ttc-vscap.exe ⇒ 声明与实际不符")
+        } else {
+            Write-Host "   ✅ 声明不出侧车，包内也确实没有 ⇒ App 启动时会自动隐藏该功能入口"
+        }
+    } else {
+        $warns.Add("声明值 '$declared' 既不是 true 也不是 false ⇒ 侧车是否入包【未判定】（多半是 -SkipDependencyCheck 出的包）")
+        Write-Host "   ⚠️ 声明值 '$declared' ⇒ 未判定（不是通过）" -ForegroundColor Yellow
+    }
+}
+
 #  [6/6] 汇总
 # ══════════════════════════════════════════════════════════════
 $totalFiles = (Get-ChildItem $PackageDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count

@@ -62,7 +62,6 @@
                 <ToggleButton x:Name="OverlayToggle"
                               HorizontalAlignment="Left" VerticalAlignment="Top"
                               Margin="10" Height="32" Padding="12,0"
-                              IsChecked="True"
                               Checked="OnOverlayToggleChanged" Unchecked="OnOverlayToggleChanged"
                               ToolTipService.ToolTip="显示 / 关闭文字覆盖层">
                     <StackPanel Orientation="Horizontal" Spacing="6">

@@ -1,6 +1,7 @@
 # ── .NET Build Artifacts ──
 bin/
 obj/
+build/
 *.user
 *.suo
 *.userosscache

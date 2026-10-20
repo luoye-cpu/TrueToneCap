@@ -52,6 +52,13 @@ public sealed partial class OcrPreviewWindow : Window
         Func<byte[], int, int, Task>? saveHandler = null)
     {
         this.InitializeComponent();
+        // 崩溃根因（2026-10-21 探针实测，台账 §70）：`IsChecked="True"` 写在 XAML 标记里会在加载期抛
+        // `XamlParseException / 0x802B000A`，内层原文是
+        // "Failed to assign to property 'Microsoft.UI.Xaml.Controls.Primitives.ToggleButton.IsChecked'"。
+        // 同一个值改成 InitializeComponent 之后在代码里赋 ⇒ 加载过得去（默认档仍是"显示覆盖层"）。
+        // 原先这个异常从 DispatcherQueue 回调里抛出且没人接，才升级成原生 fail-fast（进程直接消失）。
+        // 回归由门禁 [1.97/2] 的 --window-probe 与 Test_OcrPreviewWindow_ConstructionGuarded 两处理住。
+        OverlayToggle.IsChecked = true;
         MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
         // 窗口标题不在可视树里，只能显式翻译。
         Title = LocaleManager.Tr(Title);
