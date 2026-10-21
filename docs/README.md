@@ -143,8 +143,8 @@
    · `.git` **253 MB → 166 MB**：那 89 MB `AppPackages`（0.3.7 MSIX + 17 个安装脚本）先整目录导出到
      `publish/msix-0.3.7-from-backup-2026-10-21/`（18 文件 / 89,312,957 B，MSIX sha256 `263b3ce1…`，与 ref 内 blob 逐字节相等），
      再 `git update-ref -d refs/backup/main-pre-strip` + `git gc --prune=now`；`7da0b2c` 现已不可达，`refs/` 只剩 `main`。
-   · `publish/` **2.21 GB → 905 MB**：0.3.9-beta 包已按 HEAD `00e0519` 重出（413 MB / 611 文件，`build-info.json`
-     `commitSha` 逐字一致、`dirtyWorktree=false`），`-KeepLast 1` 清掉 0.3.6 两套与 0.3.7 目录（1,220 MB），
+   · `publish/` **2.21 GB → 905 MB**：0.3.9-beta 包已按 tag 指向的提交重出（413 MB / 611 文件，`build-info.json`
+     `commitSha` 与 tag 提交逐字相等、`dirtyWorktree=false`；FileVersion 已随 `-Version` 覆盖为 0.3.9.0），`-KeepLast 1` 清掉 0.3.6 两套与 0.3.7 目录（1,220 MB），
      另手删两个 7z（242 MB）与 `_scratch`（397 MB）。现存=0.3.9 包 413 + `PLAN` 182 + `TTC日志查看器` 225 + 导出的 MSIX 85。
    · `artifacts/` **2,866 MB → 444 MB**（拆 wt-gm / wt-pr1 与补丁/快照清理，见第 6 件）。
    · `src` **1,850 MB → 93 MB**、`tests` **209 MB → 151 MB**：删掉 src/tests 下全部 `bin`/`obj`（16 处）、
