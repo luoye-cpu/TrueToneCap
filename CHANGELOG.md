@@ -58,6 +58,10 @@
 
 ### 门禁读数
 
+- `-WriteGateBaseline` 之前用 `Set-Content -Encoding UTF8`，PowerShell 5.1 那个写法必然加 BOM ⇒ 生成的基线用
+  `json.load(open(p, encoding="utf-8"))` 读会抛 `Unexpected UTF-8 BOM`。上一轮是手工剥的（治标，本轮重生成即复发），
+  现在改成显式无 BOM 写盘 + 写后读回前 3 字节自检，带 BOM 直接 `exit 1`。
+
 - `--unit-tests` 1304 → **1308**（新卡 4 条），其余六套件不变；地板用 `-WriteGateBaseline` 重打（见 `scripts/gate-baseline.json`）。
 - `verify-publish-gates.ps1` 场景数 6 → **8**。
 

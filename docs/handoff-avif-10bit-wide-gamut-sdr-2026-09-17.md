@@ -7932,3 +7932,10 @@ WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App
 - `--unit-tests` 1304 → **1308**（新卡 4 条），其余六套件不变；地板随后用 `-WriteGateBaseline` 重打。
 - 门禁静态项新增两格（G/H）；`verify-publish-gates.ps1` 从 6 场景变 8 场景。
 
+
+### 72.6 上一轮那句"生成后去掉 BOM"是治标，本轮复发并已根治
+- 现象：`-WriteGateBaseline` 用的是 `Set-Content -LiteralPath … -Encoding UTF8`，而 PowerShell 5.1 那个写法**必然**在文件头写 `EF BB BF`。2026-10-21 那轮我是生成完再手工剥掉 BOM 才提交的，本轮重跑基线它又长回来了，并且这次真炸：`json.load(open(p, encoding="utf-8"))` 报 `Unexpected UTF-8 BOM (decode using utf-8-sig)`。
+- 修法：`verify.ps1` 改为 `[System.IO.File]::WriteAllText(path, json, (New-Object System.Text.UTF8Encoding($false)))`，并在写完后读回前 3 字节自检 —— 带 BOM 就 `exit 1`（"这一轮不算写完"），而不是留一句注释等人记得去剥。
+- 读数：重生成后基线 1,570 B、首三字节 `{` `CR` `LF`、python 按 **utf-8（不带 -sig）** 读通，总断言 1871 / unit 1308；整轮 exit 0。
+- 自纠：这是本仓第二次栽在"修一次只改一个文件、没改生成器"上（前一次是手改 `THIRD-PARTY-NOTICES.md` 而被生成器覆盖）。凡"产物不该长这样"的修复，落点必须在生成它的那行代码里，否则下一轮必复发。
+

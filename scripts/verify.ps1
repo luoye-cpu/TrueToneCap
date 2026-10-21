@@ -1309,8 +1309,19 @@ if ($WriteGateBaseline -and $failedSuites.Count -eq 0) {
     }
     $noteKey = '_说明'
     $doc.各套件.$noteKey = '用 scripts\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里'
-    $doc | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $baselinePath -Encoding UTF8
-    Write-Host "  ℹ️  基线已写入 $baselinePath（本轮总断言 $totalPassed）" -ForegroundColor DarkGray
+    # ⚠ 不能用 `Set-Content -Encoding UTF8`：PowerShell 5.1 那个写法【必然】在文件头加 BOM (EF BB BF)。
+    #   2026-10-21 那轮是生成后手工剥掉 BOM 的 —— 治标：本轮 -WriteGateBaseline 一跑就又长回来了，
+    #   而且带 BOM 的这份 JSON 用 python json.load(open(p, encoding='utf-8')) 会当场抛
+    #   "Unexpected UTF-8 BOM (decode using utf-8-sig)"（本轮实测踩过，也是它逼出来的这条修法）。
+    #   改成显式无 BOM 编码写盘，并在写完后自己复核一次 —— 尺子要能看见自己的输出。
+    $json = $doc | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText($baselinePath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $headBytes = [System.IO.File]::ReadAllBytes($baselinePath)
+    if ($headBytes.Length -ge 3 -and $headBytes[0] -eq 0xEF -and $headBytes[1] -eq 0xBB -and $headBytes[2] -eq 0xBF) {
+        Write-Host "  ❌ 基线写出来带 BOM ⇒ 按无 BOM UTF-8 读它的脚本会抛异常，这一轮【不算写完】" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  ℹ️  基线已写入 $baselinePath（本轮总断言 $totalPassed，无 BOM 已复核）" -ForegroundColor DarkGray
 } elseif ($WriteGateBaseline) {
     # ⚠ 本轮有套件失败 ⇒【拒绝写基线】。2026-09-29 实测踩过：一次 --unit-tests 红 1 条的轮次照样带了
     #   -WriteGateBaseline，于是把"通过 899"记成了地板 —— 地板从那一刻起就比真实规模低，

@@ -24,9 +24,9 @@
 
 | 文件 | 行 | 状态 |
 |---|---|---|
-| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,934 | §编号已到 **72**，最后追加 2026-10-22；724,393 B，**占 `docs/` 总字节的 31.6%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
+| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,941 | §编号已到 **72**（含 72.6），最后追加 2026-10-22；725,563 B，**占 `docs/` 总字节的 31.7%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
 | `handoff-avif-encoder-refactor-2026-09-16.md` | 406 | 前一阶段的交接，已收尾 |
-| `CHANGELOG.md`（仓库根） | 221,975 B（blob） | 变更流水；发布记录与 tag 对账也记在这 |
+| `CHANGELOG.md`（仓库根） | 222,344 B（blob） | 变更流水；发布记录与 tag 对账也记在这 |
 
 要找"某件事当时为什么这么做/后来怎么翻的"，先在这三份里搜，别去审计快照里找结论。
 
@@ -70,8 +70,8 @@
 `gpu-acceleration-availability-09-16` `root-cause-hdr-multimonitor-09-16` `capture-source-regression-09-16`
 `release-review-09-16` `windows-system-notification-09-16` `pending-changes-triage-09-14`。
 
-**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,381 行 / 2,290,851 B（2.18 MiB）**（2026-10-22 在本次提交树内实测；
-字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,308,347 B，虚高 0.76%），
+**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,388 行 / 2,292,021 B（2.18 MiB）**（2026-10-22 在本次提交树内实测；
+字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,309,524 B，虚高 0.76%），
 其中带日期 54 份、无日期 10 份（即 §三 那 10 份活文档）。含本索引是 65 份，行数要加上本文件自己的当前行数；
 本文件会被继续编辑，所以"含本索引"的行数不给死数。
 （上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.90 倍**，那份计数已过期，别拿它做体积或成本判断。
@@ -172,7 +172,7 @@
 ```bash
 # 份数（不含本索引）= 64
 ls docs/*.md | grep -vc '^docs/README.md$'                        # 磁盘口径；docs/README.md 自己不数
-# 行数 / 字节（blob 口径，与 §四 那组 30,381 行 / 2,290,851 B 逐字相等，2026-10-22 实跑对过）
+# 行数 / 字节（blob 口径，与 §四 那组 30,388 行 / 2,292,021 B 逐字相等，2026-10-22 实跑对过）
 for f in $(git ls-files docs | grep -v '^docs/README.md$'); do git cat-file blob "HEAD:$f"; done | wc -l -c
 # 活文档（无 2026-MM-DD 后缀）：上面这条给 11 是含了本索引，去掉就是 §四 的 10 份
 ls docs/*.md | grep -v '2026-[0-9][0-9]-[0-9][0-9]'
