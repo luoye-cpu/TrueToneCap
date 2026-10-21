@@ -16,6 +16,52 @@
 ---
 
 
+## [未发布] — 2026-10-22：许可声明补齐、发布 workflow 两处接线、裁剪根改条件加载
+
+### 许可：那句"都已带头"现在是真的，而且有判据
+
+- 86 个自有源码文件各 +2 行 SPDX/Copyright（`py scripts/add-spdx-headers.py` 实跑）。逐文件复核口径：
+  把新增两行剥掉后必须与原字节逐字相同 —— 86/86 通过，BOM 未变，行尾按各文件原风格。
+- ⚠ **一处误标已回退**：上游逐字副本 `src/TrueToneCap.VSCap/upstream/src/cap/DesktopCapture.h` 被盖过 Apache 章 ——
+  那既误署版权方，又破坏 `licenses/INDEX.json` 里"upstream/ 为逐字副本（逐 blob 与上游对撞相等）"那条声明。
+  工具已加 `VENDORED_PREFIXES` 豁免（`.cpp` 本就不在其口径内，所以上游 4 个文件里只有这一个会被碰到）。
+- 新判据 `Test_SpdxHeaders_OwnSourceFilesAreStamped`（挂在 `--unit-tests`，4 条）：清单口径取 `git ls-files` 而非磁盘遍历——
+  磁盘上另有 85 个被 `.gitignore` 挡住的旧 harness 没有头，按磁盘遍历这把尺子会恒红。
+  变异实测：临时摘掉 `CoreLog.cs` 的头 ⇒ 当场红并点名该文件；还原后 `--unit-tests` 1308 通过 / 0 失败。
+
+### 发布 workflow：一条从没被执行过的死路（P0）
+
+- `release.yml` 调 `Publish.ps1 -Version …` 时**没带 `-NoVSCap`**，而 `[0/6]` 侧车闸门要求"不带该开关就必须有侧车"。
+  该 job 跑在 `[self-hosted, Windows, X64]`（本机无 Qt）⇒ 自 `36374ac` 起这个 workflow **第一步就会中止**，
+  且报错写着"缺侧车"，看不出问题出在 workflow 文本里。为什么门禁一直没见过：`verify-publish-gates.ps1` 的 A~E 全都显式传了 `-NoVSCap`。
+- 修法：补 `-NoVSCap`（并写明要出带侧车的包先在装了 Qt 的机器上跑 `scripts/BuildVSCap.ps1`）。
+- `scripts/verify-package-content.ps1`（2026-09-26 从临时目录提升入库后**一直零调用点**）接进 `release.yml`，
+  位置在 `id: locate` 之后 —— 它量的是"包里的内容是不是这一轮的"，与 `verify-package.ps1` 量的结构/依赖不重叠。
+- `verify-publish-gates.ps1` 加两条静态臂 G（发布步骤带 `-NoVSCap`）/ H（调用行存在且排在 locate 之后），整轮 8 场景 ✅。
+  ⚠ H 的**第一版是假绿**：锚点写 `IndexOf('verify-package-content.ps1')`，而这个名字同时出现在步骤 title 和注释里 ⇒
+  把调用行整行删掉它照样绿；改成"只认 Trim() 后以该命令开头的行"，同一变异 ⇒ 2/8 红。
+  诚实边界：这两条臂只证明 workflow **文本**的接线；该文件顶部"尚未在 GitHub Actions 上实跑过"那句仍然成立。
+
+### 构建输入：裁剪根不再挂着"看起来在起作用"
+
+- `TrueToneCap.App.csproj` 的 `<TrimmerRootDescriptor Include=…>` 原是**无条件**的，而全仓
+  `PublishTrimmed/PublishAot/TrimMode/IsAotCompatible` 零命中（`git grep` 重测）⇒ 一份谁也消费不到的死配置。
+- 改为条件加载（`PublishTrimmed` 或 `PublishAot` 为 true 时才声明）。两臂实测：
+  `dotnet msbuild -getItem:TrimmerRootDescriptor` 默认 → `[]`；加 `-p:PublishTrimmed=true` → 1 条且 `FullPath` 指向仓库根 XML。
+
+### 门面
+
+- 新增 `SECURITY.md`（双语）：报告渠道、支持范围、以及"已具备的机制"逐条注明出处——DPAPI 存密钥、
+  日志不写 OCR 原文、CI `--locked-mode`、包内 `SHA256SUMS.txt` + `build-info.json` 都当场核对过存在。
+- 新增 `.github/dependabot.yml`：只跟 `github-actions` 版本；NuGet 保持人工核实（CPM 单一事实源 + 5 个 lock 文件 +
+  钉的是预览版 SDK，自动 PR 会稳定产出编不过的改动，理由写在该文件头部）。
+
+### 门禁读数
+
+- `--unit-tests` 1304 → **1308**（新卡 4 条），其余六套件不变；地板用 `-WriteGateBaseline` 重打（见 `scripts/gate-baseline.json`）。
+- `verify-publish-gates.ps1` 场景数 6 → **8**。
+
+---
 ## [0.3.9-beta] — 2026-10-21：识字/翻译必崩修好；外接屏的色域判定不再读错屏
 
 ### 修复：点"识字"或"翻译"整个软件直接消失（无弹窗、无报错、无日志）

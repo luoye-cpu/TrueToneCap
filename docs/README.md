@@ -24,9 +24,9 @@
 
 | 文件 | 行 | 状态 |
 |---|---|---|
-| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,900 | §编号已到 **71**，最后追加 2026-10-21；718,541 B，**占 `docs/` 总字节的 31.4%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
+| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,934 | §编号已到 **72**，最后追加 2026-10-22；724,393 B，**占 `docs/` 总字节的 31.6%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
 | `handoff-avif-encoder-refactor-2026-09-16.md` | 406 | 前一阶段的交接，已收尾 |
-| `CHANGELOG.md`（仓库根） | 216,238 B（blob） | 变更流水；发布记录与 tag 对账也记在这 |
+| `CHANGELOG.md`（仓库根） | 221,975 B（blob） | 变更流水；发布记录与 tag 对账也记在这 |
 
 要找"某件事当时为什么这么做/后来怎么翻的"，先在这三份里搜，别去审计快照里找结论。
 
@@ -70,8 +70,8 @@
 `gpu-acceleration-availability-09-16` `root-cause-hdr-multimonitor-09-16` `capture-source-regression-09-16`
 `release-review-09-16` `windows-system-notification-09-16` `pending-changes-triage-09-14`。
 
-**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,347 行 / 2,284,999 B（2.18 MiB）**（2026-10-21 在本次提交树内实测；
-字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,302,461 B，虚高 0.76%），
+**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,381 行 / 2,290,851 B（2.18 MiB）**（2026-10-22 在本次提交树内实测；
+字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,308,347 B，虚高 0.76%），
 其中带日期 54 份、无日期 10 份（即 §三 那 10 份活文档）。含本索引是 65 份，行数要加上本文件自己的当前行数；
 本文件会被继续编辑，所以"含本索引"的行数不给死数。
 （上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.90 倍**，那份计数已过期，别拿它做体积或成本判断。
@@ -117,28 +117,33 @@
 只看 grep 命中 + 文件缺失会造出一整批假缺陷。
 带日期的快照即便真含过期句子也**不回写**（规则一）。
 
-## 七、待你拍的六件（都是取舍，不是清理；第 5、6 件已处置，余四件）
+## 七、待你拍的六件（都是取舍，不是清理）—— 2026-10-22 六件全部处置完毕
 
-1. **54 份快照要不要真挪进 `docs/reviews/<族>/`**：实测成本 = **95 处 `docs/<文件名>` 路径引用 / 跨 35 个跟踪文件**
+1. **54 份快照要不要真挪进 `docs/reviews/<族>/` —— 2026-10-22 拍板：不搬**
    （`CHANGELOG.md` 21、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `f0fc56c` 树内按 `git ls-files` 全文重跑，
    只数写成 `docs/<带日期文件名>` 的引用，"文件指自己"已排除——本索引列的是不带前缀的短名，所以它自己贡献 0 处）。
    台账 §54.4 记的"22 处"已过期 4 倍。
-   现状=不挪，靠本索引分层（零引用改写）。
-2. **`TrimmerRoots.xml` + `App.csproj:131-136` 这一对**：csproj 无条件 `<TrimmerRootDescriptor Include=…>`，
+   ⇒ 现状维持不搬：分层已由本索引 §三/§四 给出，搬家只换来一次全仓引用改写（其中台账与快照里的 `名字:行号` 引用会整片错位）。
+2. **`TrimmerRoots.xml` + `App.csproj` 这一对 —— 2026-10-22 已处置：改成条件加载**（既没摘掉知识，也没假装它在起作用）：原来是 csproj 无条件 `<TrimmerRootDescriptor Include=…>`，
    但全仓 `PublishTrimmed/PublishAot/TrimMode/IsAotCompatible` **零命中**，`Publish.ps1:408-409` 自己写明
    "`CorePublishAot` 没有任何 csproj 消费"，且 `docs/roadmap-v0.4.md` 里 **AOT/裁剪 0 次提及**
    ⇒ 今天完全不起作用。要么成对摘掉（改构建输入，6 行 + 1 文件），要么把 `-CoreAot` 真接通让它有意义。
-   ⚠ 不能只删 xml——csproj 那行会指向空路径。
-3. **一次性脚本归置**：`migrate_forensic_paths.py`（文档自述"一次性脚本"，`.workbuddy-ai` 引用已 21→0）、
+   两臂实测（`dotnet msbuild -getItem:TrimmerRootDescriptor`）：默认 → `[]`；`-p:PublishTrimmed=true` → 1 条且 FullPath 指向仓库根那份 xml。
+   没有选"成对摘掉"（会删掉将来开裁剪要保哪些类型这条知识），也没选"把 `-CoreAot` 真接通"（那是产品级改动，另议）。
+3. **一次性脚本归置 + SPDX 头 —— 2026-10-22 已处置**：先补齐（`add-spdx-headers.py` 实跑 86 个自有文件各 +2 行，逐文件"剥掉新增行后与原字节相同"全过；
+   上游逐字副本 `VSCap/upstream/DesktopCapture.h` 我一度误盖了 Apache 章，已还原并在工具里加 `VENDORED_PREFIXES` 豁免——盖上去既误署版权又破坏 INDEX.json 的"逐字副本"声明），
+   再补判据（新卡 `Test_SpdxHeaders_OwnSourceFilesAreStamped`，口径 = `git ls-files`；摘掉头会红，实测红 1 条）；
+   三个一次性脚本（`migrate_forensic_paths.py`（文档自述"一次性脚本"，`.workbuddy-ai` 引用已 21→0）、
    `add-spdx-headers.py`（⚠ 本轮重测：按它自己的口径 `.c/.cs/.h/.hlsl/.ps1/.py` 命中 **262 个跟踪文件，其中 87 个没有 SPDX 头**——
    含 `src/` 下 4 个 `.cs`（`MarkdownDocumentWindow` / `PrivacyPolicyWindow.xaml.cs` / `ThirdPartyNoticesWindow.xaml.cs` / `CoreLog`）
    和我自己写的 `gen-third-party-notices.py`、`mutation-verify.ps1`；门禁没有任何一格管 SPDX 头，`CorePipelineTests.cs:3035` 那条管的是
    `licenses/INDEX.json` 的表达式，不是源码头。原先这里写的"464 个跟踪文件都已带头"是错的）
    、`migrate-net11.ps1`（net11 迁移已完成；它的断链本轮已修）
-   —— 退役它之前要么先把它跑完补齐那 87 个，要么原地留着当可复跑工具；直接退役等于把缺口永久留在原地。
+   —— 结论：补齐后**原地留用**，不建 `scripts/retired/`。它们都是可复跑工具，且被文档点名引用。
    ⚠ `export_onnx_fp32.py` 文档里**一次都没提**，而配套的 `onnx_fp16_quantize.py` 有 3 处文档记录 ⇒ 要么补出处要么一起处置。
-4. **`scripts/verify-package-content.ps1` 零调用点**（CI 两份 workflow 都不引用）：接进 `release.yml`，
-   还是从 README 的规范段摘出去——它 2026-09-26 是"从临时目录提升入库"的，删它等于自食那个决定。
+4. **`scripts/verify-package-content.ps1` 零调用点 —— 2026-10-22 已接入 `release.yml`**（排在 `id: locate` 之后），
+   并由 `verify-publish-gates.ps1` 新增的静态臂 H 钉住（第一版 H 是假绿——锚点匹到了步骤 title 和注释，删掉调用行照样绿；改成只认调用行后变异当场红）。
+   顺带修掉一条从没被执行过的死路：release job 的 `Publish.ps1` 调用缺 `-NoVSCap`，在没 Qt 的自托管 runner 上会在 [0/6] 第一步就中止。
 5. **磁盘回收 —— 2026-10-21 已按你两句（"移除它们""只留最新整包"）处置掉大头**：
    · `.git` **253 MB → 166 MB**：那 89 MB `AppPackages`（0.3.7 MSIX + 17 个安装脚本）先整目录导出到
      `publish/msix-0.3.7-from-backup-2026-10-21/`（18 文件 / 89,312,957 B，MSIX sha256 `263b3ce1…`，与 ref 内 blob 逐字节相等），
@@ -167,13 +172,16 @@
 ```bash
 # 份数（不含本索引）= 64
 ls docs/*.md | grep -vc '^docs/README.md$'                        # 磁盘口径；docs/README.md 自己不数
-# 行数 / 字节（blob 口径，与 §四 那组 30,347 行 / 2,284,999 B 逐字相等，2026-10-21 实跑对过）
+# 行数 / 字节（blob 口径，与 §四 那组 30,381 行 / 2,290,851 B 逐字相等，2026-10-22 实跑对过）
 for f in $(git ls-files docs | grep -v '^docs/README.md$'); do git cat-file blob "HEAD:$f"; done | wc -l -c
 # 活文档（无 2026-MM-DD 后缀）：上面这条给 11 是含了本索引，去掉就是 §四 的 10 份
 ls docs/*.md | grep -v '2026-[0-9][0-9]-[0-9][0-9]'
 # 入站引用 / 孤儿：把每个 docs/<名> 在所有跟踪文本文件里搜一遍（排除构建副本、排除文件指自己）
 # 断链：文中 token 命中 + 目标存在性两条一起判，只命中一条会误报
 ```
+
+⚠ **行号引用换算**：2026-10-22 给 86 个自有源码文件各加了 2 行 SPDX 头 ⇒ 那之前写成 `名字:行号` 的引用一律 **+2 才是今天的行号**
+（受影响 5 个文件 / 16 处，全在带日期快照里，按"快照不回写"原则没有改）。引用这些串时先按这个偏移折一下。
 
 ⚠ **自指提醒**（上一轮就栽过一次）：本文件自己也在 `docs/` 里，所以 §四 用的是**不含本索引**的稳定口径；
 若改成"含我"的口径，每编辑一次这份索引数字就会漂一次 —— 那不是数据变了，是尺子动了。

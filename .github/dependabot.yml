@@ -1,0 +1,32 @@
+# TrueToneCap/.github/dependabot.yml
+#
+# 只开 github-actions，刻意不开 dotnet/nuget。理由都写在这里，防止以后"顺手补上"：
+#
+#   1) 依赖版本的单一事实源是 Directory.Packages.props（Central Package Management），
+#      并且每个工程都有 packages.lock.json，CI 用 `dotnet restore --locked-mode` 还原
+#      （见 .github/workflows/ci.yml）。⇒ 只改 props 而不重生成 lock 文件的 PR，
+#      在 CI 上必然失败；而 lock 文件要由本机 pinned SDK 生成，dependabot 的 runner
+#      用的是另一套 SDK（本仓钉的是 11.0.100-rc.1 预览版，镜像里未必有）。
+#   2) 本仓的版本升级是【带核实的动作】，不是例行动作：每次都要回上游注册表/仓库核对
+#      （例：libavif 把 libpng 钉在 cmake/Modules/LocalZlibpng.cmake 里，普通 -D 覆盖不了，
+#      这种坑自动 PR 只会提出一个编不过的改动）。过程与结论记在 CHANGELOG 的依赖段。
+#
+# ⇒ NuGet 升级继续走"人挑版本 + 本机重生成 lock + 门禁"这条路；这里只让 dependabot
+#   盯 action 的版本与运行时（action 升级不涉及 lock 文件，风险面小得多）。
+#
+# 若要开 dotnet 生态：先确认 (a) 预览版 SDK 在 runner 可得，(b) dependabot 能同步
+# 更新 5 个 packages.lock.json —— 两条都不成立就别开，它会稳定产出红 PR。
+#
+# 依赖政策与安全报告见 SECURITY.md / PRIVACY.md。
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'saturday'
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - '*'

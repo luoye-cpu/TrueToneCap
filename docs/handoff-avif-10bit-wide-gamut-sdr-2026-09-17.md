@@ -7898,3 +7898,37 @@ WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App
 ```
 
 本台账 §71 之后抬地板的理由，写在本节末尾（新增段落请追加在代码块之后，勿改上面的原文）。
+
+## §72 2026-10-22 审查轮落地：SPDX 头补齐、release.yml 两处接线、裁剪根改条件加载
+（触发：用户"重新审查项目结构和git树，给出综合建议"→"这些按照你的想法开始实现"。本轮所有数字都是当场重跑的。）
+
+### 72.1 许可头（§七-3 的前提：先让那句"都已带头"变成真的）
+- 前态实测：`add-spdx-headers.py` 自己的口径（`.c/.cs/.h/.hlsl/.ps1/.py`）命中 262 个跟踪文件，其中 **87 个没有 SPDX 头** ⇒ 索引里"464 个跟踪文件都已带头"是假的（该假陈述已于 10-21 在 §七-3 撤回）。
+- 跑工具：86 个自有文件各 **+2 行 / 0 删除**；独立复核 = 把新增两行剥掉后与原字节逐字相同，86/86 通过；BOM 未变；行尾按各文件原风格增加。
+- ⚠ **我自己造成的一处实质错误**：第 87 个是 `src/TrueToneCap.VSCap/upstream/src/cap/DesktopCapture.h`，那是**上游逐字副本**（`licenses/INDEX.json` 写明"逐 blob 与上游 7042772 对撞相等"），给它盖 `Apache-2.0 / Copyright 2026 TrueToneCap contributors` 既误署版权方、又破坏"逐字副本"那条对外声明 ⇒ 已 `git checkout` 还原，并在工具里加 `VENDORED_PREFIXES` 豁免；`--dry-run` 现报"将写入 0 个文件；已有 SPDX 261 个"。
+  （口径细节：`.cpp` 不在工具扩展名集合内，所以上游那 4 个文件里只有这一个 `.h` 会被误盖 —— 不是 4 个。）
+- 新判据 `Test_SpdxHeaders_OwnSourceFilesAreStamped`（挂在 `--unit-tests`，4 条断言）：清单口径取 `git ls-files` 而不是磁盘遍历 —— 磁盘上另有 **85 个被 .gitignore 挡住的旧 harness 没有头**，按磁盘遍历这把尺子会恒红、然后被人当噪声删掉。卡里三条臂：谓词自身分叉、枚举不得塌空（≥200）、逐文件核对；另有一条反向哨兵盯住"上游豁免对象仍然存在且仍未被盖章"。
+  变异实测：临时摘掉 `CoreLog.cs` 前两行 ⇒ 红 1 条并点名该文件、退出码 1；还原后 sha256 与摘除前相等，`--unit-tests` 1308 通过 / 0 失败。
+- 副作用登记：这 86 个文件各 +2 行 ⇒ 此前按 `名字:行号` 引用它们的文档串整体下移 2 行。实测受影响 **5 个文件 / 16 处**，全部位于带日期快照（按"快照不回写"原则不改写，换算口径写进索引 §八）。
+
+### 72.2 release.yml：一条从没跑过的死路 + 给零调用脚本接上调用点（§七-4）
+- **新发现的缺陷**：release job 调 `.\Publish.ps1 -Version …` 没带 `-NoVSCap`，而 `[0/6]` 侧车闸门的规矩是"不带该开关就必须在 `buildscap-runtime` 找到 `ttc-vscap.exe`，否则拒绝发布"；这个 job 跑在 `[self-hosted, Windows, X64]`（本机无 Qt）⇒ 自 36374ac 起该 workflow **第一步就会死**，且报错写着"缺侧车"，看不出真正的问题在 workflow 文本里。为什么门禁没抓到：A~E 五个场景全部显式传了 `-NoVSCap`，这条组合从未被执行。
+- 修法：release.yml 加 `-NoVSCap` 并写明"要带侧车先在装了 Qt 的机器上跑 `scripts/BuildVSCap.ps1`"；同时把 `verify-package-content.ps1` 接进 release.yml（排在 `id: locate` 之后）。
+- 两条静态臂进 `verify-publish-gates.ps1`：G（发布步骤带 `-NoVSCap`）、H（调用行存在且排在 locate 之后）。整轮 **8/8 场景 ✅**。
+- ⚠ **H 第一版是假绿**：锚点写成 `$relYml.IndexOf('verify-package-content.ps1')`，而这个字符串同时出现在步骤 title 和我新加的说明注释里 ⇒ 把调用行整行删掉它照样绿。改成"只认 Trim() 后以这条命令开头的行"再验：同一变异 ⇒ **2/8 红（G、H 各一条）**，退出码 1，还原后 release.yml sha256 与变异前相等。
+- 诚实边界：这两条臂只证明 **workflow 文本**的接线；release.yml 顶部那句"本 workflow 尚未在 GitHub Actions 上实跑过"**仍然成立**，我没有远端实跑读数。
+
+### 72.3 裁剪根改条件加载（§七-2）
+- 重测：全仓 `PublishTrimmed/PublishAot/TrimMode/IsAotCompatible` 仍**零命中**（`git grep`），唯一提到它们的是 `Publish.ps1` 里那句"没有任何 csproj 消费"的注释。
+- 处置：`TrueToneCap.App.csproj` 的 ItemGroup 改为 `Condition="'$(PublishTrimmed)' == 'true' Or '$(PublishAot)' == 'true'"`。两臂用 `dotnet msbuild -getItem:TrimmerRootDescriptor` 实测：默认 → `"TrimmerRootDescriptor": []`；`-p:PublishTrimmed=true` → 1 条且 `FullPath` = 仓库根 `TrimmerRoots.xml`。
+- 为什么不选"成对摘掉"：那会把"将来开裁剪要保哪些类型"这条知识从树里删掉；也不选"把 `-CoreAot` 真接通"：那是产品级改动（R2R/AOT 与 WinUI 兼容性要单独论证），不属于这一轮。
+
+### 72.4 门面文件
+- 新增 `SECURITY.md`（双语，逐条注明出处）。文中每条"已具备的机制"都当场核对过：`SecretStore.cs` 走 DPAPI（`CryptProtectData`）、`TranslationService.cs:263` 那句"不把响应原文写进日志"、CI 的 `dotnet restore --locked-mode`、包内 `SHA256SUMS.txt` + `build-info.json`。唯一本机无法核对的是"GitHub private vulnerability reporting 入口是否已开"⇒ 文件里给了退路说法，没有假装它一定可用。
+- 新增 `.github/dependabot.yml`：只开 `github-actions`，**刻意不开 dotnet/nuget**，理由写在文件头（CPM 单一事实源 + 5 个 `packages.lock.json` + 钉的是预览版 SDK + 升级要回上游核实）。
+- 未做：issue / PR 模板 —— 单人维护，模板不产生任何判据，属于噪声。
+
+### 72.5 本轮读数
+- `--unit-tests` 1304 → **1308**（新卡 4 条），其余六套件不变；地板随后用 `-WriteGateBaseline` 重打。
+- 门禁静态项新增两格（G/H）；`verify-publish-gates.ps1` 从 6 场景变 8 场景。
+
