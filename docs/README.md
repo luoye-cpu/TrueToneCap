@@ -24,7 +24,7 @@
 
 | 文件 | 行 | 状态 |
 |---|---|---|
-| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,887 | §编号已到 **70**，最后追加 2026-10-21；691,101 B，**占 `docs/` 总字节的 30.6%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
+| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,900 | §编号已到 **71**，最后追加 2026-10-21；718,541 B，**占 `docs/` 总字节的 31.4%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
 | `handoff-avif-encoder-refactor-2026-09-16.md` | 406 | 前一阶段的交接，已收尾 |
 | `CHANGELOG.md`（仓库根） | 216,238 B（blob） | 变更流水；发布记录与 tag 对账也记在这 |
 
@@ -70,12 +70,13 @@
 `gpu-acceleration-availability-09-16` `root-cause-hdr-multimonitor-09-16` `capture-source-regression-09-16`
 `release-review-09-16` `windows-system-notification-09-16` `pending-changes-triage-09-14`。
 
-**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,334 行 / 2,257,559 B（2.15 MiB）**（2026-10-21 在 `f0fc56c` 提交树内实测；
-字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,275,008 B，虚高 0.77%），
+**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,347 行 / 2,284,999 B（2.18 MiB）**（2026-10-21 在本次提交树内实测；
+字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,302,461 B，虚高 0.76%），
 其中带日期 54 份、无日期 10 份（即 §三 那 10 份活文档）。含本索引是 65 份，行数要加上本文件自己的当前行数；
 本文件会被继续编辑，所以"含本索引"的行数不给死数。
 （上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.90 倍**，那份计数已过期，别拿它做体积或成本判断。
 同一天更早一次记的"60 份 / 28,973 行"在 `36374ac` 树里是真数，`f0fc56c` 把 4 份 10-07 快照落了地 ⇒ +4 份 / +1,361 行。）
+后又一轮（2026-10-21 本次提交）把台账 §71（26 KB 地板史）从 gate-baseline.json 搬进主台账 ⇒ +13 行 / +27,440 B，份数不变。
 
 ## 五、孤儿（零入站引用，但仍是证据）
 
@@ -116,10 +117,10 @@
 只看 grep 命中 + 文件缺失会造出一整批假缺陷。
 带日期的快照即便真含过期句子也**不回写**（规则一）。
 
-## 七、待你拍的六件（都是取舍，不是清理）
+## 七、待你拍的六件（都是取舍，不是清理；第 6 件 2026-10-21 已按你一句"移除它们"处置完，余五件）
 
-1. **54 份快照要不要真挪进 `docs/reviews/<族>/`**：实测成本 = **94 处 `docs/<文件名>` 路径引用 / 跨 35 个跟踪文件**
-   （`CHANGELOG.md` 20、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `f0fc56c` 树内按 `git ls-files` 全文重跑，
+1. **54 份快照要不要真挪进 `docs/reviews/<族>/`**：实测成本 = **95 处 `docs/<文件名>` 路径引用 / 跨 35 个跟踪文件**
+   （`CHANGELOG.md` 21、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `f0fc56c` 树内按 `git ls-files` 全文重跑，
    只数写成 `docs/<带日期文件名>` 的引用，"文件指自己"已排除——本索引列的是不带前缀的短名，所以它自己贡献 0 处）。
    台账 §54.4 记的"22 处"已过期 4 倍。
    现状=不挪，靠本索引分层（零引用改写）。
@@ -143,15 +144,20 @@
    `download_models.ps1`，代价=OCR 首次要重下模型）；另有本机 `.git` 里那 89 MB `AppPackages` 只挂在
    `refs/backup/main-pre-strip` 上（远端已无），删该 ref + `git gc --prune=now` 可回收，
    代价=失去那次出包的逐字退回。
-6. **`artifacts/wt-gm` 里有一处未提交改动**：`src/TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs`
-   在分离 HEAD `ca7ed99` 上被改过 ⇒ 可能是没落地的工作，本轮**没碰**，请你确认留还是弃。
+6. **`artifacts/wt-gm` 里那处未提交改动 —— 2026-10-21 已处置（按"弃 + 存档"）**：改动本体是
+   `src/TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs` 在分离 HEAD `ca7ed99` 上把 `RescaleGainMap` 的因子 4 改成可读
+   `TTC_GM_FACTOR`，文件里自己写明"体积实验专用、不进工作树"⇒ 是实验旋钮不是待落地功能（体积数已由 `pipeline-and-usability-review-2026-09-27.md` §⑧ 记下）。
+   拆 worktree 前已存档：`artifacts/backup-consolidated/wt-gm-uncommitted-2026-10-21/`（改后文件逐字节副本 sha256 `374aea30…` + `uncommitted.patch`，
+   实测 `git apply -p1 --check` 打到当前 main 通过、`--3way` Applied cleanly）。之后 `git worktree remove --force artifacts/wt-gm` 与
+   `.../wt-pr1` 都已执行，两个基座 `ca7ed99`/`36374ac` 经 `merge-base --is-ancestor` 证仍是 main 的祖先 ⇒ 没丢任何独有提交。
+   `artifacts/` 由 2,866.7 MB 降到 444.1 MB。
 
 ## 八、这些数字怎么重跑
 
 ```bash
 # 份数（不含本索引）= 64
 ls docs/*.md | grep -vc '^docs/README.md$'                        # 磁盘口径；docs/README.md 自己不数
-# 行数 / 字节（blob 口径，与 §四 那组 30,334 行 / 2,257,559 B 逐字相等，2026-10-21 实跑对过）
+# 行数 / 字节（blob 口径，与 §四 那组 30,347 行 / 2,284,999 B 逐字相等，2026-10-21 实跑对过）
 for f in $(git ls-files docs | grep -v '^docs/README.md$'); do git cat-file blob "HEAD:$f"; done | wc -l -c
 # 活文档（无 2026-MM-DD 后缀）：上面这条给 11 是含了本索引，去掉就是 §四 的 10 份
 ls docs/*.md | grep -v '2026-[0-9][0-9]-[0-9][0-9]'
