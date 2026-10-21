@@ -44,7 +44,12 @@ jobs:
 
       - name: 发布打包
         shell: pwsh
-        run: .\Publish.ps1 -Version '${{ inputs.version }}'
+        # ⚠ 必须带 -NoVSCap：Publish.ps1 的 [0/6] 侧车闸门是"不带 -NoVSCap 且
+        #   build\vscap-runtime 里没有 ttc-vscap.exe ⇒ 拒绝发布"。这个 job 跑在
+        #   [self-hosted, Windows, X64] 上，而那台机器没有 Qt 工具链 ⇒ 不加这个开关，
+        #   本 workflow 会在第一步就中止（2026-10-22 审 release.yml 时发现的，此前无人调过它）。
+        #   要出带侧车的包：先在装有 Qt 的机器上跑 .\scripts\BuildVSCap.ps1，再去掉这个开关。
+        run: .\Publish.ps1 -Version '${{ inputs.version }}' -NoVSCap
 
       - name: 定位发布目录
         id: locate
@@ -61,6 +66,17 @@ jobs:
         run: |
           .\scripts\verify-package.ps1 -PackageDir '${{ steps.locate.outputs.path }}' `
                                        -ExpectedVersion '${{ inputs.version }}'
+
+      - name: 校验包内内容就是本轮源码（verify-package-content.ps1）
+        # 2026-10-22 接进来：这条脚本 2026-09-26 从临时目录提升入库后一直【零调用点】
+        # （CI 两份 workflow 都不引用它），于是"包里的 dll 是不是这一轮改出来的"这件事
+        # 又回到只有人工发版才看得见。它量的是【内容】，与上面那条量【结构】不重叠：
+        # verify-package.ps1 数文件/查依赖，本条拿本轮新串在不在 DLL/.xbf 里、旧串是否已消失，
+        # 并比对源码与产物的 mtime（CI 里 checkout 早于构建 ⇒ 该臂应当为"新"）。
+        shell: pwsh
+        run: |
+          .\scripts\verify-package-content.ps1 '${{ steps.locate.outputs.path }}'
+          if ($LASTEXITCODE -ne 0) { throw "包内内容核对未通过（退出码 $LASTEXITCODE）" }
 
       - name: 无头自测（真实启动主程序跑一遍编码链路）
         # 这一条是 P0-6 的核心：前面的校验都不启动主程序，

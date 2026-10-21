@@ -130,8 +130,14 @@
     <ProjectReference Include="..\TrueToneCap.Core\TrueToneCap.Core.csproj" />
   </ItemGroup>
 
-  <!-- ═══ AOT 兼容：JSON 源生成器 + 裁剪根配置 ═══ -->
-  <ItemGroup>
+  <!-- ═══ AOT 兼容：JSON 源生成器 + 裁剪根配置 ═══
+       2026-10-22：这条 Include 原来是【无条件】的，而全仓 PublishTrimmed/PublishAot/TrimMode/
+       IsAotCompatible 零命中（git grep 实测，唯一提到它们的代码是 Publish.ps1 里那句"无人消费"的注释），
+       于是它今天谁也消费不到 —— 一份"看起来在起作用"的死配置比没有配置更误导人。
+       改成条件加载：今天不声明，将来真开裁剪/打包 AOT 时自动生效，
+       届时要保护的类型（SharpGen/Vortice 的 COM vtable 反射）仍由仓库根 TrimmerRoots.xml 单一来源描述。
+       实测两臂：默认求值 → 0 条；-p:PublishTrimmed=true → 1 条并指向该 xml（见交接 §72）。 -->
+  <ItemGroup Condition="'$(PublishTrimmed)' == 'true' Or '$(PublishAot)' == 'true'">
     <TrimmerRootDescriptor Include="$(MSBuildProjectDirectory)\..\..\TrimmerRoots.xml" />
   </ItemGroup>
 

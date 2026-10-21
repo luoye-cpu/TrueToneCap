@@ -194,6 +194,40 @@ $script:results += [pscustomobject]@{
     Pass          = $orderOk
 }
 
+# ── 场景 G/H：release.yml 的两条接线（静态，不跑子进程）──────────
+# 为什么钉这两条（2026-10-22）：
+#   G：Publish.ps1 的 [0/6] 侧车闸门要求"不带 -NoVSCap 就必须有侧车"，而 release job 跑在
+#      没有 Qt 的自托管 runner 上 ⇒ 漏了这个开关，发布 job 第一步就死，且死因写着"缺侧车"，
+#      看不出真正的问题在 workflow 文件里。
+#   H：verify-package-content.ps1 提升入库后长期零调用点 ⇒ "包里的内容是不是这一轮的"没人观测。
+#   A~F 全都走 Publish.ps1 本体，碰不到 workflow 文本，所以只能这样判。
+$relYml = Get-Content -LiteralPath (Join-Path $RepoRoot '.github\workflows\release.yml') -Raw
+$pubLine = ($relYml -split "`n" | Where-Object { $_ -match 'Publish\.ps1\s+-Version' } | Select-Object -First 1)
+$gOk = ($null -ne $pubLine) -and ($pubLine -match '-NoVSCap')
+$script:results += [pscustomobject]@{
+    Scenario      = 'G release.yml 的发布步骤带 -NoVSCap（静态）'
+    Threw         = if ($gOk) { "已带 (行: $($pubLine.Trim()))" } else { "没带或找不到该行: $pubLine" }
+    ExpectedThrow = 'run: .\Publish.ps1 -Version … -NoVSCap'
+    DotnetRuns    = 0
+    ExpectRuns    = 0
+    Pass          = $gOk
+}
+# ⚠ 锚点必须是【调用行】本身：第一版这里写的是 $relYml.IndexOf('verify-package-content.ps1')，
+#   而这个名字在步骤 title 和上面那段说明注释里都出现 ⇒ 把 run 行删掉它照样绿（变异实测过）。
+$contentCall = ($relYml -split "`n" | Where-Object { $_.Trim() -match '^\.\\scripts\\verify-package-content\.ps1\s' } | Select-Object -First 1)
+$idxLocate = $relYml.IndexOf('id: locate')
+$idxContent = if ($null -ne $contentCall) { $relYml.IndexOf($contentCall) } else { -1 }
+$hOk = ($idxLocate -ge 0) -and ($idxContent -ge 0) -and ($idxContent -gt $idxLocate)
+$script:results += [pscustomobject]@{
+    Scenario      = 'H release.yml 调用包内内容核对且排在定位目录之后（静态）'
+    Threw         = if ($hOk) { "已接线 (L$((($relYml.Substring(0,$idxContent)) -split "`n").Count))" }
+                    else { "找不到调用行（只认行首是这条命令的行），或排在 locate 之前 (locate=$idxLocate, content=$idxContent)" }
+    ExpectedThrow = '一行以  .\scripts\verify-package-content.ps1  开头的调用，且位于 "id: locate" 之后'
+    DotnetRuns    = 0
+    ExpectRuns    = 0
+    Pass          = $hOk
+}
+
 # ── 汇总 ──────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "════════ 门禁验证结果 ════════"
