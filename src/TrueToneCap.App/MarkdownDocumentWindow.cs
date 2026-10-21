@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/MarkdownDocumentWindow.cs
 // 只读 Markdown 文档窗口的共用基类 —— 被两个合规窗口复用：
 //   · ThirdPartyNoticesWindow  → 展示 THIRD-PARTY-NOTICES.md（BSD/Apache 要求再分发时展示许可全文）

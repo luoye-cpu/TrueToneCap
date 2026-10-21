@@ -135,6 +135,7 @@ public static class CorePipelineTests
         Test_StartupManager_PackagedUsesStartupTask();
         Test_OcrPreviewTranslation_CancellationAndSnapshot();
         Test_LogDirectory_PackagedBranch();
+        Test_SpdxHeaders_OwnSourceFilesAreStamped();
 
         // D3D 设备丢失判定（重建逻辑的判据，必须可单测）
         Test_D3DDeviceLost_HResultClassification();
@@ -2803,6 +2804,114 @@ public static class CorePipelineTests
             "残留 _translatedLines ⇒ 两条数据源并存");
         Assert("取消后不得再发布结果（窗口已关，发布了也只是改内存）",
             code.Contains("ThrowIfCancellationRequested"));
+    }
+
+    /// <summary>
+    /// "每个自有源码文件都带 SPDX 声明"这句对外口径的判据（2026-10-22 补）。
+    /// <para><b>为什么补这条</b>：索引里长期写着"464 个跟踪文件都已带头"，本轮实测
+    /// 自有文件 261 个里<strong>有 87 个根本没带头</strong> —— 一句没有判据背书的对外声明必然腐烂，
+    /// 而它腐烂的方式是"文档说合规、仓库不合规"，读文档的人无法察觉。</para>
+    /// <para>口径与 <c>scripts/add-spdx-headers.py</c> 同源：扩展名 <c>.cs/.ps1/.py/.c/.h/.hlsl</c>，
+    /// 判据是"文件前 4000 字节内出现 <c>SPDX-License-Identifier:</c>"。
+    /// 上游逐字副本（VSCap 的 <c>upstream/</c> 子树）由上游自己声明许可，不在口径内 ——
+    /// 那条豁免本身也要被盯住：本轮就有一次误盖，把 Apache 章插进了上游的 <c>DesktopCapture.h</c>，
+    /// 既误署版权方又破坏 INDEX.json 里"逐字副本"的声明。</para>
+    /// </summary>
+    static void Test_SpdxHeaders_OwnSourceFilesAreStamped()
+    {
+        const string card = "SPDX 头覆盖";
+        var tool = FindRepoFile(Path.Combine("scripts", "add-spdx-headers.py"));
+        if (tool is null) { Skip(card, "定位不到 add-spdx-headers.py ⇒ 口径锚点没了"); return; }
+        var repoRoot = Directory.GetParent(tool.Replace('/', Path.DirectorySeparatorChar))!.Parent!.FullName;
+
+        // 谓词单独抽出来，好让"它自己有没有牙"成为一条可判的断言（否则整卡可能空转）
+        static bool HasHeader(string text) =>
+            text.Contains("SPDX-License-Identifier:", StringComparison.Ordinal);
+
+        Assert("谓词两臂必须分叉：有头的认得出、没头的不许认成有头",
+            HasHeader("// SPDX-License-Identifier: Apache-2.0") && !HasHeader("#pragma once\r\n#include <QImage>"),
+            "两臂同真或同假 ⇒ 这把尺子没有牙");
+
+        string[] exts = [".cs", ".ps1", ".py", ".c", ".h", ".hlsl"];
+        string vendored = "src/TrueToneCap.VSCap/upstream/";
+
+        // 口径 = 跟踪清单，不是磁盘遍历。实测差异不是装饰性的：磁盘上另有 85 个
+        // 被 .gitignore 挡住的旧 harness 没有头（它们根本不属于这个仓库），按磁盘遍历会把
+        // 判据变成"永远红"，进而被人当噪声删掉。
+        var tracked = new List<string>();
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("git", "ls-files")
+            {
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            using var gp = System.Diagnostics.Process.Start(psi);
+            if (gp is null) throw new InvalidOperationException("Process.Start 返回 null");
+            while (gp.StandardOutput.ReadLine() is { } line)
+            {
+                if (!string.IsNullOrWhiteSpace(line)) tracked.Add(line.Trim().Replace('\\', '/'));
+            }
+            gp.WaitForExit(15000);
+        }
+        catch (Exception ex)
+        {
+            // fail-closed：读不到跟踪清单就是"判据失明"，绝不允许落成绿
+            Assert("git ls-files 可用（清单读不到时本卡没有牙齿）", false, ex.Message);
+            return;
+        }
+
+        var scanned = new List<string>();
+        var offenders = new List<string>();
+        foreach (var rel in tracked)
+        {
+            if (!exts.Contains(Path.GetExtension(rel).ToLowerInvariant())) continue;
+            if (rel.StartsWith(vendored, StringComparison.Ordinal)) continue;   // 上游逐字副本豁免
+            var abs = Path.Combine(repoRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(abs))
+            {
+                offenders.Add(rel + "（在跟踪清单里但磁盘上没有）");
+                continue;
+            }
+            byte[] head;
+            try
+            {
+                using var fs = File.OpenRead(abs);
+                head = new byte[Math.Min(4000, fs.Length)];
+                int got = 0;
+                while (got < head.Length)
+                {
+                    int n = fs.Read(head, got, head.Length - got);
+                    if (n <= 0) break;
+                    got += n;
+                }
+            }
+            catch (Exception ex) { offenders.Add(rel + "（读失败：" + ex.GetType().Name + "）"); continue; }
+            scanned.Add(rel);
+            if (!HasHeader(System.Text.Encoding.UTF8.GetString(head))) offenders.Add(rel);
+        }
+
+        // 枚举塌空 ⇒ 下面那条"零违规"会恒真，这是本仓踩过的最大假绿源
+        Assert("扫描到至少 200 个自有源码文件（枚举塌空等于判据失明）",
+            scanned.Count >= 200, $"实得 {scanned.Count} 个");
+        Assert("每个自有源码文件前 4000 字节内都有 SPDX 声明",
+            offenders.Count == 0,
+            $"缺头 {offenders.Count} 个：{string.Join(", ", offenders.Take(8))}"
+            + "（补法：py scripts/add-spdx-headers.py）");
+
+        // 反向哨兵：豁免必须是真的豁免（那个文件确实存在且确实没被我们的章污染），
+        // 否则"upstream/ 不盖章"只是一句可以随时被扩大成"什么都不查"的空话。
+        var upstreamFile = Path.Combine(repoRoot, "src", "TrueToneCap.VSCap", "upstream",
+            "src", "cap", "DesktopCapture.h");
+        if (File.Exists(upstreamFile))
+            Assert("上游逐字副本保持自己的许可（我们的章不许出现在 upstream/ 里）",
+                !HasHeader(File.ReadAllText(upstreamFile)),
+                "DesktopCapture.h 里出现了 SPDX 声明 ⇒ 已误署版权方");
+        else
+            Assert("上游逐字副本仍在仓库里（豁免对象消失要点名，不能静默少一块）",
+                false, $"未找到 {upstreamFile}");
     }
 
     /// <summary>

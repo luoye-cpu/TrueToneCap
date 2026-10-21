@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # B1 的前提校验：14px 下语义图标看不清，到底是【我抽的轮廓失真】还是【尺寸本身就不够】？
 #
 # 为什么先量这个：抽取脚本 w7-glyph-to-pathdata.ps1 第 8 行写明"以 em=100 取点再 Flatten"，

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // CSE (Corrupted State Exception) 可捕获性探针
 //
 // 目的：回答 P0-4 的关键未知 —— 在 .NET 11 (net11.0-windows) 上，

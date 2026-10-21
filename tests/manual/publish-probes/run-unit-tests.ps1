@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 $ErrorActionPreference = 'Stop'
 $exe = Join-Path $PSScriptRoot '..\src\TrueToneCap.Test\bin\Release\net11.0-windows10.0.26100.0\TrueToneCap.Test.exe'
 $exe = (Resolve-Path $exe).Path

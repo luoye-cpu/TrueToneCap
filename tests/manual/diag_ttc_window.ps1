@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # TTC_HC 窗口诊断脚本
 param([string]$Action = "check")  # check | sendmouse | cancel
 

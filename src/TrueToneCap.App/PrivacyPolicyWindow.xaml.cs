@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/PrivacyPolicyWindow.xaml.cs
 // 隐私政策面：从磁盘读 PRIVACY.md，按行渲染成一份可滚动的只读文本。
 //

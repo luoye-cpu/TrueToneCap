@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # W1a 实机矩阵：无感截图（Ctrl+Shift+Q）× 6 格式 × {SDR 档, HDR 档}
 #
 # 为什么选这条动作当矩阵的行：一次按键同时走完【捕获→色彩→编码→落盘→剪贴板】五环，

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 覆盖层"看起来变了"的最后一半读数（报告 §23.6 机制 A、任务 #12）
 # 两件一次做掉：
 #   ① EnumWindows 按 z 序列出该 PID 的全部顶层窗（标题/矩形/可见性）⇒ 直接数"叠了几个背景窗"，

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 把 lane 那句"没验：LogViewer 界面本身（绑定只被源码断言钉住）"变成读数。（报告 §26）
 # 做法：从进程外起 TTCLogViewer，喂一份真日志，用 UIA 读渲染出来的文本。
 # 判据（每条单独落盘，缺哪条判哪条）：

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 一格：盘上写的格式，重启之后还剩什么？（区分"没读回来"与"读回来又被覆写"）
 #
 # 起因：06:49 与 06:54 两趟各量到"盘上 FormatIndex=2/3，界面显示 PNG、编码也用 PNG"，

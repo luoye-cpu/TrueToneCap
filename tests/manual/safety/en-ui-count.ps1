@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 批次 T3（#7）第一格：**英文界面的残留计数** —— D4 场景 5 此前是"零次读数"。
 # 两条独立尺子，缺一条就只报"半格"：
 #   A. 产品自己那句运行时读数（MainWindow.Localization.cs:234-249 的 Locale 日志：命中 0 处 / 残留 N 处）；

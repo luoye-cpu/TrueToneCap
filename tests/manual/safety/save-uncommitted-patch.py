@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 把当前未提交状态存成一份可复现、可自证的退路补丁
 #
 # 为什么要有这个脚本而不是手敲命令：本仓的树被打回过四次，恢复靠的是"恰好命中一次的脚本"；

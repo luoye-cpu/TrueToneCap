@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Logging/CoreLog.cs
 // Core 侧日志出口 —— 单一事实源。
 //

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 端到端：SDR 档改道之后，选区→编码→落盘→读回声明，整条链路还能不能用（2026-09-30）
 #
 # 为什么要这一格：改道只证到"打开的是同一张窗、屏幕上不是平的"，

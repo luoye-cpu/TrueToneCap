@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 直接按注册表实例路径读 EDID：证实"每块屏各自的原色"确实存在，且与型号/分辨率对得上。
 # 这正是 TrueToneCap 修复后所走的同一条数据源，但取值与解码都在本脚本独立完成。
 $base = 'SYSTEM\CurrentControlSet\Enum\DISPLAY'

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 把 LogViewer 那 5 枚换过的图标拍下来 —— 它是独立 exe，主程序修好了不代表它也修好了。
 #
 # 为什么这一格值得跑：报告 §13.6 把它记成"未目视"。LogViewer 的 5 枚图标本轮从 FontIcon 换成

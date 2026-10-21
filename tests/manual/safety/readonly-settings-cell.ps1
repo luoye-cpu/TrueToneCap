@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # F 批剩余构造之二：**设置文件被标只读 ⇒ 整进程怎么办**（§15.5 列的"只读目录"那一格的 App 侧）。
 # 探针本身早就有 T1（CorePipelineTests.Test_SettingsWriteProbe_RealProbe：只读文件 + ACL 拒写的
 # WindowsApps 两条臂都实测）⇒ 这里补的是"起一次真身，看用户对这一格能看见什么"。

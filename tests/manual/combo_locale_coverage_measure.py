@@ -11,6 +11,8 @@
   py -3 tests/manual/combo_locale_coverage_measure.py                # 只报数
   py -3 tests/manual/combo_locale_coverage_measure.py --ceiling 7 35 # 当判据跑
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import re
 import sys
 from pathlib import Path

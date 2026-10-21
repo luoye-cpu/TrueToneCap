@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 param([int]$SecondaryX = 4200, [int]$SecondaryY = 300, [int]$PrimaryX = 1200, [int]$PrimaryY = 700)
 $ErrorActionPreference = 'Stop'
 $exe = 'C:\PLAN\TrueToneCap\src\TrueToneCap.App\bin\x64\Release\net11.0-windows10.0.26100.0\win-x64\TrueToneCap.exe'

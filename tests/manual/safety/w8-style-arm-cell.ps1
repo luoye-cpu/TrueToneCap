@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # B0 探针的读数格：同一张图里同时含【Style 形式】与【内联形式】的两枚相同轮廓。
 #
 # 判据设计：MainWindow line 33（导航项"OCR / 翻译"的图标）已改成 <PathIcon Style="{StaticResource …}"/>，

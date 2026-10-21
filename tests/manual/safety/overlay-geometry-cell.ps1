@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 批次 T3 最后一格：**选区覆盖层的工具条几何**（2026-09-30，用户授权真实键鼠注入）
 #
 # 判什么（代码里的规则，SelectionOverlay.xaml.cs:508-526）：

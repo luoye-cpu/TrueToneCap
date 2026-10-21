@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # R1 的 T3：逐格式读质量那一行，验"中文模式逐字不变" + "英文模式不留中文"。
 #
 # 为什么要有这一格：R1 把"Core 吐中文成品串"改成了"Core 给枚举 + App 格式化"。

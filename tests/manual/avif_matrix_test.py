@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 验证 matrix=0 (identity) vs matrix=9 (BT.2020 NCL) 的解码兼容性
 # 同一 PNG → avifenc 两种 matrix → PIL 解码对比
 import struct, os, subprocess, tempfile, zlib

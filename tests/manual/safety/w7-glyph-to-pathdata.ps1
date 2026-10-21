@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 把 Segoe 符号字体的字形取成 XAML Path Data（离线工具，不改产品）
 #
 # 为什么走 GDI+ 而不是我手写几何：手写 8 枚图标等于自己设计一套视觉，观感得你重判；

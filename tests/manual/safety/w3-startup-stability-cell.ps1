@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 启动稳定性：连起 N 次，崩溃与"没崩"分开计数
 #
 # 起因：07:18 那一趟 W1b 里产品起来 ~15 s 就没了，WER 归档给出

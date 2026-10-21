@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 $ErrorActionPreference = 'Stop'
 Add-Type -ReferencedAssemblies System.Core -Language CSharp -TypeDefinition @'
 using System;

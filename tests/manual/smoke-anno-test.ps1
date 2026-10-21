@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # TrueToneCap 标注冒烟测试 v7 - 标注前后 PrintWindow 对比
 param(
     [string]$Exe = "c:\PLAN\TrueToneCap\src\TrueToneCap.App\bin\x64\Debug\net11.0-windows10.0.26100.0\win-x64\TrueToneCap.exe"

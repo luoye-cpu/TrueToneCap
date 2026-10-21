@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 把主窗抓下来看一眼：XamlControlsResources 每次都加载失败，界面到底长成什么样
 #
 # 为什么用 PrintWindow(hwnd, hdc, 2) 而不是 CopyFromScreen：

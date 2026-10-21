@@ -14,6 +14,8 @@
   · BOM 与 CRLF 版式逐文件保持不变；
   · 可重跑：第二次运行不产生任何新改动（幂等）。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import io, os, re, sys, glob, collections, hashlib
 
 ROOT = r'C:\PLAN\TrueToneCap'

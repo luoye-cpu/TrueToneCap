@@ -38,12 +38,22 @@ EXT_LANGS = {
 EXT_LANGS[".hlsl"] = ("// ", "")
 
 
+# 上游逐字副本：许可由上游自己声明，不给别人的文件盖我们的章。
+# 2026-10-21 实测踩过：本脚本曾把 "Apache-2.0 / Copyright 2026 TrueToneCap contributors"
+# 插进 src/TrueToneCap.VSCap/upstream/src/cap/DesktopCapture.h —— 那一行既误署版权方，
+# 又破坏 licenses/INDEX.json 里"upstream/ 为逐字副本（逐 blob 与上游对撞相等）"那条声明。
+# 口径与 INDEX 一致：VSCap 侧只 exempt upstream/ 子树，适配层（其外）仍是我们的文件。
+VENDORED_PREFIXES = ("src/TrueToneCap.VSCap/upstream/",)
+
+
 def tracked_files() -> list[str]:
     """只处理 git 跟踪的文件 —— 未跟踪的样张/临时件不该被盖章。"""
     out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=True)
     files = []
     for line in out.stdout.splitlines():
         line = line.strip().replace("\\", "/")
+        if line.startswith(VENDORED_PREFIXES):
+            continue
         ext = os.path.splitext(line)[1].lower()
         if ext in EXT_LANGS:
             files.append(line)

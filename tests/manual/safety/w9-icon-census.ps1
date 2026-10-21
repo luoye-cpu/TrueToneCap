@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 46 枚图标的逐枚普查：把每条 Data 与"字体直画同一码位"做墨水对照，并出一张对照表。
 #
 # 为什么需要它：覆盖层的标注子工具条（9 枚）要先点「标注」才出现、HDR 采集窗的字形是 D3D 画的、

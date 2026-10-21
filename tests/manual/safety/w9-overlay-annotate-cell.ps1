@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 覆盖层【标注子工具条】那 9 枚图标的目视格。
 #
 # 为什么还要单独一格：主工具条 6 枚已在 overlay-toolbar2.png 里目视确认（保存/标注/复制/识字/翻译/取消

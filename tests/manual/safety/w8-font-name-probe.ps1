@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 量三件事：注册表里的符号字体友好名、SegoeIcons.ttf 内部真实的名字表、
 # 以及本进程（GDI+ / WPF 两条）能不能按这些名字取到字形。
 # 目的：② 的根因是"按友好名解析失败"，那就先把"到底注册成了什么名字"量出来。

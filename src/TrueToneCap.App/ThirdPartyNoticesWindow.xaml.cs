@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/ThirdPartyNoticesWindow.xaml.cs
 // 第三方许可致谢面：从磁盘读 THIRD-PARTY-NOTICES.md，按行渲染成一份可滚动的只读文本。
 //

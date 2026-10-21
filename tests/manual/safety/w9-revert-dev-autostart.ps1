@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 撤掉本轮验证过程种下的开机自启动项。
 #
 # 事实链（都有日志/注册表实证）：

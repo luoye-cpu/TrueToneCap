@@ -22,6 +22,8 @@ JXL 容器里也【没有 colr 盒】（顶层只有 JXL / ftyp / jxlc），色�
      也可用 TTC_CJXL 显式指定 —— 与 ffprobe / avifenc 同一套优先级约定。
 退出码：0 判据通过 / 1 判据不成立（回归）/ 3 找不到 cjxl ⇒ SKIP，是"这轮没判"，不是通过
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import hashlib
 import os
 import subprocess

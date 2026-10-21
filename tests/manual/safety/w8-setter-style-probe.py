@@ -7,6 +7,8 @@ AI 翻译页页眉那枚（line 374）用的是【逐字相同】的 Data（本�
 
 不把 1593 字符的 Data 打印到终端，只做等值断言。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import io, os, re, sys
 
 ROOT = r'C:\PLAN\TrueToneCap'

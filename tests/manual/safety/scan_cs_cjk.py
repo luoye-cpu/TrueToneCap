@@ -10,6 +10,8 @@
   py -3 tests/manual/safety/scan_cs_cjk.py <文件>            # 只列
   py -3 tests/manual/safety/scan_cs_cjk.py <文件> --wrap      # 就地包 Tr()（幂等）
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import io
 import re
 import sys

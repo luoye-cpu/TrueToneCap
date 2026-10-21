@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 $ErrorActionPreference = 'Stop'
 # ═══ 用 WMI 拿【当前连接】显示器的原始 EDID，直接读面板原色 ═══
 # 为什么走 WMI 而不是注册表 Enum\DISPLAY\...\EDID：后者会留下拔出/虚拟设备的陈旧条目，

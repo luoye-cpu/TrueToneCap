@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 枚举指定进程的所有窗口
 param([int]$TargetPid)
 Add-Type @"

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 英文模式取证：这个产品的英文界面到底能不能用？
 #
 # 为什么这一格必须最先跑：本轮截过的所有界面图【全部是中文模式】。而审计里 F6 的修法

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # R3 的 T3：注册表里已有自启动项时，起一个 dev 构建会不会把它删掉/改指。
 #
 # 旧代码在 MainWindow 构造路径里做 StartupManager.IsEnabled = _settings.AutoStart，

@@ -11,6 +11,8 @@
     py scripts/gen-third-party-notices.py            # 写 THIRD-PARTY-NOTICES.md
     py scripts/gen-third-party-notices.py --check    # 只校验：漂移则退出码 1（门禁用）
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 from __future__ import annotations
 
 import hashlib

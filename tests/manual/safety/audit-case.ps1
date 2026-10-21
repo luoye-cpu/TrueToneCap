@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 2026-09-29 E 批 · 用 --display-audit 跑 B 域格子（无头，起一次真身进程/格）。
 # 每格做四件事：① 换上进手的 settings.json ② 起 --display-audit 取【真退出码】
 # ③ 把审计卡的"管线落点"段原样落到日志 ④ 比 settings/凭据库指纹（V6/V7 的副作用面）。

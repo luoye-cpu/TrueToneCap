@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 复制这条腿（SDR 改道后）：选区 → Ctrl+C → 剪贴板里到底有没有那张位图
 #
 # 为什么单独跑：§22 量过的是"无感截图 → 剪贴板"那一条写者；改道后选区复制走的是

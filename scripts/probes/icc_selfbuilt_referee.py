@@ -20,6 +20,8 @@ tag 表 offset/size 字节序全反 ⇒ 那份"兜底 sRGB ICC"从来没合法�
 用法:  py scripts/probes/icc_selfbuilt_referee.py
 退出码: 0 全过；1 有失败。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 from __future__ import annotations
 
 import io

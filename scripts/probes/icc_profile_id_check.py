@@ -11,6 +11,8 @@ ProfileID 跟着重算；但 ID 的字节构成我不能凭记忆写死 —— �
 用法:  py scripts/probes/icc_profile_id_check.py [--verbose]
 退出码: 0 = 至少一份真实 profile 命中某配方；1 = 一份都没命中（配方未证实）。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 from __future__ import annotations
 
 import argparse

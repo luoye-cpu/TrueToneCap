@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # W1b 选区那条腿：Ctrl+C 到底进没进得去（这一格从未判成过一次）
 #
 # 现场为什么自相矛盾：09-30 23:17 那一趟，夹具已经读到产品自己写的「选区完成 1445x959 @(…)」，

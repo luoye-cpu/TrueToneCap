@@ -6,6 +6,8 @@
 
 前置：先把上一版双写的两处还原成单反斜杠，否则原始串会把两个都留在产物里。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import io
 
 BS = chr(92)

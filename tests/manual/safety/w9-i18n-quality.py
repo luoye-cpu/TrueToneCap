@@ -20,6 +20,8 @@
 
 写盘口径：C# 侧的插入文本一律用 raw 字符串，避免 Python 与 C# 两层转义互相咬。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import io
 
 LM = 'src/TrueToneCap.App/Services/LocaleManager.cs'

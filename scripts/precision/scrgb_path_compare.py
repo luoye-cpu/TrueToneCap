@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 #!/usr/bin/env python3
 # 两条预览路径的色彩差（报告 §24）。输入是产品自己算出来的数，对照曲线这里独立实现
 # —— 拿同一个实现比自己是恒等式，量不出任何东西。

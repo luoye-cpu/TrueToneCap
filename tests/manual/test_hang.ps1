@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # TrueToneCap 实机卡死测试脚本 (2026-08-10)
 # 用法: .\test_hang.ps1 [-TargetPid 11960]
 param([int]$TargetPid = 0)

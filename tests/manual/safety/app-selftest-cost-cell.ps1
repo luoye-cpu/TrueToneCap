@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 任务 #13 的前置量：App 侧"进程内判据"到底多贵、会不会写盘（报告 §18 / §26.1 那条老缺口的第一笔数）
 # 三个模式各跑一次：--settings-migration / --display-audit / --selftest
 # 判据 = 退出码（0 通过）；成本 = 墙钟毫秒；写盘 = 设置文件 sha1 前后对照 + --out 目录新增件清单。

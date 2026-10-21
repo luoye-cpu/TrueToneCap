@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 回环自检：把取出来的 Path Data 再画成图，与 GDI+ 直接画的字形对比
 #
 # 为什么必须有这一步：我要拿这串数据去改产品界面，如果取点/归一/闭合有一处错，

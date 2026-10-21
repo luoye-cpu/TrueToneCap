@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 用户已经开着 TrueToneCap 时再双击一次，最后到底能不能看到已有窗口被带到前面？
 #
 # 为什么单独量这一条：代码侧机制是接好的（App.xaml.cs:124 抢 Mutex 失败 → :312 SendMessageTimeout

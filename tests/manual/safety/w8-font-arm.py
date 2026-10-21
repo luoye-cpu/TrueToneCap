@@ -15,6 +15,8 @@
 
 本臂是一次性诊断，读完即撤；不写中文界面串（避免扰动本地化扫描面）。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import io, sys
 
 P = r'C:\PLAN\TrueToneCap\src\TrueToneCap.App\MainWindow.xaml'

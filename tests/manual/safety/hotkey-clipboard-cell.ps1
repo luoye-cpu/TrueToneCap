@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 批次 T3 剩下两格：热键冲突回退链 + 无感截图到剪贴板（2026-09-30，用户授权注键鼠）
 #
 # 两格合跑一趟的理由：回退链不需要注键鼠就能判（本进程抢下两个默认组合，产品首选必然失败，

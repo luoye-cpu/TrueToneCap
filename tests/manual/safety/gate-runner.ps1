@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 2026-09-29 审查轮 · 门禁包装器。
 # 三件事：① 先拍用户设置指纹（测试与产品共用配置 ⇒ 跑测试能改用户机器）；
 #        ② 子进程方式起 scripts/verify.ps1，**门禁自己的退出码**当本轮退出码；

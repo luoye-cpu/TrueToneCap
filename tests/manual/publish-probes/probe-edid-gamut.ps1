@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 $ErrorActionPreference = 'Stop'
 # ── EDID 原色解码：先自检，再读真机 ──
 # 上一版直接从注册表解，三块屏都得到 R=(0.16,0.08) 这种不可能的值 ⇒ 必须用已知真值把

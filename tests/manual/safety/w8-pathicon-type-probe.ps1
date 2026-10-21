@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # B0 的硬前提：PathIcon.Data 到底是什么类型、WinUI 里有没有可用的 Geometry 资源类型。
 # 只反射，不起产品，不改任何文件。
 $ErrorActionPreference = 'Continue'

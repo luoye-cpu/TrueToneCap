@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 判据臂：把 DWriteCore.dll 挪开，看 XAML 引擎是否回落到系统 DirectWrite
 #
 # 为什么用"挪文件"而不是改配置：本轮在包与 props/targets 里都没找到 DWriteCore 的开关

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 把为验证停掉的产品实例按原样起回来（不带任何诊断环境变量、不带参数）。
 $ErrorActionPreference = 'Continue'
 $d = 'C:\PLAN\TrueToneCap\src\TrueToneCap.App\bin\x64\Release\net11.0-windows10.0.26100.0\win-x64'

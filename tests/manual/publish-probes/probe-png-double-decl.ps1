@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 读一枚 PNG 的两份色彩声明，判它们是否互相矛盾：
 #   cICP(码点)  vs  iCCP(ICC 的 rXYZ/gXYZ/bXYZ + wtpt + TRC 形状)
 # 查看器优先级不同（多数现代查看器 ICC 覆盖 cICP），两份不一致就是"同一张图两种解释"。
