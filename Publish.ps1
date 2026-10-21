@@ -144,6 +144,15 @@ if ($VersionForMsBuild -notmatch '^\d+(\.\d+){0,3}(-[0-9A-Za-z\-\.]+)?(\+[0-9A-Z
     throw "版本号 '$Version' 不是合法的 NuGet/MSBuild 版本字符串。请使用形如 0.3.4-beta 或 1.0.0 的形式。"
 }
 
+# FileVersion / AssemblyVersion 必须和 Version 一起覆盖。
+#   Directory.Build.props 把它们钉成 0.3.7.0，且带 Condition="'$(…)' == ''" —— -p:Version 不会连带改它们。
+#   2026-10-21 实测：0.3.9-beta 的包里 ProductVersion 已是 0.3.9-beta+<sha>，
+#   而 Windows 属性页显示的 FileVersion 仍是 0.3.7.0。
+#   取 x.y.z[.w]（去掉 -pre / +meta），不足 4 段补 0（商店要求 Identity 第四段为 0）。
+$verParts = @((($VersionForMsBuild -split '[-+]')[0]).Split('.') | Select-Object -First 4)
+while ($verParts.Count -lt 4) { $verParts += '0' }
+$Version4 = ($verParts -join '.')
+
 # 归一化为绝对路径（后续 Get-ChildItem / Copy-Item 均依赖此路径）
 if (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
     $OutputDir = Join-Path $RepoRoot $OutputDir
@@ -460,6 +469,10 @@ if ($CoreAot) {
 
 # 版本号注入（覆盖 Directory.Build.props 的默认值；已剥离 v 前缀）
 $extraArgs += "-p:Version=$VersionForMsBuild"
+# 这两个不跟着 -p:Version 走（props 里各自有 Condition 的非空默认值），必须显式一起传，
+# 否则包内 ProductVersion 与 FileVersion 会分属两个版本号。
+$extraArgs += "-p:AssemblyVersion=$Version4"
+$extraArgs += "-p:FileVersion=$Version4"
 
 # ═══ MSIX 打包开关透传（2026-10-07）═══
 # 只传这一个属性：MSIX 的"成套"约束（WindowsPackageType=MSIX + EnableMsixTooling

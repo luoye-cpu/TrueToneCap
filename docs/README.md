@@ -117,7 +117,7 @@
 只看 grep 命中 + 文件缺失会造出一整批假缺陷。
 带日期的快照即便真含过期句子也**不回写**（规则一）。
 
-## 七、待你拍的六件（都是取舍，不是清理；第 6 件已处置，第 5 件已处置大头，余四件 + 磁盘可选项）
+## 七、待你拍的六件（都是取舍，不是清理；第 5、6 件已处置，余四件）
 
 1. **54 份快照要不要真挪进 `docs/reviews/<族>/`**：实测成本 = **95 处 `docs/<文件名>` 路径引用 / 跨 35 个跟踪文件**
    （`CHANGELOG.md` 21、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `f0fc56c` 树内按 `git ls-files` 全文重跑，
@@ -147,8 +147,13 @@
      `commitSha` 逐字一致、`dirtyWorktree=false`），`-KeepLast 1` 清掉 0.3.6 两套与 0.3.7 目录（1,220 MB），
      另手删两个 7z（242 MB）与 `_scratch`（397 MB）。现存=0.3.9 包 413 + `PLAN` 182 + `TTC日志查看器` 225 + 导出的 MSIX 85。
    · `artifacts/` **2,866 MB → 444 MB**（拆 wt-gm / wt-pr1 与补丁/快照清理，见第 6 件）。
-   · 仍可选清的（都在忽略区、可再生，本轮**没动**）：`src` 的 bin/obj **1,850 MB**（删后全量重建约 40 s）、
-     `tests/output` 133 MB、`official_models` 132 MB（重下走 `download_models.ps1`，代价=OCR 首次要重下模型）。
+   · `src` **1,850 MB → 93 MB**、`tests` **209 MB → 151 MB**：删掉 src/tests 下全部 `bin`/`obj`（16 处）、
+     `src/TrueToneCap.App/AppPackages`（221 MB，是另一次 0.3.7 构建，与导出的那枚 sha 不同），
+     以及 `tests/output` 里 6 个**零引用**条目（`round69-precommit` 29 MB + 三个 `uncommitted-2026-10-03*.patch` + `handoff.pre-*`）；
+     被跟踪文档点名的产物（`realmachine-2026-10-01` 被 23 处引用等）一个没动。
+   · **OCR 模型按你的要求持续保留**：`src/TrueToneCap.App/Models/*.onnx`（66 MB，跟踪件）、`official_models/`（132 MB）、
+     包内 `data/Models/`（66 MB）都在，`download_models.ps1` 不需要重跑。
+   · 合计：工作区（不含 `.git`）**4.79 GB → 1.69 GB**；含 `.git` **5.04 GB → 1.86 GB**。
 6. **`artifacts/wt-gm` 里那处未提交改动 —— 2026-10-21 已处置（按"弃 + 存档"）**：改动本体是
    `src/TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs` 在分离 HEAD `ca7ed99` 上把 `RescaleGainMap` 的因子 4 改成可读
    `TTC_GM_FACTOR`，文件里自己写明"体积实验专用、不进工作树"⇒ 是实验旋钮不是待落地功能（体积数已由 `pipeline-and-usability-review-2026-09-27.md` §⑧ 记下）。

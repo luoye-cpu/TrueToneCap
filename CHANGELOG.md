@@ -44,6 +44,14 @@
   `Ctrl+Alt+T` 不被占用，日志留一句"侧车未随包分发"。要带它请先 `.\scripts\BuildVSCap.ps1` 再
   `.\Publish.ps1`（不带 `-NoVSCap` 时缺侧车会**拒绝发布**）。
 
+### 打包：`ProductVersion` 与 `FileVersion` 不再分属两个版本号（2026-10-21）
+
+- **现象**：`TrueToneCap.exe` 的 `ProductVersion` 是 `0.3.9-beta+<commit>`，但 Windows 属性页的
+  `FileVersion` 仍是 `0.3.7.0` —— `Directory.Build.props` 把 `AssemblyVersion`/`FileVersion` 各钉了一个
+  非空默认值，`Publish.ps1` 只传 `-p:Version=` 覆盖不到它们。
+- **修法**：`Publish.ps1` 从 `-Version` 派生 `x.y.z[.w]`（去掉 `-pre`/`+meta`、不足补 0）并同时传
+  `-p:AssemblyVersion` / `-p:FileVersion`。
+
 ### 门禁：三类"只有真跑一次才看得见"的缺陷现在有自动判据
 
 - 新增 `TrueToneCap.exe --window-probe`：把运行期才建的 XAML 窗真建一次，判据=退出码（挂在 `[1.97/2]`）。
