@@ -928,6 +928,36 @@ if (-not (Test-Path -LiteralPath $logLineProbe)) {
     exit 1
 }
 Write-Host "[1.96/2] 日志行格式对撞（写方 FormattedLine ↔ 读方 LogParser 正则）..."
+# ── 缺输入时用产品自己生成，而不是判红 ──
+# 这一格要一份"真实产品日志"作对照臂，而探针只从 src\TrueToneCap.App\bin 下找 app_*.log。
+# 干净 checkout（bin 刚重建 / 刚清过）里一份都没有 ⇒ 判据会因为"红的是缓存"而不是"格式对不上"。
+# 这与 2026-10-21 修 notices 那条的判据同类：干净树上必然判红的格子等于不存在。
+# 生成方式用 --window-probe（产品真跑一次、退出码可判、不碰用户设置文件）——
+# 不用 --settings-migration，因为后者会 Load() 并可能重写设置。
+$logScanRoot = Join-Path $RepoRoot 'src\TrueToneCap.App\bin'
+$seedLogs = @(Get-ChildItem -LiteralPath $logScanRoot -Filter 'app_*.log' -Recurse -File -ErrorAction SilentlyContinue)
+if ($seedLogs.Count -eq 0) {
+    Write-Host "   ℹ️  bin 下没有历史日志（干净 checkout）⇒ 让产品自己跑一次生成真实对照件"
+    $seedExe = Get-ChildItem $logScanRoot -Filter "TrueToneCap.exe" -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -split '\\' -contains $Configuration } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $seedExe) {
+        Write-Host "❌ [1.96/2] 既没有 app_*.log 也没有 TrueToneCap.exe ⇒ 这一格【没判】" -ForegroundColor Red
+        exit 1
+    }
+    $seedProc = Start-Process -FilePath $seedExe.FullName -ArgumentList '--window-probe' -PassThru -WindowStyle Hidden
+    if (-not $seedProc.WaitForExit(60000)) {
+        $seedProc.Kill()
+        Write-Host "❌ [1.96/2] --window-probe 超时 ⇒ 没有生成对照日志，这一格【没判】" -ForegroundColor Red
+        exit 1
+    }
+    $seedLogs = @(Get-ChildItem -LiteralPath $logScanRoot -Filter 'app_*.log' -Recurse -File -ErrorAction SilentlyContinue)
+    if ($seedLogs.Count -eq 0) {
+        Write-Host "❌ [1.96/2] --window-probe 退出码 $($seedProc.ExitCode) 但没写出日志 ⇒ 这一格【没判】" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "    ✅ 已由产品生成对照日志（退出码 $($seedProc.ExitCode)）"
+}
 $logLineOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $logLineProbe 2>&1
 $logLineCode = $LASTEXITCODE
 ($logLineOut | ForEach-Object { "   $_" }) -join "`n" | Write-Host
