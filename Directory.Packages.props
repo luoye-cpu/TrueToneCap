@@ -33,9 +33,10 @@
          全新机器（无本地 NuGet 缓存）还原会直接 NU1101。
          实测 10.0.12 在 net11.0 TFM 上可正常还原/构建/通过门禁；
          本项目已在混用 10.x 包（System.Drawing.Common 10.0.11），无兼容性问题。
+         2026-10-22 补：本包 10.0.12 → 10.0.13（补丁级，同 LTS 线）。
          ⚠️ 这不解决根本问题：TFM 仍是 net11.0-windows、SDK 仍是 11.0.100-preview.7，
             整体仍属预发布基线；待 .NET 11 GA 后应整体评估升回 11.x。 -->
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.13" />
 
     <!-- ── 推理 / 图形 (Core) ──
          ═══ 2026-10-07 迁移：Microsoft.ML.OnnxRuntime.DirectML → Microsoft.Windows.AI.MachineLearning ═══
@@ -63,8 +64,9 @@
 
     <!-- ── 测试 / 工具 (Test / Tools) ──
          仅用于生成测试图，不随主程序发布。
-         2026-10-07: 10.0.11 → 10.0.12（同一 .NET 10 LTS 线的补丁级更新，低风险）。 -->
-    <PackageVersion Include="System.Drawing.Common" Version="10.0.12" />
+         2026-10-07: 10.0.11 → 10.0.12（同一 .NET 10 LTS 线的补丁级更新，低风险）。
+         2026-10-22: 10.0.12 → 10.0.13（10 月服务轮，补丁级；NuGet index 亲验 10.0.13 为最新稳定）。 -->
+    <PackageVersion Include="System.Drawing.Common" Version="10.0.13" />
   </ItemGroup>
 
 </Project>
