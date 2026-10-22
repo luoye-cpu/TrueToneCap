@@ -8038,3 +8038,23 @@ WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App
   默认 true，见 `Microsoft.WinUI.targets:47`）⇒ 新增文件自动随包走，**csproj 一行都不用加**，
   符合"不往构建输入里塞不必要条目"这条既定范围规矩。实测构建输出 48 个与源逐字相同。
 - 没有"资产计数"型断言（全仓 `Assets` 只在 pri 缓存与一句字体注释里出现），所以这次扩面不需要动门禁或地板文件。
+
+## 75. 维护者立了硬规矩：有 git 树就不许自造备份/退路构筑（2026-10-22）
+- 规矩原文大意：**禁止任何所谓备份/额外的旧构筑**。本轮之前我把"可 verify 的退路"当成默认做法，
+  于是攒出了 `C:\PLAN\TTC-archive\`（bundle + 重建用裸克隆 + 搬出仓的旧件，500.4 MB）、
+  `publish/msix-0.3.7-from-backup-2026-10-21/`(85.2 MB)、`artifacts/backup-consolidated/`(0.1 MB)，
+  还在 `tests/README.md` 里把"本机归档位"写成了规矩。**方向本身错了**：git 就是历史，
+  额外复制一份既不省 clone 也造出第二套需要维护的真相。本轮全部删除并改文档（那条"归档位"规矩已换成禁令）。
+- 被这条规矩覆盖掉的本台账旧条目：§七-5/§七-6 里"先整目录导出到 publish/… 再 gc"、§73.8 里
+  "退路 = TTC-archive\all-refs-before-ocr-strip-2026-10-22.bundle（已实测可取回被剥 blob）"。
+  原文不回写，只在此记一句：**该 bundle 现已删除**，重写前的 SHA 与两枚 FP32 blob 本地无处可取。
+- 判断"能不能删"的尺子，本轮定成一条：**这东西 git 覆不覆盖**。覆盖 ⇒ 它就是重复备份，直接删；
+  不覆盖 ⇒ 它不是备份而是唯一副本，属"要不要纳进 git"的决定，不许我擅自删。
+  用这把尺子量下来唯一的悬案是 `artifacts/cleanup-20260926/quarantine.tar.gz`：里面 137 件
+  **从未进过 git**，三条独立验证（与"真被删过的路径"求交集为空、`git log --all -- <路径>` 正控能命中
+  已删文件、`git rev-list --all --objects` 换实现重数仍为 0）。所以它是待处置，不是已豁免。
+- `publish/PLAN/tools/` 明确**不算**备份：`NativeLibraryResolver.cs:117` 的运行期回退链读
+  `BaseDirectory/PLAN/tools/<exe>`，且它是 `GainMapColorProductProbe` 能力探测的第二候选——
+  那是析取式判据，少一臂就削弱保护。它与 `src/…/Resources` 的逐字节重复是运行期需要，不是历史包袱。
+- 依赖 `10.0.12 → 10.0.13` 那笔（别的会话写的，未记账）本轮合并提交 `19bc5ff`，判据取 CI 原命令
+  `dotnet restore TrueToneCap.slnx --locked-mode` 退出 0。

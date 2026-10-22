@@ -16,6 +16,42 @@
 ---
 
 
+## [未发布] — 2026-10-22（同日第四轮）：禁止一切自造备份/退路构筑，已清 585.7 MB；并合并 10.0.13 依赖
+
+### 规矩（维护者下达，本轮起生效）
+**有 git 树就不许存在自造备份/退路构筑**：bundle、`quarantine` 型退路包、`*-from-backup/`、
+`backup-consolidated/`、仓库外"归档位"全部禁止。历史归 git 管；要留证据写进 `docs/`，
+要留判据按 `tests/manual` 的逐条反选机制纳进 git。此前几轮我正是拿"可 verify 的退路"当理由
+把这些东西越攒越多的，本轮起不再这么办。
+
+### 清掉的东西
+- `C:\PLAN\TTC-archive\` **500.4 MB**：10-22 的全 ref bundle（166 MB，含被剥的两枚 FP32 模型与重写前的
+  全部提交）、一个用来重建历史的裸克隆、以及前几轮从 `tests/output`/`artifacts` 搬出去的 269 MB 旧件。
+  ⇒ **重写前的那些 commit SHA 与那两枚 FP32 blob 从此本地无处可取**（这正是剥离的本意；
+  现役 FP32 原件仍在 `official_models/`，且它们是公开的 PaddleOCR 模型）。
+- `publish/msix-0.3.7-from-backup-2026-10-21/` **85.2 MB**：从早已 prune 的对象导出的 0.3.7 MSIX。
+  真要这个包，按 `v0.3.7-beta` tag 重跑 `-Msix` 即可（源码在树上）。
+- `artifacts/backup-consolidated/` 0.1 MB（§七-6 那处实验旋钮的文件副本；实测数已记在文档里）。
+- `publish/` 从此只剩 `PACKAGE.md` + `PLAN/` + 当前待测包；工作区 **2.05 GB**。
+
+### 保留没动，并说清为什么不是"备份"
+- `publish/PLAN/tools/`（与 `src/TrueToneCap.Core/Resources` 逐字节相同的那 9 件）不是备份：
+  它是 [NativeLibraryResolver.cs:117](src/TrueToneCap.Core/Services/NativeLibraryResolver.cs) 的**运行期回退落点**
+  `BaseDirectory/PLAN/tools/<exe>`，也是 `GainMapColorProductProbe` 能力探测的第二候选
+  （那里是析取式判据，少一臂会削弱保护），`precision_env.py` 也按这条路径找工具。
+- `official_models/` 132 MB 是第三方 FP32 原件留档（`onnx_fp16_quantize.py` 的输入），不是 git 的重复件；
+  要不要一并清属另一个决定。
+- `artifacts/cleanup-20260926/`（19 MB）**待处置**：实测那 137 件从未进过 git，所以删它不是"删重复备份"而是
+  真丢数据，要么按反选纳进 git 再删包、要么整包删，等一句决定。
+
+### 依赖
+- `Microsoft.Extensions.DependencyInjection` 与 `System.Drawing.Common` `10.0.12 → 10.0.13`
+  （同一 .NET 10 LTS 线的 10 月服务轮；`Directory.Packages.props` 里各自记了理由），
+  三份 `packages.lock.json` 随 restore 固化。这条是替上一轮补记账——当时没人往 CHANGELOG 里写。
+  判据用 CI 自己那条命令：`dotnet restore TrueToneCap.slnx --locked-mode` 退出 0 ⇒ props 与 lock 成套。
+
+---
+
 ## [未发布] — 2026-10-22（同日第三轮）：MSIX 图标补全 scale 与 altform-unplated 两族变体
 
 - 图标资产从 13 个补到 **48 个**（净重 27.8 KiB）：`.scale-{125,150,200,400}` 显示缩放族

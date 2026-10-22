@@ -89,8 +89,13 @@ dotnet run --project src/TrueToneCap.Test -- --unit-tests   # 单套件
   撤销动作在智谱侧，删文件不等于密钥失效（见 `.gitignore:136-141`）。
 - 断言必须**可证伪**：避免 `x is null || ...` 这类恒真写法（无论成败都通过），
   此类断言会掩盖真实回归。
-- **本机归档位 = `C:\PLAN\TTC-archive\`（仓库外）**：2026-10-22 内容规范化轮定的规矩——
-  零引用但可能唯一持有的东西（退路 bundle、改前源码快照、`reverse-apply` 验不过的 WIP 补丁、
-  旧决策的观感样张）**整件搬出仓库**，不删也不留在工作树里。留着的危害不是体积，是检索：
-  `.gitignore:241-243` 就为"仓里的旧副本把陈述拖成要加限定句"记过一次。
-  反过来，**能重跑的**（构建产物、harness 的 `--out`、`publish/PACKAGE.md:21` 明写"别长期留着"的配套产物）直接删。
+- **禁止自造备份/退路构筑**（2026-10-22 立为硬规矩）：有 git 树就不许存在 bundle、tar 退路包、
+  `*-from-backup/`、`backup-consolidated/`、仓库外的"归档位"这类东西。历史由 git 自己管，
+  要留证据就写进 `docs/`，要留判据就按 `tests/manual` 的逐条反选机制纳进 git。
+  本轮已按此清掉 585.7 MB：`C:\PLAN\TTC-archive\`（全 ref bundle + 一个重建用的裸克隆 + 从
+  `tests/output`/`artifacts` 搬出去的旧件）、`publish/msix-0.3.7-from-backup-2026-10-21/`、
+  `artifacts/backup-consolidated/`。
+  唯一还悬着的是 `artifacts/cleanup-20260926/`（19 MB）——实测它那 137 件**从未进过 git**
+  （三处独立验证：对"真被删过的路径"求交集为空、`git log --all -- <路径>` 正控能命中、
+  `rev-list --objects` 换一种实现也是 0），所以它不是 git 的重复备份，删了就没有任何后路；
+  处置等维护者定：要么按 `tests/manual` 反选把还有用的纳进 git 再删包，要么整包删。

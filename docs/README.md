@@ -257,11 +257,11 @@ find docs -name '*.md' ! -name 'README.md' -type f | grep -v '2026-[0-9][0-9]-[0
 | `artifacts/quality-ladder/v2/src.png` | 手工放的 4K 底图 | 间接——`scripts/probes/avif_backend_ladder_measure.py:171` 按路径读它 | 该探针手跑；`artifacts/quality-ladder/report-ladder.py` 族可重出其余 |
 | `artifacts/pr1-review/`（`tmp/` 已删） | 10-16 那次 PR 审查的取证现场 | 否 | `docs/reviews/upstream/upstream-pr1-review-2026-10-16.md` 记了当时的命令 |
 | `artifacts/t3-2026-09-28/` `display-audits/` `edid-fix/` `png-hdr-meta/` `ui-captures/` | 各自那轮的 App 自检 / `--display-audit` | 否 | 由 `tests/manual/safety/*-cell.ps1` 与 App 的 `--display-audit` 重跑 |
-| `artifacts/cleanup-20260926/` | **退路包**，不是清理对象 | 否 | 它的 `README.txt` 自写还原命令；里面还点名 `tests/output/dead_scan.py`、`build_quarantine.sh` 两个件——引用它们的文件本身未跟踪，**只按在册文本数引用会把这两个判成零引用** |
-| `artifacts/backup-consolidated/wt-gm-uncommitted-2026-10-21/` | §七-6 那处未提交改动的存档 | 否 | 别删；删了那条实验旋钮就没有副本 |
+| `artifacts/cleanup-20260926/` | 09-26 那次删除的 `quarantine.tar.gz`（137 件） | 否 | **待处置**：实测这 137 件从未进过 git ⇒ 不是 git 的重复备份，删了没有任何后路。按"禁止备份构筑"这条应处理掉，但要么先把还有用的按 `tests/manual` 反选纳进 git，要么整包删——等维护者定。它的 `README.txt` 还点名 `tests/output/dead_scan.py`、`build_quarantine.sh`，引用者本身未跟踪，**只按在册文本数引用会把这俩判成零引用** |
+| ~~`artifacts/backup-consolidated/`~~ | 曾存 §七-6 那处未提交改动的副本 | — | **2026-10-22 已删**：备份构筑一律不许存在；那条旋钮的实测数已由 `docs/reviews/usability/pipeline-and-usability-review-2026-09-27.md` §⑧ 记在文档里 |
 | `publish/PLAN/{tools,fonts}` | `Publish.ps1:212,214` 的 `$toolsSrc/$modelsSrc` 从 `src/…/Resources` 与 `src/…/Models` 取源 | **是**——门禁的能力探测把 `publish/PLAN/tools/ultrahdr_app.exe` 当第二候选 | 重跑发布链；`tools-manifest.json` 有逐件 sha256 |
 | `publish/TrueToneCap-v0.3.9-beta/` | 按 `v0.3.9-beta` tag 重出的正式包 | 发布期校验读它的 `build-info.json` | 重新出包（`-OutputDir` 是 `Remove-Item -Recurse`，别指着旧目录跑） |
-| `publish/msix-0.3.7-from-backup-2026-10-21/` | §七-5 从已被 prune 的 git 对象导出的**唯一副本** | 否 | **不可再生**——原始对象已不在 `.git` 里，删了就没了 |
+| ~~`publish/msix-0.3.7-from-backup-2026-10-21/`~~ | §七-5 从已 prune 的对象导出的 0.3.7 MSIX | — | **2026-10-22 已删**：它是 `*-from-backup` 型备份构筑；真要这个包，按 `v0.3.7-beta` tag 重跑 `-Msix` 即可（构建产物不逐字节相同，但源码在树上） |
 | `tests/output/` `tests/manual/safety/*/` | harness 的 `--out` 落点 | 部分（`app-settings-migration` 等由门禁自己写） | 重跑对应 cell 脚本 |
 
 ⚠ **本机的 `du` 不可信，别拿它当体积尺**：本轮 `du -sk publish/PLAN` 给 38,232 KB，
