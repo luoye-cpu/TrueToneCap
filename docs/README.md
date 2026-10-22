@@ -238,7 +238,7 @@ find docs -name '*.md' ! -name 'README.md' -type f | grep -v '2026-[0-9][0-9]-[0
 | 判定 | 对象 | 依据 |
 |---|---|---|
 | **已删** | `dotnet-tools.json`（55 B，`tools:{}` 空清单） | 本仓自己的审计早就写过："位于仓库根（正确位置是 `.config/`）且 `tools:{}` 为空 → **死配置**"；全仓无任何 `dotnet tool restore`，`verify.ps1:158` 的 `dotnet format` 是 SDK 自带。删后构建 0 警告 0 错误、7 套件 **1839 通过 / 0 失败 / 2 跳过**，与删前逐项同值 |
-| 不是死文件（我一度误报） | 13 个 `Assets/*.png` | 其中 7 个 `targetsize-*` 变体**由 `gen-msix-assets.py:138-144` 用 f-string 动态生成**，我的 grep 只搜了字面名 ⇒ 缺席断言的尺子太窄。文档记的"13 个资产可复现生成"是对的 |
+| 不是死文件（我一度误报） | 13 个 `Assets/*.png`（**2026-10-22 补全后为 48 个**） | 其中 7 个 `targetsize-*` 变体当时**由 `gen-msix-assets.py` 用 f-string 动态拼名生成**，我的 grep 只搜了字面名 ⇒ 缺席断言的尺子太窄。10-22 按官方限定符表补全到 48 个（`.scale-<N>` 显示缩放族 + `.targetsize-<N>_altform-unplated` 无底板族），生成处现在是 [scripts/gen-msix-assets.py:165-186](../scripts/gen-msix-assets.py) 的一张数据表；携带靠 `Microsoft.WinUI.props:35` 的 `Content Include="Assets/**/*.*"` 通配，**csproj 不需要加条目**（实测构建输出 48 个与源逐字相同） |
 | 同上 | `licenses/*.txt` 44 份 | 全部被 `licenses/INDEX.json` 点名（未点名 0 份） |
 | 惯例读取，非"无引用" | `.gitattributes`、`NuGet.config`、`.editorconfig`、`global.json` | git/MSBuild/NuGet 按约定读它们，不会有文本引用 ⇒ "零引用"对这类文件没有意义 |
 | 有出处的工具，未动 | `gen-msix-assets.py`、`publish-with-prebuilt.ps1`、`onnx_fp16_quantize.py`、`verify-package-content.ps1`、`migrate-net11.ps1` | 文档分别记为"可复现生成 / 新增入口 / 正式工具 / 产物内容核对 / 仅 2 个正式工具之一"。`verify-package-content.ps1` 的问题是**没有调用方**（§七-4），不是该删 |
