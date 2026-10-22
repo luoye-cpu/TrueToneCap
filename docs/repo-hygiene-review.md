@@ -3,7 +3,7 @@
 > ⚠️ **状态更新（2026-09-14）**：本报告的多个发现**已在后续处理完毕**，
 > 逐一标注于各条目下方。请以**标注后的状态**为准，勿按原文当作待办重复执行。
 >
-> 处理记录详见 `docs/git-tracking-audit-2026-09-14.md`。
+> 处理记录详见 `docs/reviews/repo-governance/git-tracking-audit-2026-09-14.md`。
 
 ---
 
@@ -116,7 +116,7 @@ git status 显示 `M src/TrueToneCap.App/Services/HDRPreviewWindow.cs`，但本�
 
 > **2026-09-14 更新**：仓库实际仍为 **170 MB**（即使已解除 models 跟踪），
 > 因为**历史 blob 未回收**。解除 `publish/PLAN/tools/` + 一次历史重写后可达 ~40MB 目标。
-> 详见 `docs/git-tracking-audit-2026-09-14.md`。
+> 详见 `docs/reviews/repo-governance/git-tracking-audit-2026-09-14.md`。
 
 ---
 

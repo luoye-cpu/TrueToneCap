@@ -114,7 +114,7 @@ https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/index.j
 
 ### 为什么强调这一点
 
-本仓库的历史文档 `docs/dependency-audit-2026-08-25.md` 曾声称
+本仓库的历史文档 `docs/reviews/dependency/dependency-audit-2026-08-25.md` 曾声称
 `Microsoft.ML.OnnxRuntime.DirectML` 最新版为 `1.29.0`，并据此推导出一系列
 "升级收益 20-30%"的结论。**该版本在 NuGet.org 上并不存在**
 （最新稳定版为 `1.24.4`，即项目当时已在使用的版本）。
@@ -158,7 +158,7 @@ https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/index.j
 - **传递依赖中的预发布版**：`SharpGen.Runtime` / `SharpGen.Runtime.COM` 为 `2.4.2-beta`
   （由 Vortice 3.8.3 锁定，无法单独替换）
 
-> 详见 `docs/dependency-inventory-2026-09-14.md`。
+> 详见 `docs/reviews/dependency/dependency-inventory-2026-09-14.md`。
 
 ---
 

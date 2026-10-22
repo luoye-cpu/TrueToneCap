@@ -585,14 +585,14 @@ HEAD          = 0916a2a (release: v0.3.3-beta)
 分支          = 仅 main
 暂存区        = 43 M + 36 A + 12 D
 未暂存        = src/TrueToneCap.Tools/PngCheck.cs (发现 2 的修正)
-未跟踪        = docs/real-machine-test-report-2026-09-14.md (本报告)
+未跟踪        = docs/reviews/repo-governance/real-machine-test-report-2026-09-14.md (本报告)
 发布产物      = publish\TrueToneCap-v0.3.4-beta (417 MB，保留在磁盘)
 ```
 
 ⚠️ 若要一并提交，需先：
 ```bash
 git add src/TrueToneCap.Tools/PngCheck.cs
-git add docs/real-machine-test-report-2026-09-14.md
+git add docs/reviews/repo-governance/real-machine-test-report-2026-09-14.md
 ```
 （`.workbuddy-ai/` 下的辅助脚本**未被跟踪**，不会进入提交。）
 

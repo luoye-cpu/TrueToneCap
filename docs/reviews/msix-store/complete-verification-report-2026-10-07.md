@@ -177,7 +177,7 @@ tests=24   non-PASS=2   blocking failures (OPTIONAL != TRUE) = 0
 ⇒ **真实收益：175.85 → 85.12 MB = −90.73 MB（−51.6%）**（原记 −52%，差异可忽略）
 
 **已处理**：在 4 份文档里更正/加注（31 处命中），并在
-`docs/msix-size-and-publish-pipeline-analysis-2026-10-07.md` 新增 §9 记录**测量时点与漂移原因**，
+`docs/reviews/msix-store/msix-size-and-publish-pipeline-analysis-2026-10-07.md` 新增 §9 记录**测量时点与漂移原因**，
 而不是把旧数字悄悄改掉 —— 体积数字必须能追溯到"什么时候量的"。
 
 ---

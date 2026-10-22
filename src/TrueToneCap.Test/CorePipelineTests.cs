@@ -3639,7 +3639,7 @@ public static class CorePipelineTests
         CheckWhitelistEqualsTags(xaml, srv, "EffortJpegLiCbo", "s.EffortJpegLi", expectTags: 3);
 
         // ── 档位 → 底层参数的映射（2026-10-07，用户口径「最小体积」= 极限参数拉满）──
-        // 值本身由真机实测定（见 docs/encoder-params-and-smallest-tier-2026-10-07.md），
+        // 值本身由真机实测定（见 docs/reviews/compression/encoder-params-and-smallest-tier-2026-10-07.md），
         // 这里钉的是"落地的值不许被随手改动"，因为每个数字背后都有一次实测。
         Assert("压缩强度/JXL 三档 = 7/5/3",
             CompressionEffortMap.JxlEffort(CompressionEffort.Smallest) == 7

@@ -7,7 +7,7 @@
 > 现行唯一入口：`dotnet run --project src/TrueToneCap.Test -c Release -- --<suite>`；
 > 完整门禁：`scripts/verify.ps1`（`ci.yml` 只调它，不复制其逻辑）。
 > 本文其余部分（缓存、锁定文件、发布链路）仍可作为背景阅读，但结论以
-> `docs/pipeline-review-2026-09-15.md` 与 `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 为准。
+> `docs/reviews/pipeline-review/pipeline-review-2026-09-15.md` 与 `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 为准。
 
 **审查日期**：2026-09-14  
 **审查范围**：配置管理、构建管线、测试体系、发布部署、环境一致性、安全性  
@@ -70,7 +70,7 @@
 
 **依赖升级**：
 - `Microsoft.Extensions.DependencyInjection`：`10.0.x` → `11.0.0-rc.1.26425.128`
-  （仅此一项升级；其余 8 项直接依赖均已是当前最新稳定版，见 `docs/dependency-inventory-2026-09-14.md`）
+  （仅此一项升级；其余 8 项直接依赖均已是当前最新稳定版，见 `docs/reviews/dependency/dependency-inventory-2026-09-14.md`）
 
 ### 两点重要更正
 
@@ -586,7 +586,7 @@ official_models/                                        133 MB  (已 gitignore)
 | 依赖来源校验        | ❌ 无 NuGet.config | 无源固定，存在依赖混淆风险                            |
 | 分支保护          | ❌ 无              | `main` 可直接 push（`git log` 显示全部提交直达主干）    |
 
-`docs/dependency-audit-2026-08-25.md` 显示项目**做过人工依赖审计**，但那是**一次性人工动作**，  
+`docs/reviews/dependency/dependency-audit-2026-08-25.md` 显示项目**做过人工依赖审计**，但那是**一次性人工动作**，  
 不是自动化门禁 —— 新的 CVE 无法被持续发现。
 
 ### 🔴 P0-22 内存安全高风险面且无任何防护

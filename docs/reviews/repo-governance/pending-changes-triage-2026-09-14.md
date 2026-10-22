@@ -81,7 +81,7 @@
 文档
   docs/architecture-design.md             顶部加"已过时"对照表
   docs/ocr-parallel-analysis.md           顶部标注并行化方案已被 2026-09-13 修复否决
-  docs/dependency-audit-2026-08-25.md     标注含事实性错误、已被新清单取代
+  docs/reviews/dependency/dependency-audit-2026-08-25.md     标注含事实性错误、已被新清单取代
   docs/repo-hygiene-review.md / roadmap-v0.4.md  状态更新横幅
   8 篇 2026-09-14 审查报告                 新增
 ```

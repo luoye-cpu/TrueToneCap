@@ -39,7 +39,8 @@ public static class OcrEngineDiag
         }
         catch (Exception ex) { Console.WriteLine($"引擎识别异常: {ex.Message}"); }
 
-        // B. 独立 det 推理 (完全复现 RunDetection 参数: limitSide=736, maxRatio=6)
+        // B. 独立 det 推理 (limitSide=736, maxRatio=6 —— 注意 736 ≠ 生产 OnnxOcrConfig.DetLimitSide=960，
+        //    本探针不是生产路径的复现件；已知漂移见 OcrProbProbe.cs 头部警告)
         try
         {
             string detPath = Path.Combine(modelDir, "PP-OCRv6_medium_det.onnx");

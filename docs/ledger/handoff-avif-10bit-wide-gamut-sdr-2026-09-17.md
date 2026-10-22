@@ -66,7 +66,7 @@
 | 路径 | 说明 |
 |---|---|
 | `CHANGELOG.md` | §「AVIF 硬件 10-bit 实测与接线（已落地）」 |
-| `docs/handoff-avif-encoder-refactor-2026-09-16.md` | §10.1 事实表勘误 + 新增 §10.4 |
+| `docs/ledger/handoff-avif-encoder-refactor-2026-09-16.md` | §10.1 事实表勘误 + 新增 §10.4 |
 | `scripts/probes/nvoff.c`（+ 未入库的 `build-nvoff.ps1`） | **MSVC 布局探针**（权威偏移来源；2026-09-19 §30 从 `.workbuddy-ai/` 迁入仓库。`build-nvoff.ps1` 仍只在第三方目录，复跑方法写在 `nvoff.c` 头注释里） |
 | `.workbuddy-ai/probe10.py` | 阶梯判据分析脚本（封装 IVF + ffmpeg 解码 + 逐带统计） |
 | `.workbuddy-ai/bd10-gate.ps1` | 构建 + 8 套件门禁（每套件单独落盘日志） |
@@ -304,7 +304,7 @@ Case B 的源本身只有 8-bit，升位深不产生信息 —— 这一点应�
    取代硬编码 `MaxBitDepth`，避免"文档说的"与"驱动能的"再次漂移
 5. **[实机] 在真实截图上验证 10-bit 的观感 / 体积 / 耗时**（项目规则：未实测不落地）
 6. ~~**[文档勘误]**~~ —— **已完成**：
-   `CHANGELOG.md`、`docs/handoff-avif-encoder-refactor-2026-09-16.md` §10.4、
+   `CHANGELOG.md`、`docs/ledger/handoff-avif-encoder-refactor-2026-09-16.md` §10.4、
    `FormatEncoders.cs`、`NvEncoderNative.cs` 中"ARGB10 输入无效"的表述均已改为
    §3 的实测结论。长期记忆（`MEMORY.md`、`2026-09-17.md`）同步更正。
    ⚠ 若在其他分支/旧文档再看到"ARGB10 无效"，一律以本文档 §3 为准。
@@ -2088,7 +2088,7 @@ L4（逐屏能力）那路子 agent 的**完成通知比它的最后一次写盘
    把产品故障伪装成环境问题。
 
 **主循环抽样复核记录**（不照抄 reviewer 的结论）：5/5 条核实为真（上面三类各抽了），
-但**抓到一条报错了**：它说 `docs/handoff-avif-encoder-refactor-2026-09-16.md:103` 也写着"探针源码保留在
+但**抓到一条报错了**：它说 `docs/ledger/handoff-avif-encoder-refactor-2026-09-16.md:103` 也写着"探针源码保留在
 `.workbuddy-ai/nvoff.c`" —— 我对那个文件 grep `nvoff` 是 **0 命中** ⇒ 未照抄。
 ⇒ 结论不变：审计类 lane 性价比极高，但每条落账前都要自己 grep 一遍。
 
@@ -3171,7 +3171,7 @@ settings.json + DPAPI 通路），"用户自备凭据"这句话落不了地。�
 | 7 | ~~`MozJpegSharp.Core` 是死引用~~ **已删（用户授权，2026-09-21）** | 取证：全仓 0 处 .cs 引用、包里 `MozJpegSharp.dll` 28 KB 照发、且**没有**对应原生 mozjpeg ⇒ 白背一份 MIT 义务，真调用即 `DllNotFound`。已删 `Core.csproj` 的 PackageReference 与 `Directory.Packages.props` 的 PackageVersion，`dotnet restore` 刷新 4 份 `packages.lock.json`（MozJpegSharp 全部消失），`licenses/` 里的 MIT 条目与全文一并撤下（清单 43 → 42，`--check` 重生成后同步）。复跑 unit 518 / encoding 14 / format 36 / usability 217 全 0 失败 |
 | 8 | 致谢窗口渲染 399 KB / 约 5.7k 行 | 只做了静态推理（按行分块 ⇒ 元素数≈块数），**没有真机看过一眼**：能否滚到底、深浅色/OLED 可读性、Esc 关闭都未实测 |
 | 9 | ICC `ProfileID` 对 v2.1 留零 | 配方无机可验（33.3 末）。若将来要补，先在一台有非零 ID 的 v2 profile 上把配方撞中再写 |
-| 10 | 本轮改动**全部未提交** | 且工作树里还有**先前遗留**的未提交日志重构：`Services/LogService.cs` (+73/−28)、未跟踪的 `src/TrueToneCap.Core/Logging/CoreLog.cs`、`docs/pipeline-e2e-test-plan-2026-09-20.md`。提交前要先决定这些算不算本轮的一部分 |
+| 10 | 本轮改动**全部未提交** | 且工作树里还有**先前遗留**的未提交日志重构：`Services/LogService.cs` (+73/−28)、未跟踪的 `src/TrueToneCap.Core/Logging/CoreLog.cs`、`docs/reviews/pipeline-review/pipeline-e2e-test-plan-2026-09-20.md`。提交前要先决定这些算不算本轮的一部分 |
 
 ### 33.7 数字
 
@@ -4193,7 +4193,7 @@ sRGB 的 gXYZ=(0.385,0.7169,0.0971) 列归一化后正是 `0.3212,0.5979` ——
    另外 wtpt 记的是原始 D65（与 §31.3-9"别断言列和==wtpt"一致）。
 2. **一个没穷举就下的负断言**：我先前写道"本机没有任何 Ultra HDR 解码器 ⇒ 这一模式只能证到文件层，
    渲染效果要等真机查看器"。**错** —— `publish/PLAN/tools/ultrahdr_app.exe` + `libuhdr.dll` 一直在，
-   而且 `docs/pipeline-e2e-test-plan-2026-09-20.md:59` 早就把它列为"GainMap 的真外部解码"。
+   而且 `docs/reviews/pipeline-review/pipeline-e2e-test-plan-2026-09-20.md:59` 早就把它列为"GainMap 的真外部解码"。
    同名的东西我上一轮找的是 djxl/avifdec，没找着就下了"没有"。
 
 ### 45.4 第 4 层：外部参考解码器重建出的像素
@@ -6629,7 +6629,7 @@ primaries 与 PQ 的组合" —— 那只对 `-x color_space=` 的**简写名**�
 
 ## §64 审查轮：把 §59-§63 改过的文件再过一遍（2026-09-29/30，用户："帮我把所有改动的文件都审查一次"）
 
-明细账在 `docs/pipeline-and-usability-review-2026-09-27.md` §17，这里只入账不重述。
+明细账在 `docs/reviews/usability/pipeline-and-usability-review-2026-09-27.md` §17，这里只入账不重述。
 
 * **产品码修了 3 处**：① 新装机那次会话"清空 API Key"删不掉凭据（`SettingsService` 那道门原先只认"读进来"
   一个可信来源，现补"本会话写成功过"，且复位排在 `Load()` 开头）；② `Avifenc` 迁移门与 `FitTag` 口径不同向
@@ -7386,7 +7386,7 @@ harness `tests/manual/safety/hotkey-clipboard-cell.ps1`；读数 `tests/output/h
 
 ## §65 实机轮：一次热键走完五环，六格式全交付；修掉"存的格式每次开机被抹掉"（2026-10-01，用户："计划一次完整的软件管线审查和实机测试，确保软件有足够的可用性"）
 
-计划 `docs/pipeline-and-usability-review-plan-2026-10-01.md`，读数与判词 `docs/pipeline-and-usability-review-2026-10-01.md`。本节只入账三件改动了盘上事实的：
+计划 `docs/reviews/usability/pipeline-and-usability-review-plan-2026-10-01.md`，读数与判词 `docs/reviews/usability/pipeline-and-usability-review-2026-10-01.md`。本节只入账三件改动了盘上事实的：
 
 1. **P1 已修**：`RebuildFormatCombo()` 在控件未实化时把回落取成 `FormatOrder.DefaultIndex` ⇒ 每次启动把用户选的格式抹成 PNG，且那次程序性赋值会触发 `OnFormatChanged`（此刻 `_uiReady` 已 true）⇒ 连盘上 `FormatIndex` 键都被差量写盘删掉。改判取 `_settings.FormatIndex`。
    前后都是真机读数：改前"盘上 3 ⇒ 界面 PNG ⇒ 键没了"、"写 5 ⇒ 界面 PNG ⇒ 键没了"；改后"写 5 ⇒ 界面 **TIFF** ⇒ `FormatIndex:5` 还在"（`tests/output/realmachine-2026-10-01/format-persist{,-postfix2}.log`）。
@@ -7568,7 +7568,7 @@ unit 1123→**1127**，地板 1686→**1690**，`round64-gate` = `GATE_EXIT=0` /
 
 ## §66 英文界面补完三批 + 两台自造仪器被纠正（2026-10-03，用户：「按照你的想法审查一下最优解，然后完整推进完成」）
 
-明细与读数全部在 `docs/usability-audit-2026-10-02.md` §9.7–§9.11，这里只留账与可复算的入口。
+明细与读数全部在 `docs/reviews/usability/usability-audit-2026-10-02.md` §9.7–§9.11，这里只留账与可复算的入口。
 
 **先审的那一票**：本轮之前截过的界面图全是中文模式，"英文模式能不能用"从没量过，而 F6 整套修法
 都挂在这个假设上。`tests/manual/safety/w9-english-mode-cell.ps1`（按字节注入 `Language=en`、
@@ -7615,7 +7615,7 @@ Core 里 `$"距离: {q:F1}"` 两条内插串的根治（让 Core 别产出用户
 
 ## §67 填完上轮两项：Core 交模板 + 真实发布跑通（2026-10-03，用户："填完整这一部分，完成实现"）
 
-明细在 `docs/usability-audit-2026-10-02.md` §9.12，这里只留账与可复算入口。
+明细在 `docs/reviews/usability/usability-audit-2026-10-02.md` §9.12，这里只留账与可复算入口。
 
 **R2 做到底**：Core 的 `FormatColorFacts.Declaration` 有 31 条中文字面量、其中 7 条带 `{expr}`
 ⇒ 第二批那套"App 按片段回翻"对带值的那几条只能拆半句，英文拼起来读不通。
@@ -7656,7 +7656,7 @@ Core 里 `$"距离: {q:F1}"` 两条内插串的根治（让 Core 别产出用户
 
 ## §68 round68 管线审查：两条环境障碍的根因 + 一个 P2 + 两处零断言（2026-10-04）
 
-明细在 `docs/pipeline-review-round68-2026-10-04.md`，计划在 `docs/pipeline-review-plan-round68-2026-10-04.md`。**产品源码一行未动**，未 commit。
+明细在 `docs/reviews/pipeline-review/pipeline-review-round68-2026-10-04.md`，计划在 `docs/reviews/pipeline-review/pipeline-review-plan-round68-2026-10-04.md`。**产品源码一行未动**，未 commit。
 
 **本轮只有一条新增可执行修复项（P2）**：`StartupManager.cs:61-64` 的 setter 把异常吞进 `LogService.Warn`、**不 rethrow**，
 于是调用方 `MainWindow.Settings.cs:391-395` 那个 `catch`（`SetStatus("⚠ 开机自启设置失败")`）**永远不可达**。
@@ -7772,7 +7772,7 @@ HDR 开着时目标解析成 BT2020 写 PQ，**像素却从没按 P3 反解** �
    是**错位取位**读出来的 ⇒ 方向对、数值不是屏的真值。本轮改成 0.0989 / 0.0234，并把**现在真正在用的**
    SAC2765=0.0867 补进判据（旧表里根本没有它）。
 3. 我在 PR 审查报告 §十四 里说过"面板原生 Rec.709 那一行是对的" —— **撤回**：那行读的是没在用的内屏。
-4. 上一轮把 `[1.97/2]` 记成"环境红"的事，纠正见 `docs/upstream-pr1-review-2026-10-16.md` §十三。
+4. 上一轮把 `[1.97/2]` 记成"环境红"的事，纠正见 `docs/reviews/upstream/upstream-pr1-review-2026-10-16.md` §十三。
 
 ### 69.7 交付与未判
 

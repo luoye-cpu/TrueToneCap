@@ -14,7 +14,7 @@
 |:---:|------|------|
 | 🔴 **严重过时** | 描述了已被替换/删除的流程，照做会出错 | `publish/PACKAGE.md` |
 | 🟠 **方向性矛盾** | 主张的优化方案已被代码反向修正，照做会引入缺陷 | `docs/ocr-parallel-analysis.md` |
-| 🟡 **部分过时** | 版本号/文件引用/完成状态有明确错误，但主干仍有效 | `docs/architecture-design.md`、`docs/repo-hygiene-review.md`、`docs/roadmap-v0.4.md`、`docs/dependency-audit-2026-08-25.md` |
+| 🟡 **部分过时** | 版本号/文件引用/完成状态有明确错误，但主干仍有效 | `docs/architecture-design.md`、`docs/repo-hygiene-review.md`、`docs/roadmap-v0.4.md`、`docs/reviews/dependency/dependency-audit-2026-08-25.md` |
 | 🟢 **基本有效** | 分析类文档，结论未见与现状冲突 | `ocr-accuracy-analysis.md`、`ocr-pipeline-review.md`、`performance-analysis.md`、`overall-optimization-2026-08-25.md`、`pipeline-review-2026-08-25.md` |
 | ✅ **本次新建** | 2026-09-14 产出，已与现状对齐 | `cicd-pipeline-review`、`dependency-inventory`、`dependency-management`、`git-tracking-audit`、`re-audit` |
 
@@ -167,11 +167,11 @@ await _inferGate.WaitAsync(ct) ...                        // 第 322 行
 | 问题 | 说明 |
 |------|------|
 | 基线过期 | 声称「基线版本 v0.3.2-beta (commit `0dd4215`)」，实际 HEAD 已是 `42cc8d8`，**落后 3 个提交**，版本为 `v0.3.4-beta` |
-| 测试基线矛盾 | 声称「318 通过」，`architecture-design.md` 说「192/192」—— **两者都不准**。2026-09-14 实测：8 个套件 **373 项断言**全部通过（详见 `docs/test-verification-2026-09-14.md`） |
+| 测试基线矛盾 | 声称「318 通过」，`architecture-design.md` 说「192/192」—— **两者都不准**。2026-09-14 实测：8 个套件 **373 项断言**全部通过（详见 `docs/reviews/repo-governance/test-verification-2026-09-14.md`） |
 | 任务状态未更新 | 任务 1（PNG 后缀 + JXL）**已完成** —— `MainWindow.xaml` 已存在 `JxlPngSuffixChk`；任务 4（系统字体检测）**已完成** —— `FontLoader.cs` 已实现系统字体枚举 |
 | 引用仍有效 | ✅ `AvifPngSuffixChk` 确实在 `MainWindow.xaml` L129，抽查无误 |
 
-### 4.4 `docs/dependency-audit-2026-08-25.md`
+### 4.4 `docs/reviews/dependency/dependency-audit-2026-08-25.md`
 
 **已处理** —— 本次已加顶部警示（虚构的 `OnnxRuntime 1.29.0`、过时的 WinAppSDK 2.3.1 等），
 指向 `dependency-inventory-2026-09-14.md`。✅ 无需再动。

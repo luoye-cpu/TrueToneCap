@@ -1201,7 +1201,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
             //   ② outputBitDepth=10
             //   二者缺一都会退化：只改输入 → 被降到 8-bit；只改输出 → 升位深。
             //   （2026-09-17 曾误记成"ARGB10 输入无效"，实测推翻，详见
-            //    docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md §3）
+            //    docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md §3）
             // 偏移量来源：本机 MSVC 对官方 nvEncodeAPI.h（SDK 13.1）逐字段 offsetof 实测，
             // 探针源码见 scripts/probes/nvoff.c（此前凭注释猜测的偏移错得离谱，详见
             // NvEncoderNative 顶部常量表）。独立验证：ffprobe 报 pix_fmt=yuv420p10le。
@@ -1377,7 +1377,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
     /// <para>与 <see cref="EncodeAsync"/> 的区别：后者输入恒为 8-bit，10-bit 输出是硬件
     /// 升位深（源精度仍 8-bit，实测解码亮度为 4 级台阶）；本方法把 10-bit 像素原样送入
     /// NVENC，实测产出真 10-bit 斜坡。详见
-    /// <c>docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md</c> §3。</para>
+    /// <c>docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md</c> §3。</para>
     /// </summary>
     /// <remarks>
     /// <b>刻意不复用 EncodeAsync 的重试矩阵</b>：那条路径的哨兵 / 失败缓存 / libaom 回退

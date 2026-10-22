@@ -1,7 +1,7 @@
 # G 项设计提案：减少 GPU→CPU 回读（2026-10-07）
 
 > 状态：**提案，未实现**。本文件只做设计与取舍分析，供评审。
-> 依据：`docs/performance-analysis-2026-10-07.md` §5.5 的真机实测。
+> 依据：`docs/reviews/performance/performance-analysis-2026-10-07.md` §5.5 的真机实测。
 
 ---
 

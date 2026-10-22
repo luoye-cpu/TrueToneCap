@@ -4,16 +4,23 @@
 > `README.md:230/:233` 只点名了主台账与一个 `docs/pipeline-review-*.md` glob，
 > `CHANGELOG.md:13` 有一句"同目录其它 `docs/*.md`"的泛称。
 > 下面的每个数字都是当场量出来的（复查口径见 §八），不要凭本文件的历史版本推断。
+>
+> **2026-10-22 目录分层**（推翻同日 §七-1 的"不搬"，由维护者直接下令）：54 份文档按主题搬进
+> `docs/reviews/<族>/` 与 `docs/ledger/`，10 份无日期活文档与本索引留在 `docs/` 顶层。
+> 搬迁用 `git mv`（rename 可追），**正文一字未改**：只把引用里的路径前缀改了 96 处 / 35 个文件，
+> 判据 = 除本索引外的 64 份仍是 **30,388 行**，与分层前记录的行数逐字相等（行内替换不加行）。
+> 已量过：没有任何在册脚本、门禁或 CI 用 `docs/*.md` 这类 glob 枚举文档，故不存在"静默少枚举 54 份"。
+
 
 ## 一、先看规则（本仓已拍板，别绕过）
 
 1. **文件名带日期的 `.md` 是取证快照**：当时为真就是价值所在。发现其中有错**不回写**，
    要纠正在**新文件**里写，或在**无日期的活文档**里更新。改快照 = 伪造历史。
-2. **例外只有一条**：`handoff-*` 那两份虽然名字带日期，实际是**跨周追加的运行台账**
+2. **例外只有一条**：`ledger/handoff-*` 那两份虽然名字带日期，实际是**跨周追加的运行台账**
    （见下节），按活文档对待。
 3. **文档三分工**（2026-09-20 拍板）：
    `README.md` 只写新增能力 + 工程规范；`CHANGELOG.md` 只写变更流水（现象与影响）；
-   `docs/handoff-*.md` 写根因、判据设计、变异实验、被推翻的旧结论。
+   `docs/ledger/handoff-*.md` 写根因、判据设计、变异实验、被推翻的旧结论。
    ⚠ 现状偏离：`CHANGELOG.md` 自己 `:12` 写着"根因分析…都在维护者文档里"，
    而正文 `:451 :521 :682 :691 :921 :1063` 六处（全文"根因/事后分析"命中 14 处）就是根因分析 ⇒ 与自己那句冲突；
    `CHANGELOG.md:13` 还把范围放宽成"其它 `docs/*.md`"——这句与上面那条分工不一致，待你定。
@@ -24,15 +31,16 @@
 
 | 文件 | 行 | 状态 |
 |---|---|---|
-| `handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,941 | §编号已到 **72**（含 72.6），最后追加 2026-10-22；725,563 B，**占 `docs/` 总字节的 31.7%**（次大的是 `pipeline-and-usability-review-2026-09-27.md` 381,691 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
-| `handoff-avif-encoder-refactor-2026-09-16.md` | 406 | 前一阶段的交接，已收尾 |
+| `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` | 7,941 | §编号已到 **72**（含 72.6），最后追加 2026-10-22；733,728 B（磁盘口径），**占 `docs/` 总字节的 31.7%**（次大的是 `docs/reviews/usability/pipeline-and-usability-review-2026-09-27.md` 381,709 B；字节口径见 §四 末）。任务账本、拍板记录、被推翻结论都在这里 |
+| `docs/ledger/handoff-avif-encoder-refactor-2026-09-16.md` | 406 | 前一阶段的交接，已收尾 |
 | `CHANGELOG.md`（仓库根） | 222,344 B（blob） | 变更流水；发布记录与 tag 对账也记在这 |
 
 要找"某件事当时为什么这么做/后来怎么翻的"，先在这三份里搜，别去审计快照里找结论。
 
 ## 三、活文档（无日期名 ⇒ 有义务跟代码同步）
 
-共 10 份（行数是**本轮改完之后**的实测值）：`architecture-design.md`(891) `ocr-model-landscape-2026.md`(429，只带年份)
+共 10 份，**全部留在 `docs/` 顶层**（分层只搬带日期的快照与台账；行数是**本轮改完之后**的实测值）：
+`architecture-design.md`(891) `ocr-model-landscape-2026.md`(429，只带年份)
 `roadmap-v0.4.md`(318) `ocr-parallel-analysis.md`(252) `performance-analysis.md`(241)
 `dependency-management.md`(232) `ocr-pipeline-review.md`(168) `repo-hygiene-review.md`(119) `ocr-accuracy-analysis.md`(111) `vscap-mode.md`(45，VS-Cap 可选模式说明)。
 （本索引自己不算在内 —— 它也是无日期名，但它是入口不是待同步对象。）
@@ -52,27 +60,38 @@
 `ShaderLoader.cs` `ToneMapping.hlsl` `GamutMapper.cs` `GpuEffectProcessor.cs` `ManagedJpegEncoder.cs`
 `NvencAvifBackend.cs` `MosaicEffect.hlsl`）是**故意留的"曾存在"标记**，不是漏改——别再去"修"它们。
 
-## 四、主题族（同族读最新那一份即可，旧的是证据不是现状）
+## 四、主题族 = 目录（同族读最新那一份即可，旧的是证据不是现状）
 
-| 族 | 成员日期 | 最新（读这份） |
+2026-10-22 起，族名就是目录名。每份目录的实测份数在括号里：
+
+| 目录 | 份数 | 最新（读这份） |
 |---|---|---|
-| 审查链 `pipeline-review*` | 08-25 / 09-14×4 / 09-15 / 10-04×2 | `pipeline-implementation-review-2026-10-07.md` |
-| 可用性 `pipeline-and-usability-review*` `usability-audit*` | 09-15 / 09-27×2 / 10-01×2 / 10-02 | `usability-audit-2026-10-02.md` |
-| MSIX / 商店（全部 10-07） | aot / packaging / size / gap / submission / winml | `realmachine-msix-verification-2026-10-07.md`（真机安装实测，mtime 最新） |
-| OCR | 08-25×3（活） / 2026 综述 / 10-07×2 | `winml-migration-plan-2026-10-07.md` + `ocr-model-replaceability-2026-10-07.md` |
-| 性能 | 08-25（活）/ 10-07 / perf-G | `performance-analysis-2026-10-07.md` |
-| 依赖 | 08-25 / 09-14×2 / 10-07 | `dependency-update-analysis-2026-10-07.md` |
-| 压缩强度 | 10-07×2 | `encoder-params-and-smallest-tier-2026-10-07.md` |
-| 上游 PR | 10-16 | `upstream-pr1-review-2026-10-16.md` |
+| `docs/reviews/pipeline-review/` | 11 | `pipeline-implementation-review-2026-10-07.md` |
+| `docs/reviews/repo-governance/` | 8 | 无后继，按名读（CI/跟踪/文档体检/待发分诊那批 09-14 与 09-16 快照） |
+| `docs/reviews/usability/` | 7 | `usability-audit-2026-10-02.md` |
+| `docs/reviews/msix-store/` | 7 | `realmachine-msix-verification-2026-10-07.md`（真机安装实测，mtime 最新） |
+| `docs/reviews/dependency/` | 4 | `dependency-update-analysis-2026-10-07.md` |
+| `docs/reviews/performance/` | 3 | `performance-analysis-2026-10-07.md` |
+| `docs/reviews/compression/` | 3 | `encoder-params-and-smallest-tier-2026-10-07.md` |
+| `docs/reviews/capture/` | 3 | `root-cause-hdr-multimonitor-2026-09-16.md` |
+| `docs/reviews/ocr/` | 2 | `winml-migration-plan-2026-10-07.md` + `ocr-model-replaceability-2026-10-07.md` |
+| `docs/reviews/notification/` | 2 | `windows-system-notification-2026-09-16.md` |
+| `docs/reviews/encoder/` | 1 | `avif-encoder-benchmark-2026-09-16.md` |
+| `docs/reviews/upstream/` | 1 | `upstream-pr1-review-2026-10-16.md` |
+| `docs/ledger/` | 2 | 见 §二（台账，不是快照） |
 
-零散快照（单份，无后继）：`cicd-pipeline-review-09-14` `git-tracking-audit-09-14` `re-audit-09-14`
-`real-machine-test-report-09-14` `test-verification-09-14` `docs-staleness-audit-09-14`
-`gpu-acceleration-availability-09-16` `root-cause-hdr-multimonitor-09-16` `capture-source-regression-09-16`
-`release-review-09-16` `windows-system-notification-09-16` `pending-changes-triage-09-14`。
+⚠ 本索引旧版把 `winml-migration-plan` **同时**列进 MSIX 族和 OCR 族（两处都写了它）。
+分层必须二选一，本次按内容归进 `reviews/ocr/`（它改的是 OCR 推理后端，与 MSIX 打包无关）。
 
-**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,388 行 / 2,292,021 B（2.18 MiB）**（2026-10-22 在本次提交树内实测；
-字节按 `git show HEAD:<path>` 的 LF blob 数——主工作树是 CRLF checkout，同一批 64 份从磁盘量是 2,309,524 B，虚高 0.76%），
-其中带日期 54 份、无日期 10 份（即 §三 那 10 份活文档）。含本索引是 65 份，行数要加上本文件自己的当前行数；
+零散快照的去向：`cicd-pipeline-review` `git-tracking-audit` `re-audit` `real-machine-test-report`
+`test-verification` `docs-staleness-audit` `pending-changes-triage` `release-review` → `repo-governance/`；
+`gpu-acceleration-availability` `root-cause-hdr-multimonitor` `capture-source-regression` → `capture/`；
+`windows-system-notification` `notification-implementation-research` → `notification/`。
+
+**体量（稳定口径：不含本索引自己）**：`docs/` 除本文件外 = **64 份 / 30,388 行 / 磁盘 2,310,697 B**（2026-10-22 分层**之后**实测）。
+分层前的对照数：同一批 64 份是 30,388 行 / 磁盘 2,309,524 B（blob 口径 2,292,021 B，主工作树 CRLF 虚高 0.76%）
+⇒ **行数一字未变**，字节 +1,173 = 96 处路径前缀替换的净增，证明搬家没动正文。
+其中带日期 54 份（52 份进 `reviews/*`，2 份是 `ledger/` 台账）、无日期 10 份（即 §三 那 10 份活文档）。含本索引是 65 份；
 本文件会被继续编辑，所以"含本索引"的行数不给死数。
 （上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.90 倍**，那份计数已过期，别拿它做体积或成本判断。
 同一天更早一次记的"60 份 / 28,973 行"在 `36374ac` 树里是真数，`f0fc56c` 把 4 份 10-07 快照落了地 ⇒ +4 份 / +1,361 行。）
@@ -80,11 +99,17 @@
 
 ## 五、孤儿（零入站引用，但仍是证据）
 
-判据 = 除本索引外没有任何跟踪文件写出它的全名（`git ls-files` 全文匹配，2026-10-21 在 `f0fc56c` 树内重跑）：
+判据 = 除本索引外没有任何跟踪文件写出它的全名（`git ls-files` 全文匹配，2026-10-21 在 `f0fc56c` 树内重跑；
+**2026-10-22 分层后按同一判据再跑一次 = 仍是 8 份，名单逐字相同** ⇒ 搬家没改变谁被引用）：
 
-`aot-and-store-publishing-analysis` · `compression-effort-3tier-design` · `docs-staleness-audit`
-· `pipeline-independent-review` · `pipeline-review-e2e` · `pipeline-review-plan` · `release-review`
-· `windows-system-notification`（均带各自日期后缀）
+`reviews/compression/compression-effort-3tier-design` · `reviews/msix-store/aot-and-store-publishing-analysis`
+· `reviews/notification/windows-system-notification` · `reviews/pipeline-review/pipeline-independent-review`
+· `reviews/pipeline-review/pipeline-review-e2e` · `reviews/pipeline-review/pipeline-review-plan`
+· `reviews/repo-governance/docs-staleness-audit` · `reviews/repo-governance/release-review`（均带各自日期后缀）
+
+⚠ 这条读数本身有个坑，本轮踩过：第一版尺子忘了把 `docs/README.md` 排除出引用者，结果只报 6 份
+——因为我在 §四 的"零散快照去向"里点名了 `docs-staleness-audit` 与 `windows-system-notification`，
+索引自己把这两份从孤儿名单里捞了出来。**判据里"除本索引外"这个限定词必须落到脚本里**，不然每改一次索引，孤儿数就漂一次。
 
 ⚠ 两处别扭：`docs-staleness-audit-2026-09-14.md` 自己点名了一堆本仓文档，却只被本索引提到——
 它就是当年那次"文档体检"的结论，**要查历史判定先看它**；`real-machine-test-report-2026-09-14` 与 `upstream-pr1-review-2026-10-16`
@@ -119,11 +144,18 @@
 
 ## 七、待你拍的六件（都是取舍，不是清理）—— 2026-10-22 六件全部处置完毕
 
-1. **54 份快照要不要真挪进 `docs/reviews/<族>/` —— 2026-10-22 拍板：不搬**
+1. **54 份快照要不要真挪进 `docs/reviews/<族>/` —— 2026-10-22 上午拍板"不搬"，同日晚上按维护者新令推翻：搬。**
+   原拍板理由（保留原文以免历史失踪）：
    （`CHANGELOG.md` 21、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `f0fc56c` 树内按 `git ls-files` 全文重跑，
    只数写成 `docs/<带日期文件名>` 的引用，"文件指自己"已排除——本索引列的是不带前缀的短名，所以它自己贡献 0 处）。
    台账 §54.4 记的"22 处"已过期 4 倍。
    ⇒ 现状维持不搬：分层已由本索引 §三/§四 给出，搬家只换来一次全仓引用改写（其中台账与快照里的 `名字:行号` 引用会整片错位）。
+   **推翻后的实测更正**：那句"`名字:行号` 引用会整片错位"是**过宽的**——错位只在**内容被编辑**时发生，
+   而 `git mv` 不改变任何一行，所以行号引用照旧有效。真正的代价只有一项：路径前缀改写。
+   实测量 = **96 处 / 35 个文件**（旧口径按 `docs/<名>.md` 数得 21+13+7=41 处，是只数了三份文件的子集，漏了 `.cs` 注释、`SECURITY.md`、CI 与 `docs/README.md` 自己）。
+   搬家后两条负样本都过了：对 54 份搬走的文件查旧扁平路径 = **0 处残留**；对 10 份活文档报出的"45 处残留"是我的探针把没搬的文件也算进去造成的假数，已撤回。
+   另确认：**没有任何在册脚本 / 门禁 / CI 用 `docs/*.md` 这类 glob 枚举文档**（命中 11 处全是文字引用），
+   所以分层不会造成"少枚举 54 份然后静默判绿"。
 2. **`TrimmerRoots.xml` + `App.csproj` 这一对 —— 2026-10-22 已处置：改成条件加载**（既没摘掉知识，也没假装它在起作用）：原来是 csproj 无条件 `<TrimmerRootDescriptor Include=…>`，
    但全仓 `PublishTrimmed/PublishAot/TrimMode/IsAotCompatible` **零命中**，`Publish.ps1:408-409` 自己写明
    "`CorePublishAot` 没有任何 csproj 消费"，且 `docs/roadmap-v0.4.md` 里 **AOT/裁剪 0 次提及**
@@ -170,15 +202,24 @@
 ## 八、这些数字怎么重跑
 
 ```bash
-# 份数（不含本索引）= 64
-ls docs/*.md | grep -vc '^docs/README.md$'                        # 磁盘口径；docs/README.md 自己不数
-# 行数 / 字节（blob 口径，与 §四 那组 30,388 行 / 2,292,021 B 逐字相等，2026-10-22 实跑对过）
+# 份数（不含本索引）= 64   ⚠ 2026-10-22 分层后 `ls docs/*.md` 只会给出顶层的 11 份，必须递归
+find docs -name '*.md' ! -name README.md -type f | wc -l           # → 64
+# 行数 / 字节（磁盘 CRLF 口径 = §四 的 30,388 行 / 2,310,697 B）
+find docs -name '*.md' ! -name README.md -type f -exec cat {} + | wc -l -c
+# blob（LF）口径：要在提交后按 HEAD 的新路径量；提交前用 git show HEAD:<旧路径>，两口径别混
 for f in $(git ls-files docs | grep -v '^docs/README.md$'); do git cat-file blob "HEAD:$f"; done | wc -l -c
-# 活文档（无 2026-MM-DD 后缀）：上面这条给 11 是含了本索引，去掉就是 §四 的 10 份
-ls docs/*.md | grep -v '2026-[0-9][0-9]-[0-9][0-9]'
-# 入站引用 / 孤儿：把每个 docs/<名> 在所有跟踪文本文件里搜一遍（排除构建副本、排除文件指自己）
+# 每个族目录的份数（= §四 那张表）
+git ls-files docs | sed 's|^docs/||' | awk -F/ 'NF>2{print $1"/"$2}NF==2{print "TOP:"$1}' | sort | uniq -c | sort -rn
+# 活文档（无 2026-MM-DD 后缀）：递归数给 11 = 10 份活文档 + 本索引
+find docs -name '*.md' ! -name 'README.md' -type f | grep -v '2026-[0-9][0-9]-[0-9][0-9]'
+# 搬走的文件有没有残留旧路径（判据 = 0）：拿 git diff --name-status 的 R 行逐个 basename 反查
+# 入站引用 / 孤儿：把每个文件名在所有跟踪文本里搜一遍（排除构建副本、排除文件指自己）
 # 断链：文中 token 命中 + 目标存在性两条一起判，只命中一条会误报
 ```
+
+⚠ **搬家本身踩过的一次尺子事故，记在这**：分层后第一版残留检查把 `docs/architecture-design.md`
+这类**根本没搬**的活文档也算成"残留 45 处"，差点被判成分层失败。负断言的候选集必须是
+**实际搬走的那 54 个名字**（从 `git diff --cached -M --name-status` 的 `R` 行取），不是 docs 下全部文件。
 
 ⚠ **行号引用换算**：2026-10-22 给 86 个自有源码文件各加了 2 行 SPDX 头 ⇒ 那之前写成 `名字:行号` 的引用一律 **+2 才是今天的行号**
 （受影响 5 个文件 / 16 处，全在带日期快照里，按"快照不回写"原则没有改）。引用这些串时先按这个偏移折一下。
@@ -204,3 +245,31 @@ ls docs/*.md | grep -v '2026-[0-9][0-9]-[0-9][0-9]'
 | 设计如此 | `tests/manual/**`(82 跟踪)、`scripts/probes/**`(16)、`scripts/precision/**`(21) | 手动取证件，本来就"无人调用"；计数口径 = `git ls-files`（`f0fc56c` 从 `tests/manual` 删掉 29 份零调用 harness，之前是 111）。`tests/manual` 磁盘 `os.walk` 195 文件 = 82 跟踪 + 113 生成件（`__pycache__`/输出），其中**未跟踪且未忽略 = 0**（`git ls-files --others --exclude-standard` 实测） |
 
 ⇒ 结论：**这个仓没有成片的死文件**。剩下的"精简"都是**取舍**而不是清理，全部列在 §七 等你拍。
+
+## 十、被忽略的本地产物层：谁能重跑、门禁观不观测它（2026-10-22 分层同轮新增）
+
+`artifacts/`、`publish/` 的非在册部分、`tests/output/`、`tests/manual/safety/*/` 整目录被忽略，
+对新克隆既跑不了也验不了——所以这张表**记的是角色，不是清单**（清单每天在变，记下来必烂）。
+
+| 落点 | 谁产的 | 门禁观测它吗 | 删了怎么回 |
+|---|---|---|---|
+| `artifacts/precision/<kind>` 与 `artifacts/precision/probe/<kind>` | `src/TrueToneCap.Tools` 的样张落点 + `scripts/precision/*.py` | **是**——`scripts/verify.ps1:406-438` 把 `probe/<kind>` 拷进 `<kind>` 再判，`:584` 另读 `probe/nvenc_color` | 跑一次门禁即重生；**删这个目录会让色彩判据集体失明** |
+| `artifacts/quality-ladder/v2/src.png` | 手工放的 4K 底图 | 间接——`scripts/probes/avif_backend_ladder_measure.py:171` 按路径读它 | 该探针手跑；`artifacts/quality-ladder/report-ladder.py` 族可重出其余 |
+| `artifacts/pr1-review/`（`tmp/` 已删） | 10-16 那次 PR 审查的取证现场 | 否 | `docs/reviews/upstream/upstream-pr1-review-2026-10-16.md` 记了当时的命令 |
+| `artifacts/t3-2026-09-28/` `display-audits/` `edid-fix/` `png-hdr-meta/` `ui-captures/` | 各自那轮的 App 自检 / `--display-audit` | 否 | 由 `tests/manual/safety/*-cell.ps1` 与 App 的 `--display-audit` 重跑 |
+| `artifacts/cleanup-20260926/` | **退路包**，不是清理对象 | 否 | 它的 `README.txt` 自写还原命令；里面还点名 `tests/output/dead_scan.py`、`build_quarantine.sh` 两个件——引用它们的文件本身未跟踪，**只按在册文本数引用会把这两个判成零引用** |
+| `artifacts/backup-consolidated/wt-gm-uncommitted-2026-10-21/` | §七-6 那处未提交改动的存档 | 否 | 别删；删了那条实验旋钮就没有副本 |
+| `publish/PLAN/{tools,fonts}` | `Publish.ps1:212,214` 的 `$toolsSrc/$modelsSrc` 从 `src/…/Resources` 与 `src/…/Models` 取源 | **是**——门禁的能力探测把 `publish/PLAN/tools/ultrahdr_app.exe` 当第二候选 | 重跑发布链；`tools-manifest.json` 有逐件 sha256 |
+| `publish/TrueToneCap-v0.3.9-beta/` | 按 `v0.3.9-beta` tag 重出的正式包 | 发布期校验读它的 `build-info.json` | 重新出包（`-OutputDir` 是 `Remove-Item -Recurse`，别指着旧目录跑） |
+| `publish/msix-0.3.7-from-backup-2026-10-21/` | §七-5 从已被 prune 的 git 对象导出的**唯一副本** | 否 | **不可再生**——原始对象已不在 `.git` 里，删了就没了 |
+| `tests/output/` `tests/manual/safety/*/` | harness 的 `--out` 落点 | 部分（`app-settings-migration` 等由门禁自己写） | 重跑对应 cell 脚本 |
+
+⚠ **本机的 `du` 不可信，别拿它当体积尺**：本轮 `du -sk publish/PLAN` 给 38,232 KB，
+而它的子目录 `du -sk publish/PLAN/tools` 单独给 186,093 KB——父比子小，自相矛盾。
+逐文件逻辑求和（PowerShell `Measure-Object Length -Sum` 或 Python `os.walk`）两处都给 181.7 MB / 17 个文件，
+与 10-21 台账记的"PLAN 182"一致 ⇒ 本节的体积数一律用逻辑求和口径，`du` 读数作废。
+
+⚠ 本轮两次自查纠正：① 分层后第一版残留检查把**没搬**的 10 份活文档也算成"残留 45 处"，差点误判分层失败；
+② "`tests/manual` 有 18 个遗留脚本"是用 `*.py|*.ps1|*.cs` glob 数的，里面混着 6 个在册文件，
+真实未跟踪遗留要问 `git ls-files --others --ignored --exclude-standard`。**负断言的候选集要从 ref 取，不能从 glob 取。**
+

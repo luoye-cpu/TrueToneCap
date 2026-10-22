@@ -1,6 +1,6 @@
 # TrueToneCap 管线完整审查 · 报告（round68，2026-10-04）
 
-- **计划**：`docs/pipeline-review-plan-round68-2026-10-04.md`。
+- **计划**：`docs/reviews/pipeline-review/pipeline-review-plan-round68-2026-10-04.md`。
 - **基线坐标**：HEAD `ca7ed99`（tag `v0.3.6-beta` 之后只差文档）。开工时工作树 **77 项未提交改动**（`M` 62 / `D` 4 / `??` 11），收工时 80 项——**多出的只有本轮新增的 `tests/output/` 产物与本计划文件，产品源码一行未动**（§7 有逐项核对）。
 - **上一轮门禁**：`tests/output/w9/gate-final2.log` = `GATE_RC=0` / 7 套件全通过 / **1738 断言** / 无未判格子；地板 `scripts/gate-baseline.json` = 1738。
 - **本轮门禁**：**6/7 套件逐套件与地板逐字一致（563 断言），`--unit-tests` 因环境不够未复核**（§1 说清为什么）。
@@ -277,7 +277,7 @@ lane 全部**只读**（不 build、不跑测试、不起产品进程）——�
 ## 7. 本轮账目
 
 - **产品源码改动：0 行。** 工作树开工 77 项 → 收工 80 项，多出的 3 项全在 `tests/output/`（本轮的日志与恢复件）与本计划文件；`M`/`D` 计数由 62/4 变 60/4（差异来自 `git status` 对 `tests/output` 内文件的分类，**产品源码无一行变动**）。
-- **新增文件**：`docs/pipeline-review-plan-round68-2026-10-04.md`（本计划）、`docs/pipeline-review-round68-2026-10-04.md`（本报告）、`tests/output/round68-2026-10-04/`（门禁三轮日志 + `scratch/` ），`tests/output/recovery-round68/`（退路）。
+- **新增文件**：`docs/reviews/pipeline-review/pipeline-review-plan-round68-2026-10-04.md`（本计划）、`docs/reviews/pipeline-review/pipeline-review-round68-2026-10-04.md`（本报告）、`tests/output/round68-2026-10-04/`（门禁三轮日志 + `scratch/` ），`tests/output/recovery-round68/`（退路）。
 - **退路**：`tests/output/recovery-round68/worktree-bytebackup.zip`（**172 文件、逐字节验证可还原**，sha256 `0409A0CBADBF0A2F0C1C1B462E067AE08406B4228F2061662CA418DB41787A60`）+ 两个 diff 补丁（参考用，**不作还原手段**）+ `manifest.txt`。
 - **门禁**：`[1/2]`–`[1.97/2]` 全部通过；7 套件中 6 套逐套件与地板逐字一致（**563 断言**），`--unit-tests` 记**环境不够、未复核**。
 - **未 commit / 未 push / 未打 tag**（逐次授权）。

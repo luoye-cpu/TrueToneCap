@@ -15,6 +15,24 @@
 | `manual/` | 一次性取证 harness 与分析脚本 | ⚠️ **默认不上传，入库需显式点名**：`.gitignore` 用 `tests/manual/*` 打底，再逐条 `!` 反选；`safety/`、`publish-probes/` 两个子目录整体反选 |
 | `output/` | harness 的运行产物（日志、样张、备份补丁） | ❌ `tests/output/` 整目录忽略 |
 | `src/TrueToneCap.Test/`（项目内，**不在本目录**） | 正式自动化测试（随 slnx 构建，被门禁实跑） | ✅ 上传 |
+| `src/TrueToneCap.Tools/`（项目内，**不在本目录**） | 需要**重新构建**才跑得动的产品侧探针（单 exe，`args[0]` 分派） | ✅ 上传 |
+
+## 探针的分工（2026-10-22 定死，免得再问一次）
+
+三处探针**不是重复**，按"它引用谁"分：
+
+| 位置 | 性质 | 为什么不合到一处 |
+|---|---|---|
+| `scripts/precision/*.py`（21） | **独立参照实现**：自己解析容器/码流，不调用产品代码 | 合进产品侧就失去"第二个读者"的意义，等于用被测者自己判自己 |
+| `scripts/probes/*`（16） | **产品现场/环境探针**：量本机能力、编码器矩阵、崩溃转储 | 与门禁同目录，被 `verify.ps1` 直接调用 |
+| `tests/manual/publish-probes/*.ps1`（15） | **发布链取证**：EDID/WGC/WMI 这类要在真机上按命令跑的 | 入库靠 `.gitignore` 点名反选，是审查点 |
+
+⚠ `src/TrueToneCap.Tools` 的 39 个 `args[0]` 分派分支里**只有 7 个设 `Environment.ExitCode`**
+⇒ 另外 32 个"跑完"不等于"判过"，退出码恒 0。门禁只调其中已带判据的那几个模式；
+手跑其余模式时**要读 stdout，不能只信 exit code**。这一格本轮只登记、未扩面（改 32 个分支属测试能力建设，不是内容规范化）。
+
+⚠ `tests/manual/cse-probe/` 是**实验件**：不在 `TrueToneCap.slnx`、csproj 里 opt-out 了中央包管理、无 `packages.lock.json`，
+它的唯一判据就是退出码（0=抓到，-1073741819=进程被 AV 打死）。不参与门禁，也不给它补 lock。
 
 ## 自动化测试
 
@@ -71,3 +89,8 @@ dotnet run --project src/TrueToneCap.Test -- --unit-tests   # 单套件
   撤销动作在智谱侧，删文件不等于密钥失效（见 `.gitignore:136-141`）。
 - 断言必须**可证伪**：避免 `x is null || ...` 这类恒真写法（无论成败都通过），
   此类断言会掩盖真实回归。
+- **本机归档位 = `C:\PLAN\TTC-archive\`（仓库外）**：2026-10-22 内容规范化轮定的规矩——
+  零引用但可能唯一持有的东西（退路 bundle、改前源码快照、`reverse-apply` 验不过的 WIP 补丁、
+  旧决策的观感样张）**整件搬出仓库**，不删也不留在工作树里。留着的危害不是体积，是检索：
+  `.gitignore:241-243` 就为"仓里的旧副本把陈述拖成要加限定句"记过一次。
+  反过来，**能重跑的**（构建产物、harness 的 `--out`、`publish/PACKAGE.md:21` 明写"别长期留着"的配套产物）直接删。

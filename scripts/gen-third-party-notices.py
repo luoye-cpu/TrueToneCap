@@ -94,7 +94,7 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
   在拿到可再分发的明确依据之前，这一项**未闭环**。
 
 - **界面图标轮廓**：本程序的界面图标不是运行时引用系统字体画的，而是**离线把字形轮廓抽出来、
-  以路径数据烘进 `TrueToneCap.dll`**（原因见 `docs/pipeline-and-usability-review-2026-10-01.md` §11-②：
+  以路径数据烘进 `TrueToneCap.dll`**（原因见 `docs/reviews/usability/pipeline-and-usability-review-2026-10-01.md` §11-②：
   本进程解析不出这些符号字体，图标会渲染成方块）。轮廓取自
   `C:\Windows\Fonts\SegoeIcons.ttf`（Family 名 `Segoe Fluent Icons`）与
   `C:\Windows\Fonts\segmdl2.ttf`（`Segoe MDL2 Assets`），共 32 条不同轮廓 / 46 处引用。

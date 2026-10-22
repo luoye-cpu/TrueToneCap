@@ -1,6 +1,6 @@
 # NVENC 小参分析与结论（2026-10-07）
 
-> 承接 `docs/encoder-params-and-smallest-tier-2026-10-07.md`（AVIF / JXL / WebP）。
+> 承接 `docs/reviews/compression/encoder-params-and-smallest-tier-2026-10-07.md`（AVIF / JXL / WebP）。
 > 本文件覆盖**其余编码器**：NVENC（硬件 AVIF）、JPEG LI（cjpegli）、PNG / TIFF（托管）。
 
 ---

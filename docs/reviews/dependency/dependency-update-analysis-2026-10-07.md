@@ -251,7 +251,7 @@ checkout 无额外参数、upload-artifact 传 path），改完跑一次 CI 即�
 | `ppocrv6_dict.txt` | 18,708 行 | 与官方 `inference.yml` 的 character_dict 逐条一致 | ✅ 一致 |
 
 官方还有 **tiny（det 1.7 MB / rec 4.3 MB）** 与 **small（det 9.4 MB / rec 20.2 MB）** 档，
-但它们相对 medium 是**精度降级**，不是"更新"。详见 `docs/ocr-model-replaceability-2026-10-07.md`。
+但它们相对 medium 是**精度降级**，不是"更新"。详见 `docs/reviews/ocr/ocr-model-replaceability-2026-10-07.md`。
 
 **唯一"新能力"型更新**：官方有 **语言专用 rec 模型**（如 `korean_PP-OCRv5_mobile_rec.onnx` 12.8 MB，
 实测可让韩文 0% → 100%）。这属于**功能新增**而非版本升级，已在该文档中单列建议。

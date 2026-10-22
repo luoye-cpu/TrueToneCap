@@ -1,7 +1,7 @@
 # TrueToneCap 管线完整审查与可用性分析 · 报告（2026-09-27）
 
 - **基线**：`v0.3.6-beta`（标签钉在发布提交 `4368eed`，HEAD `ca7ed99` 只差文档；工作树除本文件与计划文件外干净）。
-- **计划**：`docs/pipeline-and-usability-review-plan-2026-09-27.md`（目标 G1–G4、六条 lane、三级判据 T1/T2/T3、交付物 D1–D8、六个决策）。
+- **计划**：`docs/reviews/usability/pipeline-and-usability-review-plan-2026-09-27.md`（目标 G1–G4、六条 lane、三级判据 T1/T2/T3、交付物 D1–D8、六个决策）。
 - **本文当前状态**：批次 A 的基线取证已完成，批次 G（旧 P1×18 台账重判）首遍完成。批次 B/C/D/E/F 未开始 ⇒ G1（产出正确性全矩阵）与 G2（静默降级台账）**尚未回答**，本文不假装答过。
 
 ---

@@ -37,13 +37,13 @@
 >
 > **本文剩下的唯一未做项是任务 7（γ 阶段）**。但它的"验证方式"那一节要一并修：
 > 文中写"复用 `OcrAccBench`（Tools 项目）"，而 `--ocr-bench` 这一族模式**没有任何门禁调用方**
-> （`scripts/`、`.github/`、`Publish.ps1` 三处 grep 命中 0），只有 `docs/real-machine-test-report-2026-09-14.md`
+> （`scripts/`、`.github/`、`Publish.ps1` 三处 grep 命中 0），只有 `docs/reviews/repo-governance/real-machine-test-report-2026-09-14.md`
 > 与两份 `ocr-model-*` 文档记着当时的读数 ⇒ 做任务 7 之前要先把这条基准路重新接上，否则
 > "准确率提升 ≥5%" 这条验收项没有可跑的尺子。
 >
 > ⚠ **职责声明**：本文自 2026-10-20 起只承担 **γ 阶段（任务 7）的规格**，不再充当运行台账。
-> 每日推进、拍板与被推翻的结论在 `docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md`
-> 与 `docs/upstream-pr1-review-2026-10-16.md`；本文件与它们不重复记账，只在任务 7 开工/关闭时改这一份。
+> 每日推进、拍板与被推翻的结论在 `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md`
+> 与 `docs/reviews/upstream/upstream-pr1-review-2026-10-16.md`；本文件与它们不重复记账，只在任务 7 开工/关闭时改这一份。
 
 ---
 

@@ -113,7 +113,7 @@ public static class NativeEncoderGuard
     ///    实测：P/Invoke 触发 0xC0000005 后进程直接终止（退出码 -1073741819），
     ///    本方法的 catch 与调用方 finally 均未执行；且 LegacyCorruptedStateExceptionsPolicy
     ///    属性已不再写入 runtimeconfig（加与不加 runtimeconfig 逐字节一致）。
-    ///    详见 docs/pipeline-review-2026-09-15.md 的 P0-4。
+    ///    详见 docs/reviews/pipeline-review/pipeline-review-2026-09-15.md 的 P0-4。
     ///
     ///    保留这两个分支仅作文档/未来兼容之用，【不要】依赖它们做"崩溃已防护"的假设。
     ///    真正可靠的隔离是【子进程】：avifenc / cjxl / cwebp 已是子进程，崩溃只影响子进程；

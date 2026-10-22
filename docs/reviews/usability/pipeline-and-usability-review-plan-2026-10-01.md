@@ -30,7 +30,7 @@
 | 用户真实配置 | `OutputPath="D:\TTC"` 而本机无 D 盘 ⇒ 现有格子全靠"临时按字节改到仓库内再还原"绕过；**这条本身就是 U2** | `bin\...\TrueToneCap.settings.json`（198 B，10-01 04:50） |
 | 界面格式下拉 | 6 项：PNG / JPEG LI / JXL / AVIF / WebP / TIFF（`Core/Settings/FormatOrder.cs`，索引即盘上 `FormatIndex`；GainMap 不在表内） | 同上 |
 | 兜底覆盖层 | 已可主动到达（`TTC_FORCE_LEGACY_OVERLAY=1`），三臂取证做过一次；B 档删掉下层 GPU 供帧窗之后**没再复跑** | `tests/output/tierA-2026-10-01/preview-content-postB.log` |
-| 门禁 | 1645 断言全绿，但 App 侧仍以文本哨兵（T2）为主 ⇒ 绿的含义是"这行字在"，不是"这行跑过" | `docs/pipeline-and-usability-review-plan-2026-09-27.md` §3 |
+| 门禁 | 1645 断言全绿，但 App 侧仍以文本哨兵（T2）为主 ⇒ 绿的含义是"这行字在"，不是"这行跑过" | `docs/reviews/usability/pipeline-and-usability-review-plan-2026-09-27.md` §3 |
 
 ⇒ **这一轮的重点不在再找一批静态候选，而在把 U1 那张 24 格矩阵第一次量出来。**
 
@@ -97,8 +97,8 @@
 - **D-B** 降级可见性台账（W2/W3 合并成一张）
 - **D-C** 可用性分场景评级表（U5）
 - **D-D** 新锁与牙的实测记录（每条接上绿 / 改回红且点名 / 还原绿，三段齐才算）
-- **D-E** 报告 `docs/pipeline-and-usability-review-2026-10-01.md`（本轮唯一完整交付，含"我自己造成的事"与"仍需眼睛"两节）
-- **D-F** 交接 `docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 新开 §65，只追加
+- **D-E** 报告 `docs/reviews/usability/pipeline-and-usability-review-2026-10-01.md`（本轮唯一完整交付，含"我自己造成的事"与"仍需眼睛"两节）
+- **D-F** 交接 `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 新开 §65，只追加
 
 ---
 

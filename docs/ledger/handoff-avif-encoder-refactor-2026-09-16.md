@@ -94,7 +94,7 @@
 |---|---|
 | **NVIDIA / Intel 的 AV1 硬编都支持 10-bit**（AV1 Main10 profile）。8-bit 是**我们输入路径的实现限制**，不是硬件能力 | `NvEncoderNative.cs:29` 的 `NV_ENC_BUFFER_FORMAT_ARGB10` 常量**定义了却从未使用**；`MftEncoderNative.cs:91` 输入类型恒为 `NV12`（P010 才是 10-bit） |
 | 初版推测的三处改动里，**"选 Main10 profile"走错了方向**（位深与 profile 无关） | 实测：输出位深由 `NV_ENC_CONFIG_AV1.outputBitDepth` 决定，**与 profile 无关**。但"喂 ARGB10 输入"**方向没错，只是当时缺了另一半** |
-| ⚠ **2026-09-17 二次勘误（重要）** | 本节初版写"改 ARGB10 输入无效"是**错的**，实测推翻。`outputBitDepth`（输出）与 `inputBitDepth`（输入语义）必须**配套**：当时只改输入格式、`outputBitDepth` 仍是 8 ⇒ 10-bit 输入被降到 8。头文件那句 "Support for 8 bit input to 10 bit encode conversion only" 限制的是**转换方向**（不支持 10→8），不是禁止 10-bit 输入。**驱动实测**：AV1 输入格式含 `ARGB10`/`ABGR10`/`YUV420_10BIT`，`SUPPORT_10BIT_ENCODE=1`。阶梯判据实测：ARGB10 输入 → 真 10-bit 斜坡；8-bit 输入 → 4 级台阶。详见 `docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §3 |
+| ⚠ **2026-09-17 二次勘误（重要）** | 本节初版写"改 ARGB10 输入无效"是**错的**，实测推翻。`outputBitDepth`（输出）与 `inputBitDepth`（输入语义）必须**配套**：当时只改输入格式、`outputBitDepth` 仍是 8 ⇒ 10-bit 输入被降到 8。头文件那句 "Support for 8 bit input to 10 bit encode conversion only" 限制的是**转换方向**（不支持 10→8），不是禁止 10-bit 输入。**驱动实测**：AV1 输入格式含 `ARGB10`/`ABGR10`/`YUV420_10BIT`，`SUPPORT_10BIT_ENCODE=1`。阶梯判据实测：ARGB10 输入 → 真 10-bit 斜坡；8-bit 输入 → 4 级台阶。详见 `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §3 |
 | **容器层确实无需改动** ✅（此条原判断正确） | `IvfWriter.WriteAvif` 从 AV1 序列头解析 `bitDepth`，并据此写 av1C 的 `high_bitdepth` 与 `bd` —— 编码器吐 10-bit 码流，容器自动跟着变。**但见下方 🔴：该解析器本身有 bug** |
 | 另需考虑**广色域 SDR** | 用户指出 SDR 源不止 sRGB，还有 Display P3 / AdobeRGB 的广色域 SDR —— 这类内容 10-bit 才够用（8-bit 在 P3 渐变上有可见色带）。这是保留 10-bit 默认的实质理由 |
 
@@ -315,11 +315,11 @@ python .workbuddy-ai/runps.py Publish.ps1 -AllowDirty -Force    # 发布（-Forc
 
 | 文档 | 内容 |
 |---|---|
-| `docs/avif-encoder-benchmark-2026-09-16.md` | 性能基准：speed 甜点、位深/色度影响、**24s → 2.9s 优化全过程** |
-| `docs/image-codec-dependency-audit-2026-09-16.md` | 依赖版本审计（含 libaom/SVT 现状） |
-| `docs/notification-implementation-research-2026-09-16.md` | 通知方案调研（为何改用自绘浮层） |
-| `docs/root-cause-hdr-multimonitor-2026-09-16.md` | 多显示器 HDR 三个根因 |
-| `docs/capture-source-regression-2026-09-16.md` | "只有桌面无窗口"回归修复 |
+| `docs/reviews/encoder/avif-encoder-benchmark-2026-09-16.md` | 性能基准：speed 甜点、位深/色度影响、**24s → 2.9s 优化全过程** |
+| `docs/reviews/dependency/image-codec-dependency-audit-2026-09-16.md` | 依赖版本审计（含 libaom/SVT 现状） |
+| `docs/reviews/notification/notification-implementation-research-2026-09-16.md` | 通知方案调研（为何改用自绘浮层） |
+| `docs/reviews/capture/root-cause-hdr-multimonitor-2026-09-16.md` | 多显示器 HDR 三个根因 |
+| `docs/reviews/capture/capture-source-regression-2026-09-16.md` | "只有桌面无窗口"回归修复 |
 | `.workbuddy-ai/memory/2026-09-15.md` | **完整工作日志**（本轮所有决策、实测数据、踩坑） |
 
 ---
@@ -378,7 +378,7 @@ python .workbuddy-ai/runps.py Publish.ps1 -AllowDirty -Force    # 发布（-Forc
 | **Gain Map** | 8 | 忽略（Base 与灰度增益图均 8-bit）→ 死字段 | 恒 8 |
 | **WebP** | 8 | 8-bit 容器 | 恒 8（上一轮已修） |
 | **JPEG XL** | 8 / 16 | 走 16-bit PNG 中转，输出 16-bit 容器 | 保留 8/10/12（与现状一致，不引入行为变化） |
-| **PNG** | 8 / 16（10/12 仅 HDR 路径为真） | SDR 下落到 16-bit 容器 + `sBIT=8` | 保留（既有行为，另见 `docs/pipeline-and-usability-review-2026-09-15.md:321`） |
+| **PNG** | 8 / 16（10/12 仅 HDR 路径为真） | SDR 下落到 16-bit 容器 + `sBIT=8` | 保留（既有行为，另见 `docs/reviews/usability/pipeline-and-usability-review-2026-09-15.md:321`） |
 | **AVIF** | 由能力表协商 | 已协商并提示 | 不变 |
 
 改动：`SettingsService.NormalizeBitDepth`（按格式分派 + 更正过时注释）、

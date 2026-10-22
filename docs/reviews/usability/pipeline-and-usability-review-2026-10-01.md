@@ -1,6 +1,6 @@
 # 管线审查与实机可用性 · 报告（2026-10-01）
 
-计划见 `docs/pipeline-and-usability-review-plan-2026-10-01.md`。本文是本轮唯一完整交付；台账只在 §4 新开一节指过来。
+计划见 `docs/reviews/usability/pipeline-and-usability-review-plan-2026-10-01.md`。本文是本轮唯一完整交付；台账只在 §4 新开一节指过来。
 
 ## 0. 判词（先看这几句）
 

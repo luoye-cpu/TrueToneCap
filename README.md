@@ -228,10 +228,10 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 
 > 这一节只写**新增能力**与**工程规范**。缺陷的根因、判据设计、被实测推翻的旧结论都不在这里 ——
 > 面向用户的变更流水见 [CHANGELOG.md](./CHANGELOG.md)；09-15 之后的逐条判据与实证过程见
-> `docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md`（维护者文档）；更早版本（v0.3.3 及以前）的
+> `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md`（维护者文档）；更早版本（v0.3.3 及以前）的
 > NVENC 结构体偏移、GUID 实测值、容器布局等细节，**权威出处是代码自身的注释**
 > （`NvEncoderNative.cs` 的偏移表与 GUID 段、`ManagedTiffEncoder.cs`、`MftEncoderNative.cs` 等），
-> 完整叙述另见 `docs/pipeline-review-*.md` 与 git 历史。
+> 完整叙述另见 `docs/reviews/pipeline-review/*.md` 与 git 历史。
 
 ### 上游 PR #1 — VS-Cap 模式（2026-10-11 提交，2026-10-16 合入）
 

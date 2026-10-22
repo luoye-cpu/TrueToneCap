@@ -10,7 +10,7 @@
 
 只记**用户可感知的能力变化**与**工程规范**，一条一行、写现象和影响。
 缺陷的根因分析、判据设计、被实测推翻的旧结论，都在维护者文档里
-（`docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 及同目录其它 `docs/*.md`），
+（`docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 及同目录其它 `docs/*.md`），
 本节只留指针。09-15 之前写的长段落属历史遗留，完整版同样在 `docs/` 里，不再新增那种写法。
 
 ---
@@ -119,13 +119,13 @@
 > `v0.3.9-beta`（`36374ac`）的祖先（`git merge-base --is-ancestor` 实测）⇒ 它们**已随 0.3.9-beta 出货**，
 > 标题因此改成 `[0.3.9-beta 收录]`，正文一字未动。
 > 另：0.3.8-beta 是 2026-10-20 的手测构建（无 tag、未公开发布），其结论已被 0.3.9-beta 取代，
-> CHANGELOG 不单列该版——它的日志与结论记在 `docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §69/§70。
+> CHANGELOG 不单列该版——它的日志与结论记在 `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §69/§70。
 > 断言规模：0.3.9 段里那句"本轮实测 1841"是打 tag 那一笔的读数；tag 之后又落了 3 笔提交，
 > 现行地板与实测都是 **1867**（`scripts/gate-baseline.json`，2026-10-21 用 `-WriteGateBaseline` 重打）。
 
 ## [0.3.9-beta 收录] — 2026-10-07：真机安装 MSIX 实测（关闭"打包后才暴露"的验证盲区）
 
-> 报告：`docs/realmachine-msix-verification-2026-10-07.md`
+> 报告：`docs/reviews/msix-store/realmachine-msix-verification-2026-10-07.md`
 
 ### 突破：把"装不了"变成"能装"
 
@@ -176,7 +176,7 @@
 
 ## [0.3.9-beta 收录] — 2026-10-07：完整验证（从零重建）+ 修掉 2 条"没有牙"的判据
 
-> 报告：`docs/complete-verification-report-2026-10-07.md`
+> 报告：`docs/reviews/msix-store/complete-verification-report-2026-10-07.md`
 
 ### 验证方法与结论
 
@@ -254,7 +254,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 ## [0.3.9-beta 收录] — 2026-10-07：全仓管线审查 + 修掉自查发现的自启严重缺陷
 
-> 审查报告：`docs/pipeline-implementation-review-2026-10-07.md`
+> 审查报告：`docs/reviews/pipeline-review/pipeline-implementation-review-2026-10-07.md`
 
 ### 🔴 严重（自查发现并修复）：上一轮我写的反射自启恒失败且静默
 
@@ -336,7 +336,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 ## [0.3.9-beta 收录] — 2026-10-07：打包形态开机自启 + 仓库卫生修复
 
-> 上架就绪度复核见 `docs/store-readiness-gap-analysis-2026-10-07.md`。
+> 上架就绪度复核见 `docs/reviews/msix-store/store-readiness-gap-analysis-2026-10-07.md`。
 
 ### 修复：MSIX 打包后开机自启不生效（声明了但没实现）
 
@@ -386,7 +386,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 ## [0.3.9-beta 收录] — 2026-10-07：修复 MSIX 下设置与日志写不进去
 
-> 上架核查的延续，见 `docs/store-submission-guide-2026-10-07.md` §3.1b。
+> 上架核查的延续，见 `docs/reviews/msix-store/store-submission-guide-2026-10-07.md` §3.1b。
 
 ### 修复：MSIX 打包后**用户改的设置重启即丢**
 
@@ -440,7 +440,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 ## [0.3.9-beta 收录] — 2026-10-07：隐私政策（商店政策 10.5.1 合规）
 
-> 上架准备见 `docs/store-submission-guide-2026-10-07.md`（含免费账号申请流程与 WACK 实测结果）。
+> 上架准备见 `docs/reviews/msix-store/store-submission-guide-2026-10-07.md`（含免费账号申请流程与 WACK 实测结果）。
 
 ### 新增：`PRIVACY.md` + 应用内隐私入口
 
@@ -483,7 +483,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 > `SettingsService` 把设置只写**程序同目录**，且刻意**不降级到 %LOCALAPPDATA%**；
 > MSIX 包目录对应用只读 ⇒ **打包后用户改的设置重启即丢**（只有日志里一行提示）。
 > 已实测全仓不存在任何"打包感知"的存储分支。**这必须在提交商店前修掉** ——
-> 详见 `docs/store-submission-guide-2026-10-07.md` §3.1b。
+> 详见 `docs/reviews/msix-store/store-submission-guide-2026-10-07.md` §3.1b。
 
 ---
 
@@ -491,13 +491,13 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 ## [0.3.9-beta 收录] — 2026-10-07：MSIX 框架依赖开关（商店包体积减半）
 
-> 分析见 `docs/msix-size-and-publish-pipeline-analysis-2026-10-07.md`（含实测体积矩阵与实现记录）。
+> 分析见 `docs/reviews/msix-store/msix-size-and-publish-pipeline-analysis-2026-10-07.md`（含实测体积矩阵与实现记录）。
 
 ### 新增：`-FrameworkDependent`（商店包 MSIX 从 175.82 MB → **84.57 MB**，−52%）
 
 > ⚠️ **体积数字已在后续验证中更正**：同日又加入隐私政策窗口与若干修复后，代码量增加 ⇒
 > 最终实测为 **175.85 MB → 85.12 MB（−51.6%）**，build 口径 150.91 MB。
-> 详见 `docs/msix-size-and-publish-pipeline-analysis-2026-10-07.md` §9。下表保留当日原始测量值。
+> 详见 `docs/reviews/msix-store/msix-size-and-publish-pipeline-analysis-2026-10-07.md` §9。下表保留当日原始测量值。
 
 - 用法：`.\Publish.ps1 -Msix -FrameworkDependent`
 - 把 .NET 与 WinAppSDK 运行时交给目标机（商店包由 Windows 自动解析依赖），
@@ -542,7 +542,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 ## [0.3.9-beta 收录] — 2026-10-07：MSIX 打包（为微软商店上架铺路）
 
-> 分析见 `docs/msix-store-packaging-analysis-2026-10-07.md`（含实测配置推导与验收读数）。
+> 分析见 `docs/reviews/msix-store/msix-store-packaging-analysis-2026-10-07.md`（含实测配置推导与验收读数）。
 
 ### 新增：MSIX 打包能力（`-Msix`，与绿色包并行）
 
@@ -601,7 +601,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 ## [0.3.9-beta 收录] — 2026-10-07：依赖全面升级
 
-> 依据 `docs/dependency-update-analysis-2026-10-07.md` 的分批计划执行。
+> 依据 `docs/reviews/dependency/dependency-update-analysis-2026-10-07.md` 的分批计划执行。
 > 所有版本均经上游注册表/仓库实时核实，所有产物均经重建 + 哈希回填 + 测试回归。
 
 ### 安全：avifenc 内嵌 libpng 1.6.58 → 1.6.59（CVE-2026-46675）
@@ -703,7 +703,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 
 > 起因：微软 ORT 官方 DirectML 文档声明 **DirectML 进入 sustained engineering（维护模式）**，
 > 新功能开发已转向 WinML。DML 仍受支持，但运行时不再前进。
-> 完整论证、验收判据与风险登记见 `docs/winml-migration-plan-2026-10-07.md`。
+> 完整论证、验收判据与风险登记见 `docs/reviews/ocr/winml-migration-plan-2026-10-07.md`。
 
 ### 变更：OCR 推理运行时 `Microsoft.ML.OnnxRuntime.DirectML` 1.24.4 → `Microsoft.Windows.AI.MachineLearning`（WinML）2.4.89
 
@@ -895,7 +895,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 - 新增判据 20 条（7 套件总数 1787 → **1807**），覆盖：映射表逐格取值、
   **均衡档必须等于改动前的行为**（AVIF/WebP 不许因本功能而变）、坏值回落均衡档（不是最慢档）、
   三个下拉的 Tag ↔ 白名单 ↔ 实际字段三方对撞。
-- **其余编码器的小参也逐项实测过** —— 详见 `docs/other-encoders-params-analysis-2026-10-07.md`：
+- **其余编码器的小参也逐项实测过** —— 详见 `docs/reviews/compression/other-encoders-params-analysis-2026-10-07.md`：
   * **NVENC（硬件 AVIF）**：`tuningInfo` 已是 `HIGH_QUALITY`（最高质量档；2/3 是降延迟换质量、
     4 是无损不适合截图）。**不引入 `enableAQ`/`lookahead`**：那是往 `NV_ENC_RC_PARAMS`
     的裸内存偏移里塞新字段，而本仓已为该偏移表付过代价（"旧实现用 13/15/21，实为
@@ -936,7 +936,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 - 三条防护：尺寸不符则另分配（绝不截断）、复用槽只在缓冲真被采用时更新、
   仍持 `_frameLock` 拷贝（去掉的是分配，不是同步）。
 - 完整分析（含逐段实测、按收益/风险排序的其余 5 项建议）见
-  `docs/performance-analysis-2026-10-07.md`。
+  `docs/reviews/performance/performance-analysis-2026-10-07.md`。
   ⚠ 其中最大的一项 **`cjxl -e 9`**（JXL 编码 22.5 s vs 其它格式 0.5–3.7 s，实测降到
   `-e 7` 可省 22–23× 时间）**尚未改动**：它的收益是"时间换体积"，**需要产品决策**，不擅自改。
   📌 **已在随包 `cjxl` v0.11.2 → v0.12.0 升级后复测**：方向不变、数值微降
@@ -962,7 +962,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
   **但两条回读都在用**（SDR 供预览与 `?? GetDisplayPixels()` 兜底、
   HDR 供 >8-bit 编码），要减少就得动"源精度/预览/编码分派"的语义 ⇒ **本轮只测量，
   留待评审**，不擅自改。
-  **→ 已补设计提案 `docs/perf-G-readback-proposal-2026-10-07.md`**（三方案 + 逐行查证的数据流）。
+  **→ 已补设计提案 `docs/reviews/performance/perf-G-readback-proposal-2026-10-07.md`**（三方案 + 逐行查证的数据流）。
   提案里纠正了一个我起初写错的机制：`MainWindow` 的 HDR / SDR 两条分支**互斥**
   （`:1566` 走 HDR 时**从不读** `SdrPixels`），所以走 HDR 时那次 **40.2 ms 的 SDR 回读被直接丢弃**
   —— 这既是可省的一块钱，也说明 `?? GetDisplayPixels()` 那条兜底在真实流程里**从不触发**。
@@ -1057,7 +1057,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
   "受限令牌 + Low 完整性"只放行工作区与私有临时目录 ⇒ 从工作区内起的测试宿主写不了那个目录。
   这是**沙箱的既定设计**（不是本产品缺陷，真实用户环境无此限制）。本机出包前的全量门禁是用
   "把该目录临时换成指向工作区的 junction 并补 Low 标签"跑通 1738 断言全绿的，详见
-  `docs/pipeline-review-round68-2026-10-04.md` 与交接 §68。
+  `docs/reviews/pipeline-review/pipeline-review-round68-2026-10-04.md` 与交接 §68。
 - **动图录制是"卖出去但没接线"的功能**（`AnimationRecorder` 零实例化、`RecordHotkey` 从不注册），
   按既定口径**先待命**，本版未动。
 - **同毫秒文件名无存在性检测**（`{prefix}{yyyyMMdd_HHmmssfff}{ext}` + 原子写 `overwrite: true`）
@@ -1498,7 +1498,7 @@ MSIX 沙箱内子进程 + `%TEMP%`、设置持久化、取消是否真的立即�
 ### 🔍 软件管线审查修复（2026-09-15）
 
 对构建 / 依赖 / CI / 发布 / 测试 / 运行时全链路做了一次审查（详见
-`docs/pipeline-review-2026-09-15.md`），并修复其中判据明确的部分。
+`docs/reviews/pipeline-review/pipeline-review-2026-09-15.md`），并修复其中判据明确的部分。
 
 **构建与依赖**
 - **构建治理层首次入库**：`Directory.Build.props` / `Directory.Packages.props` /
@@ -1691,7 +1691,7 @@ internally from inputBitDepth -> outputBitDepth if bit depths differ. Support fo
 头文件那句 "Support for 8 bit input to 10 bit encode conversion only" 限制的是
 **转换方向**（不支持 10→8），不是禁止 10-bit 输入。实测：ARGB10 输入 +
 `outputBitDepth=10` ⇒ 解码亮度是真 10-bit 斜坡；8-bit 输入 ⇒ 4 级台阶（升位深）。
-详见 `docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §3。
+详见 `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §3。
 
 **第二阶段：权威布局 + 接线落地**
 
@@ -1795,7 +1795,7 @@ byte[]（8-bit BGRA 源）入口的 `EncodeSdrAsync` 同步钳 8：PNG/JXL/TIFF 
 PNG `rgba64be`（3.2KB/42ms）、TIFF `rgba64le`（14.1KB/14ms）、JXL
 `rgba64le,bits=10`（1.8KB/450ms）均为真高位深产物；AVIF Auto→NVENC ARGB10
 （0.6KB/63ms，ffmpeg 解码有效）；WebP 诚实 `yuv420p` 8-bit；8-bit 源 + 请求 10
-被双路径钳制正确压回。详见 `docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §8。
+被双路径钳制正确压回。详见 `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §8。
 完整 `scripts/verify.ps1`（含 [1.6/2] 发布门禁回归，此前被运行中的旧发布实例阻断）
 在用户授权关闭该实例后全绿。
 

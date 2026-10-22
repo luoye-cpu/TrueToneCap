@@ -1056,7 +1056,7 @@ public sealed unsafe class NvEncoderNative : IDisposable
     //     但【若源真有 10-bit 精度】（如 Float16 管线），ARGB10 输入是**有效且必需**的：
     //     实测（阶梯判据）ARGB10 输入产出真 10-bit 斜坡，8-bit 输入只能产出 4 级台阶。
     //     新增的 EncodeAv1Argb10 就是给这种情况用的。见
-    //     docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md §3
+    //     docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md §3
 
     /// <summary>枚举驱动针对指定 codec 支持的 profile GUID，返回第一个。
     /// <para>

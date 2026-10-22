@@ -14,7 +14,7 @@
 // 本 harness 直接驱动【真实的 OnnxOcrEngine】——不是探针级别的 SessionOptions 复刻，
 // 而是产品代码路径本身（含 _inferGate 串行化、张量池化、box 提取、CTC 解码）。
 //
-// 判据（对应 docs/winml-migration-plan-2026-10-07.md 的 A4/A5）:
+// 判据（对应 docs/reviews/ocr/winml-migration-plan-2026-10-07.md 的 A4/A5）:
 //   A4 : ≥100 次识别、双 EP、多尺寸，异常数必须为 0
 //   A5 : 并发调用（模拟"连点 OCR"）不得崩溃/死锁，且结果与串行一致
 

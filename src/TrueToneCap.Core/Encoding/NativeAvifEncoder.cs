@@ -497,7 +497,7 @@ public static class NativeAvifEncoder
 
     /// <summary>从 scRGB linear float[] 编码 HDR AVIF 文件（PQ + BT.2020 + 10-bit）。</summary>
     /// <remarks>
-    /// <b>死代码，没有调用方</b>（评估记录见 docs/avif-encoder-benchmark-2026-09-16.md 的"Y4M 直传"一节）。
+    /// <b>死代码，没有调用方</b>（评估记录见 docs/reviews/encoder/avif-encoder-benchmark-2026-09-16.md 的"Y4M 直传"一节）。
     /// ⚠ 若将来要启用：下面那句 <c>--cicp 9/16/9</c> 是<b>写死</b>的，而现行 HDR 路一律问
     /// <see cref="FormatHelper.BuildCicpArgs"/> / <see cref="FormatHelper.AvifMatrixCoefficients"/>
     /// 取值 —— 直接启用本方法会重新造出第二个事实源（交接 §31.3-10 同型问题）。

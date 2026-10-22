@@ -24,7 +24,8 @@ public static class OcrBoxDiag
         int w = bmp.Width, h = bmp.Height;
         Console.WriteLine($"图: {w}x{h}\n");
 
-        // 复刻 RunDetection 预处理
+        // 复刻 RunDetection 预处理【但 limitSide 故意用 736，与生产 OnnxOcrConfig.DetLimitSide=960 不一致】
+        // —— 这是已知漂移（见 OcrProbProbe.cs 头部那句警告），本文件的读数不能当成生产路径的读数。
         int limitSide = 736;
         float ratio;
         if (Math.Min(w, h) < limitSide)

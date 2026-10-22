@@ -184,9 +184,9 @@ NVENC SDK 13.1 会话与 AV1 编码均成功；LibAom 后端编码 163.7 KB / 2.
 | `TrueToneCap.slnx` | 补 App 的 `<Platform Project="x64" />` 映射 |
 | `src/*/packages.lock.json` ×5 | 删除反推版，改由 NuGet 原生生成 |
 | `docs/dependency-management.md` | §7 更正根因（APPDATA → ProgramFiles） |
-| `docs/dependency-inventory-2026-09-14.md` | §8.3 遗留事项标记已解决，附反推版差异实测 |
-| `docs/cicd-pipeline-review-2026-09-14.md` | 验证限制说明加「已解除」更正 |
-| `docs/re-audit-2026-09-14.md` | 加真实构建补验结论 |
+| `docs/reviews/dependency/dependency-inventory-2026-09-14.md` | §8.3 遗留事项标记已解决，附反推版差异实测 |
+| `docs/reviews/repo-governance/cicd-pipeline-review-2026-09-14.md` | 验证限制说明加「已解除」更正 |
+| `docs/reviews/repo-governance/re-audit-2026-09-14.md` | 加真实构建补验结论 |
 
 ---
 

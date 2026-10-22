@@ -7,7 +7,7 @@
 （`!publish/PACKAGE.md`），一直没写。
 
 本规范只管**命名与保留**。构建正确性的判据在门禁脚本与
-`docs/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 里，这里不重复。
+`docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` 里，这里不重复。
 
 ---
 

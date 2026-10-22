@@ -358,7 +358,7 @@ RESULT 正则命中真实输出（p=47 f=0 / p=93 f=0），并正确忽略人类
 | P1-5 | 版本/tag/CHANGELOG 脱节 | 新增 `CHANGELOG.md`（含 Unreleased 工程化条目）；`Publish.ps1 -Tag` 在 `[5.8/6]` 创建本地附注标签 `v<版本>` 并写入 `build-info.json`；**不自动 push**（打印命令给人执行） | ✅ 已实施 |
 | P1-9 | 无格式门禁 | `verify.ps1 -Format` 跑 `dotnet format --verify-no-changes`，**仅报告不阻断**（观察期） | ✅ 已实施 |
 | P2-13 | 产物无保留策略 | `Publish.ps1 -KeepLast N`；默认 0 = 不清理；只处理 `publish\TrueToneCap-*`，且当输出目录不在 `publish\` 下时**直接跳过** | ✅ 已实施（逻辑仿真验证，未实删） |
-| P1-7 | 62 项悬挂改动 | 新增 `docs/pending-changes-triage-2026-09-14.md`：按 diff 内容（非 mtime）判定归属，给出 6 批提交清单 | 🔶 分类完成，**提交待你确认** |
+| P1-7 | 62 项悬挂改动 | 新增 `docs/reviews/repo-governance/pending-changes-triage-2026-09-14.md`：按 diff 内容（非 mtime）判定归属，给出 6 批提交清单 | 🔶 分类完成，**提交待你确认** |
 
 ### 关键设计取舍：为什么用"显式跳过"而不是"跳过即通过"
 
