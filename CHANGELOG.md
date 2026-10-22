@@ -36,10 +36,12 @@
 - `.git` **167.8 MB → 65.5 MB**（−102.3 MB，−61%）：从全部历史剥掉两枚 FP32 OCR 模型 blob
   （`PP-OCRv6_medium_{det,rec}.onnx` 的 62,119,454 / 76,629,984 B 版本，只活在中间提交里）。
   **在册的 `src/TrueToneCap.App/Models/*.onnx`（31.1 / 38.4 MB）逐字节未动**，md5 前后相等。
-- ⚠ **公开克隆体积要等远端同步才会变**：`origin` 上仍是旧历史，一次 `git fetch origin` 就把旧提交连那 100 MB
-  一起拉回本地（实测 `.git` 复涨到 166.1 MB）。本地瘦身的持久性 = 是否对 `main` 与 10 个 tag 做 force-push，
-  这属远端不可逆动作，未经维护者点头不执行。退路 = `C:\PLAN\TTC-archive\all-refs-before-ocr-strip-2026-10-22.bundle`
-  （173,688,761 B，`git bundle verify` 通过，实测能取回被剥的那枚 76,629,984 B blob）。
+- ⚠ **公开克隆体积（2026-10-22 已同步远端）**：`git filter-repo` 会移除 `origin`；把 remote 加回去 fetch 一次，
+  旧历史连那 100 MB 会整条回来（实测 `.git` 复涨到 166.1 MB）——所以本地瘦身的持久性取决于远端是否同步重写。
+  本轮已用 8 个 `--force-with-lease=<ref>:<实测远端值>`（非裸 `--force`）推完 `main` + 7 个被重写的 tag，
+  `pre-push` 的完整门禁先行通过（1871 断言 / 0 失败）。推送后实测：GitHub **新裸克隆 68.1 MB**（此前约 166 MB），
+  一次 `git fetch --tags` 后本地仍 65.5 MB。`GET /repos/...` 的 `size` 字段还显示 174,456 KB，那是 GitHub 自己 GC
+  之前的账面数，别拿它当克隆体积。`0.1 / 0.1.3 / 0.1.5` 三个 tag 的 SHA 未变（它们的树本来不含被剥对象）。
 
 ### 受影响的可执行引用
 

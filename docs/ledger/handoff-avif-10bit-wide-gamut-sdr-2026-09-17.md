@@ -7990,3 +7990,31 @@ WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App
 `git cat-file -t 3093b25b…` 又返回 `blob` —— 旧历史在远端还是权威，一次 fetch 就整条回来。
 **结论**：`--strip-blobs-*` 这类历史重写，只有把 `main` 与全部 tag 一起 force-push 到远端才真正生效；
 在那之前，远端同步 = 本地成果清零。这条属远端不可逆动作，等维护者点头，不在本轮擅自执行。
+
+### 73.8 第一版剥离改坏了两个发布 tag 的树，本轮从 bundle 重建后修正并推送
+- **缺陷**：第一趟用了 `git filter-repo --invert-paths --path publish/PLAN/models`。按路径反转删除的是**树条目**，
+  作用于每一笔提交，因此 `0.3.2`(原 17 条 `publish/PLAN`) 与 `v0.3.3-beta`(原 13 条) 各自丢了 `models/` 下 3 条
+  （`git rev-parse 0.3.2:publish/PLAN/models/PP-OCRv6_medium_det.onnx` 报不存在）。
+  我当时的判据只验了 `HEAD^{tree}` 未变与提交数不变——**没验 tag 树**，所以这个改动带着"发布点被改过"的状态进了第二次重写。
+  blob 本身没丢（那两枚与在册模型共用对象），但"tag 树逐字可复现那次发布"这条性质对这两个 tag 已经不成立。
+- **修法**：从 10-22 的退路 bundle `git clone --bare` 重建原始历史（验回 HEAD 树 = `3e4dea25…`、
+  `0.3.2` = 17 条、`v0.3.3-beta` = 13 条、FP32 blob 在），然后**只用** `--strip-blobs-with-ids`
+  （按 blob ID 剥，只删指向被剥对象的树条目；那两枚 FP32 只存在于中间提交，故发布 tag 的条目原样保留）。
+  再把 bundle 点之后的那笔 CHANGELOG/台账提交用 `git reset --soft` + 重新提交接回新链，工作树未动过一秒。
+- **重建后判据**：HEAD 树逐字 `3e4dea25…`；11 个 ref / 46 笔提交；`0.3.2` 17 条含 models 3、`v0.3.3-beta` 13 条含 models 3；
+  `0.3.2` 起每个 tag 仍有 2 枚 `src/…/Models/*.onnx`；FP32 blob `cat-file -t` 报 GONE；`git fsck --full` 空。
+  附带发现：`0.1 / 0.1.3 / 0.1.5` 三笔 7 月的 tag **SHA 完全没变**——它们的树本来就不含被剥对象，
+  filter-repo 对无变化的提交保留原 SHA，所以影响面是 7 个 tag 而不是 10 个。
+- **推送**：`git push` 带 8 个 `--force-with-lease=<ref>:<刚 ls-remote 实测到的远端值>`（不是裸 `--force`），
+  远端若在我读完后动过就会直接失败。`pre-push` 的完整门禁先跑：**1871 断言 / 0 失败**。结果 8 个 ref 全部 forced update。
+- **推送后实测**：`origin/main` 与本地逐字相等；旧 tip `3ba4999` 与 FP32 blob 在本地都取不到；
+  一次 `git fetch --tags origin` 之后 `.git` 仍是 65.5 MB ⇒ **本地瘦身从此不再被 fetch 复原**（这条是 §73.7 的闭环）。
+  GitHub 端**新裸克隆 68.1 MB**（此前约 166 MB）；但 `GET /repos/...` 的 `size` 字段仍报 174,456 KB——
+  那是 GitHub 自己 GC 之前的账面数，**别拿它当克隆体积**，要验就真克隆一次。
+- **副作用两条，都记账不擅自处置**：
+  ① `refs/pull/1/head = 3a91130` 仍在远端，指向重写前的旧历史 ⇒ PR #1 的 base 与主线脱钩（10-17 起它本就已离主线，
+  这次只是彻底断），GitHub 自己存着该对象，不是我删的。
+  ② **`v0.3.5-beta` 的 tag 提交不在 main 上**：它的父 `ad7dd93`(v0.3.4-beta) 在 main，main 下一个 release 直接是
+  `7fff1f0`(v0.3.6-beta)，且 main 上没有任何提交与它同树 ⇒ 那次发布的仓库状态只存在于 tag 之下。
+  这不是本轮造成的（10-20 那次重写就把它留在了侧叶上），但它让"一条提交=一版本+tag"这条政策对 0.3.5-beta 失效；
+  要不要补一笔把它接回主线，属发布历史处置，等维护者定，本轮不动。
