@@ -8058,3 +8058,28 @@ WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App
   那是析取式判据，少一臂就削弱保护。它与 `src/…/Resources` 的逐字节重复是运行期需要，不是历史包袱。
 - 依赖 `10.0.12 → 10.0.13` 那笔（别的会话写的，未记账）本轮合并提交 `19bc5ff`，判据取 CI 原命令
   `dotnet restore TrueToneCap.slnx --locked-mode` 退出 0。
+
+## 76. 上古内容大扫除（2026-10-23）—— 判据是"谁把它当输出写"，不是"谁提到过它"
+- 下令："清理掉这些上古内容"。删除集：`artifacts/` 除 `precision/` 与 `quality-ladder/v2/` 之外全部
+  （`t3-2026-09-28` 32.8 MB、`cleanup-20260926` 18.3 MB、`pr1-review` 4.4 MB、`quality-ladder` 其余、
+  `display-audits`/`edid-fix`/`png-hdr-meta`/`ui-captures`、根层散件）+ `tests/output/` 整层 85 MB
+  + `tests/manual/safety/*.patch` + `official_models/` 132 MB + `.workbuddy-ai/rebuild-avifenc.log`
+  + 空壳 `obj/` ⇒ **230 项 / 274.1 MB**，工作区 2.07 → 1.71 GB（不含 `.git`）。守卫沿用 §73.3 修好的那道
+  （`git ls-files` 集合 + 目录前缀双向正控），结果 `SKIP-TRACKED=0`、`FAIL=0`、在册 500 一个没动、
+  `未跟踪且未忽略 = 0`。
+- **两条尺子的教训**：
+  ① 判"能不能删"要看**写侧**。`tests/output/` 里大量目录被跟踪文档点名引用（`realmachine-2026-10-01` 42 处、
+     `preview-content` 25 处），按"谁提到过"一条都不该动；但那些引用是**溯源注释**
+     （`CorePipelineTests.cs:1023/1514/1815/4822/4857` 写"这个读数是从哪份 log 取的"），不是运行期读取。
+     真正的运行期依赖只有 `verify.ps1:998/1121` 往 `tests\output\{app-settings-migration,app-window-probe}` **写**。
+     实测清空后跑一轮门禁：1871 断言 / 0 失败、exit 0，且那两个目录被门禁自己重建 ⇒ 判据成立。
+  ② `official_models/` 不是"git 覆盖不到的备份"而是**输出缓存**：`export_onnx_fp32.py:10` 的 `BASE` 就是它，
+     而它要的输入 `PP-OCRv6_medium_{det,rec}_infer/{inference.pdmodel,pdiparams}` 早就不在盘上（目录里只剩
+     `onnx_fp32/` 两个文件）⇒ 这份 FP32 从来就不是不可再生的孤本；`paddle2onnx`/`paddlepaddle`/`onnx` 三个模块
+     本机都能 import，原件属公开模型库。这条也是本台账 §七-5 里"OCR 模型按你的要求持续保留"被本轮下令变更的来由，
+     原句不回写，状态追加在 §七-5 下面。
+- **唯一真正没有任何后路的一笔，记死在这**：`cleanup-20260926/quarantine.tar.gz` 里 137 件从未进过 git
+  （与"git 史里真被删过的路径"求交集为空、`git log --all -- <路径>` 正控能命中已删文件、
+  `git rev-list --all --objects` 换实现重数仍为 0）。它不是备份而是孤本，本轮按"清理上古内容"删除，
+  从此**无处可取**。里面值得注意的是 `tests/output/prename/*.xaml` 五份改名前的窗体快照与 30 来份
+  08-10 期的一次性分析脚本；它们的结论都在 `docs/` 里，脚本本身没了。
