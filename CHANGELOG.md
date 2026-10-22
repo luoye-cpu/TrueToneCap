@@ -16,6 +16,26 @@
 ---
 
 
+## [未发布] — 2026-10-23：清理上古内容，工作区 2.07 → 1.71 GB
+
+- 删掉 **230 项 / 274.1 MB** 的本地产物：`artifacts/` 只留 `precision/`（门禁观测）与 `quality-ladder/v2/`
+  （探针按路径读 `v2/src.png`），其余（`t3-2026-09-28` 32.8 MB、`cleanup-20260926` 18.3 MB、`pr1-review` 4.4 MB、
+  `quality-ladder` 其余、`display-audits`/`edid-fix`/`png-hdr-meta`/`ui-captures`、根层散件）全部清除；
+  `tests/output/` 与 `tests/manual/safety/*/` 整层清空；`official_models/` 132 MB 删除；
+  另有 `tests/manual/safety/*.patch`、`.workbuddy-ai/rebuild-avifenc.log`、空壳 `obj/`。
+- 判据是**谁把它当输出写**，不是谁提到过它：跟踪文档里"读数取自某份 log"的溯源引用（`CorePipelineTests.cs`
+  多处）不构成运行期依赖；真正的运行期依赖只有 `verify.ps1:998/1121` 往 `tests\output\{app-settings-migration,
+  app-window-probe}` 写。⇒ 清空后重跑门禁 **1871 断言 / 0 失败**、退出 0，那两个目录由门禁自己重建。
+- `official_models/` 属可重出的输出缓存：`export_onnx_fp32.py` 的 `BASE` 就是它，而它需要的 Paddle 原件
+  `PP-OCRv6_medium_*_infer/` 早就不在盘上；`paddle2onnx`/`paddlepaddle`/`onnx` 本机均可 import。
+  **在册的 `src/…/Models/*.onnx`（66 MB）与包内 `data/Models/` 未动**，`download_models.ps1` 不需要重跑。
+- ⚠ 一笔真正的损失记死：`artifacts/cleanup-20260926/quarantine.tar.gz` 里 137 件**从未进过 git**
+  （三条独立验证），删了就没有任何后路，含 `tests/output/prename/` 五份改名前的窗体快照与 30 来份
+  08-10 期一次性分析脚本。它们的结论都在 `docs/` 里，脚本本身没了。
+- 未受影响：`.git` 66 MB、在册 500 个文件、`git status` 全净、`未跟踪且未忽略 = 0`、门禁观测的全部入口都在。
+
+---
+
 ## [未发布] — 2026-10-22（同日第四轮）：禁止一切自造备份/退路构筑，已清 585.7 MB；并合并 10.0.13 依赖
 
 ### 规矩（维护者下达，本轮起生效）

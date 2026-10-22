@@ -190,6 +190,9 @@
      被跟踪文档点名的产物（`realmachine-2026-10-01` 被 23 处引用等）一个没动。
    · **OCR 模型按你的要求持续保留**：`src/TrueToneCap.App/Models/*.onnx`（66 MB，跟踪件）、`official_models/`（132 MB）、
      包内 `data/Models/`（66 MB）都在，`download_models.ps1` 不需要重跑。
+     ⇒ **10-23 变更**：`official_models/` 已按"清理上古内容"删除。它不是孤本——`export_onnx_fp32.py:10` 的 `BASE` 就是它，
+     而它要的输入 `PP-OCRv6_medium_{det,rec}_infer/` Paddle 原件早就不在盘上；`paddle2onnx`/`paddlepaddle`/`onnx`
+     三个模块本机都能 import，原件属公开模型库。跟踪件 `src/…/Models/*.onnx` 与包内 `data/Models/` **未动**。
    · 合计：工作区（不含 `.git`）**4.79 GB → 1.69 GB**；含 `.git` **5.04 GB → 1.86 GB**。
 6. **`artifacts/wt-gm` 里那处未提交改动 —— 2026-10-21 已处置（按"弃 + 存档"）**：改动本体是
    `src/TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs` 在分离 HEAD `9ff00ad` 上把 `RescaleGainMap` 的因子 4 改成可读
@@ -248,6 +251,12 @@ find docs -name '*.md' ! -name 'README.md' -type f | grep -v '2026-[0-9][0-9]-[0
 
 ## 十、被忽略的本地产物层：谁能重跑、门禁观不观测它（2026-10-22 分层同轮新增）
 
+> **10-23 上古内容大扫除**：`artifacts/` 只留 `precision/`（门禁观测）与 `quality-ladder/v2/`（探针按路径读
+> `v2/src.png`）；`tests/output/`、`tests/manual/safety/*/` 整层清空；`official_models/`（132 MB FP32 缓存）删除。
+> 净回收 **274.1 MB / 230 项**，工作区（不含 `.git`）2.07 → 1.71 GB。
+> 判据不是"谁提到过它"而是**谁把它当输出写**——跟踪文档里那些"读数取自某份 log"的溯源引用不构成运行期依赖，
+> 清空后重跑门禁全绿即是证明。细节与那笔孤本账记在台账 §76。
+
 `artifacts/`、`publish/` 的非在册部分、`tests/output/`、`tests/manual/safety/*/` 整目录被忽略，
 对新克隆既跑不了也验不了——所以这张表**记的是角色，不是清单**（清单每天在变，记下来必烂）。
 
@@ -255,14 +264,14 @@ find docs -name '*.md' ! -name 'README.md' -type f | grep -v '2026-[0-9][0-9]-[0
 |---|---|---|---|
 | `artifacts/precision/<kind>` 与 `artifacts/precision/probe/<kind>` | `src/TrueToneCap.Tools` 的样张落点 + `scripts/precision/*.py` | **是**——`scripts/verify.ps1:406-438` 把 `probe/<kind>` 拷进 `<kind>` 再判，`:584` 另读 `probe/nvenc_color` | 跑一次门禁即重生；**删这个目录会让色彩判据集体失明** |
 | `artifacts/quality-ladder/v2/src.png` | 手工放的 4K 底图 | 间接——`scripts/probes/avif_backend_ladder_measure.py:171` 按路径读它 | 该探针手跑；`artifacts/quality-ladder/report-ladder.py` 族可重出其余 |
-| `artifacts/pr1-review/`（`tmp/` 已删） | 10-16 那次 PR 审查的取证现场 | 否 | `docs/reviews/upstream/upstream-pr1-review-2026-10-16.md` 记了当时的命令 |
-| `artifacts/t3-2026-09-28/` `display-audits/` `edid-fix/` `png-hdr-meta/` `ui-captures/` | 各自那轮的 App 自检 / `--display-audit` | 否 | 由 `tests/manual/safety/*-cell.ps1` 与 App 的 `--display-audit` 重跑 |
-| `artifacts/cleanup-20260926/` | 09-26 那次删除的 `quarantine.tar.gz`（137 件） | 否 | **待处置**：实测这 137 件从未进过 git ⇒ 不是 git 的重复备份，删了没有任何后路。按"禁止备份构筑"这条应处理掉，但要么先把还有用的按 `tests/manual` 反选纳进 git，要么整包删——等维护者定。它的 `README.txt` 还点名 `tests/output/dead_scan.py`、`build_quarantine.sh`，引用者本身未跟踪，**只按在册文本数引用会把这俩判成零引用** |
+| ~~`artifacts/pr1-review/`~~ | 10-16 那次 PR 审查的取证现场 | 否 | **10-23 已清**；命令与读数都在 `docs/reviews/upstream/upstream-pr1-review-2026-10-16.md` 里，现场文件没了 |
+| ~~`artifacts/t3-2026-09-28/` `display-audits/` `edid-fix/` `png-hdr-meta/` `ui-captures/`~~ | 各自那轮的 App 自检 / `--display-audit` 落点 | 否 | **10-23 已清**：由 `tests/manual/safety/*-cell.ps1` 与 App 的 `--display-audit` 重跑即回 |
+| ~~`artifacts/cleanup-20260926/`~~ | 09-26 那次删除的 `quarantine.tar.gz`（137 件） | 否 | **10-23 按"清理上古内容"删除**。删前实测这 137 件从未进过 git（三条独立验证，见台账 §76）⇒ 它是孤本而不是 git 的重复备份，从此无处可取；它们的结论都还在 `docs/` 里 |
 | ~~`artifacts/backup-consolidated/`~~ | 曾存 §七-6 那处未提交改动的副本 | — | **2026-10-22 已删**：备份构筑一律不许存在；那条旋钮的实测数已由 `docs/reviews/usability/pipeline-and-usability-review-2026-09-27.md` §⑧ 记在文档里 |
 | `publish/PLAN/{tools,fonts}` | `Publish.ps1:212,214` 的 `$toolsSrc/$modelsSrc` 从 `src/…/Resources` 与 `src/…/Models` 取源 | **是**——门禁的能力探测把 `publish/PLAN/tools/ultrahdr_app.exe` 当第二候选 | 重跑发布链；`tools-manifest.json` 有逐件 sha256 |
 | `publish/TrueToneCap-v0.3.9-beta/` | 按 `v0.3.9-beta` tag 重出的正式包 | 发布期校验读它的 `build-info.json` | 重新出包（`-OutputDir` 是 `Remove-Item -Recurse`，别指着旧目录跑） |
 | ~~`publish/msix-0.3.7-from-backup-2026-10-21/`~~ | §七-5 从已 prune 的对象导出的 0.3.7 MSIX | — | **2026-10-22 已删**：它是 `*-from-backup` 型备份构筑；真要这个包，按 `v0.3.7-beta` tag 重跑 `-Msix` 即可（构建产物不逐字节相同，但源码在树上） |
-| `tests/output/` `tests/manual/safety/*/` | harness 的 `--out` 落点 | 部分（`app-settings-migration` 等由门禁自己写） | 重跑对应 cell 脚本 |
+| `tests/output/` `tests/manual/safety/*/` | harness 的 `--out` 落点 | 部分（`app-settings-migration`/`app-window-probe` 由门禁自己写） | 10-23 整层清空。**实测门禁会自己重建这两个目录**：清空后跑一轮 = 1871 断言 / 0 失败，`tests/output/` 里长出那两项 |
 
 ⚠ **本机的 `du` 不可信，别拿它当体积尺**：本轮 `du -sk publish/PLAN` 给 38,232 KB，
 而它的子目录 `du -sk publish/PLAN/tools` 单独给 186,093 KB——父比子小，自相矛盾。
