@@ -1,7 +1,7 @@
 # TrueToneCap v0.4 长线规划
 
 > **规划日期**：2026-08-25  
-> **基线版本**：v0.3.2-beta (commit 0dd4215)  
+> **基线版本**：v0.3.2-beta (commit 0.3.2)  
 > **基线测试**：318 通过 / 0 失败 (Core 47 | Color 81 | Encoding 14 | Service 5 | OCR 10 | Usability 161)  
 >
 > ⚠️ **基线已过期（2026-09-14 核实）**：

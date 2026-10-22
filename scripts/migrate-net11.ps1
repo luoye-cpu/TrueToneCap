@@ -132,7 +132,7 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "   dotnet run --project src\TrueToneCap.Test -- --unit-tests"
     Write-Host ""
     Write-Host "📋 后续步骤:"
-    Write-Host "   1. 迁移计划原文已不在工作树（`0aece78` 删），要读它用: git show 0aece78^:docs/dotnet11-migration-plan.md"
+    Write-Host "   1. 迁移计划原文已不在工作树（`c4591a7` 删），要读它用: git show c4591a7^:docs/dotnet11-migration-plan.md"
     Write-Host "   2. 更新 Publish.ps1 中的版本号"
     Write-Host "   3. 更新 PACKAGE.md 中的版本号"
 } else {

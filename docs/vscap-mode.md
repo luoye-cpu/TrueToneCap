@@ -1,6 +1,6 @@
 # TTC 的 VS-Cap 模式
 
-2026-10-11，本地移植。TTC 基线为 `luoye-cpu/TrueToneCap@0916a2af7179b5bd19cc8b516399c823787ddbe3`（v0.3.3-beta），代码、模型和原生工具已拉齐。
+2026-10-11，本地移植。TTC 基线为 `luoye-cpu/TrueToneCap@v0.3.3-beta`（v0.3.3-beta），代码、模型和原生工具已拉齐。
 
 ## 使用
 

@@ -2,7 +2,7 @@
 # Copyright 2026 TrueToneCap contributors
 # 发布布局下 missingBackend 能不能归零 —— 交接账本 §30.5 的第一条"未验"。
 #
-# 为什么不是"直接跑那枚 v0.3.6-beta 的包"：包里的 App 出自 4368eed，里面还没有
+# 为什么不是"直接跑那枚 v0.3.6-beta 的包"：包里的 App 出自 v0.3.6-beta，里面还没有
 # missingBackend 这一类结局（它是本轮未提交的改动）。所以要在【当前构建的宿主】上造出
 # 发布布局的那一条性质 —— 而这条性质对判据来说只有一件事：
 #   <BaseDirectory>\native\ 里躺着 avifenc/cjpegli/cjxl/cwebp 四枚 exe

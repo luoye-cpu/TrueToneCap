@@ -8043,7 +8043,7 @@ public static class CorePipelineTests
     /// <para>为什么要有这条（2026-09-27，用户报「AVIF 缺少编码器选项」查出的一次发布期回归）：
     /// <c>AvifOptionsCard</c> 在 XAML 里是 <c>Visibility="Collapsed"</c>，而
     /// <c>AvifOptionsCard.Visibility = isAvif ? Visible : Collapsed</c> 那一行在
-    /// <b>cde6168（release: v0.3.5-beta，我自己做的那个发布提交）里被删掉了</b> ⇒
+    /// <b>v0.3.5-beta（release: v0.3.5-beta，我自己做的那个发布提交）里被删掉了</b> ⇒
     /// 「AVIF 编码器 / 色度采样 / .png 后缀」三行在任何状态下都不再出现，而 7 个套件全绿 ——
     /// 门禁对"控件存在但没人点亮"这一类完全失明：不崩、不报错、日志干净，只是界面上没有。</para>
     /// <para>判据形状：枚举 XAML 里同时带 <c>x:Name</c> 与 <c>Visibility="Collapsed"</c> 的开标签

@@ -692,7 +692,7 @@ public sealed partial class MainWindow : Window
         JpegLiOptionsCard.Visibility = isJpegLi ? Visibility.Visible : Visibility.Collapsed;
         WebPOptionsCard.Visibility = format == OutputFormat.WebP ? Visibility.Visible : Visibility.Collapsed;
         TiffOptionsCard.Visibility = format == OutputFormat.TIFF ? Visibility.Visible : Visibility.Collapsed;
-        // ═══ 2026-09-27 修回归：这一行在 cde6168（0.3.5-beta 发布提交）里被删掉了 ═══
+        // ═══ 2026-09-27 修回归：这一行在 v0.3.5-beta（0.3.5-beta 发布提交）里被删掉了 ═══
         // `AvifOptionsCard` 在 XAML 里是 Visibility="Collapsed"，全仓【只有这里】会点亮它，
         // 于是 AVIF 的「编码器 / 色度采样 / .png 后缀」三行在任何状态下都不再出现，
         // 只有后来拆出去的 AvifBitDepthCard 还亮着 —— 用户看到的就是"AVIF 没有编码器可选"。

@@ -7939,3 +7939,54 @@ WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App
 - 读数：重生成后基线 1,570 B、首三字节 `{` `CR` `LF`、python 按 **utf-8（不带 -sig）** 读通，总断言 1871 / unit 1308；整轮 exit 0。
 - 自纠：这是本仓第二次栽在"修一次只改一个文件、没改生成器"上（前一次是手改 `THIRD-PARTY-NOTICES.md` 而被生成器覆盖）。凡"产物不该长这样"的修复，落点必须在生成它的那行代码里，否则下一轮必复发。
 
+
+## 73. 内容规范化轮（2026-10-22）—— 根因、判据设计、被推翻的旧结论
+
+### 73.1 本机的 `du` 不能当体积尺（父目录报得比子目录小）
+`du -sk publish/PLAN` = 38,232 KB，而 `du -sk publish/PLAN/tools` 单独 = 186,093 KB —— 父 < 子，自相矛盾。
+同一批文件用逐文件逻辑求和（PowerShell `Measure-Object Length -Sum` 与 Python `os.walk` 两种实现）都得 181.7 MB / 17 个文件，
+且与本台账 §七-5 记的"PLAN 182"一致。**结论**：本轮之前我一度据此认为"publish/PLAN 掉了 144 MB"，那是读数坏的假案，已撤回。
+往后凡写进文档的体积数，口径必须是逻辑字节和，`du` 只用于相对比较。
+
+### 73.2 `git rev-list --objects` 的路径列不能用来给对象归因
+第一轮大对象清单把 `3093b25b` / `f8633ab3` 写成 `publish/PLAN/models/…`，我据此判断"剥这一个路径就能省 100 MB"。
+实际上该命令每个对象只印**一个**路径，而这两枚 blob 同时是 `src/TrueToneCap.App/Models/*.onnx` 在**历史提交**里的内容。
+所以第一趟 `--invert-paths --path publish/PLAN/models` 跑完，`.git` 只从 167.8 降到 166.0 MB。
+**正确做法**：从 `git ls-tree -r HEAD` 取"活对象集合"，再拿全历史 blob 与之做差，按 `%(objectsize:disk)` 排序——
+这才给出真数：死掉的大对象只有这 2 枚，合计 100.5 MB。第二趟用 `--strip-blobs-with-ids`（按 blob ID，不按路径）。
+判据 = 重写前后 `git rev-parse HEAD^{tree}` 逐字相等（`3e4dea25…`）+ `git rev-list --all --count` 不变 + 在册模型 md5 不变。
+
+### 73.3 PowerShell 的别名优先级高于函数：`Del` 被 `Remove-Item` 劫持
+删除脚本里的 `function Del($p,$why)` 全部没生效——命令解析顺序是 Alias > Function，`del` 本来就是 `Remove-Item` 的别名，
+于是 `Del <path> '<理由串>'` 变成 `Remove-Item <path> '<理由>'` ⇒ `PositionalParameterNotFound`，删除次数 0。
+第一次跑完打印的是 `deleted=0 archived=71`，靠"删除数与预期不符"才发现。
+**规矩**：自写脚本的函数名一律避开 `del/rd/erase/echo/cls`；且统计行必须把"应删/实删/跳过"三个数分开打印，
+只报一个总数会把全失败伪装成部分成功。
+
+### 73.4 负断言的候选集要从 ref 取，不能从 glob 取（本轮犯两次）
+- 分层后查"残留旧路径"，我用 `docs/<每个 docs 文件名>` 全量匹配，报出 45 处残留——其中 10 份是**根本没搬**的活文档。
+  候选集必须是 `git diff --cached -M --name-status` 里的 54 个 `R` 行，按它重跑 = 0 处残留。
+- "`tests/manual` 有 18 个遗留脚本"是用 `*.py|*.ps1|*.cs` glob 数的，里面混着 6 个在册文件；
+  真数是 `git ls-files --others --ignored --exclude-standard` 那一侧。
+**同一条教训的第三种形态**：给"引用计数"当尺子时，`keep`/`restore`/`precision` 这类通用词的 basename 命中数是被吹大的假引用
+（`keep` 报 97，实际是英文词"keep"的噪声），零引用一侧不受影响（噪声只会把数抬高），但"有引用"一侧不能拿它当保留理由的唯一依据。
+
+### 73.5 尺子必须内置正控，且正控要覆盖引用者集合的边界
+第一版引用尺子用 `New-Object System.Collections.Generic.Dictionary[string,string]`——PowerShell 把泛型参数里的逗号当位置参数拆开，
+词典是空的，于是三个正控全给 0，脚本自己 `ABORT: ruler blind`。改成 `[System.Collections.Generic.Dictionary[…]]::new()` 后过。
+更深的一课：**引用者集合的边界要和判据同定义**。`artifacts/cleanup-20260926/README.txt` 点名 `tests/output/dead_scan.py` 与
+`build_quarantine.sh`，而该 README 本身未跟踪；只拿"跟踪文本"当语料就会把这俩判成零引用、连带删掉退路包的还原工具。
+第二版把 `artifacts/**/{README*,manifest*,*.md}` 也进语料，并把 `dead_scan.py` 加为第四个正控，才判得准。
+
+### 73.6 §七-1 的分层判断被推翻，以及那句错话的更正
+同日拍板"不搬"的理由里写着"搬家只换来一次全仓引用改写（其中台账与快照里的 `名字:行号` 引用会整片错位）"。
+`git mv` 不增删任何一行 ⇒ 行号引用照旧有效，那半句是过宽的推论，实测也不成立（除索引外 64 份仍 30,388 行）。
+真实代价只有一项：路径前缀改写 96 处 / 35 个文件。原口径 41 处（21+13+7）是只数 `docs/<名>.md` 且只数三份文件的子集，
+漏了 `.cs` 注释、`SECURITY.md`、CI 与索引自己。
+另：`winml-migration-plan-2026-10-07.md` 在旧索引里同时挂在 MSIX 族和 OCR 族两处——分层必须二选一，按内容（改 OCR 推理后端）归 `reviews/ocr/`。
+
+### 73.7 本地瘦身不等于克隆瘦身：fetch 会把旧历史拉回来
+`git filter-repo` 会移除 `origin`。我把 remote 加回去并 fetch 了一次，实测 `.git` 从 65.5 MB 复涨到 **166.1 MB**，
+`git cat-file -t 3093b25b…` 又返回 `blob` —— 旧历史在远端还是权威，一次 fetch 就整条回来。
+**结论**：`--strip-blobs-*` 这类历史重写，只有把 `main` 与全部 tag 一起 force-push 到远端才真正生效；
+在那之前，远端同步 = 本地成果清零。这条属远端不可逆动作，等维护者点头，不在本轮擅自执行。

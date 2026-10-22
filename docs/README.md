@@ -48,10 +48,10 @@
 **本次逐条核过的具体不同步点（只有这两份需要动，其余点名符号都能在 `src/` 里搜到）**：
 
 - `architecture-design.md:30` 把 `Encoding/ManagedBmpEncoder.cs` 列进"**当前确实存在**"名单 ⇒ 该文件已于
-  `4368eed`(v0.3.6) 删除，且 `CorePipelineTests.cs:4063-4065` 有一条**反向断言**禁止它再出现。已就地更正。
+  `v0.3.6-beta`(v0.3.6) 删除，且 `CorePipelineTests.cs:4063-4065` 有一条**反向断言**禁止它再出现。已就地更正。
   同一句话里其余 5 个名字（`IccStore.cs` / `NativeEncoderGuard.cs` / `ManagedTiffEncoder.cs` /
   `AvifHardwareProbe.cs` / `GpuCapability.cs`）实测**都还在**，只有 BMP 这一条是假的。
-- `repo-hygiene-review.md`：`:111` 写 `HDRPreviewWindow.cs`"文件仍存在" ⇒ 已于 `a54bb5c`(v0.3.7) 删除
+- `repo-hygiene-review.md`：`:111` 写 `HDRPreviewWindow.cs`"文件仍存在" ⇒ 已于 `v0.3.7-beta`(v0.3.7) 删除
   （反向锁 `Test_Overlay_HasNoGpuBackgroundPath` 在位，`CorePipelineTests.cs:156/:4689`）；
   `:110` 那条"把 docs 合并成 3-4 份主题文档"与本文第一节的快照规则直接冲突。
   ⇒ 已按它自己的"状态更新"体例追加，原句不删。
@@ -94,12 +94,12 @@
 其中带日期 54 份（52 份进 `reviews/*`，2 份是 `ledger/` 台账）、无日期 10 份（即 §三 那 10 份活文档）。含本索引是 65 份；
 本文件会被继续编辑，所以"含本索引"的行数不给死数。
 （上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.90 倍**，那份计数已过期，别拿它做体积或成本判断。
-同一天更早一次记的"60 份 / 28,973 行"在 `36374ac` 树里是真数，`f0fc56c` 把 4 份 10-07 快照落了地 ⇒ +4 份 / +1,361 行。）
+同一天更早一次记的"60 份 / 28,973 行"在 `ce1e9e7` 树里是真数，`20a3198` 把 4 份 10-07 快照落了地 ⇒ +4 份 / +1,361 行。）
 后又一轮（2026-10-21 本次提交）把台账 §71（26 KB 地板史）从 gate-baseline.json 搬进主台账 ⇒ +13 行 / +27,440 B，份数不变。
 
 ## 五、孤儿（零入站引用，但仍是证据）
 
-判据 = 除本索引外没有任何跟踪文件写出它的全名（`git ls-files` 全文匹配，2026-10-21 在 `f0fc56c` 树内重跑；
+判据 = 除本索引外没有任何跟踪文件写出它的全名（`git ls-files` 全文匹配，2026-10-21 在 `20a3198` 树内重跑；
 **2026-10-22 分层后按同一判据再跑一次 = 仍是 8 份，名单逐字相同** ⇒ 搬家没改变谁被引用）：
 
 `reviews/compression/compression-effort-3tier-design` · `reviews/msix-store/aot-and-store-publishing-analysis`
@@ -119,7 +119,7 @@
 
 | 出处 | 指向 | 处置 |
 |---|---|---|
-| `scripts/migrate-net11.ps1:135` | `docs/dotnet11-migration-plan.md`（该文档在 `0aece78` 被删） | **已改**（2026-10-17）：脚本现在给出可取回原文的命令 `git show 0aece78^:docs/dotnet11-migration-plan.md`（实测 RC=0，标题 "TrueToneCap .NET 11 迁移计划"） |
+| `scripts/migrate-net11.ps1:135` | `docs/dotnet11-migration-plan.md`（该文档在 `c4591a7` 被删） | **已改**（2026-10-17）：脚本现在给出可取回原文的命令 `git show c4591a7^:docs/dotnet11-migration-plan.md`（实测 RC=0，标题 "TrueToneCap .NET 11 迁移计划"） |
 
 **以下 7 组曾被一轮审计当成"断链"报回来，逐条核过都不是**（写在这免得第三轮又报）：
 
@@ -146,7 +146,7 @@
 
 1. **54 份快照要不要真挪进 `docs/reviews/<族>/` —— 2026-10-22 上午拍板"不搬"，同日晚上按维护者新令推翻：搬。**
    原拍板理由（保留原文以免历史失踪）：
-   （`CHANGELOG.md` 21、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `f0fc56c` 树内按 `git ls-files` 全文重跑，
+   （`CHANGELOG.md` 21、主台账 13、`handoff-avif-encoder-refactor` 7；2026-10-21 在 `20a3198` 树内按 `git ls-files` 全文重跑，
    只数写成 `docs/<带日期文件名>` 的引用，"文件指自己"已排除——本索引列的是不带前缀的短名，所以它自己贡献 0 处）。
    台账 §54.4 记的"22 处"已过期 4 倍。
    ⇒ 现状维持不搬：分层已由本索引 §三/§四 给出，搬家只换来一次全仓引用改写（其中台账与快照里的 `名字:行号` 引用会整片错位）。
@@ -192,11 +192,11 @@
      包内 `data/Models/`（66 MB）都在，`download_models.ps1` 不需要重跑。
    · 合计：工作区（不含 `.git`）**4.79 GB → 1.69 GB**；含 `.git` **5.04 GB → 1.86 GB**。
 6. **`artifacts/wt-gm` 里那处未提交改动 —— 2026-10-21 已处置（按"弃 + 存档"）**：改动本体是
-   `src/TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs` 在分离 HEAD `ca7ed99` 上把 `RescaleGainMap` 的因子 4 改成可读
+   `src/TrueToneCap.Core/Encoding/JpegGainMapEncoder.cs` 在分离 HEAD `9ff00ad` 上把 `RescaleGainMap` 的因子 4 改成可读
    `TTC_GM_FACTOR`，文件里自己写明"体积实验专用、不进工作树"⇒ 是实验旋钮不是待落地功能（体积数已由 `pipeline-and-usability-review-2026-09-27.md` §⑧ 记下）。
    拆 worktree 前已存档：`artifacts/backup-consolidated/wt-gm-uncommitted-2026-10-21/`（改后文件逐字节副本 sha256 `374aea30…` + `uncommitted.patch`，
    实测 `git apply -p1 --check` 打到当前 main 通过、`--3way` Applied cleanly）。之后 `git worktree remove --force artifacts/wt-gm` 与
-   `.../wt-pr1` 都已执行，两个基座 `ca7ed99`/`36374ac` 经 `merge-base --is-ancestor` 证仍是 main 的祖先 ⇒ 没丢任何独有提交。
+   `.../wt-pr1` 都已执行，两个基座 `9ff00ad`/`ce1e9e7` 经 `merge-base --is-ancestor` 证仍是 main 的祖先 ⇒ 没丢任何独有提交。
    `artifacts/` 由 2,866.7 MB 降到 444.1 MB。
 
 ## 八、这些数字怎么重跑
@@ -242,7 +242,7 @@ find docs -name '*.md' ! -name 'README.md' -type f | grep -v '2026-[0-9][0-9]-[0
 | 同上 | `licenses/*.txt` 44 份 | 全部被 `licenses/INDEX.json` 点名（未点名 0 份） |
 | 惯例读取，非"无引用" | `.gitattributes`、`NuGet.config`、`.editorconfig`、`global.json` | git/MSBuild/NuGet 按约定读它们，不会有文本引用 ⇒ "零引用"对这类文件没有意义 |
 | 有出处的工具，未动 | `gen-msix-assets.py`、`publish-with-prebuilt.ps1`、`onnx_fp16_quantize.py`、`verify-package-content.ps1`、`migrate-net11.ps1` | 文档分别记为"可复现生成 / 新增入口 / 正式工具 / 产物内容核对 / 仅 2 个正式工具之一"。`verify-package-content.ps1` 的问题是**没有调用方**（§七-4），不是该删 |
-| 设计如此 | `tests/manual/**`(82 跟踪)、`scripts/probes/**`(16)、`scripts/precision/**`(21) | 手动取证件，本来就"无人调用"；计数口径 = `git ls-files`（`f0fc56c` 从 `tests/manual` 删掉 29 份零调用 harness，之前是 111）。`tests/manual` 磁盘 `os.walk` 195 文件 = 82 跟踪 + 113 生成件（`__pycache__`/输出），其中**未跟踪且未忽略 = 0**（`git ls-files --others --exclude-standard` 实测） |
+| 设计如此 | `tests/manual/**`(82 跟踪)、`scripts/probes/**`(16)、`scripts/precision/**`(21) | 手动取证件，本来就"无人调用"；计数口径 = `git ls-files`（`20a3198` 从 `tests/manual` 删掉 29 份零调用 harness，之前是 111）。`tests/manual` 磁盘 `os.walk` 195 文件 = 82 跟踪 + 113 生成件（`__pycache__`/输出），其中**未跟踪且未忽略 = 0**（`git ls-files --others --exclude-standard` 实测） |
 
 ⇒ 结论：**这个仓没有成片的死文件**。剩下的"精简"都是**取舍**而不是清理，全部列在 §七 等你拍。
 

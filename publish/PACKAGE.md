@@ -1,8 +1,8 @@
 # 打包与产物保留规范
 
 制定于 2026-09-26。起因很直接：`publish/` 里同时躺着 4 份 414 MB 的展开目录
-（`TrueToneCap-v0.3.5-beta`、`-s53`、`-cde6168`、`-i18n`）加两枚 09-24 的归档，共 2021 MB。
-根因有两条：**目录后缀是我每轮现编的**（`-s53`/`-cde6168`/`-i18n`，名字既不说状态也不说能不能删），
+（`TrueToneCap-v0.3.5-beta`、`-s53`、`-v0.3.5-beta`、`-i18n`）加两枚 09-24 的归档，共 2021 MB。
+根因有两条：**目录后缀是我每轮现编的**（`-s53`/`-v0.3.5-beta`/`-i18n`，名字既不说状态也不说能不能删），
 以及**从来没有"留几份"的规则** ⇒ 每出一次包就多一份。`.gitignore` 第 52 行早给本文件留了位置
 （`!publish/PACKAGE.md`），一直没写。
 
@@ -107,14 +107,14 @@ ls <目录>/TrueToneCap.settings.json ; du -sm <目录>/log     # ① 有没有�
 
 ## 7 清理记录
 
-**2026-09-26 第一次**：删三份被取代的展开目录 `TrueToneCap-v0.3.5-beta/`、`-s53/`、`-cde6168/`
+**2026-09-26 第一次**：删三份被取代的展开目录 `TrueToneCap-v0.3.5-beta/`、`-s53/`、`-v0.3.5-beta/`
 （414 MB × 3）。删前三份 `TrueToneCap.settings.json` 与四个日志文件先挪进
 `qoder-scratch\ttc-publish-userdata-2026-09-26\`，三对 settings 哈希相同、`log` 清单哈希相同。
 `publish/` 2021 MB → **782 MB，释放 1239 MB**。
 
 **同日第二次**：删两枚 09-24 归档 + 两个 `.sha256`（254 MB）。判定依据（实测）：
 仓库**没有 `v0.3.5-beta` 这个 tag**（最新是 `v0.3.4-beta`），两枚内 `build-info.json` 都是
-`commitSha 614a0b1` + `dirtyWorktree: true`，即未发布预产且已被今天的树取代。
+`commitSha v0.3.4-beta` + `dirtyWorktree: true`，即未发布预产且已被今天的树取代。
 删除前留档：`…win-x64.7z` 126,802,233 B / sha256 `9b34cc1f92e317b1…`；
 `…build2.7z` 126,958,073 B / sha256 `b17271613c347231…`（两个 `.sha256` 与实算一致）。
 

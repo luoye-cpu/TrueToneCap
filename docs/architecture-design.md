@@ -29,7 +29,7 @@
 > `Encoding/IccStore.cs`、`Encoding/NativeEncoderGuard.cs`、
 > `Encoding/ManagedTiffEncoder.cs`、
 > `Encoding/AvifHardwareProbe.cs`、`Encoding/GpuCapability.cs`、`src/*/packages.lock.json`。
-> （这一行原先还把 `Encoding/ManagedBmpEncoder.cs` 算作"当前确实存在"：它已于 `4368eed`(v0.3.6) 删除，
+> （这一行原先还把 `Encoding/ManagedBmpEncoder.cs` 算作"当前确实存在"：它已于 `v0.3.6-beta`(v0.3.6) 删除，
 > 且 `CorePipelineTests.cs:4063-4065` 有一条反向断言禁止该文件与 `"BMP"` 字面量再出现 —— 2026-10-17 核对。）
 >
 > **结构树中带 `✗` 前缀的条目表示「该文件已不存在」**，其后注明现在的承担者，勿再按原名查找。
