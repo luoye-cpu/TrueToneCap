@@ -83,6 +83,17 @@ public sealed class AppSettingsData
     public bool GainMapMerged { get; set; } = false;
 
     /// <summary>
+    /// 结构迁移标记：本文件是否已经经过"免费翻译端点改为默认启用"的一次性翻面。
+    /// <para>需要它的只有一批人：v0.3.4 及更早的版本是<b>整份写回</b>的，那些老文件里钉着
+    /// <c>AllowUnofficialTranslateEndpoints: false</c>。而 2026-09-24 起 <c>Save()</c> 只写
+    /// "与默认值不同"的键 ⇒ 从没碰过这个勾的用户文件里根本没有这个键，改默认值会自动生效，
+    /// 不需要迁移。剩下那批被写死 false 的文件才是这一格的活儿。</para>
+    /// <para>与 <see cref="GainMapMerged"/> 同样的理由<b>不借</b> <see cref="SettingsRevision"/> 当触发器：
+    /// 那个计数门控的是默认值表版本，借它会把全体用户的质量档再清一遍。</para>
+    /// </summary>
+    public bool FreeEndpointsMigrated { get; set; } = false;
+
+    /// <summary>
     /// JPEG LI 是否附带增益图（Ultra HDR）。2026-09-26 起 GainMap 不再是独立输出格式，
     /// 而是 JPEG LI 的一个选项；打开时管线内部仍走 <see cref="TrueToneCap.Core.Encoding.OutputFormat.JPEG_GAINMAP"/>
     /// 那条编码路径，且强制 HDR 输出。
@@ -290,13 +301,20 @@ public sealed class AppSettingsData
     public string YoudaoAppSecret { get; set; } = "";
 
     /// <summary>
-    /// 允许把 OCR 出来的原文发给 Google 的<b>非官方</b>端点（网页版 / Chrome 划词用的内部接口）。
-    /// <para>默认 false，两件事都要求它默认关：① 那两条不是公开 API，无 key 调用不符合 Google
-    /// 服务条款；② 截图里的文字可能含 token、身份证号、聊天记录，未经用户同意不外发。</para>
-    /// <para>开启路径只有这一个勾选框，且界面上必须同时写明这两点（见 MainWindow.Settings.cs）。
-    /// 关掉时 <c>TranslationService</c> 连请求都不会发，不是"发了但忽略结果"。</para>
+    /// 是否允许把 OCR 出来的原文发给<b>免费公共翻译端点</b>（Edge 内置口 / 必应网页版 / MyMemory / Google）。
+    /// <para>默认 <b>true</b>（2026-10-23 用户口径："不应该让用户手动填 KEY，免费端点应该考虑各种
+    /// 免费开放端点"）。此前默认 false 的实际后果不是"保护了谁"，而是<b>免费档开箱一条路都不通</b>：
+    /// 不填密钥就没有可用后端，而界面标签恰好写着"回退到 Google 非官方端点"，紧邻的说明又说 Google
+    /// 在国内实测超时 ⇒ 用户唯一看得见的出路只剩去注册拿 AppID。</para>
+    /// <para>这一条现在是 <b>opt-out</b>。代价必须由界面说清楚、且不许藏在折叠区里：
+    /// ① 截图里的文字（可能含 token、身份证号、聊天记录）会发给第三方；
+    /// ② 除 MyMemory 明写允许匿名之外，其余几家都是各家前端的自用接口，不是给我们用的公开 API，
+    /// 且页面改版就可能静默断掉。界面上的标签与说明要照这两点写。</para>
+    /// <para>关掉时 <c>TranslationService</c> 连请求都不会发，不是"发了但忽略结果"。</para>
+    /// <para>老文件里被写死的 <c>false</c> 由 <see cref="FreeEndpointsMigrated"/> 那一格翻一次；
+    /// 之后用户自己取消勾选就是明确意愿，迁移门已关，不会被下次启动改回来。</para>
     /// </summary>
-    public bool AllowUnofficialTranslateEndpoints { get; set; }
+    public bool AllowUnofficialTranslateEndpoints { get; set; } = true;
 
     /// <summary>
     /// 日志详细度档位：<c>Brief</c> / <c>Diagnose</c> / <c>Trace</c>（直接取 Core.LogDetail 的枚举名，

@@ -172,10 +172,10 @@ public sealed partial class MainWindow : Window
         LlmApiKeyTxt.Text = _settings.LlmApiKey;
         LlmModelTxt.Text = _settings.LlmModel;
         LlmPromptTxt.Text = _settings.LlmSystemPrompt;
-        // 有道官方开放平台凭据 + Google 非官方端点开关（整组只在 Free 模式下显形）
+        // 免费公共端点开关（默认开）+ 有道官方凭据（可选加速项）——整组只在 Free 模式下显形
         YoudaoKeyTxt.Text = _settings.YoudaoAppKey;
         YoudaoSecretTxt.Text = _settings.YoudaoAppSecret;
-        UnofficialGoogleChk.IsChecked = _settings.AllowUnofficialTranslateEndpoints;
+        FreeEndpointsChk.IsChecked = _settings.AllowUnofficialTranslateEndpoints;
         SetComboByTag(LogVerbosityCbo, _settings.LogVerbosity);
         ApplyLogVerbosity();   // 设置读进来才谈得上档位：在那之前的启动日志固定按 Brief 落
         SetComboByTag(TargetLangCbo, _settings.TargetLanguage);
@@ -382,7 +382,7 @@ public sealed partial class MainWindow : Window
             _settings.LlmSystemPrompt = LlmPromptTxt.Text;
             _settings.YoudaoAppKey = YoudaoKeyTxt.Text.Trim();
             _settings.YoudaoAppSecret = YoudaoSecretTxt.Text.Trim();
-            _settings.AllowUnofficialTranslateEndpoints = UnofficialGoogleChk.IsChecked == true;
+            _settings.AllowUnofficialTranslateEndpoints = FreeEndpointsChk.IsChecked == true;
             _settings.LogVerbosity = (LogVerbosityCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Brief";
             _settings.TargetLanguage = (TargetLangCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh-CN";
             // 同上：OcrLangCbo 在 ONNX 引擎下是空的（没有可选项），旧写法每次保存都把用户存过的语言抹成 ""

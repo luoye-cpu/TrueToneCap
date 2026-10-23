@@ -8083,3 +8083,73 @@ WinUI 把它变成原生 fail-fast，于是托管侧一行日志都没有、`App
   `git rev-list --all --objects` 换实现重数仍为 0）。它不是备份而是孤本，本轮按"清理上古内容"删除，
   从此**无处可取**。里面值得注意的是 `tests/output/prename/*.xaml` 五份改名前的窗体快照与 30 来份
   08-10 期的一次性分析脚本；它们的结论都在 `docs/` 里，脚本本身没了。
+
+## 77. 第二十九轮（2026-10-23）：翻译免费档改为开箱可用，Edge 免凭据端点接入 ✅
+
+维护者一句话推翻了 §35.2/§36 定的一条上限：**"不应该让用户手动填 KEY，这不是我要求过的内容，
+免费端点应该考虑各种免费开放端点"**。⇒ 免费公共端点从 opt-in 升成默认路径，免费档必须不填任何
+凭据就能翻。⚠ 我上一轮把"默认关"说成是他拍过的立场，引的是本节 §35.2 那句"维护者反驳『应该能免费调用』"——
+**方向读反了**：那句记录的是他在要求免费可用。教训：**引用台账里"用户说过 X"之前先读上下文，
+尤其是"反驳"这种双向词**；这类错会让下一轮拿它去挡用户本人。
+
+### 77.1 三条被推翻的旧结论（每条都有本轮一手读数）
+1. **"不存在免密的整句翻译通道"（README:319）不成立**。本轮从零重测 47 臂，成立的两条是
+   Edge `translatetext` 与必应 `ttranslatev3`，另加 MyMemory 匿名档；§35.2 那轮只测了有道/百度/必应/
+   Lingva/Google 五族，**从没测过 MyMemory 与 Edge**。⇒ 旧结论不是错在推理，是错在候选集没穷尽。
+2. **"Edge 不需要浏览器头"是我自己造出来的假读数**。取证用的是 `urllib`，它**替自己注入了**
+   `User-Agent: Python-urllib/3.x`，于是"我没设 UA"被读成"这个端点不需要 UA"。C# 侧 `HttpClient`
+   真的一个 UA 都不发 ⇒ 第一档当场 400 `Client Browser Version not supported`、静默降到必应，
+   而**离线形状判据当时全绿**。逮到它靠的是端到端用例把"谁交出的译文"印出来（新增 `LastBackendServed`）。
+   ⇒ 规矩：**凡"某个头/参数不需要"这类结论，必须用不会替调用方补头的客户端（`http.client`）重测一遍**。
+   重测结果：无 UA 或空 UA ⇒ 400；`curl/8.9.0`、`Python-urllib/3.12` 都 ⇒ 200，
+   **它只判这个头存在且非空，不解析浏览器版本** ⇒ 产品侧发诚实的 `TrueToneCap/desktop-translation-client`，
+   不冒充 Chrome（冒充等于把"哪天真开始挑版本"藏成只有抓包才能发现的依赖）。
+3. **MyMemory 官方 spec 页那句 "Max 500 bytes" 说歪了**：实测边界在**字符**——ASCII 501 字符被拒，
+   中文 300 字符（=900 UTF-8 字节）照常通过 ⇒ 按字节切会把能过的文本白切一半。
+   另抓到真件的一个形状陷阱：**拒绝时 `responseStatus` 是字符串 `"403"`，成功时是数字 `200`**，
+   且拒因写在 `responseData.translatedText` 里（HTTP 仍是 200）。
+   ⇒ 离线夹具第一版喂的是数字 403，产品代码恰好两种都解析所以照样绿——**夹具与真件不同形**这一族
+   在本仓是第四次以上；现在两种形状 + `null` 形状（对 `JsonValueKind.Null` 调 `GetString()` 抛
+   `InvalidOperationException`，而外层只兜 `JsonException`）各有一条卡。
+
+### 77.2 判据设计（+43 条，地板 1871→1914）
+五张新卡，每张都先跑一发变异证明有牙：
+`Test_FreeTranslateEndpointsAreOnByDefault`（默认开箱可用 + App 侧持久化默认值的源码哨兵，
+**读不到源文件判红而不是 Skip**——本仓 53 条文本哨兵"找不到就 Skip"的通病，见 §32.13 同族）；
+`Test_EdgeFreeEndpointShape`（裸字符串数组 / 省略 `from` 才是自动检测 / **非空 UA** / 四种失败形状）；
+`Test_MyMemoryCharLimitAndSilentRejection`（按字符不按字节 / 体内拒绝不许当译文 / 字符串与数字两种
+`responseStatus` / `null` 不许抛）；
+**`Test_FreeEndpointHintNamesARealControl`**（跨文件一致性：从 Core 返回值里抽 `「…」` 内的控件名，
+逐个要求在 `MainWindow.xaml` 里逐字存在）——起因是 §35.3 那条"告知整改"的提示让用户去勾一个
+**界面上根本不存在的**名字（带必应的那串字面量全仓只出现在提示里），而当时的判据只对 Core 那句做
+`Contains("非官方")` 关键词比对 ⇒ 两边各写一半照样全绿。这是"钉那一句在不在"和"钉谁等于谁"的差别。
+`Test_FreeEndpointsDefaultMigrationIsWired`（翻面的接线、盖章位置、门不借 `SettingsRevision`）。
+变异读数：**M1** 把 `EdgeClientUa` 置空 ⇒ 恰好红 2 条；**M3** 把界面标签改回旧的「允许回退到 Google…」
+⇒ 红 6 条且全部归属这一处（新卡 2 + 本地化闸门 4，其中 2 条是那些卡自己的自检臂）；
+**M5** 把 MyMemory 判长改成按 UTF-8 字节 ⇒ 恰好红 1 条。三发还原后 `--no-incremental` 重编再跑全量。
+
+### 77.3 一次性翻面为什么只需要覆盖一小批人（这条差点做成多余迁移）
+09-24 起 `Save()` 只写**与默认值不同**的键 ⇒ 从没碰过那个勾的用户，文件里**根本没有这个键**，
+改代码默认值对他们自动生效。需要迁移的只有 v0.3.4 及更早"整份写回"时代留下的那批钉死 `false` 的文件。
+门用自己的标记 `FreeEndpointsMigrated`（与 `GainMapMerged` 同一族理由：借 `SettingsRevision`
+会把全体用户的质量档再清一遍），章盖在唯一写盘出口 `Save()`。
+⇒ 被翻的这批人**不存在"主动关掉"**：默认关的年代里 `false` 就是缺省值，界面上没有比它更关的一档可关。
+`[1.97/2]` 那条 App 侧进程内自检（`--settings-migration`，58 臂 + 迁移 + 归一）本轮实测退出码 0。
+
+### 77.4 端到端读数（本机，中国大陆网络）
+默认配置、未填任何凭据：实发 `Please save the file before exiting.` → 收到 `请在退出前保存文件。`，
+**662 ms，交出译文的后端 = Edge (translatetext)**。修 UA 之前同一句是 2393 ms 且后端 = 必应（第一档静默失效）。
+四档实测延迟：Edge 0.47–0.58 s / 必应 1.06–1.20 s（n=6）/ MyMemory 0.81–1.41 s（n=6）/ Google 超时。
+官方 API 侧对照：有道 108 ms、百度 203 ms、腾讯 125 ms、阿里 155 ms——**要 key 但快一个量级**，
+这是"要不要引导用户填 key"在 CN 的真实性能代价，不是免费与否的道德问题。
+
+### 77.5 挂账（下一条接手看这里）
+| # | 事项 |
+|---|---|
+| 1 | ~~`[1.6/2]` 本轮没判~~ **已补跑通过**：第一遍确实判不了（要求 `TrueToneCap.exe` 未运行，而维护者正在手测 ⇒ 四场景齐红 + `dotnet run 0 次`），经授权 `taskkill /F` 终止 PID 123536 后完整门禁 **1947 断言 / 0 失败 / `[1.6/2]` 通过**。|
+| 2 | 三家的额度/限流阈值都没量出来：Edge 官方无说明（本轮 38 臂零限流）、必应与 MyMemory 的 429/验证码阈值未测。要测得长跑，且会消耗匿名额度（MyMemory 明写免费 5000 字符/自然日，**按 IP**）⇒ 属"要一句话"的动作，不擅自烧。|
+| 3 | Edge 那条"必需头"只验到 UA：`Origin/Referer/Accept` 是否可全剥没逐一剥净（探针第 1 节只控制 UA 与 Content-Type）。|
+| 4 | 界面新文案的英文面只过了闸门（覆盖率 + 死键 + 变异自检），**没有人眼读数**——本轮不想起产品进程（维护者正在用）。|
+| 5 | 离线档（不受墙影响、免认证且原文不出本机）：Windows 系统**没有**可调用的翻译 API（`Live Translation` 仍在 Planned；Phi Silica 要 LAF token 且大陆不可用）；真离线只剩 Bergamot/OPUS-MT 那条（模型 25.5–59.5 MB，MPL-2.0，Windows 嵌入靠第三方 `BergamotTranslatorSharp`，且模型托管在 `storage.googleapis.com`——本机今天恰好量到该域可达）。要不要走这条属产品决定。|
+| 6 | 收口形态（维护者 2026-10-23 拍）：本轮改动落成一笔 **v0.3.10-beta 发布提交**，并按"一条提交 = 一个版本"重出**同名**包 `publish\TrueToneCap-v0.3.10-beta`（旧那枚被他授权覆盖，里面他测出来的 `settings.json` 与当日 `log` 先挪到 `C:\PLAN\qoder-scratch\ttc-package-userdata-2026-10-23\v0.3.10-beta\` 并核对过 sha256）。**不推远端、不打 tag**（tag 要不要补由他定：`git tag -a v0.3.10-beta <发布提交>`）。|
+

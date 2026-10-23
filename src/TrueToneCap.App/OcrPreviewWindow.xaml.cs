@@ -487,15 +487,19 @@ public sealed partial class OcrPreviewWindow : Window
         try { previous?.Dispose(); } catch { /* 已被关窗路径释放过：忽略 */ }
         var ct = cts.Token;
 
-        // ═══ 先问一句"到底配了后端没有"（2026-09-21 告知整改）═══
+        // ═══ 先问一句"到底有没有可用后端"（2026-09-21 告知整改）═══
         // 扇出 N 行之前不先判断，N 行各自注定失败，而下面的行级容错会把原因全吞掉 ——
         // 用户看到的就是"⚠ 翻译完成（N/N 行失败，已保留原文）"：既没原因，也没出路。
+        // ⚠ 2026-10-23 补一条 Warn 落盘：这句话原先只进状态栏，而状态栏会被下一次点击盖掉，
+        //    日志里查不到"我点了翻译为什么没反应"这件事 —— "成功照打、失败无痕"的那一类盲区。
         if (!TranslationService.AnyBackendAvailable(_translationConfig))
         {
+            string why = TranslationService.DescribeBackends(_translationConfig);
+            LogService.Warn("OcrPreview", $"翻译未开始：一条后端都没配。{why.Replace("\n", "；")}", LogCategory.Network);
             DispatcherQueue.TryEnqueue(() =>
             {
                 TranslateBtn.IsEnabled = true;
-                InfoTxt.Text = "⚠ " + TranslationService.DescribeBackends(_translationConfig);
+                InfoTxt.Text = "⚠ " + why;
             });
             return;
         }
@@ -531,7 +535,7 @@ public sealed partial class OcrPreviewWindow : Window
             else
             {
             // ═══ P-4/R-5 修复: 并发限制 + 行级容错 ═══
-            // 旧实现 Task.WhenAll 无并发限制 → 免费通道 (有道/Google) 可能限流/封 IP;
+            // 旧实现 Task.WhenAll 无并发限制 → 免费通道 (Edge / 必应 / MyMemory) 可能限流/封 IP;
             // 且任一行异常导致 WhenAll 快速失败 → 全部译文丢失。
             // 新实现: SemaphoreSlim(4) 限并发 + 逐行 try/catch (失败行回填原文, 不影响其他行)。
             using var sem = new System.Threading.SemaphoreSlim(4);

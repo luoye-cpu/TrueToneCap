@@ -174,6 +174,9 @@ public sealed class SettingsService
                 // 结构迁移：GainMap 并入 JPEG LI（与"默认值表版本"各用各的门，见 GainMapMerged）
                 migrated |= MigrateGainMapMerge(Current);
 
+                // 结构迁移：免费翻译端点改默认开（同一族，另一扇门，见 FreeEndpointsMigrated）
+                migrated |= MigrateFreeEndpointsDefaultOn(Current);
+
                 // 默认值修订号迁移（必须早于 Normalize：先补历史账，再钳越界值）
                 migrated |= MigrateStaleDefaults(Current);
 
@@ -237,6 +240,9 @@ public sealed class SettingsService
         Current.SettingsRevision = AppSettingsData.CurrentSettingsRevision;
         // 结构迁移标记同理盖章：本 build 写出的文件必然已是"GainMap 并入 JPEG LI"之后的形态。
         Current.GainMapMerged = true;
+        // 也必然已是"免费翻译端点默认开"之后的形态 ⇒ 盖这一格，老文件里的 false 才不会被反复翻面，
+        // 而用户此后主动取消勾选的那次意愿也不会被下一次启动的迁移吃掉。
+        Current.FreeEndpointsMigrated = true;
         var json = SerializeDiffs(Current);
 
         // ═══ 2026-09-15 修复：原子写入（与 SecretStore.cs:121-137 对齐）═══
@@ -608,6 +614,35 @@ public sealed class SettingsService
             "GainMap 已并入 JPEG LI（一次性重映射，此前格式列表少一项会让裸索引静默指向别的格式）："
             + string.Join("，", notes) + "。增益图现在是 JPEG LI 面板里的开关。");
         return true;
+    }
+
+    /// <summary>
+    /// 一次性翻面：把免费公共翻译端点从「默认关、要用户显式勾选」改成「默认开、可以关」。
+    /// <para><b>谁真的需要它</b>：只有 v0.3.4 及更早那种<b>整份写回</b>的时代留下的文件 —— 里面钉着
+    /// <c>AllowUnofficialTranslateEndpoints: false</c>。2026-09-24 起 <c>Save()</c> 只写与默认值
+    /// 不同的键，没被碰过的键不落盘 ⇒ 那批人改了代码默认值就自动生效，本迁移对他们不做任何事。</para>
+    /// <para><b>为什么被翻的这批人不存在"主动关掉"</b>：默认关的年代里 false 就是缺省值，
+    /// 界面上没有比它更关的一档可关；勾上的人存的是 true，与本迁移同向。
+    /// 所以这一次翻面不会覆盖任何人的明确意愿。而门关上之后（<c>FreeEndpointsMigrated</c>），
+    /// 用户真的去取消勾选就永久生效 —— 那是迁移之后才会出现的状态。</para>
+    /// <para>门是 <c>FreeEndpointsMigrated</c> 而不是 <c>SettingsRevision</c>：与
+    /// <see cref="MigrateGainMapMerge"/> 同一个理由 —— 借默认值表那个版本门会连带把全体用户的
+    /// 质量档再清一遍。</para>
+    /// </summary>
+    internal static bool MigrateFreeEndpointsDefaultOn(AppSettingsData s)
+    {
+        if (s.FreeEndpointsMigrated) return false;
+
+        bool flipped = !s.AllowUnofficialTranslateEndpoints;
+        s.AllowUnofficialTranslateEndpoints = true;
+        if (flipped)
+        {
+            LogService.Info("SettingsService",
+                "免费翻译端点已翻成默认启用（2026-10-23 口径：免费档不该逼用户去注册密钥）。"
+                + "这份是整份写回时代的老文件，里面那条 false 是当时的缺省值、不是主动选择；"
+                + "不想把文字发给第三方的用户可在 设置 → 翻译 里取消勾选，取消后不会再被翻回来。");
+        }
+        return flipped;   // 只有真改了值才强制重写盘；盖章由 Save() 在唯一写盘出口统一做
     }
 
     private static void ClampTo(double current, Action<double> set, double min, double max, double def)

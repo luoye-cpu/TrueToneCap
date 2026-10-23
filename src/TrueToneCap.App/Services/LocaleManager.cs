@@ -238,18 +238,20 @@ public static class LocaleManager
             ["选择翻译引擎，OCR 识别后的文字将被翻译为目标语言"] =
                 "Pick the translation engine; OCR text is translated into the target language",
             ["模式"] = "Mode",
-            ["本档顺序：有道智云开放平台（需自备 AppID/密钥）→ 非官方端点（必应网页版 / Google，默认不启用）。「LLM 翻译 / 视觉翻译」两档里自定义 LLM 排在有道之前，失败才降级到这条链。"] =
-                "Order in this mode: Youdao Zhiyun open platform (bring your own AppID/secret) → unofficial endpoints (Bing web / Google, off by default). In the LLM / Vision translation modes the custom LLM runs before Youdao and falls back to this chain on failure.",
+            ["本档开箱即可用：不填任何密钥，按 Edge → 必应 → MyMemory → Google 的顺序依次尝试免费公共端点（2026-10-23 国内实测前三条各 0.5–1.4 秒出整句译文，Google 在本机超时）。「LLM 翻译 / 视觉翻译」两档里自定义 LLM 排在它们之前。"] =
+                "This mode works out of the box: with no key entered it tries the free public endpoints in order — Edge → Bing → MyMemory → Google (measured 2026-10-23 from a mainland-China network: each of the first three returns a full sentence in 0.5–1.4 s; Google timed out here). In the LLM / Vision modes the custom LLM runs before them.",
+            ["使用免费公共翻译端点（识别到的文字会发给第三方）"] =
+                "Use free public translation endpoints (recognized text is sent to third parties)",
+            ["代价要说清，这条默认开着不是隐瞒：① 截图里的文字（可能含 token、账号、聊天记录）会发到微软 / MyMemory 的服务器；② 除 MyMemory 明写允许匿名调用外，其余几家都是各家网页与浏览器前端的自用接口，不是给我们用的公开 API，页面一改版就可能静默断掉；③ 各家限制不同——Edge 免凭据、必应要先抓页面凭据且约 1 小时过期、MyMemory 单条 500 字符且匿名档 5000 字符每自然日（一整屏文字就能用完）。不想外发就取消勾选，然后填下面的凭据，否则本档将无法翻译。"] =
+                "The costs, stated plainly — this stays on by default and that is not a concealment: ① text from your screenshots (which may contain tokens, account names or chat history) is sent to Microsoft / MyMemory servers; ② apart from MyMemory, which explicitly permits anonymous calls, the others are each vendor's own web- and browser-frontend endpoints rather than public APIs meant for us, and they can break silently whenever a page changes; ③ the limits differ — Edge needs no credentials, Bing first scrapes page credentials that expire in about an hour, MyMemory allows 500 characters per request and 5000 characters per calendar day anonymously (one full screen of text uses it up). To keep text on this machine, untick this and fill in a credential below — otherwise this mode cannot translate.",
             ["有道 AppID"] = "Youdao AppID",
-            ["智云开放平台 应用 ID（留空则跳过有道）"] = "Zhiyun open-platform app ID (leave empty to skip Youdao)",
+            ["可选：填了就优先走官方 API（更快更稳，留空则直接走上面的免费端点）"] =
+                "Optional: with it filled the official API runs first (faster and steadier); leave empty to go straight to the free endpoints above",
             ["有道密钥"] = "Youdao secret",
             ["AppSecret — 仅本机 DPAPI 加密存储，不写进 settings.json"] =
                 "AppSecret — stored only on this machine via DPAPI, never written to settings.json",
-            ["凭据从哪来：登录 ai.youdao.com → 控制台创建应用 → 复制「应用ID / 应用密钥」。官方文档写明新用户注册即赠 50 元体验金（常见语种 48 元/百万字符 ⇒ 约 104 万字符），先扣体验金、用完才扣余额；本程序未实测到账时效与是否需要完善实名信息。"] =
-                "Where the credentials come from: sign in at ai.youdao.com → create an app in the console → copy the App ID / App secret. Official docs state new registrations receive ¥50 trial credit (common language pairs cost ¥48 per million characters ≈ 1.04 M characters), spent before any balance; this app has not measured credit timing or identity-verification requirements.",
-            ["允许回退到 Google 非官方翻译端点"] = "Allow fallback to unofficial Google translation endpoints",
-            ["这些是各家网页前端的自用接口，不是公开 API：勾选即表示你接受截图里的文字会被发给第三方，且自行承担其服务条款风险。必应网页版免密钥、2026-09-21 国内实测能出整句译文，但它的凭据约 1 小时过期、页面一改版就断；Google 那两个端点同日实测本机连接超时。"] =
-                "These are the vendors' own web-frontend endpoints, not public APIs: ticking this means you accept that text from your screenshots is sent to a third party and you carry the terms-of-service risk. Bing web needs no key and produced full-sentence translations in a 2026-09-21 test from a mainland network, but its token expires after about an hour and breaks whenever the page changes; both Google endpoints timed out on this machine the same day.",
+            ["凭据从哪来（可选，不是必需）：登录 ai.youdao.com → 控制台创建应用 → 复制「应用ID / 应用密钥」。官方文档写明新用户注册即赠 50 元体验金（常见语种 48 元/百万字符 ⇒ 约 104 万字符），先扣体验金、用完才扣余额；本程序未实测到账时效与是否需要完善实名信息。"] =
+                "Where the credentials come from (optional — not required): sign in at ai.youdao.com → create an app in the console → copy the App ID / App secret. Official docs state new registrations receive ¥50 trial credit (common language pairs cost ¥48 per million characters ≈ 1.04 M characters), spent before any balance; this app has not measured credit timing or identity-verification requirements.",
             ["LLM 配置"] = "LLM settings",
             ["OCR 识别文字后，通过 LLM API 翻译为高质量译文"] =
                 "After OCR, translate the text through an LLM API for higher-quality output",

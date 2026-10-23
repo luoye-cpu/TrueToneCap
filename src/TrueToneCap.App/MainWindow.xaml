@@ -489,17 +489,20 @@
                                         <ComboBoxItem Tag="ar">العربية</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <!-- 免费模式提示 + 凭据输入（仅 Free 模式可见，见 MainWindow.OcrSettings.cs） -->
+                                <!-- 免费模式提示 + 可选凭据（仅 Free 模式可见，见 MainWindow.OcrSettings.cs）
+                                     2026-10-23 顺序倒过来：免费端点默认就走、不需要任何密钥，密钥降成"可选加速项"。
+                                     原先这里是"先要 AppID、免密钥那条藏在默认关的勾选后面"，实际后果是
+                                     不注册就一条都翻不动，而紧邻的说明恰好写着那家免密钥端点在国内超时。 -->
                                 <StackPanel x:Name="FreeModePanel" Spacing="8">
                                     <TextBlock x:Name="FreeModeHint" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                               Text="本档顺序：有道智云开放平台（需自备 AppID/密钥）→ 非官方端点（必应网页版 / Google，默认不启用）。「LLM 翻译 / 视觉翻译」两档里自定义 LLM 排在有道之前，失败才降级到这条链。" TextWrapping="Wrap"/>
-                                    <Grid ColumnDefinitions="100,*"><TextBlock Text="有道 AppID" VerticalAlignment="Center"/><TextBox x:Name="YoudaoKeyTxt" Grid.Column="1" PlaceholderText="智云开放平台 应用 ID（留空则跳过有道）"/></Grid>
+                                               Text="本档开箱即可用：不填任何密钥，按 Edge → 必应 → MyMemory → Google 的顺序依次尝试免费公共端点（2026-10-23 国内实测前三条各 0.5–1.4 秒出整句译文，Google 在本机超时）。「LLM 翻译 / 视觉翻译」两档里自定义 LLM 排在它们之前。" TextWrapping="Wrap"/>
+                                    <CheckBox x:Name="FreeEndpointsChk" Content="使用免费公共翻译端点（识别到的文字会发给第三方）"/>
+                                    <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
+                                               Text="代价要说清，这条默认开着不是隐瞒：① 截图里的文字（可能含 token、账号、聊天记录）会发到微软 / MyMemory 的服务器；② 除 MyMemory 明写允许匿名调用外，其余几家都是各家网页与浏览器前端的自用接口，不是给我们用的公开 API，页面一改版就可能静默断掉；③ 各家限制不同——Edge 免凭据、必应要先抓页面凭据且约 1 小时过期、MyMemory 单条 500 字符且匿名档 5000 字符每自然日（一整屏文字就能用完）。不想外发就取消勾选，然后填下面的凭据，否则本档将无法翻译。"/>
+                                    <Grid ColumnDefinitions="100,*"><TextBlock Text="有道 AppID" VerticalAlignment="Center"/><TextBox x:Name="YoudaoKeyTxt" Grid.Column="1" PlaceholderText="可选：填了就优先走官方 API（更快更稳，留空则直接走上面的免费端点）"/></Grid>
                                     <Grid ColumnDefinitions="100,*"><TextBlock Text="有道密钥" VerticalAlignment="Center"/><TextBox x:Name="YoudaoSecretTxt" Grid.Column="1" PlaceholderText="AppSecret — 仅本机 DPAPI 加密存储，不写进 settings.json"/></Grid>
                                     <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
-                                               Text="凭据从哪来：登录 ai.youdao.com → 控制台创建应用 → 复制「应用ID / 应用密钥」。官方文档写明新用户注册即赠 50 元体验金（常见语种 48 元/百万字符 ⇒ 约 104 万字符），先扣体验金、用完才扣余额；本程序未实测到账时效与是否需要完善实名信息。"/>
-                                    <CheckBox x:Name="UnofficialGoogleChk" Content="允许回退到 Google 非官方翻译端点"/>
-                                    <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
-                                               Text="这些是各家网页前端的自用接口，不是公开 API：勾选即表示你接受截图里的文字会被发给第三方，且自行承担其服务条款风险。必应网页版免密钥、2026-09-21 国内实测能出整句译文，但它的凭据约 1 小时过期、页面一改版就断；Google 那两个端点同日实测本机连接超时。"/>
+                                               Text="凭据从哪来（可选，不是必需）：登录 ai.youdao.com → 控制台创建应用 → 复制「应用ID / 应用密钥」。官方文档写明新用户注册即赠 50 元体验金（常见语种 48 元/百万字符 ⇒ 约 104 万字符），先扣体验金、用完才扣余额；本程序未实测到账时效与是否需要完善实名信息。"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>

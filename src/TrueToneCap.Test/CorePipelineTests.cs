@@ -216,8 +216,13 @@ public static class CorePipelineTests
         Test_NativeEncodeTimeoutIsJudged();
         Test_NativeProbeTimeoutIsReachable();   // 上一条钉形态，这一条真拿挂死的子进程量时间
         Test_IccEmbeddableIsStructuralNotLength();   // §31.3-9：ICC 判据换成结构判据的三面反证
-        Test_UnofficialTranslateEndpointsAreOptIn();  // B-8：非官方翻译端点必须默认不发请求
+        Test_UnofficialTranslateEndpointsAreOptIn();  // B-8：端点开关【关掉】时必须一条请求都不发
         Test_TranslationBackendAvailabilityIsHonest();
+        Test_FreeTranslateEndpointsAreOnByDefault();   // 2026-10-23：免费档开箱可用，不许逼用户填 key
+        Test_EdgeFreeEndpointShape();
+        Test_MyMemoryCharLimitAndSilentRejection();
+        Test_FreeEndpointHintNamesARealControl();      // 提示里引号内的控件名必须在界面上逐字存在
+        Test_FreeEndpointsDefaultMigrationIsWired();
         Test_LlmFailureReasonIsClassified();
         Test_VisionTranslationIsWired();
         Test_BingWebEndpointShapeAndOptIn();            // 必应网页端点：同一条闸门 + 三个"看着像成功"的坑
@@ -2399,20 +2404,23 @@ public static class CorePipelineTests
     }
 
     /// <summary>
-    /// B-8（2026-09-20 许可合规审计）：Google 的两个<b>非官方</b>端点（网页版 <c>client=gtx</c>、
-    /// Chrome 划词 <c>client=dict-chrome-ex</c>）必须在开关关闭时<b>一个请求都不发</b>，
-    /// 而不是"照样发出去但忽略结果"。
-    /// <para>修之前 README 写"只走官方开放平台 API"，而这两个端点一直是默认降级链的一环
-    /// ⇒ 声明与实现矛盾；且 OCR 原文（可能含 token / 个人信息）会未经同意外发。</para>
+    /// B-8（2026-09-20 许可合规审计 → 2026-10-23 默认值改判）：Google 的两个<b>非官方</b>端点
+    /// （网页版 <c>client=gtx</c>、Chrome 划词 <c>client=dict-chrome-ex</c>）在开关关闭时必须
+    /// <b>一个请求都不发</b>，而不是"照样发出去但忽略结果"。
+    /// <para>⚠ 这条卡的<b>牙没变，变的是默认值</b>：2026-10-23 用户口径"不应该让用户手动填 KEY，
+    /// 免费端点应该考虑各种免费开放端点"⇒ 开关默认开（见
+    /// <see cref="Test_FreeTranslateEndpointsAreOnByDefault"/>）。这里继续钉的是"关掉就真不发"，
+    /// 那一半从来不是产品取向问题，而是"关着但偷偷发"这个形状本身不可接受。</para>
     /// <para>① ② ③ ④ 是<b>行为</b>判据（直接调用取端点的函数拿真值表）；
     /// ⑤ 是源码级判据，防止"函数改好了但没人调用它"—— 这类漂移本仓真实踩过
     /// （有道凭据从未注入，见 MainWindow.xaml.cs 的 2026-09-15 注释）。</para>
     /// </summary>
     static void Test_UnofficialTranslateEndpointsAreOptIn()
     {
-        // ① 默认值就是"关"
-        var cfg = new LlmConfig();
-        Assert("B-8/LlmConfig: 默认不启用非官方端点", !cfg.AllowUnofficialTranslateEndpoints);
+        // ① 开关关掉 ⇒ 连 URL 都不构造（默认值那一半由 Test_FreeTranslateEndpointsAreOnByDefault 钉）
+        var cfg = new LlmConfig { AllowUnofficialTranslateEndpoints = false };
+        Assert("B-8/LlmConfig: 显式关掉后 Google 两口一条都不返回",
+            TranslationService.UnofficialGoogleEndpoints(cfg.AllowUnofficialTranslateEndpoints, "你好", "en", null).Length == 0);
 
         // ② 关 ⇒ 连 URL 都不构造 ⇒ 客观上发不出请求
         var off = TranslationService.UnofficialGoogleEndpoints(false, "你好", "en", null);
@@ -2459,6 +2467,313 @@ public static class CorePipelineTests
                         + src.Split("clients5.google.com").Length - 1;
         Assert("B-8/端点字面量只出现在受控函数内（共 2 处）", occurrences == 2, $"实得 {occurrences} 处");
     }
+
+    /// <summary>
+    /// 2026-10-23 用户口径："不应该让用户手动填 KEY，免费端点应该考虑各种免费开放端点"。
+    /// 这条卡的不是某个端点的形状，而是<b>默认配置下用户开箱就能翻译</b>这件事 ——
+    /// 在那之前，免费档 + 不填凭据 = <c>AnyBackendAvailable</c> 为 false，点翻译只会换来一句
+    /// "还没有任何可用的翻译后端"，于是"免费"实际上等于"先去注册一个 AppID"。
+    /// <para>① ② 是 Core 侧行为真值（直接构造默认 <see cref="LlmConfig"/> 问它可不可用）；
+    /// ③ 是 App 侧持久化默认值的源码哨兵 —— Test 工程只引用 Core，够不到
+    /// <c>AppSettingsData</c>，所以只能钉源码形态（与 <c>Test_GainMapMerged_FormatIndexMigration</c>
+    /// 同一族手法）。少了 ③ 就是"Core 默认开了但 App 传下来的是 false"这种半截改动的盲区。</para>
+    /// </summary>
+    static void Test_FreeTranslateEndpointsAreOnByDefault()
+    {
+        var cfg = new LlmConfig();
+        Assert("默认配置: 免费公共端点是开着的（不需要用户勾选才用）",
+            cfg.AllowUnofficialTranslateEndpoints);
+        Assert("默认配置: 不填任何凭据也算『有后端可用』（否则点翻译只会得到去注册）",
+            TranslationService.AnyBackendAvailable(cfg));
+
+        // 默认配置下不该再走"三条路任选一条"那段劝退文案
+        string hint = TranslationService.DescribeBackends(cfg);
+        Assert("默认配置: 说明里不再宣称『还没有任何可用的翻译后端』",
+            !hint.Contains("还没有任何可用的翻译后端"), hint);
+        Assert("默认配置: 说明改为列出真正启用的那一条免费端点",
+            hint.Contains("免费公共端点"), hint);
+
+        var appSettings = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "AppSettingsData.cs"));
+        if (appSettings is null)
+        {
+            // 文件读不到 ⇒ 这一格的 ③ 判红而不是 Skip：App 侧默认值漂回 false 时，
+            // "Core 默认开、盘上默认关"这种半截改动会恰好藏在 Skip 里（本仓 53 条哨兵的通病）。
+            Assert("AppSettingsData.cs 可读（否则 App 侧默认值无人判）", false, "FindRepoFile 没找到该文件");
+        }
+        else
+        {
+            string src = File.ReadAllText(appSettings);
+            Assert("App 侧持久化默认值同为 true（钉代码形态，不钉关键词）",
+                src.Contains("public bool AllowUnofficialTranslateEndpoints { get; set; } = true;"),
+                "AppSettingsData 里这条属性没有 = true 的初值");
+        }
+    }
+
+    /// <summary>
+    /// Edge 免费端点（<c>edge.microsoft.com/translate/translatetext</c>）的线格式。
+    /// <para>为什么值得单独一条：它是 2026-10-23 本机实测里最好的一条免费路
+    /// （免凭据、468–577 ms、单条 4 万字符仍可用、14 个目标语言码原样通），
+    /// 而它有两个"写错就是 400、且 400 的响应体是空的"形状约束 ——
+    /// 空体意味着服务端不给原因，靠线上试错永远看不出坏在哪。两条都必须在离线判据里钉死：</para>
+    /// <list type="number">
+    /// <item><description>body 是<b>裸字符串数组</b>，不是对象数组也不是对象；</description></item>
+    /// <item><description>自动检测 = <b>不发 <c>from</c> 参数</b>；发 <c>from=auto</c> 会 400
+    /// （Google 那条 <c>sl = sourceLang ?? "auto"</c> 的写法照搬过来就是这条缺陷）。</description></item>
+    /// </list>
+    /// </summary>
+    static void Test_EdgeFreeEndpointShape()
+    {
+        const string t = "The output folder does not exist.";
+
+        Assert("Edge/开关关掉: 一个请求都不构造",
+            TranslationService.EdgeFreeEndpointRequest(false, t, "zh-Hans", null) is null);
+
+        var auto = TranslationService.EdgeFreeEndpointRequest(true, t, "zh-Hans", null);
+        Assert("Edge/自动检测靠【省略 from 参数】实现",
+            auto is not null && !auto.Value.url.Contains("from="), auto?.url ?? "<null>");
+        Assert("Edge/绝不发 from=auto（实测 400 空体，与 Google 的 auto 写法相反）",
+            auto is not null && !auto.Value.url.Contains("from=auto") && !auto.Value.url.Contains("from=AUTO"),
+            auto?.url ?? "<null>");
+
+        var explicitSrc = TranslationService.EdgeFreeEndpointRequest(true, t, "en", "zh-CN");
+        Assert("Edge/给了源语言就带上，且用 App 的原码不映射",
+            explicitSrc is not null && explicitSrc.Value.url.Contains("from=zh-CN")
+            && explicitSrc.Value.url.Contains("to=en"), explicitSrc?.url ?? "<null>");
+
+        Assert("Edge/body 必须是裸字符串数组（不能是对象、也不能是对象数组）",
+            auto is not null && auto.Value.body.StartsWith("[\"") && auto.Value.body.EndsWith("\"]")
+            && !auto.Value.body.Contains("{"), auto?.body ?? "<null>");
+
+        // ⚠ 这一条是本轮真发请求时逮到的缺陷的固化：.NET 的 HttpClient 默认一个 UA 都不发，
+        //    而该端点缺 UA 直接 400 "Client Browser Version not supported" ⇒ 第一档静默失效、
+        //    全部降到必应，而离线判据（URL 形状、body 形状）当时全绿。
+        //    用 urllib 取证时它替自己注入了 User-Agent: Python-urllib/3.x，所以"我没设 UA"
+        //    被误读成"这个端点不需要 UA" —— 仪器偷偷加的头，必须当成被测对象的一部分来量。
+        Assert("Edge/必须带一个【非空】User-Agent（缺了就是 400，实测 curl/Python-urllib 这类也算数）",
+            auto is not null && !string.IsNullOrWhiteSpace(auto.Value.ua), auto?.ua ?? "<null>");
+        Assert("Edge/UA 用产品自己的标识而不是冒充 Chrome（它不解析版本，冒充只会把依赖藏起来）",
+            auto is not null && auto.Value.ua.StartsWith("TrueToneCap/"), auto?.ua ?? "<null>");
+
+        // 原文里带引号/反斜杠/换行时，body 必须是**合法且往返一致**的 JSON —— 这一族的对位判据在
+        // Google 那条是"URL 编码不破坏查询串"，而 Edge 的原文进的是 body 不是 URL：照抄那条会写出
+        // 一个永不成立的断言（本轮第一版就是这样，红在"url 里没有原文"——红的是判据，不是产品）。
+        var nasty = TranslationService.EdgeFreeEndpointRequest(true, "a\"b\\c\nd#é", "zh-Hans", null);
+        bool roundTrips = false;
+        string parsed = "";
+        if (nasty is not null)
+        {
+            try
+            {
+                using var d = System.Text.Json.JsonDocument.Parse(nasty.Value.body);
+                var arr = d.RootElement;
+                if (arr.ValueKind == System.Text.Json.JsonValueKind.Array && arr.GetArrayLength() == 1)
+                {
+                    parsed = arr[0].GetString() ?? "";
+                    roundTrips = parsed == "a\"b\\c\nd#é";
+                }
+            }
+            catch (System.Text.Json.JsonException) { /* 留 parsed/roundTrips 给 detail 打印 */ }
+        }
+        Assert("Edge/原文含引号反斜杠换行时 body 仍是合法 JSON 且逐字往返",
+            roundTrips, $"实得 {parsed?.Replace("\n", "\\n") ?? "<解析失败>"}");
+        Assert("Edge/原文【不进 URL】（进 body；哪天有人把它拼进查询串，这条与上面那条会分开指向两种错法）",
+            nasty is not null && !nasty.Value.url.Contains("a%22b") && !nasty.Value.url.Contains("a\"b"),
+            nasty?.url ?? "<null>");
+
+        // ── 响应解析：成功形状与三种失败形状都要给出可行动的话 ──
+        var (good, goodNote) = TranslationService.ParseEdgeResponse(200,
+            """[{"translations":[{"text":"输出文件夹不存在。","backend":"MTRANS_MTIR"}]}]""");
+        Assert("Edge/正常形状取到译文", good == "输出文件夹不存在。", goodNote);
+
+        var (e400, note400) = TranslationService.ParseEdgeResponse(400, "");
+        Assert("Edge/400 空体要说『形状不对』并把两条已知错形写进话里（否则只剩『没有译文』）",
+            e400 is null && note400.Contains("体为空")
+            && note400.Contains("裸字符串数组") && note400.Contains("from=auto"), note400);
+
+        var (html, noteHtml) = TranslationService.ParseEdgeResponse(200, "<html><body>登录</body></html>");
+        Assert("Edge/200 但回的是网页 ⇒ 判失败而不是判成功",
+            html is null && noteHtml.Contains("不是 JSON"), noteHtml);
+
+        var (empty, noteEmpty) = TranslationService.ParseEdgeResponse(200, "[]");
+        Assert("Edge/空数组 ⇒ 判失败", empty is null && noteEmpty.Contains("空数组"), noteEmpty);
+
+        var (big, noteBig) = TranslationService.ParseEdgeResponse(400,
+            "Request exceeds the maximum allowed translation size.");
+        Assert("Edge/超长时把服务端那句原话带给用户（实测 4 万字符过、20 万被拒）",
+            big is null && noteBig.Contains("exceeds the maximum"), noteBig);
+
+        var svcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "TranslationService.cs"));
+        if (svcPath is null)
+            Assert("TranslationService.cs 可读（Edge 字面量的唯一性无人判）", false, "FindRepoFile 没找到该文件");
+        else
+        {
+            string src = File.ReadAllText(svcPath);
+            Assert("Edge 端点字面量全文件只出现一次（别处再拼一份就绕过了开关与形状约束）",
+                src.Split("edge.microsoft.com").Length - 1 == 1,
+                $"实得 {src.Split("edge.microsoft.com").Length - 1} 处");
+        }
+    }
+
+    /// <summary>
+    /// MyMemory 匿名档的两条实测硬事实：单条上限在<b>字符</b>上（不是官方文档写的 bytes），
+    /// 以及<b>被拒时回的是 HTTP 200 + 体内 responseStatus≠200，拒因塞在译文栏里</b>。
+    /// <para>后一条与必应的"HTTP 200 + 体内 statusCode=205"同族：任何"按状态码下结论"的实现
+    /// 都会把拒绝当成功、把拒因当译文显示给用户。前一条决定切分策略按什么单位算——
+    /// 按字节会把能过的文本白切一半（中文 300 字符＝900 字节实测照过）。</para>
+    /// </summary>
+    static void Test_MyMemoryCharLimitAndSilentRejection()
+    {
+        Assert("MyMemory/上限常量是 500 个字符", TranslationService.MyMemoryMaxChars == 500,
+            TranslationService.MyMemoryMaxChars.ToString());
+
+        var at = TranslationService.MyMemoryEndpointRequest(true, new string('a', TranslationService.MyMemoryMaxChars), "zh-CN", null);
+        Assert("MyMemory/恰好 500 字符 ⇒ 构造请求", at is not null, "<null>");
+
+        var over = TranslationService.MyMemoryEndpointRequest(true, new string('a', TranslationService.MyMemoryMaxChars + 1), "zh-CN", null);
+        Assert("MyMemory/501 字符 ⇒ 不发请求（发出去只会换来一句写在译文栏里的拒因）", over is null,
+            over?.url ?? "<null>");
+
+        // 中文 300 字符 = 900 UTF-8 字节：若哪天有人按字节判，这一条会当场红
+        var zh = TranslationService.MyMemoryEndpointRequest(true, new string('汉', 300), "en", null);
+        Assert("MyMemory/按【字符】不按【字节】判（中文 300 字符＝900 字节仍应放行）",
+            zh is not null && System.Text.Encoding.UTF8.GetByteCount(new string('汉', 300)) > TranslationService.MyMemoryMaxChars,
+            zh?.url ?? "<null>");
+
+        Assert("MyMemory/关掉开关 ⇒ 不构造",
+            TranslationService.MyMemoryEndpointRequest(false, "hello", "zh-CN", null) is null);
+
+        var auto = TranslationService.MyMemoryEndpointRequest(true, "hello", "zh-CN", null);
+        Assert("MyMemory/源语言缺省写 autodetect（不是 auto）",
+            auto is not null && auto.Value.url.Contains("langpair=autodetect"), auto?.url ?? "<null>");
+
+        // ⚠ 两个形状都要判：真件在【拒绝】时把 responseStatus 写成字符串 "403"，
+        //    成功时才写数字 200（2026-10-23 由 scripts/probes/edge_mymemory_free_endpoint_probe.py
+        //    第 3 节抓到）。本卡第一版只喂数字 403 —— 产品代码恰好两种都解析所以照样绿，
+        //    而真件形状一条都没测到（"夹具与真件不同形"这一族）。
+        var (strForm, strNote) = TranslationService.ParseMyMemoryResponse(
+            """{"responseData":{"translatedText":"QUERY LENGTH LIMIT EXCEEDED. MAX ALLOWED QUERY : 500 CHARS"},"quotaFinished":null,"mtLangSupported":null,"responseDetails":"QUERY LENGTH LIMIT EXCEEDED. MAX ALLOWED QUERY : 500 CHARS","responseStatus":"403","responderId":null,"exception_code":null,"matches":[]}""");
+        Assert("MyMemory/真件形状（体内 403 是字符串）⇒ 判失败，且不许把拒因当译文返回",
+            strForm is null && strNote.Contains("responseStatus=403"), strNote);
+
+        var (lenNote, lenBody) = TranslationService.ParseMyMemoryResponse(
+            """{"responseData":{"translatedText":"QUERY LENGTH LIMIT EXCEEDED. MAX ALLOWED QUERY : 500","match":1},"responseDetails":"","responseStatus":403}""");
+        Assert("MyMemory/同一条拒绝写成数字 403 时也必须判失败（两种形状都收，不许只认一种）",
+            lenNote is null && lenBody.Contains("responseStatus=403"), lenBody);
+
+        var (quota, quotaNote) = TranslationService.ParseMyMemoryResponse(
+            """{"responseData":{"translatedText":"MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY","match":1},"responseStatus":200}""");
+        Assert("MyMemory/额度用尽那句被写在译文栏里 ⇒ 不许当译文",
+            quota is null && quotaNote.Contains("额度"), quotaNote);
+
+        var (ok, okNote) = TranslationService.ParseMyMemoryResponse(
+            """{"responseData":{"translatedText":"输出文件夹不存在。","match":0.85},"responseStatus":200}""");
+        Assert("MyMemory/正常形状取到译文", ok == "输出文件夹不存在。", okNote);
+
+        var (junk, junkNote) = TranslationService.ParseMyMemoryResponse("<html>cf challenge</html>");
+        Assert("MyMemory/回的是网页 ⇒ 判失败", junk is null && junkNote.Contains("不是 JSON"), junkNote);
+
+        // 这一条钉的是解析器自己的崩口：对 JsonElement 的 Null 值调 GetString() 抛
+        // InvalidOperationException，而外层只 catch JsonException ⇒ 会变成"翻译服务炸一下"
+        // 而不是"这个后端失败并降级到下一条"。形状不确定时按失败处理，绝不许抛。
+        string? threw = null;
+        try
+        {
+            var (n, note) = TranslationService.ParseMyMemoryResponse(
+                """{"responseData":{"translatedText":"x"},"responseStatus":null}""");
+            threw = n is null && note.Contains("responseStatus=-1") ? "" : "判成了成功/原因不含状态码：" + note;
+        }
+        catch (Exception ex) { threw = "THREW:" + ex.GetType().Name; }
+        Assert("MyMemory/responseStatus 是 null 或缺字段 ⇒ 判失败而不是抛异常（外层只兜得住 JsonException）",
+            threw == "", threw ?? "<null>");
+    }
+
+    /// <summary>
+    /// 提示里引号内的那个界面控件名，必须真的存在于界面上。
+    /// <para>起因是一条真实缺陷：<c>DescribeBackends</c> 让用户去勾「允许回退到非官方翻译端点
+    /// （必应网页版 / Google）」，而界面上那条叫「允许回退到 Google 非官方翻译端点」——
+    /// 那串带必应的字面量<b>全仓只出现在提示里</b>，界面上一处都没有。后果是闭环的：
+    /// 免密钥那条路的标签指向 Google，而紧邻的说明恰好写着"Google 在国内实测超时"⇒
+    /// 用户照着提示找不到勾，唯一看得见的出路只剩去填 AppID。
+    /// 当时的判据只对 Core 那句话做 <c>Contains("非官方")</c> 关键词比对，两边各写一半照样全绿。</para>
+    /// <para>所以这条钉的是<b>跨文件的一致性</b>：从 Core 的返回值里把【引号内的标签】抽出来，
+    /// 逐个要求它在 <c>MainWindow.xaml</c> 里逐字存在。变异形态 = 把界面文案改回只提 Google，
+    /// 必须当场红。<b>读不到 XAML 判红而不是 Skip</b>（理由见 <c>Test_FreeTranslateEndpointsAreOnByDefault</c>
+    /// 里同一族的说明）。</para>
+    /// </summary>
+    static void Test_FreeEndpointHintNamesARealControl()
+    {
+        // 关掉开关才会走"三条路"那段提示 ⇒ 用显式关掉的配置来取这句话
+        string hint = TranslationService.DescribeBackends(new LlmConfig { AllowUnofficialTranslateEndpoints = false });
+        Assert("取到的是『一条都没配』那段提示（否则本卡没有输入可判）",
+            hint.Contains("还没有任何可用的翻译后端"), hint);
+
+        var labels = System.Text.RegularExpressions.Regex.Matches(hint, "「([^」]+)」")
+            .Select(m => m.Groups[1].Value).ToList();
+        Assert("提示里至少有一个【引号内的控件名】可判（一个都没有说明文案被改成了泛指，本卡就空转了）",
+            labels.Count >= 1, $"实得 {labels.Count} 个：{string.Join(" / ", labels)}");
+
+        var xamlPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"));
+        if (xamlPath is null)
+        {
+            Assert("MainWindow.xaml 可读（否则『提示引用的控件名』这一格完全没判）", false,
+                "FindRepoFile 没找到 MainWindow.xaml");
+            return;
+        }
+        string xaml = File.ReadAllText(xamlPath);
+
+        foreach (string label in labels)
+            Assert($"提示里引用的控件名逐字存在于界面：{label}", xaml.Contains(label));
+
+        // 反向半边：留痕句里引号内的名字同样必须是界面上真实的那一条
+        var disabled = System.Text.RegularExpressions.Regex.Match(
+            TranslationService.FreeEndpointsDisabledNote, "「([^」]+)」");
+        Assert("关掉后端时的留痕句也引用真实控件名",
+            disabled.Success && xaml.Contains(disabled.Groups[1].Value),
+            TranslationService.FreeEndpointsDisabledNote);
+    }
+
+    /// <summary>
+    /// 老文件里被写死的 <c>false</c> 怎么翻、以及<b>翻完之后门必须永久关上</b>。
+    /// <para>需要迁移的只有一批人：v0.3.4 及更早是<b>整份写回</b>的，那些文件里钉着
+    /// <c>AllowUnofficialTranslateEndpoints: false</c>；而 2026-09-24 起 <c>Save()</c> 只写差集，
+    /// 没被碰过的键根本不落盘 ⇒ 改默认值对他们自动生效。源码哨兵钉住"迁移挂了、章盖在唯一写盘出口、
+    /// 门用的是自己的标记而不是 <c>SettingsRevision</c>"这三件事——
+    /// 借默认值表那个版本门会把全体用户的质量档再清一遍（<see cref="Test_GainMapMerged_FormatIndexMigration"/>
+    /// 同一族教训）。</para>
+    /// </summary>
+    static void Test_FreeEndpointsDefaultMigrationIsWired()
+    {
+        var svcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SettingsService.cs"));
+        var dataPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "AppSettingsData.cs"));
+        if (svcPath is null || dataPath is null)
+        {
+            Assert("SettingsService.cs / AppSettingsData.cs 可读（迁移接线无人判）", false,
+                $"svc={svcPath is not null} data={dataPath is not null}");
+            return;
+        }
+        string svc = File.ReadAllText(svcPath);
+        string data = File.ReadAllText(dataPath);
+
+        Assert("Load 里挂了这次翻面迁移（不是只写了函数没人调）",
+            svc.Contains("migrated |= MigrateFreeEndpointsDefaultOn(Current);"));
+        Assert("章盖在唯一的写盘出口 Save()（与 GainMapMerged 同一处，保证写过的文件不再被翻）",
+            svc.Contains("Current.FreeEndpointsMigrated = true;"));
+        Assert("门是 FreeEndpointsMigrated，函数体里不许借 SettingsRevision 触发",
+            svc.Contains("if (s.FreeEndpointsMigrated) return false;"));
+        Assert("AppSettingsData 里有这一格标记（缺键的老文件读作 false ⇒ 迁移才会触发一次）",
+            data.Contains("public bool FreeEndpointsMigrated { get; set; } = false;"));
+
+        // 翻面之后不许有第二次：方法体内不能再有"每次都写 true"的无条件赋值
+        int start = svc.IndexOf("internal static bool MigrateFreeEndpointsDefaultOn", StringComparison.Ordinal);
+        Assert("迁移函数本体取得到（取不到就没法判它的形态）", start >= 0, start.ToString());
+        if (start >= 0)
+        {
+            string body = svc[start..Math.Min(svc.Length, start + 2000)];
+            Assert("迁移函数不盖章（章归 Save 盖）：体内不许出现 FreeEndpointsMigrated = true",
+                !body.Contains("FreeEndpointsMigrated = true"), body[..Math.Min(body.Length, 160)]);
+        }
+    }
+
 
     /// <summary>
     /// 必应网页版端点（2026-09-21 接入）与 Google 共用同一条 opt-in 闸门，且请求形状要钉住
@@ -2525,7 +2840,7 @@ public static class CorePipelineTests
         var (htmlText, htmlNote) = TranslationService.ParseBingResponse("<!DOCTYPE html><html>trans_result</html>");
         Assert("必应/HTML 判失败而不是按关键字认译文", htmlText is null && htmlNote.Contains("不是 JSON"), htmlNote);
 
-        // ⑩ 接线：生产路径真的调它，且**排在 Google 前面**（本机实测必应 1.1–2.4 s、Google 各挂 5 s 超时，
+        // ⑩ 接线：生产路径真的调它，且排在 Google 前面（本机实测必应 1.1–2.4 s、Google 各挂 5 s 超时，
         //     反序会让国内用户每行白等 10 秒才轮得到能用的那条）
         var path = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "TranslationService.cs"));
         if (path is null) { Skip("必应/调用侧接线", "未找到 TranslationService.cs"); return; }
@@ -2535,15 +2850,28 @@ public static class CorePipelineTests
         Assert("必应/TryBingWebEndpointAsync 被降级链调用且排在 Google 前",
             bingAt >= 0 && googleAt >= 0 && bingAt < googleAt, $"bing@{bingAt} google@{googleAt}");
 
-        // ⑪ 闸门关着 + 什么都没配 ⇒ 抛的是"没配后端"，一条请求都发不出去。
+        // ⑩.1 2026-10-23 的完整顺序：Edge → 必应 → MyMemory → Google（全部本机实测延迟排出来的，
+        //       不是按"哪家更有名"。反序的代价按行数乘：多行并发时每一行都要白等前面那几条的超时。）
+        int edgeAt = code.IndexOf("await TryEdgeFreeEndpointAsync(", StringComparison.Ordinal);
+        int mmAt = code.IndexOf("await TryMyMemoryEndpointAsync(", StringComparison.Ordinal);
+        Assert("免费端点四条都在降级链里，且顺序是 Edge→必应→MyMemory→Google",
+            edgeAt >= 0 && bingAt >= 0 && mmAt >= 0 && googleAt >= 0
+            && edgeAt < bingAt && bingAt < mmAt && mmAt < googleAt,
+            $"edge@{edgeAt} bing@{bingAt} mymemory@{mmAt} google@{googleAt}");
+
+        // ⑪ 免费端点关掉 + 什么都没配 ⇒ 抛的是"没配后端"，一条请求都发不出去。
         //     这条是整轮整改的落点：以前这种情况会真的往外发请求，然后回一句"翻译失败"。
-        var offline = new TranslationService(new LlmConfig());
+        //     ⚠ 2026-10-23 之后必须【显式关掉】才能构造这个状态 ——
+        //     写 `new LlmConfig()` 现在得到的是"免费端点可用"，那条用例会当场变成
+        //     "门禁联网发了一次真请求"（红不红全看网络，而绿灯时没人知道它发过）。
+        var offline = new TranslationService(new LlmConfig { AllowUnofficialTranslateEndpoints = false });
         string? thrown = null;
         try { offline.TranslateAsync("Hello", "zh-CN").GetAwaiter().GetResult(); }
         catch (TranslationNotConfiguredException ex) { thrown = ex.Message; }
         catch (Exception ex) { thrown = "WrongType:" + ex.GetType().Name; }
-        Assert("闸门关且无凭据 ⇒ 抛 TranslationNotConfiguredException（不是网络文案、也不发请求）",
-            thrown is not null && !thrown.StartsWith("WrongType:") && thrown.Contains("非官方"), thrown ?? "<没抛>");
+        Assert("免费端点关掉且无凭据 ⇒ 抛 TranslationNotConfiguredException（不是网络文案、也不发请求）",
+            thrown is not null && !thrown.StartsWith("WrongType:") && thrown.Contains("免费"),
+            thrown ?? "<没抛>");
     }
 
     /// <summary>
@@ -2980,24 +3308,30 @@ public static class CorePipelineTests
 
     static void Test_TranslationBackendAvailabilityIsHonest()
     {
-        Assert("空配置 ⇒ 判定为无可用后端", !TranslationService.AnyBackendAvailable(new LlmConfig()));
+        // ⚠ 2026-10-23 起"什么都没填"不再等于"没有可用后端"：免费公共端点默认开着。
+        //    所以这一族判据里的"空配置"一律显式写成 `免费端点关掉` ——
+        //    留着原来的 `new LlmConfig()` 会得到两种错：可用/不可用判反，
+        //    以及最后那条"必须在发请求之前就抛"变成"门禁真的联网发了一次请求"。
+        static LlmConfig NoneConfigured() => new() { AllowUnofficialTranslateEndpoints = false };
+
+        Assert("免费端点关掉且无凭据 ⇒ 判定为无可用后端", !TranslationService.AnyBackendAvailable(NoneConfigured()));
         Assert("只有 AppKey 没有 AppSecret ⇒ 仍算没有（有道会被跳过，不许声称可用）",
-            !TranslationService.AnyBackendAvailable(new LlmConfig { YoudaoAppKey = "k" }));
+            !TranslationService.AnyBackendAvailable(new LlmConfig { YoudaoAppKey = "k", AllowUnofficialTranslateEndpoints = false }));
         Assert("AppKey + AppSecret ⇒ 可用",
             TranslationService.AnyBackendAvailable(new LlmConfig { YoudaoAppKey = "k", YoudaoAppSecret = "s" }));
         Assert("开了 LLM 但没填端点 ⇒ 不算可用",
-            !TranslationService.AnyBackendAvailable(new LlmConfig { UseCustomLlm = true }));
+            !TranslationService.AnyBackendAvailable(new LlmConfig { UseCustomLlm = true, AllowUnofficialTranslateEndpoints = false }));
         Assert("LLM + 端点 ⇒ 可用",
             TranslationService.AnyBackendAvailable(new LlmConfig { UseCustomLlm = true, ApiEndpoint = "https://api.deepseek.com/v1" }));
-        Assert("只勾非官方端点 ⇒ 可用（这条本身就是用户显式同意过的）",
+        Assert("免费公共端点开着 ⇒ 可用（这就是 2026-10-23 之后的默认状态）",
             TranslationService.AnyBackendAvailable(new LlmConfig { AllowUnofficialTranslateEndpoints = true }));
 
-        string empty = TranslationService.DescribeBackends(new LlmConfig());
-        Assert("没配时的说明给出三条出路（有道 / LLM / Google 非官方）",
-            empty.Contains("有道") && empty.Contains("LLM") && empty.Contains("非官方"), empty);
+        string empty = TranslationService.DescribeBackends(NoneConfigured());
+        Assert("没配时的说明给出三条出路（免费端点 / 有道 / LLM）",
+            empty.Contains("免费公共") && empty.Contains("有道") && empty.Contains("LLM"), empty);
         Assert("没配时的说明不甩锅网络", !empty.Contains("网络问题"), empty);
-        Assert("非官方那条写清两项代价（非公开 API + 文字发给第三方）",
-            empty.Contains("不是公开 API") || empty.Contains("第三方"), empty);
+        Assert("免费端点那条写清代价（文字发给第三方），且引用的控件名界面上真有（见 Test_FreeEndpointHintNamesARealControl）",
+            empty.Contains("第三方"), empty);
         string configured = TranslationService.DescribeBackends(
             new LlmConfig { YoudaoAppKey = "k", YoudaoAppSecret = "s" });
         Assert("配了之后的说明切成「已启用哪些 + 那是真失败」口径",
@@ -3007,13 +3341,13 @@ public static class CorePipelineTests
         string outcome;
         try
         {
-            new TranslationService(new LlmConfig()).TranslateAsync("hello", "zh-CN")
+            new TranslationService(NoneConfigured()).TranslateAsync("hello", "zh-CN")
                 .GetAwaiter().GetResult();
             outcome = "NO-THROW";
         }
         catch (TranslationNotConfiguredException ex) { outcome = ex.Message; }
         catch (Exception ex) { outcome = "WRONG-TYPE:" + ex.GetType().Name; }
-        Assert("空配置直接抛 TranslationNotConfiguredException（带三条出路）",
+        Assert("无任何可用后端时直接抛 TranslationNotConfiguredException（带三条出路）",
             outcome.StartsWith("还没有任何可用") , outcome.Length > 60 ? outcome[..60] : outcome);
 
         // ── 有道错误码必须翻成人话，但**只翻有据的那几个** ──

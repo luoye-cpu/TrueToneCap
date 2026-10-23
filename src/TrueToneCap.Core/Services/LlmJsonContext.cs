@@ -57,6 +57,7 @@ internal sealed record LlmVisionRequest(
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(LlmChatRequest))]
 [JsonSerializable(typeof(LlmVisionRequest))]
+[JsonSerializable(typeof(string[]))]
 internal partial class LlmJsonContext : JsonSerializerContext
 {
 }

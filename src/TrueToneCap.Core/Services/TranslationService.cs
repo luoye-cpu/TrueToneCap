@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/TranslationService.cs
-// 多后端翻译服务：LLM (OpenAI 兼容) → 有道官方开放平台 → 非官方端点（必应网页版 / Google，默认关闭）
+// 多后端翻译服务：LLM (OpenAI 兼容) → 有道官方开放平台 → 免费公共端点（Edge / 必应 / MyMemory / Google，默认启用）
 // 支持: DeepSeek V4 Flash / GLM-4.7-Flash / GPT-4o-mini / GPT-4.1-mini / 任意 OpenAI 兼容端点
 
 using System.Net.Http.Json;
@@ -14,7 +14,7 @@ using TrueToneCap.Core.Logging;   // CoreLog / LogCategory（本文件的日志�
 
 namespace TrueToneCap.Core.Services;
 
-/// <summary>翻译服务：LLM 优先（如已配置）→ 有道官方开放平台 → 非官方端点（必应 / Google，默认关闭）。</summary>
+/// <summary>翻译服务：LLM 优先（如已配置）→ 有道官方开放平台（如已填凭据）→ 免费公共端点（Edge / 必应 / MyMemory / Google，默认启用）。</summary>
 public class TranslationService
 {
     // ═══ 2026-09-15 修复：HttpClient 改为进程级共享 ═══
@@ -43,6 +43,30 @@ public class TranslationService
     /// 当状态栏的"原因示例"。并发写是 last-writer-wins，不要求精确 —— 它只是诊断提示。</para>
     /// </summary>
     private string? _lastBackendNote;
+
+    /// <summary>最近一次<b>成功</b>是哪个后端交出的译文（失败路径不写，保持上一个值不动）。
+    /// <para>为什么需要一个字段而不是只写日志：成功那行是 <c>CoreLog.Debug</c>，而默认详细度是
+    /// <c>Brief</c>（Debug 不进盘），于是"这条译文到底是 Edge 还是必应给的"在用户的日志里
+    /// 完全查不到 —— 而这条恰恰是排障时最想问的一句（各家限额与失效形态都不一样）。
+    /// 端到端用例（<c>ServiceTests.Test_FreeTranslateEndpointsLive</c>）靠它做归因。</para>
+    /// <para><c>internal</c> 而不是 public：Test 工程有 <c>InternalsVisibleTo</c>，
+    /// 而这只是诊断读数，不该变成产品 API（同 <c>SettingsService.Normalize</c> 的处理）。</para>
+    /// </summary>
+    private string? _lastBackendServed;
+    internal string? LastBackendServed => _lastBackendServed;
+
+    /// <summary>最近一次失败的留痕句。<b>成功时不清空</b> —— 这正是这条链的排障入口：
+    /// 降级链会静默吃掉前面每一档的失败，用户与测试都只看到"最后一档成功了"。
+    /// 端到端用例要靠它回答"第一档为什么没跑成"（2026-10-23 就是这么逮到
+    /// "离线形状判据全绿、而真发请求时 Edge 失败降到必应"的）。</summary>
+    internal string? LastAttemptNote => _lastBackendNote;
+
+    /// <summary>成功出口的统一记账：留下"哪个后端交出的"，并按原有的详细度写 Debug 行。</summary>
+    private void NoteSuccess(string label)
+    {
+        _lastBackendServed = label;
+        CoreLog.Debug("Translate", $"成功: {label}", LogCategory.Network);
+    }
 
     /// <summary>
     /// 有道智云错误码 → 人话。<b>只收录有据的码</b>，其余原样报码、不猜含义。
@@ -76,13 +100,19 @@ public class TranslationService
         || (!string.IsNullOrWhiteSpace(c.YoudaoAppKey) && !string.IsNullOrWhiteSpace(c.YoudaoAppSecret))
         || c.AllowUnofficialTranslateEndpoints;
 
-    /// <summary>按当前配置生成"缺什么 / 哪几条路可走"的中文说明，可直接展示。</summary>
+    /// <summary>按当前配置生成"缺什么 / 哪几条路可走"的中文说明，可直接展示。
+    /// <para>⚠ 这里出现的每一个【引号内的界面控件名】都必须在界面源码里逐字存在 ——
+    /// 判据 <c>Test_FreeEndpointHintNamesARealControl</c> 钉的就是这件事。
+    /// 2026-10-23 之前这条写着让用户去勾「允许回退到非官方翻译端点（必应网页版 / Google）」，
+    /// 而界面上那条叫「允许回退到 Google 非官方翻译端点」⇒ 用户照着提示找不到那个勾，
+    /// 唯一剩下的出路就是去填密钥，"免费档必须填 key"就是这么造出来的。</para>
+    /// </summary>
     public static string DescribeBackends(LlmConfig c)
     {
         var on = new List<string>();
         if (c.UseCustomLlm && !string.IsNullOrWhiteSpace(c.ApiEndpoint)) on.Add("自定义 LLM");
         if (!string.IsNullOrWhiteSpace(c.YoudaoAppKey) && !string.IsNullOrWhiteSpace(c.YoudaoAppSecret)) on.Add("有道官方 API");
-        if (c.AllowUnofficialTranslateEndpoints) on.Add("非官方端点（必应 / Google）");
+        if (c.AllowUnofficialTranslateEndpoints) on.Add("免费公共端点（Edge / 必应 / MyMemory / Google）");
 
         if (on.Count > 0)
             // ⚠ 这里不再猜原因。原先固定缀一句"多半是网络、额度或接口变更，不是没配置"，
@@ -91,10 +121,10 @@ public class TranslationService
             return "已启用的后端：" + string.Join("、", on) + " —— 它们都没返回结果。";
 
         return "还没有任何可用的翻译后端，三条路任选一条：\n"
-             + "① 设置 → 翻译：填有道智云开放平台的 AppID 与密钥（官方 API；密钥只在本机 DPAPI 加密存储）；\n"
-             + "② 设置 → 翻译：把模式切到 LLM，填 DeepSeek / GLM / OpenAI 兼容端点与密钥；\n"
-             + "③ 设置 → 翻译：勾选「允许回退到非官方翻译端点（必应网页版 / Google）」—— 不需要密钥，"
-             + "但那不是公开 API，且截图里的文字会发给第三方，这两点由你自己承担。";
+             + "① 设置 → 翻译：勾选「使用免费公共翻译端点（识别到的文字会发给第三方）」—— 不需要任何密钥，"
+             + "依次走 Edge / 必应 / MyMemory / Google 这四家免费接口；\n"
+             + "② 设置 → 翻译：填有道智云开放平台的 AppID 与密钥（官方 API；密钥只在本机 DPAPI 加密存储）；\n"
+             + "③ 设置 → 翻译：把模式切到 LLM，填 DeepSeek / GLM / OpenAI 兼容端点与密钥。";
     }
 
     /// <summary>
@@ -153,13 +183,24 @@ public class TranslationService
         if (youdaoResult is not null)
             return youdaoResult;
 
-        // 3. 非官方端点（默认关闭，须用户在设置里显式同意）。
-        //    先必应后 Google：2026-09-21 本机实测必应 1.1–2.4 s 能出整句译文，
-        //    而 Google 两个端点各挂满 5 s 超时 ⇒ 反序的话，国内用户每行都要白等 10 秒才轮得到能用的那条，
-        //    多行并发时这个开销会乘在每一行上。
+        // 3. 免费公共端点（默认启用；用户可在 设置 → 翻译 里关掉）。
+        //    排序按 2026-10-23 本机（中国大陆网络）实测：
+        //      Edge 468–577 ms / 免凭据 / 单条 4 万字符仍可用  ⇒ 放最前
+        //      必应 1.06–1.20 s / 要先抓前端凭据、约 1 h 过期   ⇒ 第二
+        //      MyMemory 0.81–1.41 s / 免凭据但单条 500 字符、官方明写 5000 字符/天 ⇒ 兜底
+        //      Google 本机直接超时（两个口各挂 5 s）              ⇒ 垫底，保留只为海外机器
+        //    反序的代价是每一行都要白等前面那几条的超时，多行并发时按行数翻倍。
+        var edgeResult = await TryEdgeFreeEndpointAsync(text, targetLang, sourceLang, ct);
+        if (edgeResult is not null)
+            return edgeResult;
+
         var bingResult = await TryBingWebEndpointAsync(text, targetLang, sourceLang, ct);
         if (bingResult is not null)
             return bingResult;
+
+        var myMemoryResult = await TryMyMemoryEndpointAsync(text, targetLang, sourceLang, ct);
+        if (myMemoryResult is not null)
+            return myMemoryResult;
 
         var googleResult = await TryGoogleMultiEndpointAsync(text, targetLang, sourceLang, ct);
         if (googleResult is not null)
@@ -257,7 +298,7 @@ public class TranslationService
             var result = ParseYoudaoResponse(json);
             if (result is not null)
             {
-                CoreLog.Debug("Translate", "有道开放平台成功", LogCategory.Network);
+                NoteSuccess("有道开放平台");
                 return result;
             }
             // ⚠ 不把响应原文写进日志：错误响应里可能带 query/输入串，那正是 OCR 原文。
@@ -416,7 +457,7 @@ public class TranslationService
         if (endpoints.Length == 0)
         {
             // 留痕而不是静默：否则"翻译偶尔不走 Google"在这台机器上无从解释
-            _lastBackendNote ??= "Google 非官方端点未启用（需在设置 → 翻译 里显式勾选）";
+            _lastBackendNote ??= FreeEndpointsDisabledNote;
             CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
             return null;
         }
@@ -431,7 +472,7 @@ public class TranslationService
                 var result = ParseGoogleResponse(response);
                 if (!string.IsNullOrWhiteSpace(result))
                 {
-                    CoreLog.Debug("Translate", $"成功: {label}", LogCategory.Network);
+                    NoteSuccess(label);
                     return result;
                 }
             }
@@ -668,7 +709,7 @@ public class TranslationService
     {
         if (!_config.AllowUnofficialTranslateEndpoints)
         {
-            _lastBackendNote ??= "非官方端点（必应 / Google）未启用（需在设置 → 翻译 里显式勾选）";
+            _lastBackendNote ??= FreeEndpointsDisabledNote;
             CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
             return null;
         }
@@ -700,7 +741,7 @@ public class TranslationService
                 var (translation, note) = ParseBingResponse(body);
                 if (translation is not null)
                 {
-                    CoreLog.Debug("Translate", $"成功: {built.Value.label}", LogCategory.Network);
+                    NoteSuccess(built.Value.label);
                     return translation;
                 }
 
@@ -730,6 +771,287 @@ public class TranslationService
 
         return null;
     }
+
+    // ═══════════════════════════════════════
+    //  Edge 免费端点（浏览器内置翻译口；2026-10-23 本机实测免凭据可用）
+    // ═══════════════════════════════════════
+
+    private const string EdgeTranslateUrl = "https://edge.microsoft.com/translate/translatetext";
+
+    /// <summary>
+    /// Edge 免费端点必须带一个<b>非空</b> <c>User-Agent</c>，否则一条都发不出去。
+    /// <para>2026-10-23 用 <c>http.client</c> 精确控制头重测（前一版结论用的是 urllib，
+    /// 它<b>自己偷偷注入了</b> <c>User-Agent: Python-urllib/3.12</c>，于是"我没设 UA"被误读成
+    /// "这个端点不需要 UA"；.NET 的 <c>HttpClient</c> 真的不带 ⇒ 第一档当场 400、静默降到必应，
+    /// 读数可由 <c>scripts/probes/edge_mymemory_free_endpoint_probe.py</c> 第 1 节复跑（它用
+    /// <c>http.client</c> 而不是 urllib —— 后者会替自己注入 UA，正是这条被读错的原因）：</para>
+    /// <list type="bullet">
+    /// <item><description>完全不带 UA、或带一个空值 UA ⇒ 都是 400
+    /// <c>Client Browser Version not supported</c>；</description></item>
+    /// <item><description>而 <c>curl/8.9.0</c> 与 <c>Python-urllib/3.12</c> 都返回 200
+    /// ⇒ 它<b>只判这个头存在且非空，不解析浏览器版本</b>。</description></item>
+    /// </list>
+    /// <para>所以这里发的是诚实的产品标识，而不是冒充 Chrome：既然版本解析并不存在，
+    /// 冒充就只是把"哪天它真开始挑版本"这件事变成一条只有抓包才能发现的静默依赖。
+    /// 这句 UA 不带版本号是刻意的 —— 它会随每次发布漂移，而这里没有任何东西读它。</para>
+    /// </summary>
+    internal const string EdgeClientUa = "TrueToneCap/desktop-translation-client";
+
+    /// <summary>
+    /// Edge 浏览器内置翻译的调用口：<b>不要 key、不要 token、也不要任何 cookie</b>，
+    /// 但<b>要一个非空的 <see cref="EdgeClientUa"/></b>（见那句的说明）。
+    /// <para>两条写错就 400、而 <b>400 的响应体是空的</b>（服务端不给原因）的形状约束：</para>
+    /// <list type="number">
+    /// <item><description>body 必须是<b>裸字符串数组</b> <c>["句子"]</c>。包成对象（<c>[{"text":…}]</c>、
+    /// <c>[{"Text":…}]</c>）或写成 <c>{"text":…}</c> 全部 400。这一格当初漏掉时，
+    /// 我据此写下过"Edge 系免认证不成立"的错判 —— 形态矩阵要从服务端那句
+    /// <c>Cannot deserialize the current JSON object … requires a JSON array</c> 倒推补齐。</description></item>
+    /// <item><description>自动检测源语言 = <b>不发 <c>from</c> 参数</b>；发 <c>from=auto</c> /
+    /// <c>from=AUTO</c> 都是 400。⇒ 不能照抄 Google 那条 <c>sl = sourceLang ?? "auto"</c> 的写法。</description></item>
+    /// </list>
+    /// <para>语言码无需映射：App 下拉里的 <c>zh-CN</c> / <c>zh-TW</c> 等原样传都返回正确语种译文
+    /// （必应那边要的 <see cref="MapToBingLang"/> 在这一条上是多余的）。批量实测与请求逐条对齐，
+    /// 但本服务仍是逐行发（与必应同一决定，不依赖批量形态）。</para>
+    /// <para>容量：单条 40,000 字符仍出译文，200,000 字符被拒并明写
+    /// <c>Request exceeds the maximum allowed translation size.</c> ⇒ 上限落在两者之间，未穷尽。</para>
+    /// </summary>
+    internal static (string url, string body, string ua, string label)? EdgeFreeEndpointRequest(
+        bool allowed, string text, string targetLang, string? sourceLang)
+    {
+        if (!allowed) return null;
+        string url = $"{EdgeTranslateUrl}?&to={HttpUtility.UrlEncode(targetLang)}"
+                   + (string.IsNullOrWhiteSpace(sourceLang)
+                          ? ""                                   // 自动检测：整个参数不发，见上面第 2 条
+                          : "&from=" + HttpUtility.UrlEncode(sourceLang));
+        string body = JsonSerializer.Serialize(new[] { text }, LlmJsonContext.Default.StringArray);
+        return (url, body, EdgeClientUa, "Edge (translatetext)");
+    }
+
+    /// <summary>解析 Edge 响应 <c>[{"translations":[{"text":"…"}]}]</c>。
+    /// 返回 (译文或 null, 人话原因)；参数被拒时体是空的，所以状态码必须进原因句，
+    /// 否则用户看到的只是"没有译文"。</summary>
+    internal static (string? text, string note) ParseEdgeResponse(int status, string body)
+    {
+        string s = body.Trim();
+        if (status != 200)
+            return (null, $"Edge 返回 HTTP {status}"
+                + (s.Length == 0
+                    ? "（体为空：实测这就是请求形状不对的形态 —— body 要是裸字符串数组，且不能发 from=auto）"
+                    : $"：{s[..Math.Min(s.Length, 120)]}"));
+
+        if (s.Length == 0) return (null, "Edge 响应体为空");
+        if (s[0] != '[' && s[0] != '{') return (null, $"Edge 响应不是 JSON（{s.Length} B，形如网页）");
+        try
+        {
+            using var doc = JsonDocument.Parse(s);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+                return (null, "Edge 响应是空数组或不是数组");
+            var item = root[0];
+            if (item.TryGetProperty("translations", out var tr)
+                && tr.ValueKind == JsonValueKind.Array && tr.GetArrayLength() > 0
+                && tr[0].TryGetProperty("text", out var t))
+            {
+                string? text = t.GetString();
+                if (!string.IsNullOrWhiteSpace(text)) return (text, "成功");
+                return (null, "Edge translations[0].text 为空");
+            }
+            return (null, "Edge 响应里没有 translations 数组（形状与实测不符）");
+        }
+        catch (JsonException)
+        {
+            return (null, "Edge 响应 JSON 解析失败");
+        }
+    }
+
+    private async Task<string?> TryEdgeFreeEndpointAsync(string text, string targetLang,
+        string? sourceLang, CancellationToken ct)
+    {
+        var built = EdgeFreeEndpointRequest(
+            _config.AllowUnofficialTranslateEndpoints, text, targetLang, sourceLang);
+        if (built is null)
+        {
+            _lastBackendNote ??= FreeEndpointsDisabledNote;
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+            return null;
+        }
+
+        try
+        {
+            using var quickCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, quickCts.Token);
+            using var req = new HttpRequestMessage(HttpMethod.Post, built.Value.url)
+            {
+                // ⚠ 必须写全限定 System.Text.Encoding：本命名空间下有个 TrueToneCap.Core.Encoding
+                //    命名空间，裸写 Encoding 会绑到它上面（CS0234）。
+                Content = new StringContent(built.Value.body, System.Text.Encoding.UTF8, "application/json")
+            };
+            // ⚠ 少这一个头就一条都发不出去：400 "Client Browser Version not supported"
+            //    （.NET 的 HttpClient 默认连 UA 都不发，而 urllib 会替自己加一个 —— 这就是
+            //    第一轮"离线形状全绿、真发请求时第一档静默失效"的根因，见 EdgeClientUa 的说明）
+            req.Headers.TryAddWithoutValidation("User-Agent", built.Value.ua);
+            using var resp = await s_http.SendAsync(req, linked.Token);
+            string body = await resp.Content.ReadAsStringAsync(linked.Token);
+            var (translation, note) = ParseEdgeResponse((int)resp.StatusCode, body);
+            if (translation is not null)
+            {
+                NoteSuccess(built.Value.label);
+                return translation;
+            }
+
+            _lastBackendNote = "Edge: " + note;
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;   // 用户取消要往上传，不能吞成"这个后端失败"
+        }
+        catch (OperationCanceledException)
+        {
+            _lastBackendNote = "Edge 请求超时（>8 秒）";
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _lastBackendNote = "Edge 请求失败（" + ex.GetType().Name + "）";
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+        }
+
+        return null;
+    }
+
+    // ═══════════════════════════════════════
+    //  MyMemory 免费端点（翻译记忆库 + MT 兜底；官方文档明写允许匿名调用）
+    // ═══════════════════════════════════════
+
+    private const string MyMemoryApiUrl = "https://api.mymemory.translated.net/get";
+
+    /// <summary>
+    /// 单条请求的文本上限：<b>500 个字符</b>。
+    /// <para>官方 spec 页写的是 "Max 500 bytes"，实测边界落在<b>字符</b>上：ASCII 501 字符即被拒，
+    /// 而中文 300 字符＝900 UTF-8 字节照常通过（复跑：<c>scripts/probes/edge_mymemory_free_endpoint_probe.py</c> 第 3 节）
+    /// ⇒ 谁要按字节切这句话，会把能过的文本白切一半。</para>
+    /// </summary>
+    internal const int MyMemoryMaxChars = 500;
+
+    /// <summary>官方 usagelimits 页明写的匿名额度：免费 5000 字符/天（带 <c>de=</c> 邮箱 50000）。
+    /// 一整屏 OCR 就吃满一天 ⇒ 这一条只配当兜底，排在 Edge 与必应之后。</summary>
+    internal const int MyMemoryAnonymousCharsPerDay = 5000;
+
+    /// <summary>组装 MyMemory 匿名请求。<paramref name="allowed"/> 为 false 时返回 null，
+    /// <b>连请求都不发</b>（"关着但不发"与"发了但忽略结果"是两回事）。
+    /// 文本超过 <see cref="MyMemoryMaxChars"/> 时同样返回 null，由调用方留痕说明——
+    /// 发出去只会换来一句写在译文栏里的拒因。</summary>
+    internal static (string url, string label)? MyMemoryEndpointRequest(
+        bool allowed, string text, string targetLang, string? sourceLang)
+    {
+        if (!allowed || text.Length > MyMemoryMaxChars) return null;
+        string sl = string.IsNullOrWhiteSpace(sourceLang) ? "autodetect" : sourceLang;
+        return ($"{MyMemoryApiUrl}?q={HttpUtility.UrlEncode(text)}&langpair={HttpUtility.UrlEncode(sl)}|{HttpUtility.UrlEncode(targetLang)}",
+                "MyMemory (匿名档)");
+    }
+
+    /// <summary>解析 MyMemory 响应。
+    /// <para>⚠ 被长度/额度拒绝时它回的是 <b>HTTP 200 + 体内 <c>responseStatus</c> 非 200</b>，
+    /// 而拒因被塞进 <c>responseData.translatedText</c>（实测见过
+    /// <c>QUERY LENGTH LIMIT EXCEEDED. MAX ALLOWED QUERY : 500</c>）。
+    /// 只看状态码会把它当成功，只看译文栏会把拒因当译文 ⇒ 两者都必须判（与必应体内 205 同族）。</para>
+    /// </summary>
+    internal static (string? text, string note) ParseMyMemoryResponse(string body)
+    {
+        string s = body.Trim();
+        if (s.Length == 0) return (null, "MyMemory 响应体为空");
+        if (s[0] != '{') return (null, $"MyMemory 响应不是 JSON（{s.Length} B，形如网页）");
+        try
+        {
+            using var doc = JsonDocument.Parse(s);
+            var root = doc.RootElement;
+            // 真件两种形状都见过：成功时是数字 200，拒绝时是字符串 "403"。
+            // ⚠ 必须先验 ValueKind 再取：对 Null 调 GetString() 抛的是 InvalidOperationException，
+            //    而下面只兜 JsonException —— 那会变成"翻译服务自己崩一下"而不是"这个后端失败"。
+            int status = -1;
+            if (root.TryGetProperty("responseStatus", out var st))
+            {
+                if (st.ValueKind == JsonValueKind.Number && st.TryGetInt32(out var num)) status = num;
+                else if (st.ValueKind == JsonValueKind.String && int.TryParse(st.GetString(), out var txt)) status = txt;
+            }
+            string? text = root.TryGetProperty("responseData", out var rd)
+                           && rd.TryGetProperty("translatedText", out var tt) ? tt.GetString() : null;
+
+            if (status != 200)
+                return (null, $"MyMemory 体内 responseStatus={status}"
+                    + (string.IsNullOrWhiteSpace(text) ? "" : $"（译文栏里写的是：{text[..Math.Min(text.Length, 80)]}）"));
+            if (string.IsNullOrWhiteSpace(text)) return (null, "MyMemory 响应里没有 responseData.translatedText");
+            if (text.Contains("WARNING", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("LIMIT", StringComparison.OrdinalIgnoreCase))
+                return (null, "MyMemory 匿名额度或单条长度到顶：" + text[..Math.Min(text.Length, 80)]);
+            return (text, "成功");
+        }
+        catch (JsonException)
+        {
+            return (null, "MyMemory 响应 JSON 解析失败");
+        }
+    }
+
+    private async Task<string?> TryMyMemoryEndpointAsync(string text, string targetLang,
+        string? sourceLang, CancellationToken ct)
+    {
+        if (!_config.AllowUnofficialTranslateEndpoints)
+        {
+            _lastBackendNote ??= FreeEndpointsDisabledNote;
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+            return null;
+        }
+        if (text.Length > MyMemoryMaxChars)
+        {
+            _lastBackendNote ??= $"MyMemory 未参与：文本 {text.Length} 字符 > 该端点单条 {MyMemoryMaxChars} 字符上限";
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+            return null;
+        }
+
+        var built = MyMemoryEndpointRequest(true, text, targetLang, sourceLang);
+        if (built is null) return null;
+
+        try
+        {
+            using var quickCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, quickCts.Token);
+            string body = await _http.GetStringAsync(built.Value.url, linked.Token);
+            var (translation, note) = ParseMyMemoryResponse(body);
+            if (translation is not null)
+            {
+                NoteSuccess(built.Value.label);
+                return translation;
+            }
+
+            _lastBackendNote = "MyMemory: " + note;
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            _lastBackendNote = "MyMemory 请求超时（>8 秒）";
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _lastBackendNote = "MyMemory 请求失败（" + ex.GetType().Name + "）";
+            CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+        }
+
+        return null;
+    }
+
+    /// <summary>免费端点被关掉时的留痕句。<b>引号里的标签必须与界面上那条勾选逐字相同</b>，
+    /// 否则就会出现"提示让用户去找一个界面上不存在的控件"这种分叉 ——
+    /// 2026-10-23 之前这条写的是「允许回退到非官方翻译端点（必应网页版 / Google）」，
+    /// 而界面上真实叫「允许回退到 Google 非官方翻译端点」，用户照着提示找不到那个勾，
+    /// 唯一看得见的出路就剩去注册拿密钥。判据：<c>Test_FreeEndpointHintNamesARealControl</c>。</summary>
+    internal const string FreeEndpointsDisabledNote =
+        "免费公共翻译端点未启用（需在设置 → 翻译 里勾选「使用免费公共翻译端点（识别到的文字会发给第三方）」）";
 
     // ═══════════════════════════════════════
     //  LLM 翻译 (OpenAI 兼容 API — 支持 DeepSeek/GLM/GPT 等)
@@ -778,7 +1100,10 @@ public class TranslationService
             .GetProperty("content")
             .GetString();
 
-        return RequireTranslatedContent(content);
+        // 先验内容再记归因：RequireTranslatedContent 对空译文要抛，归因不能抢在它前面写"成功"
+        var llmDone = RequireTranslatedContent(content);
+        NoteSuccess("自定义 LLM");
+        return llmDone;
     }
 
     /// <summary>
@@ -975,17 +1300,23 @@ public class LlmConfig
     public string YoudaoAppSecret { get; set; } = "";
 
     /// <summary>
-    /// 是否允许把文本发给<b>非官方</b>翻译端点：必应网页版 <c>ttranslatev3</c>（免密钥、2026-09-21 实测
-    /// 在国内可用），以及 Google 的 <c>client=gtx</c> / Chrome 划词两个口。
-    /// <para>默认 <b>false</b>：这些都不是公开 API，是各家网页前端的自用接口，未获授权调用不符合其服务条款，
-    /// 而且它们会把截图里的文字（可能含 token、个人信息）发出去。用户在设置里显式勾选
-    /// "接受非官方端点"才会启用；勾选框旁的文案要写清这两件事。</para>
-    /// <para>名字原来是 <c>AllowUnofficialGoogleEndpoints</c>；接入必应后不再只关 Google，
-    /// 故与设置里既有的持久化字段 <c>AppSettingsData.AllowUnofficialTranslateEndpoints</c> 统一成一个词。
-    /// 落盘的键名一直是后者，所以这次改名不影响老配置的读取。</para>
-    /// <para>判据：<c>CorePipelineTests.Test_UnofficialTranslateEndpointsAreOptIn</c>。</para>
+    /// 是否允许把文本发给<b>免费公共翻译端点</b>：Edge 浏览器内置口 <c>translatetext</c>、
+    /// 必应网页版 <c>ttranslatev3</c>（要抓前端凭据）、MyMemory 匿名档、Google 的两个网页前端口。
+    /// <para>默认 <b>true</b>（2026-10-23 用户口径："不应该让用户手动填 KEY，
+    /// 免费端点应该考虑各种免费开放端点"）。这推翻的是 2026-09-21 那条"不得升成默认路径"的上限 ——
+    /// 当时定的默认关是拿必应/Google 的 ToS 与"改版即断"当理由，而免费档因此在默认配置下
+    /// <b>一条都不通</b>，用户想翻译就只能自己去注册拿密钥。</para>
+    /// <para>不变的代价要如实写给用户，且必须在界面上出现：这些接口会把截图里的文字（可能含
+    /// token、身份证号、聊天记录）发给第三方，且除 MyMemory 外都不是给我们用的公开 API。
+    /// 所以界面上这条是<b>可关</b>的 opt-out，不是需要同意才用的 opt-in。</para>
+    /// <para>关掉时这几条连请求都不会发，不是"发了但忽略结果"。</para>
+    /// <para>键名 <c>AllowUnofficialTranslateEndpoints</c> 自 v0.3.x 起就是持久化键，
+    /// 覆盖范围从"Google 两口"扩到现在这四条时都没改过名 —— 改名会让老配置读不到自己
+    /// 原本的值，这一层的迁移已经够多了（见 <c>SettingsService</c> 的同名门）。</para>
+    /// <para>判据：<c>CorePipelineTests.Test_FreeTranslateEndpointsAreOnByDefault</c>
+    /// 与 <c>Test_UnofficialTranslateEndpointsAreOptIn</c>（后者钉的是"关掉 ⇒ 真不发请求"）。</para>
     /// </summary>
-    public bool AllowUnofficialTranslateEndpoints { get; set; }
+    public bool AllowUnofficialTranslateEndpoints { get; set; } = true;
 
 }
 
