@@ -22,6 +22,8 @@
 退出码：0 = 全部判据成立；1 = 有判据不成立（上游改版或本机网络变化）；
         **绝不出现"什么都没判还退 0"** —— 每条缺席结论前都有一条正控先跑。
 """
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 import http.client
 import json
 import ssl
