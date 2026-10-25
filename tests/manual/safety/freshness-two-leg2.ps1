@@ -11,6 +11,8 @@ $ErrorActionPreference = 'Continue'
 $repo = 'C:\PLAN\TrueToneCap'
 $log  = Join-Path $repo (Join-Path 'tests\output' $LogName)
 $utf8 = New-Object System.Text.UTF8Encoding($false)
+# 宿主跟随调用者（2026-10-26 定版：默认 pwsh 7.x，Windows PowerShell 5.1 基线回退）
+$psSelf = (Get-Process -Id $PID).Path
 function Say([string[]]$lines) { [System.IO.File]::AppendAllText($log, (($lines -join "`r`n") + "`r`n"), $utf8) }
 function Touch([string]$rel) {
     $p = Join-Path $repo $rel
@@ -22,7 +24,7 @@ function Build([string]$why) {
     Say @("$why build exit=$LASTEXITCODE  " + (($b | Where-Object { $_ -match '个错误|已成功|error' } | Select-Object -First 2) -join ' / '))
 }
 function LegRun([string]$tag) {
-    $o = @(& powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -SkipBuild -SkipPrecision -SkipPublishGates 2>&1 | ForEach-Object { "$_" })
+    $o = @(& $psSelf -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -SkipBuild -SkipPrecision -SkipPublishGates 2>&1 | ForEach-Object { "$_" })
     $hits = @($o | Where-Object { $_ -match '宿主新鲜度|滞后的宿主|比它新的输入|降级为警告' })
     Say (@("   [$tag] 退出码=$($o.Count) 行输出，判据行：") + $hits)
     return @($hits -join ' ')

@@ -105,3 +105,31 @@ env -u PSModulePath powershell.exe -NoProfile -Command "Get-FileHash LICENSE"  #
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1   # 5.1 全量 → 8/8 场景
 pwsh -NoProfile -File scripts/verify.ps1                                     # 7.x 全量 → 8 套件全绿
 ```
+
+## 7. 宿主策略定版（2026-10-26 第二轮）：默认 7.x，5.1 基线回退
+
+维护者拍板，把口径从"5.1 保留为主、7.x 跟进"翻转为：**默认宿主 = PowerShell 7.x
+（本机 7.6.8 实测基线），Windows PowerShell 5.1 降为基线回退**。钩子与 csproj 在
+上一轮已是 pwsh 优先，本轮清掉剩余的写死点，让该口径在所有入口一致：
+
+| 位置 | 原状 | 处置 |
+|---|---|---|
+| `verify.ps1` [1.96/2] 日志行格式对撞 | 写死 `& powershell`：pwsh 会话里也偷偷换 5.1；pwsh-only 机器（Win11 可卸载 5.1）上这条阻塞步恒红；与 [1.6/2] "不写死宿主"的注释自相矛盾 | 改 `(Get-Process -Id $PID).Path` 跟随调用者（与 [1.6/2] 同一纪律） |
+| `tests/manual/safety/` 的 gate-runner / freshness-two-leg / two-leg2 / no-incremental + `publish-probes/run-color-decision-check.ps1` | 五个手动探针全部写死 `powershell`（§4.1 只豁免了 Get-FileHash，宿主写死不在豁免内） | 同上，跟随调用者；默认跑出来就是 7.x，要验 5.1 就从 5.1 会话再跑一轮 |
+| `ps-compat.ps1` | 只有哈希助手 | 增 `Get-TtcPsHostLabel`（**纯展示，不参与判定**）：verify.ps1 头部打印宿主标签，门禁日志从此自证"这轮是谁跑的" |
+| `verify-package-content.ps1:6`、`gui-locale-clipboard-probe.ps1:2` | 用法注释教 `powershell -File` | 改 pwsh 优先，注明 5.1 亦可 |
+| `ci.yml:117` 在 `shell: pwsh` 步骤里再显式写 `pwsh ./scripts/verify.ps1` | 看似冗余 | **保留，有意为之**：.ps1 的 `exit N` 不写 `$LASTEXITCODE`（它只归原生 exe），退出码靠外层 pwsh 进程传递；改成直调 .ps1 会让 `$LASTEXITCODE` 停在脚本内最后一个原生命令上 ⇒ 假绿 |
+
+顺带修正昨日 QR 提交残留的过时套件计数（"7 个"→"8 个"）：verify.ps1 头注两处、
+README `[2/2]` 行与 `-IncludeDesktop` 说明、pre-commit/pre-push 注释各一处。
+
+**验收（本轮实测）**：
+
+```text
+pwsh 7.6.8                    全量 verify.ps1 → EXIT=0（8 套件 1961 断言，横幅"宿主: pwsh 7.6.8"）
+Windows PowerShell 5.1.26100.9711（env -u PSModulePath）→ EXIT=0（同 1961）
+日志行探针 pwsh 直跑 → RC=0，8/8 臂（[1.96/2] 换宿主后的直接证据）
+钩子 dry-run → 两钩子均选 pwsh.exe（默认路径）
+```
+
+两轮全量里的 [1.6/2] 发布门禁回归（8/8 场景）与 [1.9/2] 宿主新鲜度均随宿主通过。

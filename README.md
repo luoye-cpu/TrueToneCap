@@ -169,10 +169,14 @@ CI 见 `.github/workflows/ci.yml`，默认面向 self-hosted Windows 运行器
 
 ```powershell
 .\scripts\verify.ps1                   # ① 一键校验（日常提交前用）
-.\scripts\verify.ps1 -IncludeDesktop   #    追加需桌面会话的 --wgc-avif-tests
+.\scripts\verify.ps1 -IncludeDesktop   #    追加需桌面会话的 --usability-tests 与 --wgc-avif-tests
 .\scripts\verify.ps1 -BuildOnly        #    只构建不跑测试（约 27s）
 .\scripts\verify.ps1 -SkipPublishGates #    跳过 [1.6/2] 发布门禁回归
 ```
+
+宿主：PowerShell 7.x（默认推荐，本仓以 7.6.x 实测基线）与 Windows PowerShell 5.1（基线回退）都能跑；
+哈希校验走 `scripts/ps-compat.ps1` 的 .NET 直调，不依赖 cmdlet 解析
+（机制与取证见 `docs/reviews/repo-governance/powershell-dual-shell-2026-10-26.md`）。
 
 `verify.ps1` 的步骤依次为：
 
@@ -184,7 +188,7 @@ CI 见 `.github/workflows/ci.yml`，默认面向 self-hosted Windows 运行器
 | `[1.7/2]` | 外部判据 12 条 | `scripts/precision/*.py` 与探针；`-SkipPrecision` 可跳 |
 | `[1.8/2]` | 色彩管线判据 | 3 条 + `--avif-hdr-depth`，**没有跳过开关** |
 | `[1.9/2]` | 宿主新鲜度 | Tools 宿主早于最新源码 ⇒ **本轮读数作废**（增量构建会跳过没动的宿主） |
-| `[2/2]` | 7 个门禁套件 | `-IncludeDesktop` 追加第 8 个（WGC，需真实桌面会话）；失败即退出 |
+| `[2/2]` | 8 个门禁套件 | `-IncludeDesktop` 追加桌面会话套件（需真实桌面 + GPU）；失败即退出 |
 
 > ⚠ `[1.7/2]` / `[1.8/2]` 在探测不到 `python` / `ffprobe` / `cjxl` 时是**逐条打 SKIP 并继续** ——
 > SKIP 的含义是"这一轮没判"，不是"判了且通过"。看结果要数判据条数，不能只看 exit 0。

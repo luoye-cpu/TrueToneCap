@@ -2,7 +2,7 @@
 # TrueToneCap pre-commit —— 只做快速构建校验（约 27s）
 #
 # 为什么这里只构建、不跑测试:
-#   全量门禁 7 个套件约 110s。把它压在每次 commit 上，实际后果是人人都加 --no-verify，
+#   全量门禁 8 个套件约 110s。把它压在每次 commit 上，实际后果是人人都加 --no-verify，
 #   于是钩子整体失效 —— 比没有钩子更糟（还多了一层"以为有保护"的错觉）。
 #   所以：commit 只挡"编译不过"，测试移到 pre-push。
 #
@@ -28,7 +28,8 @@ if [ ! -f "$verify" ]; then
     exit 1
 fi
 
-# 选一个可用的宿主：优先 pwsh（7.x），其次 Windows PowerShell 5.1
+# 选一个可用的宿主（2026-10-26 宿主策略定版）：默认 pwsh 7.x（当前 7.6.x 实测基线），
+# Windows PowerShell 5.1 作基线回退 —— 5.1 只兜底、不做首选，7.x 才是有上游维护的宿主。
 # 2026-10-26 优先 pwsh 并修正归因：5.1 并不缺 Get-FileHash（4.0 起就有）——
 # 真正的问题是【继承的 PSModulePath 把 pwsh 7 的目录排在前面】时（ZCode / VS Code
 # pwsh 终端 / Git Bash 会话都会这样继承），5.1 的模块解析抢先命中 pwsh 的

@@ -44,5 +44,6 @@ if ($new.Count -gt 0) {
         & $ff -hide_banner -i $f 2>&1 | Select-String -Pattern 'Stream|color' | ForEach-Object { Write-Host "  $_" }
     }
     Write-Host "`n=== 本仓库解码器读 cICP/iCCP（与上面互为对照）==="
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'probe-png-color.ps1') -Files $new
+    # 宿主跟随调用者（2026-10-26 定版）：原写死 powershell 会在 pwsh 会话里偷换宿主
+    & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'probe-png-color.ps1') -Files $new
 }

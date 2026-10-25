@@ -31,6 +31,8 @@ $ErrorActionPreference = 'Continue'
 $repo = 'C:\PLAN\TrueToneCap'
 $log  = Join-Path $repo (Join-Path 'tests\output' $LogName)
 $utf8 = New-Object System.Text.UTF8Encoding($false)
+# 宿主跟随调用者（2026-10-26 定版：默认 pwsh 7.x，Windows PowerShell 5.1 基线回退）
+$psSelf = (Get-Process -Id $PID).Path
 function Say([string[]]$lines) { [System.IO.File]::AppendAllText($log, (($lines -join "`r`n") + "`r`n"), $utf8) }
 # ⚠ 这里原本残留了【第二份】Touch（把时间戳钉成 now+2 分钟的那版），而 PowerShell 后定义的覆盖先定义的
 #   ⇒ 两腿跑的都是"未来时间戳"，腿 A 必然红、腿 B 必然红，两腿的读数都没有意义。
@@ -41,13 +43,13 @@ Push-Location $repo
 
 Say @("=== 腿 A：只碰 App 的源码，起完整门禁（含 --no-incremental 自构建） $(Get-Date -Format 'HH:mm:ss') ===")
 Say @("   碰过 SettingsService.cs ⇒ $(Touch 'src\TrueToneCap.App\Services\SettingsService.cs')；轮前宿主写入时间：$(HostStamps)")
-$a = @(powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 2>&1 | ForEach-Object { "$_" })
+$a = @(& $psSelf -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 2>&1 | ForEach-Object { "$_" })
 Say (@("   腿 A 门禁退出码=$LASTEXITCODE") + (Pick $a))
 Say (@("   腿 A 的 RESULT 行：") + @($a | Where-Object { $_ -match '^RESULT suite|总断言|基线已写入' }))
 
 Say @("=== 腿 B：只碰 Core 的源码，-SkipBuild 起门禁（产物不许动） $(Get-Date -Format 'HH:mm:ss') ===")
 Say @("   碰过 ⇒ $(Touch 'src\TrueToneCap.Core\Encoding\FormatEncoders.cs')")
-$b = @(powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -SkipBuild -SkipPrecision -SkipPublishGates 2>&1 | ForEach-Object { "$_" })
+$b = @(& $psSelf -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -SkipBuild -SkipPrecision -SkipPublishGates 2>&1 | ForEach-Object { "$_" })
 Say (@("   腿 B 退出码=$LASTEXITCODE") + (Pick $b))
 
 Pop-Location

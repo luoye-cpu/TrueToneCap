@@ -47,7 +47,10 @@ Write-Log $pre
 Push-Location $repo
 # ⚠ 这里必须真的把 $VerifyArgs 传下去。第一版收了参数却没接进调用 ⇒ "-WriteGateBaseline 没写基线"
 #   这件事只能从结果反推，等于一个"能传但不起作用"的假旋钮（本轮自己造的第三个尺子问题）。
-$raw = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts\verify.ps1') @VerifyArgs 2>&1
+# 宿主跟随调用者（2026-10-26 定版：默认 pwsh 7.x，Windows PowerShell 5.1 基线回退）——
+# 原写死 powershell 会在 pwsh 会话里偷偷换宿主，读数归属不清。
+$psSelf = (Get-Process -Id $PID).Path
+$raw = & $psSelf -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts\verify.ps1') @VerifyArgs 2>&1
 $gate = $LASTEXITCODE
 Pop-Location
 Write-Log (@($raw | ForEach-Object { "$_" }))

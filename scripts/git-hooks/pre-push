@@ -1,5 +1,5 @@
 #!/bin/sh
-# TrueToneCap pre-push —— 全量门禁（构建 + 7 个 headless 套件，约 110s）
+# TrueToneCap pre-push —— 全量门禁（构建 + 8 个 headless 套件，约 110s）
 #
 # 与 pre-commit 的分工:
 #   pre-commit  只构建（快）     —— 挡住"编译不过"
@@ -29,6 +29,7 @@ if [ ! -f "$verify" ]; then
     exit 1
 fi
 
+# 宿主策略定版（2026-10-26）：默认 pwsh 7.x（当前 7.6.x 实测基线），Windows PowerShell 5.1 基线回退。
 # 2026-10-26 优先 pwsh 并修正归因：5.1 并不缺 Get-FileHash（4.0 起就有）——
 # 真正的问题是【继承的 PSModulePath 把 pwsh 7 的目录排在前面】时（ZCode / VS Code
 # pwsh 终端 / Git Bash 会话都会这样继承），5.1 的模块解析抢先命中 pwsh 的

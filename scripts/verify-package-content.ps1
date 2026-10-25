@@ -3,7 +3,7 @@
 # scripts/verify-package-content.ps1
 # 「这一轮的代码真的进包了吗」—— 拿发布目录里的 DLL / .xbf 直接查证，不信"我跑过构建了"
 #
-# 用法: powershell -File scripts/verify-package-content.ps1 <包目录>
+# 用法: pwsh -File scripts/verify-package-content.ps1 <包目录>   # Windows PowerShell 5.1 亦可
 #   例: ... scripts\verify-package-content.ps1 publish\TrueToneCap-v0.3.5-beta-s53
 #
 # 为什么需要它（2026-09-26，交接 §53.7）：`Publish.ps1` exit 0 + 冒烟通过，只证明"那次构建自己没坏"，

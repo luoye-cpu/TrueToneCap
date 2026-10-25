@@ -34,3 +34,15 @@ function Get-Sha256Hex {
     }
     finally { $sha.Dispose() }
 }
+
+# 本轮门禁跑在哪个宿主上 —— 只做日志展示（verify.ps1 头部打印），绝不参与门禁判定：
+# 本仓选主靠"可用性探测"（钩子 command -v / csproj where pwsh / 子进程跟随调用者），
+# 不按版本号放行或拒绝；这里读 $PSVersionTable 纯为可观测性，与那条纪律不冲突。
+# 5.1 的 $PSVersionTable 自带 PSEdition=Desktop，ContainsKey 只是防御更老的宿主。
+function Get-TtcPsHostLabel {
+    $v = $PSVersionTable.PSVersion.ToString()
+    if ($PSVersionTable.ContainsKey('PSEdition') -and $PSVersionTable.PSEdition -eq 'Core') {
+        return "pwsh $v"
+    }
+    return "Windows PowerShell $v"
+}

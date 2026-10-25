@@ -9,7 +9,7 @@
 #   最小落点（不需要 CI 服务器就能每天用）。
 #
 # 与 Publish.ps1 的关系:
-#   · Publish.ps1 内部也跑同样的 7 个套件，但它只在发布时跑；本脚本随时可跑。
+#   · Publish.ps1 内部也跑同样的 8 个套件，但它只在发布时跑；本脚本随时可跑。
 #   · 本脚本【不】做工作区/依赖校验 —— 那些只在发布语境下有意义。
 #
 # 设计要点:
@@ -22,7 +22,7 @@
 #     不要依赖人类可读的总结行 —— 历史上它们的格式有 3 种，正则统计会静默漏套件。
 #
 # 用法:
-#   .\scripts\verify.ps1                    # 构建 + 7 个门禁套件（headless 安全）
+#   .\scripts\verify.ps1                    # 构建 + 8 个门禁套件（headless 安全）
 #   .\scripts\verify.ps1 -IncludeDesktop    # 追加 --wgc-avif-tests（需真实桌面会话 + GPU）
 #   .\scripts\verify.ps1 -SkipBuild         # 跳过构建，只跑测试
 #   .\scripts\verify.ps1 -BuildOnly         # 只构建，不跑测试（pre-commit 等快速反馈场景）
@@ -79,6 +79,10 @@ if ($SkipBuild -and $BuildOnly) {
 
 # 双宿主兼容助手（Get-Sha256Hex）—— 为什么不直接用 Get-FileHash，见该文件头注释。
 . (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "ps-compat.ps1")
+
+# 宿主策略（2026-10-26 定版）：默认 pwsh 7.x，Windows PowerShell 5.1 基线回退。
+# 这里只【报告】本轮宿主（门禁日志自证归属），不按版本号做任何放行/拒绝判定。
+Write-Host "TrueToneCap 一键校验 —— 宿主: $(Get-TtcPsHostLabel)"
 
 $ErrorActionPreference = "Stop"
 
@@ -962,7 +966,10 @@ if ($seedLogs.Count -eq 0) {
     }
     Write-Host "    ✅ 已由产品生成对照日志（退出码 $($seedProc.ExitCode)）"
 }
-$logLineOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $logLineProbe 2>&1
+# 宿主跟随调用者（与 [1.6/2] 同一纪律）：默认 pwsh 7.x，从 5.1 会话跑才是 5.1。
+# 2026-10-26 修正：原写死 `powershell` —— pwsh 会话里偷偷换宿主，且 pwsh-only 机器
+# （Win11 可选卸载 5.1）上这条阻塞步恒红，与 [1.6/2] "不写死宿主"的口径自相矛盾。
+$logLineOut = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $logLineProbe 2>&1
 $logLineCode = $LASTEXITCODE
 ($logLineOut | ForEach-Object { "   $_" }) -join "`n" | Write-Host
 if ($logLineCode -ne 0) {
