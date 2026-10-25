@@ -83,9 +83,13 @@ $raw0 = [IO.File]::ReadAllText($set)
 $outPath0 = $null
 try { $outPath0 = (Get-Content -LiteralPath $set -Raw -Encoding UTF8 | ConvertFrom-Json).OutputPath } catch { }
 $anchorOut = '"OutputPath":"' + ($outPath0 -replace '\\', '\\') + '"'
-if (([regex]::Matches($raw0, [regex]::Escape($anchorOut))).Count -ne 1) {
-    Say @("RC=2 未判：OutputPath 锚点命中 $((([regex]::Matches($raw0, [regex]::Escape($anchorOut)))).Count) 次（要求 1）⇒ 不猜"); exit 2
+$anchorHits = ([regex]::Matches($raw0, [regex]::Escape($anchorOut))).Count
+# 0 次是合法的：差量写盘 ⇒ OutputPath 用默认（图片目录）时那个键根本不写（与 FormatIndex 缺失同一形状）
+# ⇒ Set-Settings 走"插在首个 { 之后"的补键路（写入按 JSON 转义反斜杠，否则 System.Text.Json 拒读）。>1 才不猜。
+if ($anchorHits -gt 1) {
+    Say @("RC=2 未判：OutputPath 锚点命中 $anchorHits 次 ⇒ 不猜"); exit 2
 }
+Say @("轮前盘上 OutputPath 键命中 $anchorHits 次 $(if ($anchorHits -eq 0) { '（缺失 = 默认输出目录，本格按插入补键）' })")
 $fmtHits = ([regex]::Matches($raw0, '"FormatIndex":\d+')).Count
 # 0 次是合法的：差量写盘 ⇒ 值为默认(PNG=0)时那个键根本不写。>1 才是不敢猜的形状。
 if ($fmtHits -gt 1) {
@@ -108,7 +112,15 @@ Say @("native/ 在位 = $(if ($nativeHave.Count) { $nativeHave -join ',' } else 
 
 function Set-Settings([int]$fmt) {
     $raw = [IO.File]::ReadAllText($set)
-    $patched = $raw.Replace($anchorOut, '"OutputPath":"' + ($repoOut -replace '\\', '\\') + '"')
+    if ($anchorHits -eq 1) {
+        $patched = $raw.Replace($anchorOut, '"OutputPath":"' + ($repoOut -replace '\\', '\\') + '"')
+    } else {
+        # OutputPath 键缺失（差量写盘的默认形状）⇒ 插在首个 { 之后。
+        # 写入的路径必须按 JSON 转义反斜杠（C:\ → C:\\，-replace 替换串给 '\\' 两个字符即得），
+        # 否则产品侧 System.Text.Json 读取直接失败。
+        if (([regex]::Matches($raw, '\{')).Count -ne 1) { throw 'OutputPath 缺失且无法安全插入（花括号数≠1）' }
+        $patched = $raw.Replace('{', ('{"OutputPath":"' + ($repoOut -replace '\\', '\\') + '",'))
+    }
     $repl = '"FormatIndex":' + $fmt
     if (([regex]::Matches($patched, '"FormatIndex":\d+')).Count -eq 1) {
         $patched = [regex]::Replace($patched, '"FormatIndex":\d+', $repl)

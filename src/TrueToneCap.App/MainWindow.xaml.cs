@@ -1723,8 +1723,12 @@ public sealed partial class MainWindow : Window
         {
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(filePath);
             var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
-            dp.SetStorageItems(new[] { file });
 
+            // ═══ 2026-10-26 实机取证：两通道各自独立降级，位图先行 ═══
+            // 提权（管理员）运行时 SetStorageItems 恒抛"参数错误"—— Windows 限制提权进程向剪贴板
+            // 放存储项（本机隔离探针实测：提权下 SetBitmap/SetContent 照常可用，仅存储项通道被拒）。
+            // 原实现位图排在 SetStorageItems 之后 ⇒ 文件通道一抛，位图通道根本没机会 ⇒ 剪贴板整个空。
+            // 位图正是截图工具的最高频诉求（微信/QQ/画图只认位图）⇒ 先位图后文件，各吃各的异常。
             // ═══ 2026-09-15 修复：补剪贴板位图通道 ═══
             // 原实现只有 SetStorageItems（文件对象）→ 只能"粘贴为文件"。
             // 微信 / QQ / Word / 画图 / 网页输入框只接受位图 ⇒ Ctrl+V **完全无反应**，
@@ -1743,10 +1747,29 @@ public sealed partial class MainWindow : Window
                 LogService.Warn("MainWindow", $"剪贴板位图通道不可用（保留文件复制，粘贴到聊天框/画图可能无效）: {bmpEx.Message}");
             }
 
+            bool itemsOk = false;
+            try
+            {
+                dp.SetStorageItems(new[] { file });
+                itemsOk = true;
+            }
+            catch (Exception itemsEx)
+            {
+                LogService.Warn("MainWindow", $"剪贴板文件通道不可用（以管理员运行时 Windows 恒拒绝，属预期降级）: {itemsEx.Message}");
+            }
+
+            if (!bitmapOk && !itemsOk)
+            {
+                LogService.Warn("MainWindow", "剪贴板两个通道都不可用，仅保留已落盘文件");
+                SetStatus($"✅ 已保存（复制到剪贴板失败）: {Path.GetFileName(filePath)}");
+                return;
+            }
+
             Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
-            SetStatus(bitmapOk
+            var onlyLabel = bitmapOk ? "位图" : "文件";
+            SetStatus(bitmapOk && itemsOk
                 ? $"✅ 已保存并复制: {Path.GetFileName(filePath)}"
-                : $"✅ 已保存并复制（仅文件，位图不可用）: {Path.GetFileName(filePath)}");
+                : $"✅ 已保存并复制（仅{onlyLabel}，另一通道不可用）: {Path.GetFileName(filePath)}");
         }
         catch (Exception ex)
         {
