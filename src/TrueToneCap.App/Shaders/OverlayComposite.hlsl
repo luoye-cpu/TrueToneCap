@@ -20,8 +20,8 @@ cbuffer UIState : register(b0)
     float4 MousePos;       // (mx, my, 0, 0)
     float4 Flags;          // (selComplete, down, hoverIndex, dark)
     float4 FrameSize;      // (w, h, 0, 0)
-    float4 TextSubs[40];   // 图集子矩形 (0-6 主工具栏, 7-17 标注工具栏, 18-25 文字槽 0-7, 26 悬停标题)
-    float4 TextPos[40];    // 帧内位置 (0-6 主, 7-17 标注, 26 悬停标题位置)
+    float4 TextSubs[40];   // 图集子矩形 (0-6 主按钮, 7 主提示, 8-17 标注, 18 标注提示, 19-26 文字槽 0-7, 27 悬停标题)
+    float4 TextPos[40];    // 帧内位置 (0-6 主, 7 主提示, 8-17 标注, 18 标注提示, 27 悬停标题位置)
     float4 AnnoState;      // (mode: 0/1, tool: 0..5, down: 0/1, 0)
     float4 AnnoColor;      // 标注颜色 (线性 RGB + A)
     float4 AnnoStroke;     // (strokeW, opacity, 0, 0)
@@ -90,9 +90,9 @@ float4 main(PSInput input) : SV_Target
         if (minDh >= -3.5 && minDh <= 3.5)
             base.rgb = lerp(base.rgb, float3(0.2, 0.51, 0.96), 0.95);
 
-        // 标题 tooltip（左上角上方, 图集槽 26）
-        float4 tipSub = TextSubs[26];
-        float4 tipPos = TextPos[26];
+        // 标题 tooltip（左上角上方, 图集槽 27）
+        float4 tipSub = TextSubs[27];
+        float4 tipPos = TextPos[27];
         if (tipSub.z > 0.0 && all(pos >= tipPos.xy - 1.0) && all(pos <= tipPos.xy + tipPos.zw + 1.0))
         {
             float2 tipCenter = (tipPos.xy + tipPos.xy + tipPos.zw) * 0.5;
@@ -134,7 +134,7 @@ float4 main(PSInput input) : SV_Target
     }
 
     // ═══ 4. 工具栏（选区完成时）═══
-    int btnCount = (int)(ButtonLayout.w + 0.5); // 6=主工具栏 10=标注工具栏
+    int btnCount = (int)(ButtonLayout.w + 0.5); // 7=主工具栏 10=标注工具栏
     float3 fg = dark ? float3(1.0, 1.0, 1.0) : float3(0.05, 0.05, 0.05);
     // 悬停按钮索引（由鼠标位置计算, 固定 10 次循环 + 有效数判断）
     int hover = -1;
@@ -163,7 +163,7 @@ float4 main(PSInput input) : SV_Target
     {
         float2 tbMin = ToolbarRect.xy;
         float2 tbMax = ToolbarRect.xy + ToolbarRect.zw;
-        int subBase = AnnoState.x > 0.5 ? 7 : 0; // 标注工具栏文字槽偏移
+        int subBase = AnnoState.x > 0.5 ? 8 : 0; // 标注工具栏文字槽偏移（主工具栏 7 按钮 + 提示占 0-7）
 
         if (all(pos >= tbMin - 1.0) && all(pos <= tbMax + 1.0))
         {
@@ -210,11 +210,11 @@ float4 main(PSInput input) : SV_Target
                 }
             }
 
-            // 悬停提示（工具栏下方/上方; 提示槽: 主=6, 标注=17）
+            // 悬停提示（工具栏下方/上方; 提示槽: 主=7, 标注=18）
             if (hover >= 0 && hover < btnCount)
             {
-                float4 tipSub = AnnoState.x > 0.5 ? TextSubs[17] : TextSubs[6];
-                float4 tipPos = AnnoState.x > 0.5 ? TextPos[17] : TextPos[6];
+                float4 tipSub = AnnoState.x > 0.5 ? TextSubs[18] : TextSubs[7];
+                float4 tipPos = AnnoState.x > 0.5 ? TextPos[18] : TextPos[7];
                 if (tipSub.z > 0.0 && all(pos >= tipPos.xy - 1.0) && all(pos <= tipPos.xy + tipPos.zw + 1.0))
                 {
                     float2 tipCenter = (tipPos.xy + tipPos.xy + tipPos.zw) * 0.5;
@@ -300,13 +300,13 @@ float4 main(PSInput input) : SV_Target
                 if (dMin <= sw * 0.5)
                     base.rgb = lerp(base.rgb, a2.rgb, a2.a * layerA);
             }
-            // ── 5. 文字（图集槽 18+slot, 采样字形）──
+            // ── 5. 文字（图集槽 19+slot, 采样字形）──
             else if (type < 5.5)
             {
                 int slot = (int)(a3.y + 0.5);
                 if (slot >= 0 && slot < 16)
                 {
-                    float4 sub = TextSubs[18 + slot];
+                    float4 sub = TextSubs[19 + slot];
                     if (sub.z > 0.0)
                     {
                         float2 atl = (ap - a1.xy) / a1.zw * sub.zw + sub.xy;

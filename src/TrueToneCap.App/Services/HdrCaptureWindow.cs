@@ -18,7 +18,7 @@ using TrueToneCap.Core.Logging;   // LogLevel / LogCategory（定义已移到 Co
 
 namespace TrueToneCap.App.Services;
 
-public enum HdrCaptureAction { Cancel, Save, Copy, Annotate, Ocr, Translate }
+public enum HdrCaptureAction { Cancel, Save, Copy, Annotate, Ocr, Translate, Qr }
 
 public sealed partial class HdrCaptureWindow : IDisposable
 {
@@ -253,7 +253,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         public System.Numerics.Vector4 Flags;         // (selComplete,down,0,dark)
         public System.Numerics.Vector4 FrameSize;     // (w,h,0,0)
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 160)]
-        public float[] TextSubs;  // 40 槽 × 4 (0-6 主, 7-17 标注, 18-33 文字)
+        public float[] TextSubs;  // 40 槽 × 4 (0-6 主按钮, 7 主提示, 8-17 标注, 18 标注提示, 19-26 文字, 27 悬停标题)
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 160)]
         public float[] TextPos;   // 40 槽 × 4
         public System.Numerics.Vector4 AnnoState;     // (mode, tool, down, 0)
@@ -868,8 +868,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     /// <summary>
     /// 确保工具栏文字图集存在（按 _uiScale 构建）。
-    /// 布局 2048×384: 行0 = 主工具栏 7 项 (槽 0-6), 行1 = 标注工具栏 11 项 (槽 7-17),
-    /// 行2 = 文字槽 16 个 × 256×64 (槽 18-33)。
+    /// 布局 2048×384: 行0 = 主工具栏 8 项 (7 按钮+提示, 槽 0-7), 行1 = 标注工具栏 11 项 (槽 8-18),
+    /// 行2 = 文字槽 8 个 × 256×64 (槽 19-26), 行3 = 悬停标题 (槽 27)。
     /// </summary>
     private void EnsureTextAtlas()
     {
@@ -887,8 +887,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
             var mainItems = new (string text, int w, int h)[]
             {
                 ("\u2611 保存", 0, 0), ("\u270E 标注", 0, 0), ("\u2610 复制", 0, 0),
-                ("\u25C9 识字", 0, 0), ("\u2605 翻译", 0, 0), ("\u2715 取消", 0, 0),
-                ("保存截图到文件", 0, 0),
+                ("\u25C9 识字", 0, 0), ("\u2605 翻译", 0, 0), ("\u25A3 二维码", 0, 0),
+                ("\u2715 取消", 0, 0), ("保存截图到文件", 0, 0),
             };
             var annoItems = new (string text, int w, int h)[]
             {
@@ -897,22 +897,24 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 ("\u21B6 撤销", 0, 0), ("\u21B7 重做", 0, 0), ("\u2713 完成", 0, 0),
                 ("\u2715 取消", 0, 0), ("拖拽绘制标注", 0, 0),
             };
-            var lay = GetToolbarLayout(6);
+            var lay = GetToolbarLayout(7);
             int btnW = lay.BtnW, btnH = lay.BtnH;
             int hintW = Math.Max(120, (int)Math.Round(160 * _uiScale));
-            int hintH = Math.Max(18, (int)Math.Round(22 * _uiScale));
-            for (int i = 0; i < 6; i++) { mainItems[i].w = btnW; mainItems[i].h = btnH; }
-            mainItems[6].w = hintW; mainItems[6].h = hintH;
+            int hintH = Math.Max(24, (int)Math.Round(30 * _uiScale));
+            for (int i = 0; i < 7; i++) { mainItems[i].w = btnW; mainItems[i].h = btnH; }
+            mainItems[7].w = hintW; mainItems[7].h = hintH;
             for (int i = 0; i < 10; i++) { annoItems[i].w = btnW; annoItems[i].h = btnH; }
             annoItems[10].w = hintW; annoItems[10].h = hintH;
 
-            float fontSize = 11f * (float)_uiScale;
+            // 2026-10-26 用户反馈"框选字体太小"：11f 在 90×32 按钮里字高占比仅 ~1/3，
+            // 提到 18f（字高/按钮 ≈ 0.56，与 SDR SelectionOverlay 的 28/48 观感一致）。
+            float fontSize = 18f * (float)_uiScale;
             var atlasBytes = new byte[atlasW * atlasH * 4];
             var subs = new System.Numerics.Vector4[40];
             // 共享设备：不 Dispose（见 AnnotationRasterizer.SharedCanvasDevice 的说明）
             var device = AnnotationRasterizer.SharedCanvasDevice;
             {
-                // 行 0: 主工具栏 7 项 (槽 0-6)
+                // 行 0: 主工具栏 8 项 (7 按钮 + 提示, 槽 0-7)
                 int cursorX = 0;
                 for (int i = 0; i < mainItems.Length; i++)
                 {
@@ -924,19 +926,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
                         Buffer.BlockCopy(bmp, row * mainItems[i].w * 4, atlasBytes, (row * atlasW + dstX) * 4, mainItems[i].w * 4);
                     cursorX += mainItems[i].w + 8;
                 }
-                // 行 1: 标注工具栏 11 项 (槽 7-17)
+                // 行 1: 标注工具栏 11 项 (槽 8-18)
                 cursorX = 0;
                 for (int i = 0; i < annoItems.Length; i++)
                 {
                     var bmp = RenderTextBitmap(device, annoItems[i].text, annoItems[i].w, annoItems[i].h, fontSize);
                     if (bmp is null) continue;
                     int dstX = cursorX;
-                    subs[7 + i] = new System.Numerics.Vector4(dstX / (float)atlasW, row1Y / (float)atlasH, annoItems[i].w / (float)atlasW, annoItems[i].h / (float)atlasH);
+                    subs[8 + i] = new System.Numerics.Vector4(dstX / (float)atlasW, row1Y / (float)atlasH, annoItems[i].w / (float)atlasW, annoItems[i].h / (float)atlasH);
                     for (int row = 0; row < annoItems[i].h; row++)
                         Buffer.BlockCopy(bmp, row * annoItems[i].w * 4, atlasBytes, ((row1Y + row) * atlasW + dstX) * 4, annoItems[i].w * 4);
                     cursorX += annoItems[i].w + 8;
                 }
-                // 行 2: 文字槽 8 个 × 256×64 (槽 18-25) — 每个 256×64 固定 (2048/256=8 个, 超限不显示但输出合成仍正确)
+                // 行 2: 文字槽 8 个 × 256×64 (槽 19-26) — 每个 256×64 固定 (2048/256=8 个, 超限不显示但输出合成仍正确)
                 const int slotW = 256, slotH = 64;
                 int slot = 0;
                 // ═══ 2026-08-16 P1-3: 快照遍历 (渲染线程与 UI 线程修改互斥) ═══
@@ -945,7 +947,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                     if (slot >= 8) break;
                     var tl = (TextLayer)layer;
                     int dstX = slot * slotW;
-                    subs[18 + slot] = new System.Numerics.Vector4(dstX / (float)atlasW, row2Y / (float)atlasH, slotW / (float)atlasW, slotH / (float)atlasH);
+                    subs[19 + slot] = new System.Numerics.Vector4(dstX / (float)atlasW, row2Y / (float)atlasH, slotW / (float)atlasW, slotH / (float)atlasH);
                     float tfs = Math.Clamp(tl.FontSize, 10f, 48f) * (float)_uiScale;
                     var bmp = RenderTextBitmap(device, tl.Text, slotW, slotH, tfs);
                     if (bmp is not null)
@@ -955,10 +957,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
                     }
                     slot++;
                 }
-                // 行 3: 悬停窗口标题槽 (槽 26, 512×64) — QQ截图式窗口标题提示
+                // 行 3: 悬停窗口标题槽 (槽 27, 512×64) — QQ截图式窗口标题提示
                 {
                     const int tipW = 512, tipH = 64, row3Y = 320;
-                    subs[26] = new System.Numerics.Vector4(0, row3Y / (float)atlasH, tipW / (float)atlasW, tipH / (float)atlasH);
+                    subs[27] = new System.Numerics.Vector4(0, row3Y / (float)atlasH, tipW / (float)atlasW, tipH / (float)atlasH);
                     string hoverTitle = _hoverTitle ?? "";
                     if (hoverTitle.Length > 0)
                     {
@@ -1047,12 +1049,12 @@ public sealed partial class HdrCaptureWindow : IDisposable
         }
         else cb.SelRect = new System.Numerics.Vector4(0, 0, 0, 0);
 
-        // 工具栏布局（与 GetToolbarLayout / Down() 命中一致; 标注模式 10 按钮 槽 7-17）
+        // 工具栏布局（与 GetToolbarLayout / Down() 命中一致; 标注模式 10 按钮 槽 8-17）
         bool isDark = App.ResolveEffectiveTheme(App.CurrentTheme) is AppThemeMode.Dark or AppThemeMode.OLED;
         if (_selComplete)
         {
-            int n = _annoMode ? 10 : 6;
-            int subBase = _annoMode ? 7 : 0;
+            int n = _annoMode ? 10 : 7;
+            int subBase = _annoMode ? 8 : 0;
             var lay = GetToolbarLayout(n);
             int selX1 = Math.Min(_sx1, _sx2), selX2 = Math.Max(_sx1, _sx2);
             int selY1 = Math.Min(_sy1, _sy2), selY2 = Math.Max(_sy1, _sy2);
@@ -1072,9 +1074,9 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 int by = ty + lay.PadY;
                 SetV4(cb.TextPos, subBase + i, new System.Numerics.Vector4(bx, by, lay.BtnW, lay.BtnH));
             }
-            // 悬停提示位置（工具栏下方/上方）
+            // 悬停提示位置（工具栏下方/上方; 高度与图集行 0/1 的提示槽一致，随字号 18f 加高）
             int hintW = Math.Max(120, (int)Math.Round(160 * _uiScale));
-            int hintH = Math.Max(18, (int)Math.Round(22 * _uiScale));
+            int hintH = Math.Max(24, (int)Math.Round(30 * _uiScale));
             int hx = Math.Clamp(tx + totalW / 2 - hintW / 2, 4, w - hintW - 4);
             int hy = ty + totalH + 4;
             if (hy + hintH + 4 > h) hy = ty - hintH - 4;
@@ -1104,7 +1106,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             int tix = Math.Clamp(hr.X - _winX, 4, w - tipW - 4);
             int tiy = hr.Y - _winY - tipH - 4;
             if (tiy < 0) tiy = hr.Y - _winY + 4;
-            SetV4(cb.TextPos, 26, new System.Numerics.Vector4(tix, tiy, tipW, tipH));
+            SetV4(cb.TextPos, 27, new System.Numerics.Vector4(tix, tiy, tipW, tipH));
         }
         else
         {
@@ -1549,6 +1551,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 ("\u2610", "复制", "复制到剪贴板"),
                 ("\u25C9", "识字", "识别图中文字"),
                 ("\u2605", "翻译", "翻译图中文字"),
+                ("\u25A3", "二维码", "识别图中二维码（区域照常保存+复制）"),
                 ("\u2715", "取消", "取消截图"),
             };
 
@@ -1607,7 +1610,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 float hintG = isDark ? 0.02f : 0.15f;
                 float hintB = isDark ? 0.02f : 0.15f;
                 int hintW = Math.Max(120, (int)Math.Round(160 * _uiScale));
-                int hintH = Math.Max(18, (int)Math.Round(22 * _uiScale));
+                int hintH = Math.Max(24, (int)Math.Round(30 * _uiScale));
                 int hx = Math.Clamp(tx + totalW / 2 - hintW / 2, 4, w - hintW - 4);
                 int hy = ty + totalH + 4;
                 if (hy + hintH + 4 > h) hy = ty - hintH - 4;
@@ -1655,6 +1658,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 ("\u2610", "复制", "复制到剪贴板"),
                 ("\u25C9", "识字", "识别图中文字"),
                 ("\u2605", "翻译", "翻译图中文字"),
+                ("\u25A3", "二维码", "识别图中二维码（区域照常保存+复制）"),
                 ("\u2715", "取消", "取消截图"),
             };
             foreach (double scale in new[] { 1.0, 1.25, 1.5, 2.0 })
@@ -1663,8 +1667,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 int btnW = Math.Max(60, 90 * s / 100);
                 int btnH = Math.Max(24, 32 * s / 100);
                 int hintW = Math.Max(120, (int)Math.Round(160 * scale));
-                int hintH = Math.Max(18, (int)Math.Round(22 * scale));
-                float fontSize = 11f * (float)scale;
+                int hintH = Math.Max(24, (int)Math.Round(30 * scale));
+                float fontSize = 18f * (float)scale;
 
                 foreach (var it in items)
                 {
@@ -1726,7 +1730,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             if (!s_textCache.TryGetValue((text, tw, th), out var pixels))
             {
                 var device = AnnotationRasterizer.SharedCanvasDevice;   // 共享设备：不 Dispose
-                pixels = RenderTextBitmap(device, text, tw, th, 11f * (float)_uiScale);
+                pixels = RenderTextBitmap(device, text, tw, th, 18f * (float)_uiScale);
                 if (pixels is null) return;
                 s_textCache[(text, tw, th)] = pixels;
             }
@@ -1963,6 +1967,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 ("\u2610", "复制", "复制到剪贴板"),
                 ("\u25C9", "识字", "识别图中文字"),
                 ("\u2605", "翻译", "翻译图中文字"),
+                ("\u25A3", "二维码", "识别图中二维码（区域照常保存+复制）"),
                 ("\u2715", "取消", "取消截图"),
             };
             int n = items.Length;
@@ -1982,7 +1987,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 if (x >= ix && x <= ix + btnW && y >= iy && y <= iy + btnH)
                 {
                     var actions = new[] { HdrCaptureAction.Save, HdrCaptureAction.Annotate, HdrCaptureAction.Copy,
-                        HdrCaptureAction.Ocr, HdrCaptureAction.Translate, HdrCaptureAction.Cancel };
+                        HdrCaptureAction.Ocr, HdrCaptureAction.Translate, HdrCaptureAction.Qr, HdrCaptureAction.Cancel };
                     _down = false;
                     _moved = true; // 防 Up 单击逻辑重置选区 (2026-08-11 bugfix)
                     DoAction(actions[i]);

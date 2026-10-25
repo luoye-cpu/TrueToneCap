@@ -2303,6 +2303,17 @@ public sealed partial class MainWindow : Window
                             if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx4)
                                 await CaptureAndTranslateFromPixelsAsync(outPx4, rw, rh);
                             break;
+                        case HdrCaptureAction.Qr:
+                            // 与 SDR 选区的 Qr 分支同构：区域照常落盘+剪贴板，二维码窗口额外弹出；
+                            // 解码/预览/落盘三个出口吃同一份合成像素，马赛克盖住的内容不漏。
+                            LogService.Info("MainWindow", "HDR 选区二维码识别（区域照常落盘+剪贴板）");
+                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx5)
+                            {
+                                var qrSaveTask = EncodeAndSaveAsync(outPx5, rw, rh);
+                                await CaptureAndQrFromPixelsAsync(outPx5, rw, rh);
+                                await qrSaveTask;
+                            }
+                            break;
                     }
 
                     if (MinimizeTrayChk.IsChecked == true

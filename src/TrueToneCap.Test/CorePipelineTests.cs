@@ -5443,7 +5443,10 @@ public static class CorePipelineTests
         // 为什么算在基线里而不是给它开个例外：这把尺的单位本来就是"该文件里的中文字面量条数"——
         // 头六条里 `"CreateWindowExW 失败: {…}"`、`"MPO 检测失败"`、`"VRR 支持: ✓ 启用"` 都是日志串。
         // 单位变了才要改口径；只是数量 +1 就走它自己写的解释①（同一次改动里改基线并说明）。
-        const int BakedCnBaseline = 99;
+        // 2026-10-26：99 → 106（+7）。HDR 工具条补"二维码"按钮（对齐 SDR 覆盖层已有能力）：
+        // 图集主清单 1 条（"\u25A3 二维码"）+ 三份按钮清单（GDI 回退 / 启动预热 / Down() 命中）
+        // 各 2 条（"二维码" + 提示"识别图中二维码（区域照常保存+复制）"）= 7 条，全是画进位图的功能文案。
+        const int BakedCnBaseline = 106;
 
         var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
         if (p is null)
