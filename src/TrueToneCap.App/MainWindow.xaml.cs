@@ -2362,8 +2362,14 @@ public sealed partial class MainWindow : Window
                             await CaptureAndTranslateFromPixelsAsync(regionPixels, rect.Width, rect.Height);
                             break;
                         case SelectionOverlay.ActionResult.Qr:
-                            LogService.Info("MainWindow", "选区二维码识别");
+                            LogService.Info("MainWindow", "选区二维码识别（区域照常落盘+剪贴板）");
+                            // 区域与普通确认走同一条 EncodeAndSaveAsync 管线：落盘 + 文件进剪贴板 +
+                            // 成功 toast（保存自吞异常，失败走 ShowCaptureFailed）。解码并行跑让结果
+                            // 窗口尽快弹出，保存任务随后收尾。三个出口（解码/预览/落盘）吃的是
+                            // Finish 合成名单产出的同一份像素 —— 马赛克盖住的内容不会从任何一条路漏出。
+                            var qrSaveTask = EncodeAndSaveAsync(regionPixels, rect.Width, rect.Height);
                             await CaptureAndQrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
+                            await qrSaveTask;
                             break;
                     }
 

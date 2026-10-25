@@ -690,10 +690,12 @@ public sealed partial class SelectionOverlay : Window
         if (_isAnnotating) ExitAnnotationMode();
 
         // 先在后台启动像素提取/合成 (窗口关闭不影响内存中的桌面像素数据)
-        // ⚠ 四个目的地（保存/复制/识字/翻译）都要吃合成后的像素：识字/翻译一旦落回原始桌面像素，
-        //   用户用马赛克盖住的原文会被 OCR 原样读出来。
+        // ⚠ 五个目的地（保存/复制/识字/翻译/二维码）都要吃合成后的像素：识字/翻译一旦落回原始
+        //   桌面像素，用户用马赛克盖住的原文会被 OCR 原样读出来；二维码同理 —— 2026-10-26 起
+        //   它与普通截图一样把区域落盘+进剪贴板，马赛克必须先于任何像素出口（解码/预览/落盘）生效。
         Task<byte[]?>? composeTask = null;
-        if (result is ActionResult.Confirm or ActionResult.Copy or ActionResult.Ocr or ActionResult.Translate)
+        if (result is ActionResult.Confirm or ActionResult.Copy or ActionResult.Ocr or ActionResult.Translate
+            or ActionResult.Qr)
         {
             composeTask = _annotationManager.Layers.Count > 0
                 ? Task.Run(GetAnnotatedRegionPixels)
