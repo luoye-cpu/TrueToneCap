@@ -54,7 +54,8 @@
         "dependencies": {
           "Microsoft.Windows.AI.MachineLearning": "[2.4.89, )",
           "Vortice.DXGI": "[3.8.3, )",
-          "Vortice.Direct3D11": "[3.8.3, )"
+          "Vortice.Direct3D11": "[3.8.3, )",
+          "ZXing.Net": "[0.16.11, )"
         }
       },
       "Microsoft.Windows.AI.MachineLearning": {
@@ -85,6 +86,12 @@
           "SharpGen.Runtime": "2.4.2-beta",
           "Vortice.DirectX": "3.8.3"
         }
+      },
+      "ZXing.Net": {
+        "type": "CentralTransitive",
+        "requested": "[0.16.11, )",
+        "resolved": "0.16.11",
+        "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
       }
     }
   }

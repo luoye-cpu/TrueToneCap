@@ -55,6 +55,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | ✏️ **Annotate** | Rect, Ellipse, Arrow, Pen, Text, Mosaic — full-screen overlay | 矩形、椭圆、箭头、画笔、文字、马赛克 — 全屏覆盖层 |
 | 🖼️ **Export** | PNG (lossless HDR) · JPEG (optional Ultra HDR gain map) · JPEG XL · AVIF (NVENC / MFT-QSV / libaom / SVT-AV1) · WebP · TIFF | PNG（无损 HDR）· JPEG（可附 Ultra HDR 增益图）· JPEG XL · AVIF（NVENC / 系统 MFT(QSV) / libaom / SVT-AV1）· WebP · TIFF |
 | 🔤 **OCR** | PP-OCRv6 (ONNX, DirectML/CPU) + Windows OCR fallback · zh/en strongest, ja needs ≥24px, ko unsupported | PP-OCRv6（ONNX，DirectML/CPU）+ Windows OCR 兜底 · 中/英文最准，日文需字高 ≥24px，韩文不支持（转系统 OCR） |
+| 🔳 **QR recognition** | Multi-code local decode (ZXing.Net) · plain-text display with control-char/bidi escaping · open action whitelisted to http/https and only on an explicit click — dangerous schemes (file:/ms-msdt:/…) are red-flagged and never executed | 多码本机解码（ZXing.Net）· 明文展示，控制字符/双向符转义可见 · 仅 http/https 且显式点击才允许"打开链接"，危险协议（file:/ms-msdt:/…）红牌展示且永不执行 |
 | 🌐 **Translate** | Custom LLM → Youdao official API → (opt-in) Bing / Google web endpoints | 自定义 LLM → 有道官方开放平台 →（需显式勾选）必应 / Google 网页端点 |
 | ⌨️ **Hotkeys** | Recordable · tray minimize · autostart | 可录制 · 托盘最小化 · 开机启动 |
 | 🧩 **VS-Cap mode** (opt-in) | Optional Qt sidecar editor: selection annotation, unified undo, always-on-top pinning, clipboard-pin hotkey | 可选 Qt 侧车编辑器：选区标注、统一撤销、置顶贴图、剪贴板贴图热键 |
@@ -132,11 +133,12 @@ dotnet run --project src\TrueToneCap.Test -- --unit-tests   # 单套件示例
 | 编码管线集成 | `--encoding-tests` | |
 | 基础设施服务（NativeLibraryResolver） | `--service-tests` | |
 | OCR 服务（BitmapPreprocessor / LLM 提供商与模型清单闭合） | `--ocr-tests` | |
+| 二维码解码（往返 / 多码 / 处置分类 / 展示转义） | `--qr-tests` | |
 | 输出结构合法性（TIFF IFD / AVIF box） | `--format-tests` | |
 | 综合可用性 | `--usability-tests` | ✓ |
 | WGC 捕获 + AVIF 后端验证 | `--wgc-avif-tests` | ✓ |
 
-`--all` 会运行全部 8 个套件；其中 WGC 套件因需独占 STA 线程与 GPU 资源，
+`--all` 会运行全部 9 个套件；其中 WGC 套件因需独占 STA 线程与 GPU 资源，
 以独立子进程方式执行，避免与其它套件相互干扰。
 
 ### 自动拦截（git 钩子 / CI）

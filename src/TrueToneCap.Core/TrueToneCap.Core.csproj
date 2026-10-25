@@ -49,5 +49,7 @@
          ⚠ 不要再把 Microsoft.ML.OnnxRuntime.DirectML 加回来 —— WinML 已自带托管 API
            与原生运行时，两包并存会造成托管/原生版本错配。 -->
     <PackageReference Include="Microsoft.Windows.AI.MachineLearning" />
+    <!-- 二维码解码（2026-10-26，选型与安全边界见 ../../Directory.Packages.props 该条目注释） -->
+    <PackageReference Include="ZXing.Net" />
   </ItemGroup>
 </Project>

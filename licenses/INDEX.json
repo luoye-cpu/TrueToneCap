@@ -493,6 +493,17 @@
       "sha256": "1cc7abd1e97575838535484bef6e4ab14e81681ddf7837672acede5fca1d4e30",
       "obligationNote": "MIT：SharpGen.Runtime(.COM).dll 随包分发须保留声明；版权头是 “Alexandre Mutel, 2017 Jeremy Koritzinsky”。"
     },
+    {
+      "file": "zxingnet-Apache-2.0.txt",
+      "project": "ZXing.Net（二维码/条码解码，2026-10-26 随「识别二维码」功能引入）",
+      "version": "0.16.11",
+      "spdx": "Apache-2.0",
+      "shippedIn": ["runtime"],
+      "sourceKind": "downloaded",
+      "sourcePathOrUrl": "https://raw.githubusercontent.com/micjahn/ZXing.NET/master/COPYING（nuspec license=Apache-2.0；版权署名取自 nuspec authors 字段）",
+      "sha256": "f51de042e41c9c0553f38db255eb32a6caadfb1256b44205da5f00de612c7804",
+      "obligationNote": "Apache-2 第 4 条：随包分发 zxing.dll 须保留许可副本（本文件）；改动需带显著声明（当前未改动，仅重打包）。落盘文本头部注明署名与来源，正文为上游 COPYING 原文。"
+    },
 {
       "file": "vs-cap-MIT.txt",
       "project": "VS-Cap (VS-Renderer-GUI src/cap)",

@@ -422,6 +422,31 @@ public static class LocaleManager
             ["识别图中文字 (OCR)"] = "Recognise text in the image (OCR)",
             ["识字"] = "OCR",
             ["翻译图中文字"] = "Translate text in the image",
+            // ── 二维码识别（2026-10-26）：工具栏新按钮 + 结果窗（QrResultWindow）──
+            ["识别二维码 (QR)"] = "Recognise QR codes (QR)",
+            ["二维码"] = "QR",
+            ["TrueToneCap 二维码"] = "TrueToneCap QR Code",
+            ["解码在本机完成 · 程序不会自动打开任何内容 · 点「打开链接」才启动浏览器"] =
+                "Decoded locally · the app never opens anything on its own · the browser starts only when you press 「Open link」",
+            ["检测到 {0} 个二维码（解码在本机完成，不会自动打开任何内容）"] =
+                "Detected {0} QR code(s) — decoded locally, nothing is opened automatically",
+            ["链接"] = "Link",
+            ["其它协议（不打开）"] = "Other scheme (never opened)",
+            ["危险协议"] = "Dangerous scheme",
+            ["文本"] = "Text",
+            ["⚠ 内容含控制字符或双向覆盖符（反向显示类），屏幕上已按可见转义显示 —— 该内容的视觉顺序可能与实际不同，复制前请留意。"] =
+                "⚠ This content contains control characters or bidi overrides (visual-order tricks); they are shown as visible escapes here — what you see may not match reality. Check before copying.",
+            ["⚠ 此内容携带可执行/系统跳转类协议（file: / ms-msdt: / shell: 等），程序已禁止任何打开动作 —— 仅作展示。"] =
+                "⚠ This payload carries an executable/system-jump scheme (file: / ms-msdt: / shell: …); every open action is blocked — display only.",
+            ["复制内容"] = "Copy content",
+            ["复制解码原文（逐字原样）"] = "Copy the decoded text verbatim",
+            ["打开链接"] = "Open link",
+            ["在默认浏览器中打开该链接（仅 http/https）"] = "Open this link in the default browser (http/https only)",
+            ["✓ 已复制（原样，未改写）"] = "✓ Copied (verbatim)",
+            ["复制失败"] = "Copy failed",
+            ["已在默认浏览器打开"] = "Opened in the default browser",
+            ["打开链接失败"] = "Failed to open the link",
+            ["预览渲染失败: {0}"] = "Preview render failed: {0}",
             ["取消选区 (Esc)"] = "Cancel selection (Esc)",
             ["取消"] = "Cancel",
             ["矩形 (R)"] = "Rectangle (R)",

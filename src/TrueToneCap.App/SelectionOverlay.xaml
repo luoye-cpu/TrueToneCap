@@ -98,6 +98,15 @@
                         <TextBlock Text="翻译" FontSize="28" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
+                <!-- 二维码按钮（2026-10-26）：解码纯本机；结果窗只做明文展示，打开动作走 http/https 白名单 -->
+                <Button x:Name="BtnQr" Width="140" Height="72"
+                        Click="OnQr" ToolTipService.ToolTip="识别二维码 (QR)">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <PathIcon Width="32" Height="32" Data="F0 M0,0 L7,0 L7,7 L0,7 Z M1.75,1.75 L5.25,1.75 L5.25,5.25 L1.75,5.25 Z M3,3 L4.25,3 L4.25,4.25 L3,4.25 Z M13,0 L20,0 L20,7 L13,7 Z M14.75,1.75 L18.25,1.75 L18.25,5.25 L14.75,5.25 Z M16,3 L17.25,3 L17.25,4.25 L16,4.25 Z M0,13 L7,13 L7,20 L0,20 Z M1.75,14.75 L5.25,14.75 L5.25,18.25 L1.75,18.25 Z M3,16 L4.25,16 L4.25,17.25 L3,17.25 Z M11,11 L13,11 L13,13 L11,13 Z M14.5,11 L16.5,11 L16.5,13 L14.5,13 Z M17,11 L20,11 L20,13 L17,13 Z M11,14.5 L13,14.5 L13,16.5 L11,16.5 Z M11,17 L13,17 L13,20 L11,20 Z M14.5,14.5 L16.5,14.5 L16.5,16.5 L14.5,16.5 Z M17,14.5 L18.5,14.5 L18.5,16.5 L17,16.5 Z M14.5,17 L16.5,17 L16.5,18.5 L14.5,18.5 Z M17,17 L20,17 L20,20 L17,20 Z"/>
+                        <!-- 三个字（84px）塞不进 140 宽的同字号按钮，降 24 只在这一枚上 -->
+                        <TextBlock Text="二维码" FontSize="24" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
                 <Button x:Name="BtnCancel" Width="120" Height="72"
                         Click="OnCancel" ToolTipService.ToolTip="取消选区 (Esc)">
                     <StackPanel Orientation="Horizontal" Spacing="8">

@@ -59,6 +59,15 @@
     <PackageVersion Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageVersion Include="Vortice.DXGI" Version="3.8.3" />
 
+    <!-- ── 二维码识别 (Core) ──
+         2026-10-26: ZXing.Net 0.16.11 —— 截图选区的"识别二维码"功能（维护者 2026-10-26 提出）。
+         选型理由: 纯托管（无原生依赖，不进 tools-manifest）、单包无绑定系列附加包、
+               QRCodeReader / RGBLuminanceSource 路径零反射（裁剪安全）。
+         安全边界: 只做【解码】—— 解出的文本如何处置（展示/打开）全部由 App 层
+               QrResultWindow 白名单把关；本包不发起任何网络请求。
+         许可与台账: 落盘 licenses/ 后见 licenses/INDEX.json + THIRD-PARTY-NOTICES.md。 -->
+    <PackageVersion Include="ZXing.Net" Version="0.16.11" />
+
     <!-- ── 编码 (Core) ──
          MozJpegSharp.Core 已移除（2026-09-21 许可合规轮）：零引用死重量，
          理由与取证见 src/TrueToneCap.Core/TrueToneCap.Core.csproj 原位注释。 -->

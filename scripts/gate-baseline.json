@@ -1,35 +1,39 @@
 {
-    "取数时间":  "2026-10-23 07:53:12",
-    "总断言":  1914,
-    "各套件":  {
-                "--unit-tests":  {
-                                     "断言":  1351,
-                                     "跳过":  1
-                                 },
-                "--color-tests":  {
-                                      "断言":  267,
-                                      "跳过":  0
-                                  },
-                "--encoding-tests":  {
-                                         "断言":  14,
-                                         "跳过":  0
-                                     },
-                "--service-tests":  {
-                                        "断言":  2,
-                                        "跳过":  1
-                                    },
-                "--ocr-tests":  {
-                                    "断言":  12,
-                                    "跳过":  0
-                                },
-                "--format-tests":  {
-                                       "断言":  43,
-                                       "跳过":  0
-                                   },
-                "--usability-tests":  {
-                                          "断言":  225,
-                                          "跳过":  0
-                                      },
-                "_说明":  "用 scripts\\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里 ｜ 2026-10-23：地板 1871→1914（unit 1308→1351，+43）——翻译免费端点这一轮新增五张卡：Test_FreeTranslateEndpointsAreOnByDefault（默认配置开箱可用，含 App 侧持久化默认值的源码哨兵）、Test_EdgeFreeEndpointShape（裸字符串数组 / 省略 from 才是自动检测 / 非空 UA / 四种失败形状）、Test_MyMemoryCharLimitAndSilentRejection（500 上限按字符不按字节 / HTTP 200 体内 403 不许当译文 / 真件的 responseStatus 是字符串而成功时是数字 / 该字段为 null 时解析器不许抛）、Test_FreeEndpointHintNamesARealControl（提示引号内的控件名必须在界面源码里逐字存在）、Test_FreeEndpointsDefaultMigrationIsWired（一次性翻面的接线与门）。三发变异各自证明有牙：M1 把 EdgeClientUa 置空 ⇒ 恰好红 2 条；M3 把界面标签改回旧的「允许回退到 Google…」⇒ 红 6 条且全部归属这一处（新卡 2 + 本地化闸门 4，其中 2 条是那些卡自己的自检臂）；M5 把 MyMemory 的判长改成按 UTF-8 字节 ⇒ 恰好红 1 条。手改这三个数而不是 -WriteGateBaseline 重生成：按这份文件 _说明 自己的规矩，重生成会把「删了几条」洗成无痕。"
-            }
+  "取数时间": "2026-10-26 03:39:25",
+  "总断言": 1961.0,
+  "各套件": {
+    "--unit-tests": {
+      "断言": 1351,
+      "跳过": 1
+    },
+    "--color-tests": {
+      "断言": 267,
+      "跳过": 0
+    },
+    "--encoding-tests": {
+      "断言": 14,
+      "跳过": 0
+    },
+    "--service-tests": {
+      "断言": 2,
+      "跳过": 1
+    },
+    "--ocr-tests": {
+      "断言": 12,
+      "跳过": 0
+    },
+    "--qr-tests": {
+      "断言": 47,
+      "跳过": 0
+    },
+    "--format-tests": {
+      "断言": 43,
+      "跳过": 0
+    },
+    "--usability-tests": {
+      "断言": 225,
+      "跳过": 0
+    },
+    "_说明": "用 scripts\\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里"
+  }
 }

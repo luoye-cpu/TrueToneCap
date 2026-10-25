@@ -121,6 +121,7 @@ public sealed partial class MainWindow : Window
     private Services.HdrCaptureWindow? _activeHdrWindow; // 当前活动 HDR 覆盖窗口（应用退出时强制关闭）
     private AnnotationWindow? _activeAnnotationWindow;   // 当前活动标注窗口（应用退出时强制关闭）
     private OcrPreviewWindow? _activeOcrPreview;         // 当前活动 OCR 预览窗口 (2026-08-16 P3-20 新增)
+    private QrResultWindow? _activeQrWindow;             // 当前活动二维码结果窗口 (2026-10-26，随"识别二维码"新增)
     private TextBox? _recordingTarget; // 正在录制的快捷键输入框
     private string _hdrSystemHint = ""; // 系统 HDR 状态基础提示 (DetectAndApplySystemCapabilitiesAsync 写入)
     private bool _hdrHardwareSupported; // 硬件是否支持 HDR (能力检测写入, 供格式联动禁用开关)
@@ -2360,6 +2361,10 @@ public sealed partial class MainWindow : Window
                             LogService.Info("MainWindow", "选区翻译");
                             await CaptureAndTranslateFromPixelsAsync(regionPixels, rect.Width, rect.Height);
                             break;
+                        case SelectionOverlay.ActionResult.Qr:
+                            LogService.Info("MainWindow", "选区二维码识别");
+                            await CaptureAndQrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
+                            break;
                     }
 
                     if (MinimizeTrayChk.IsChecked == true
@@ -2524,6 +2529,54 @@ public sealed partial class MainWindow : Window
         // OcrPreviewWindow 与 AnnotationWindow 同属预览窗口族, 用独立字段跟踪。
         _activeOcrPreview = win;
         win.Closed += (_, _) => { if (ReferenceEquals(_activeOcrPreview, win)) _activeOcrPreview = null; };
+        win.Activate();
+    }
+
+    // ── 二维码识别（2026-10-26）──
+
+    private async Task CaptureAndQrFromPixelsAsync(byte[] pixels, int w, int h)
+    {
+        // ⚠ 日志纪律与 OCR 同一条：只记尺寸/数量，payload 文本禁止落日志（PRIVACY.md 口径）。
+        LogService.Info("MainWindow", $"二维码识别启动: {w}x{h}");
+        StatusTxt.Text = "🔎 二维码识别中...";
+        try
+        {
+            var report = await Task.Run(() => TrueToneCap.Core.Services.QrDecodeService.Decode(pixels, w, h));
+
+            if (!report.Any)
+            {
+                LogService.Info("MainWindow", "二维码未检测到");
+                StatusTxt.Text = "🔎 未检测到二维码";
+                return;
+            }
+            LogService.Info("MainWindow", $"二维码解码完成: {report.Payloads.Count} 个");
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                // 与识字/翻译同一条纪律：回调体不受外层 try/catch 保护，逃出去就是原生 fail-fast（台账 §70）。
+                try
+                {
+                    OpenQrResultWindow(pixels, w, h, report);
+                    StatusTxt.Text = "🔎 已打开二维码窗口";
+                }
+                catch (Exception ex)
+                { LogService.Error("MainWindow", $"打开二维码窗失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
+            });
+        }
+        catch (Exception ex) { LogService.Error("MainWindow", $"二维码识别失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
+    }
+
+    /// <summary>打开二维码结果窗口（截图区域 + 载荷明文列表）。</summary>
+    private void OpenQrResultWindow(byte[] pixels, int w, int h, TrueToneCap.Core.Services.QrScanReport report)
+    {
+        var win = new QrResultWindow(pixels, w, h, report)
+        {
+            // 同 OCR 预览窗：把这一拍的 ID 交下去，复制/打开动作续到同一条时间线
+            CaptureOpId = _captureOpId,
+        };
+        // 登记 → 退出时强制关闭（与 _activeOcrPreview 同一套纪律）
+        _activeQrWindow = win;
+        win.Closed += (_, _) => { if (ReferenceEquals(_activeQrWindow, win)) _activeQrWindow = null; };
         win.Activate();
     }
 
@@ -3260,10 +3313,12 @@ public sealed partial class MainWindow : Window
         try { _activeHdrWindow?.RequestCancel(); } catch { }
         try { _activeAnnotationWindow?.Close(); } catch { }
         try { _activeOcrPreview?.Close(); } catch { } // ═══ 2026-08-16 P3-20: OCR 预览窗口一并关闭 ═══
+        try { _activeQrWindow?.Close(); } catch { }   // ═══ 2026-10-26: 二维码结果窗口一并关闭 ═══
         _activeSelectionOverlay = null;
         _activeHdrWindow = null;
         _activeAnnotationWindow = null;
         _activeOcrPreview = null;
+        _activeQrWindow = null;
 
         // ═══ 2026-08-16 P2-6 修复: 退出时取消在途编码并短等完成 (防截断文件) ═══
         // ═══ 2026-08-25 发布版修复: 等待全部后台编码任务 (旧任务不再被 Cancel) ═══

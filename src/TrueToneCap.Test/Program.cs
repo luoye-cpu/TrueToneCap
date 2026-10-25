@@ -46,6 +46,7 @@ var chainedSuites = new (string Arg, string Name, Func<int> Run)[]
     ("--encoding-tests", "编码管线集成",   TrueToneCap.Test.EncodingIntegrationTests.RunAll),
     ("--service-tests",  "基础设施服务",   TrueToneCap.Test.ServiceTests.RunAll),
     ("--ocr-tests",      "OCR 服务",       TrueToneCap.Test.OcrServiceTests.RunAll),
+    ("--qr-tests",       "二维码解码",     TrueToneCap.Test.QrDecodeTests.RunAll),
     ("--format-tests",   "输出结构合法性", TrueToneCap.Test.FormatStructureTests.RunAll),
     ("--usability-tests","综合可用性",     TrueToneCap.Test.UsabilityTests.RunAll),
 };
@@ -168,7 +169,7 @@ static void PrintUsage()
     Console.WriteLine("  --format-tests     输出结构合法性测试 (TIFF IFD / AVIF box)");
     Console.WriteLine("  --wgc-avif-tests   WGC 真实捕获 + AVIF 各后端编码验证 (需桌面会话)");
     Console.WriteLine("  --scrgb-compare    诊断：把两条预览路径的数据差打成 CSV 到 stdout（非套件，不产 RESULT）");
-    Console.WriteLine("  --all              全部测试 (含全部 8 个套件; WGC 以子进程隔离运行)");
+    Console.WriteLine("  --all              全部测试 (含全部 9 个套件; WGC 以子进程隔离运行)");
     Console.WriteLine("  --help / -h        显示本帮助\n");
 }
 

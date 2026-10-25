@@ -484,6 +484,34 @@ public partial class App : Application
                         LogService.Error("WindowProbe", $"OcrPreviewWindow 构造失败 {ex.GetType().Name} HR=0x{ex.HResult:X8} {ex.Message}",
                             ex, LogCategory.UI);
                     }
+                    // 被试臂：二维码结果窗（2026-10-26 随"识别二维码"新增）——
+                    // 两条载荷刻意覆盖三件事：XAML 加载、逐类别的卡片构建（红牌/黄牌/警告行）、
+                    // Application.Current.Resources 取画刷这些"只在真跑时才现形"的路径。
+                    try
+                    {
+                        const int qw = 64, qh = 48;
+                        var qx = new byte[qw * qh * 4];
+                        for (int i = 0; i < qx.Length; i += 4) { qx[i] = 255; qx[i + 1] = 255; qx[i + 2] = 255; qx[i + 3] = 255; }
+                        var report = new TrueToneCap.Core.Services.QrScanReport();
+                        report.Payloads.Add(new TrueToneCap.Core.Services.QrPayload
+                        {
+                            Raw = "https://example.com/probe", Kind = QrPayloadKind.UrlHttp, DisplayText = "https://example.com/probe",
+                        });
+                        report.Payloads.Add(new TrueToneCap.Core.Services.QrPayload
+                        {
+                            Raw = "ms-msdt:-id probe", Kind = QrPayloadKind.DangerousScheme,
+                            DisplayText = "ms-msdt:-id probe", HasHiddenChars = true,
+                        });
+                        var qrWin = new QrResultWindow(qx, qw, qh, report);
+                        qrWin.Close();
+                        LogService.Info("WindowProbe", "QrResultWindow 构造成功", LogCategory.UI);
+                    }
+                    catch (Exception ex)
+                    {
+                        bad++;
+                        LogService.Error("WindowProbe", $"QrResultWindow 构造失败 {ex.GetType().Name} HR=0x{ex.HResult:X8} {ex.Message}",
+                            ex, LogCategory.UI);
+                    }
                     LogService.Info("WindowProbe", bad == 0 ? "全部窗口构造通过" : $"★ 构造失败 {bad} 扇", LogCategory.UI);
                     Environment.Exit(bad == 0 ? 0 : 1);
                 });

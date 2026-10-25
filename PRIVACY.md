@@ -11,6 +11,11 @@
       · 免费通道以 query 传文本 → Core/Services/TranslationService.cs:445/447/950
       · Vision 模式上传截图      → Core/Services/TranslationService.cs:1180
       · 不把 OCR 原文写进日志    → Core/Services/TranslationService.cs:304
+      · 二维码不把解码内容写进日志（只记尺寸/数量）
+                                 → App/MainWindow.xaml.cs CaptureAndQrFromPixelsAsync /
+                                    App/QrResultWindow.xaml.cs（全部 LogService 调用点）
+      · 二维码"打开链接"白名单   → Core/Services/QrDecodeService.cs QrPayload.CanOpenInBrowser（唯一判据）
+                                    + App/QrResultWindow.xaml.cs OnOpenLinkClick（点击时再复核）
       · 设置写程序同目录（便携）/ %LOCALAPPDATA%\TrueToneCap\（商店版）
                                   → App/Services/SettingsService.cs:33-39
       · 密钥用 DPAPI 加密存本地  → App/Services/SecretStore.cs
@@ -41,6 +46,9 @@ TrueToneCap 是一款**本地优先**的 Windows 截图与文字识别（OCR）�
 - **截图与录屏**（含 HDR / 广色域捕获）
 - **图像处理与格式编码**（PNG / JPEG / JPEG XL / WebP / AVIF 等）
 - **OCR 文字识别**（内置 PP-OCRv6 模型，本地推理）
+- **二维码识别**（本地解码，多码同图；解出的内容**只做明文展示**——
+  仅当你对 **http/https 链接**显式点击"打开链接"时才会启动浏览器，
+  其余内容（含 `file:` / `ms-msdt:` 等危险协议）**永远不会被打开或执行**）
 - **本地保存与图库管理**
 - **图像标注**
 
@@ -83,8 +91,9 @@ TrueToneCap 是一款**本地优先**的 Windows 截图与文字识别（OCR）�
 
 ### 五、日志
 
-应用会在本地写运行日志，用于排查故障。**日志中刻意不记录 OCR 识别出的文字内容**
-（源码中对错误响应的处理亦遵循此原则，避免把原文带入日志）。
+应用会在本地写运行日志，用于排查故障。**日志中刻意不记录 OCR 识别出的文字内容，
+也不记录二维码解码出的内容**（二维码只记"找到几个、什么尺寸"；对错误响应的处理同样
+遵循此原则，避免把内容带入日志）。
 
 ### 六、儿童
 
@@ -95,6 +104,7 @@ TrueToneCap 是一款**本地优先**的 Windows 截图与文字识别（OCR）�
 - **不使用翻译** → 完全没有数据外发
 - **关闭免费翻译**（设置 → 翻译）→ 这四条接口不再发出任何请求
 - **不使用视觉翻译** → 不上传任何图像
+- **二维码识别** → 全程本机；只有你亲手点击"打开链接"且内容是 http/https 时才会打开浏览器
 - **删除本机数据** → 删除上述设置文件与 `%LOCALAPPDATA%\TrueToneCap\` 目录
 - **随时卸载** → 通过 Windows"设置 → 应用"
 
@@ -125,6 +135,10 @@ There are no ads and no analytics SDKs.
 - **Screen capture** (including HDR / wide-gamut capture)
 - **Image processing and encoding** (PNG / JPEG / JPEG XL / WebP / AVIF, etc.)
 - **OCR** (bundled PP-OCRv6 model, local inference)
+- **QR code recognition** (decoded locally, multiple codes per image; the decoded content is
+  **displayed as plain text only** — the browser starts only when **you** explicitly press
+  "Open link" on an **http/https** payload; anything else, including dangerous schemes like
+  `file:` / `ms-msdt:`, is **never opened or executed**)
 - **Local saving and library management**
 - **Image annotation**
 
@@ -173,7 +187,8 @@ settings); you may delete them manually.
 ### 5. Logs
 
 The app writes local logs for troubleshooting. **Recognized OCR text is deliberately not written
-to logs** (the same rule is applied when handling error responses, so source text never leaks in).
+to logs, and neither is QR-decoded content** (QR logging records only the count and image size;
+the same rule applies when handling error responses, so content never leaks in).
 
 ### 6. Children
 
@@ -185,6 +200,8 @@ information.
 - **Don't use translation** → no data leaves your device at all
 - **Turn off Free translation** (Settings → Translation) → no requests to those four services
 - **Don't use Vision translation** → no image is ever uploaded
+- **QR recognition** → entirely on-device; the browser opens only when you press "Open link"
+  yourself on an http/https payload
 - **Delete local data** → remove the settings file and `%LOCALAPPDATA%\TrueToneCap\`
 - **Uninstall** at any time via Windows Settings → Apps
 

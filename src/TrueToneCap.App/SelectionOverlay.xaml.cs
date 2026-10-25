@@ -62,7 +62,7 @@ public sealed partial class SelectionOverlay : Window
     /// <summary>标注完成后的最终像素（调用方在 ActionCompleted 后读取）。</summary>
     public byte[]? AnnotatedRegionPixels { get; private set; }
 
-    public enum ActionResult { Cancel, Confirm, Annotate, Copy, Ocr, Translate }
+    public enum ActionResult { Cancel, Confirm, Annotate, Copy, Ocr, Translate, Qr }
     public event Action<ActionResult, RectInt32>? ActionCompleted;
 
     [LibraryImport("user32.dll")]
@@ -444,8 +444,9 @@ public sealed partial class SelectionOverlay : Window
         RootGrid.Focus(FocusState.Keyboard);
     }
 
-    /// <summary>工具条实测不到的地板宽/高（DIP）：6 枚按钮 5×140+120 + 5×12 间距 + 16×2 内边距 ≈ 932，高 108px/1.5 = 72。</summary>
-    private const double ToolbarFloorDip = 932;
+    /// <summary>工具条实测不到的地板宽/高（DIP）：7 枚按钮 6×140+120 + 6×12 间距 + 16×2 内边距 ≈ 1084，高 108px/1.5 = 72。
+    /// 2026-10-26 加"二维码"按钮后从 932 起抬。</summary>
+    private const double ToolbarFloorDip = 1084;
     private const double ToolbarFloorHDip = 72;
 
     /// <summary>
@@ -648,6 +649,7 @@ public sealed partial class SelectionOverlay : Window
     private void OnCopy(object sender, RoutedEventArgs e) => Finish(ActionResult.Copy);
     private void OnOcr(object sender, RoutedEventArgs e) => Finish(ActionResult.Ocr);
     private void OnTranslate(object sender, RoutedEventArgs e) => Finish(ActionResult.Translate);
+    private void OnQr(object sender, RoutedEventArgs e) => Finish(ActionResult.Qr);
     private void OnCancel(object sender, RoutedEventArgs e) => Finish(ActionResult.Cancel);
 
     private void OnAnnotate(object sender, RoutedEventArgs e) => EnterAnnotationMode();

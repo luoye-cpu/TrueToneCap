@@ -88,7 +88,7 @@ if (-not (Test-Path $slnx)) {
     exit 1
 }
 
-# headless 7 套件（与 Publish.ps1 的发布门禁一致）
+# headless 8 套件（与 Publish.ps1 的发布门禁一致）
 # 注: --usability-tests 自 2026-09-14 起已是 headless 安全的 —— 其中真正依赖显示器的
 #     2 个用例会在无显示器时"显式跳过"（计入 skipped），不再导致失败。
 $suites = @(
@@ -97,6 +97,7 @@ $suites = @(
     "--encoding-tests",
     "--service-tests",
     "--ocr-tests",
+    "--qr-tests",
     "--format-tests",
     "--usability-tests"
 )
