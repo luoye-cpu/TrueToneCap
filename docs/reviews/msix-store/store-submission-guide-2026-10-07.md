@@ -241,6 +241,14 @@ Publisher="CN=PLACEHOLDER-REPLACE-WITH-PARTNER-CENTER-IDENTITY"
 
 ### 4.1 出提交用的包
 
+> ⚠️ **2026-10-26 更正**：下面的"推荐 -FrameworkDependent"**作废**。
+> 实测核实（见 `store-readiness-review-2026-10-26.md` §6）：框架依赖包内**没有** .NET 运行时，
+> 清单也不声明 .NET 依赖，而微软**从未**发布过 .NET 运行时的商店框架包
+> （[dotnet/runtime#51574](https://github.com/dotnet/runtime/issues/51574) 仍 open）——
+> 商店只自动装声明了的框架包（WindowsAppRuntime.2 ✅），.NET 那一半没人管，
+> 干净机器上启动即失败。**提交一律用自包含**（不带 `-FrameworkDependent`）：
+> 包体 84.6 → 152 MB，换取目标设备确定性。以下原文仅留档。
+
 ```powershell
 # 推荐：框架依赖，体积减半（最终实测 175.85 → 85.12 MB，−51.6%）
 .\Publish.ps1 -Msix -FrameworkDependent

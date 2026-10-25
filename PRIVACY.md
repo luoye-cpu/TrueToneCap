@@ -6,10 +6,13 @@
   ⚠️ 维护须知（改功能时必读）：
     本文件的内容必须与代码实际行为一致。以下每一条都已在代码里核对过并注明出处；
     若日后改动这些路径，请同步改本文件，否则构成商店政策 10.1「误导」风险。
-      · Vision 模式上传截图      → Core/Services/TranslationService.cs:854-855
-      · 免费通道以 query 传文本  → Core/Services/TranslationService.cs:404
-      · 不把 OCR 原文写进日志    → Core/Services/TranslationService.cs:263
-      · 设置写程序同目录         → App/Services/SettingsService.cs（SettingsPath）
+    （行号以 v0.3.10-beta 为准，改动 TranslationService.cs 后请重新核对。）
+      · 免费翻译默认启用四端点 → App/Models/AppSettingsData.cs:317（默认 true）
+      · 免费通道以 query 传文本 → Core/Services/TranslationService.cs:445/447/950
+      · Vision 模式上传截图      → Core/Services/TranslationService.cs:1180
+      · 不把 OCR 原文写进日志    → Core/Services/TranslationService.cs:304
+      · 设置写程序同目录（便携）/ %LOCALAPPDATA%\TrueToneCap\（商店版）
+                                  → App/Services/SettingsService.cs:33-39
       · 密钥用 DPAPI 加密存本地  → App/Services/SecretStore.cs
     本仓库为 Apache-2.0；本文件是该项目的隐私声明，不改变许可条款。
 -->
@@ -17,7 +20,7 @@
 # 隐私政策 / Privacy Policy
 
 **TrueToneCap（真色截图）**
-最后更新 / Last updated: 2026-10-07
+最后更新 / Last updated: 2026-10-26
 
 ---
 
@@ -43,30 +46,36 @@ TrueToneCap 是一款**本地优先**的 Windows 截图与文字识别（OCR）�
 
 ### 三、会在你使用"翻译"时对外发送的数据
 
-翻译是**可选功能**。**你不使用翻译，就不会有任何数据外发。** 具体如下：
+翻译功能中，**"免费翻译"默认启用**（无需注册、无需配置密钥）：你在翻译时识别出的**文字**
+会被发送到下列四家免费公共翻译服务。其余翻译模式需要你自行配置。
 
 | 翻译模式 | 发送内容 | 发送对象 |
 |---|---|---|
-| **免费翻译** | 识别出的**文字** | 有道翻译 / Google 翻译公开接口 |
+| **免费翻译**（**默认启用**） | 识别出的**文字** | Edge 翻译（edge.microsoft.com）/ 必应翻译（bing.com）/ MyMemory（api.mymemory.translated.net）/ Google 翻译（translate.googleapis.com）公共接口 |
 | **LLM 翻译** | 识别出的**文字** | **你自己配置**的大模型 API 端点 |
 | **视觉翻译（Vision）** | 🔴 **整张截图的图像内容（PNG）** | **你自己配置**的大模型 API 端点 |
+
+> **如何关闭免费翻译**：设置 → 翻译 → 取消勾选"免费公共翻译端点"。
+> 取消后这四条接口**连请求都不会发出**，且你的选择会被永久保留。
+> 关闭后你仍可使用截图、OCR、标注及（已配置凭据时的）LLM 翻译等全部本地功能。
 
 > ⚠️ **请特别注意"视觉翻译"**：它不做本地 OCR，而是把**整张截图**（含画面中所有可见内容，
 > 可能包含聊天记录、邮件、文档、个人信息等）直接发送给你所配置的第三方大模型服务。
 > 单次上传的图像上限为 6 MB。**请勿在包含敏感信息的画面上使用该模式。**
 > 若只想翻译文字而不上传图像，请使用"免费翻译"或"LLM 翻译"。
 
-**"你自己配置的端点"**指：你在设置中填写的 API 地址与密钥。数据最终由**该服务提供方**处理，
-其留存与使用规则适用**他们的隐私政策**，我们无法控制。常见提供方包括 OpenAI、DeepSeek、
-Google、Moonshot、智谱、阿里云百炼、硅基流动等 —— 以你实际填写者为准。
-本应用**不内置任何 API 密钥**，不会替你选择服务商。
+**"免费公共接口"**由对应服务提供方运营，发送的文字按**其**隐私政策处理，我们无法控制其留存与使用规则。
+**"你自己配置的端点"**指：你在设置中填写的 API 地址与密钥，数据最终由**该服务提供方**处理。
+常见提供方包括 OpenAI、DeepSeek、Google、Moonshot、智谱、阿里云百炼、硅基流动等 —— 以你实际填写者为准。
+本应用**不内置任何 API 密钥**，不会替你选择 LLM 服务商。
 
 ### 四、本机存储的数据
 
 | 数据 | 位置 | 说明 |
 |---|---|---|
-| 应用设置 | 程序所在目录的 `TrueToneCap.settings.json` | 界面偏好等 |
+| 应用设置 | **商店/MSIX 版**：`%LOCALAPPDATA%\TrueToneCap\TrueToneCap.settings.json`；**便携版**：程序所在目录同名文件 | 界面偏好等 |
 | API 密钥与凭据 | `%LOCALAPPDATA%\TrueToneCap\secrets.bin` | 使用 **Windows DPAPI 加密**，仅当前用户可解密 |
+| 运行日志 | 便携版：程序目录 `log\`；商店版：`%LOCALAPPDATA%\TrueToneCap\log\` | 本地排障用 |
 | 截图结果 | **由你指定的位置** | 应用不另存副本 |
 
 我们不会把这些数据上传到任何服务器。卸载应用不会自动删除上述文件（便于你保留设置），
@@ -84,6 +93,7 @@ Google、Moonshot、智谱、阿里云百炼、硅基流动等 —— 以你实�
 ### 七、你的控制权
 
 - **不使用翻译** → 完全没有数据外发
+- **关闭免费翻译**（设置 → 翻译）→ 这四条接口不再发出任何请求
 - **不使用视觉翻译** → 不上传任何图像
 - **删除本机数据** → 删除上述设置文件与 `%LOCALAPPDATA%\TrueToneCap\` 目录
 - **随时卸载** → 通过 Windows"设置 → 应用"
@@ -120,13 +130,20 @@ There are no ads and no analytics SDKs.
 
 ### 3. Data sent when you use translation
 
-Translation is **optional**. **If you don't use it, nothing is sent.** Specifically:
+Of the translation modes, **Free translation is enabled by default** (no sign-up, no keys to
+configure): the **recognized text** is sent to the four free public translation services below.
+The other modes require you to configure them yourself.
 
 | Mode | What is sent | Where it goes |
 |---|---|---|
-| **Free translation** | Recognized **text** | Youdao / Google public translation endpoints |
+| **Free translation** (**on by default**) | Recognized **text** | Edge Translate (edge.microsoft.com) / Bing Translate (bing.com) / MyMemory (api.mymemory.translated.net) / Google Translate (translate.googleapis.com) public endpoints |
 | **LLM translation** | Recognized **text** | The LLM endpoint **you configure** |
 | **Vision translation** | 🔴 **The entire screenshot image (PNG)** | The LLM endpoint **you configure** |
+
+> **How to turn Free translation off**: Settings → Translation → uncheck "free public translation
+> endpoints". Once unchecked, **no requests are sent to these four services at all**, and your
+> choice persists. All local features (capture, OCR, annotation, and LLM translation if you
+> configure credentials) keep working.
 
 > ⚠️ **Note on "Vision translation"**: it skips local OCR and sends the **whole screenshot** —
 > including everything visible on screen, which may contain chats, email, documents, or personal
@@ -134,18 +151,20 @@ Translation is **optional**. **If you don't use it, nothing is sent.** Specifica
 > limit is 6 MB. **Do not use this mode on screens containing sensitive information.**
 > To translate text without uploading an image, use Free or LLM translation.
 
-**"The endpoint you configure"** means the API URL and key you enter in Settings. Your data is
-ultimately processed by **that provider** under **their** privacy policy, which we do not control.
+**"Free public endpoints"** are operated by the respective providers; the sent text is handled
+under **their** privacy policies, which we do not control. **"The endpoint you configure"** means
+the API URL and key you enter in Settings; your data is ultimately processed by **that provider**.
 Typical providers include OpenAI, DeepSeek, Google, Moonshot, Zhipu, Alibaba Cloud (Bailian),
-and SiliconFlow — whichever you enter. This app **ships with no API keys** and does not choose a
-provider for you.
+and SiliconFlow — whichever you enter. This app **ships with no API keys** and does not choose an
+LLM provider for you.
 
 ### 4. Data stored on your device
 
 | Data | Location | Notes |
 |---|---|---|
-| App settings | `TrueToneCap.settings.json` next to the executable | UI preferences |
+| App settings | **Store/MSIX edition**: `%LOCALAPPDATA%\TrueToneCap\TrueToneCap.settings.json`; **portable edition**: same-named file next to the executable | UI preferences |
 | API keys and credentials | `%LOCALAPPDATA%\TrueToneCap\secrets.bin` | Encrypted with **Windows DPAPI**, decryptable only by the current user |
+| Run logs | Portable: `log\` next to the executable; Store: `%LOCALAPPDATA%\TrueToneCap\log\` | Local troubleshooting |
 | Captured images | **Wherever you choose** | The app keeps no additional copy |
 
 None of this is uploaded anywhere. Uninstalling does not delete these files (so you can keep your
@@ -164,6 +183,7 @@ information.
 ### 7. Your controls
 
 - **Don't use translation** → no data leaves your device at all
+- **Turn off Free translation** (Settings → Translation) → no requests to those four services
 - **Don't use Vision translation** → no image is ever uploaded
 - **Delete local data** → remove the settings file and `%LOCALAPPDATA%\TrueToneCap\`
 - **Uninstall** at any time via Windows Settings → Apps

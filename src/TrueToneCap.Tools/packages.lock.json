@@ -4,17 +4,17 @@
     "net11.0-windows10.0.26100": {
       "System.Drawing.Common": {
         "type": "Direct",
-        "requested": "[10.0.13, )",
-        "resolved": "10.0.13",
-        "contentHash": "s8JRuC+ec1djwT471SbZRXWCBFXCKkNNGILWD/OCmIcdL0KP0w4arMjyEZzNUuKxolperKtlxHhS+34rA4N3XA==",
+        "requested": "[11.0.0-rc.2.26504.105, )",
+        "resolved": "11.0.0-rc.2.26504.105",
+        "contentHash": "wbTsf0WAcbGQC8U9E/WIvbS/CrnZ942HPdfa7Imj6jsIS+rdf9/u+v9vbFsR47HWRzaIIBbdzCddjEDZMIODNA==",
         "dependencies": {
-          "Microsoft.Win32.SystemEvents": "10.0.13"
+          "Microsoft.Win32.SystemEvents": "11.0.0-rc.2.26504.105"
         }
       },
       "Microsoft.Win32.SystemEvents": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "rtd1rRf5uiusn/r+hNsODiCjvA+nErw+1EQb2uCv0EedLi2GEYWgLK0V31SXzcZ2b0D7VeoOrHJ0WCQqfbO67Q=="
+        "resolved": "11.0.0-rc.2.26504.105",
+        "contentHash": "4bPvejlneRpYG6LPJba/gzxqe0lvsoH8ydg6Eece/Jp00W2/E1X1jsIKQH7w+1Q56Ln+S2gMg5ynu9FoZZq2Xg=="
       },
       "SharpGen.Runtime": {
         "type": "Transitive",

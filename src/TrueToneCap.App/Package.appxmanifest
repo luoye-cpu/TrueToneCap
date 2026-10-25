@@ -8,7 +8,8 @@
           （含大小写与空格）。不一致会直接导致上传失败，且报错不指向这里。
           当前值是占位符 —— 上架前必须替换。
        2) Identity/@Version 的**第四段必须为 0**（官方规定该段留给商店使用）。
-          本项目 AssemblyVersion 形如 0.3.7.0，与之一致。
+          ⚠️ 2026-10-26 实测：该值【不随】dotnet build 的 -p:Version 覆盖（传 0.3.10-beta
+          仍产出 0.3.7.0 的包）—— 出包前必须手动把这里改成与发布版本一致（x.y.z.0 形态）。
        3) 所有 Logo 路径指向的文件必须真实存在，否则 MakeAppx / 认证直接失败。
           Assets/ 下的图由 scripts/gen-msix-assets.py 生成（可重跑复现）。
 
@@ -25,7 +26,7 @@
   <Identity
     Name="TrueToneCap"
     Publisher="CN=PLACEHOLDER-REPLACE-WITH-PARTNER-CENTER-IDENTITY"
-    Version="0.3.7.0"
+    Version="0.3.10.0"
     ProcessorArchitecture="x64" />
 
   <Properties>

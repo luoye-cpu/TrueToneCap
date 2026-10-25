@@ -80,7 +80,9 @@ public static class ToastService
         try
         {
             // ① 先确保开始菜单有带 AUMID 的快捷方式（Windows 据此登记应用）
-            EnsureAppShortcut();
+            //    ⚠️ 仅未打包形态：MSIX 由系统自动创建开始菜单入口并分配 AUMID（包身份即 AUMID），
+            //    手工建 .lnk 既多余、在包沙箱里还会被文件虚拟化吞掉；打包态跳过（2026-10-07 商店分析 P0②）。
+            if (!TrueToneCap.Core.Settings.PackageRuntime.IsPackaged) EnsureAppShortcut();
 
             // ② 必须在 Register() **之前**设置 AUMID，否则系统通知会被静默丢弃
             int hr = SetCurrentProcessExplicitAppUserModelID(AppUserModelId);

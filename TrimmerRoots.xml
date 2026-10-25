@@ -1,6 +1,12 @@
 <!-- TrueToneCap/TrimmerRoots.xml
      AOT 裁剪根配置 — 保留 SharpGen.Runtime 和 Vortice 的 COM vtable 反射所需类型。
-     移除这些类型会导致所有 D3D11 操作在 AOT 运行时崩溃。 -->
+     移除这些类型会导致所有 D3D11 操作在 AOT 运行时崩溃。
+
+     ⚠️ 闭包约束（2026-10-26 实测）：这里的每个 <assembly> 必须真实出现在【App 的依赖闭包】里，
+        否则裁剪器直接 IL2007（Could not resolve assembly）拒绝整个裁剪。
+        Vortice.Direct2D1 曾列在此处，但 Core 只引用 Direct3D11/DXGI（Direct2D1 无引用方），
+        裁剪实测即报 IL2007 —— 已摘除。将来给闭包新增 Vortice 系包时再把它加回来。
+        验证方法：dotnet publish -p:PublishTrimmed=true 看是否报 IL2007。 -->
 <linker>
   <assembly fullname="SharpGen.Runtime">
     <type fullname="SharpGen.Runtime.TypeDataStorage" preserve="all" />
@@ -11,9 +17,6 @@
   </assembly>
   <assembly fullname="Vortice.DXGI">
     <type fullname="Vortice.DXGI.*" preserve="all" />
-  </assembly>
-  <assembly fullname="Vortice.Direct2D1">
-    <type fullname="Vortice.Direct2D1.*" preserve="all" />
   </assembly>
   <assembly fullname="Vortice.Mathematics">
     <type fullname="Vortice.Mathematics.*" preserve="all" />

@@ -141,6 +141,22 @@
     <TrimmerRootDescriptor Include="$(MSBuildProjectDirectory)\..\..\TrimmerRoots.xml" />
   </ItemGroup>
 
+  <!-- ═══ 裁剪（PublishTrimmed）专用配置 ═══
+       2026-10-26 落地裁剪路径（商店包 151 → 114 MB，实测见 store-readiness-review-2026-10-26.md §7）。
+       自有代码的 IL 警告【不在这里压】—— 已在源码层修掉（4 处反射改直访，AvifHardwareProbe/
+       AvifEncoderProbe/FormatEncoders/MftHardwareFlag），新增反射会在此直接判红。
+
+       IL2104 是裁剪器对【上游程序集注解缺口】的聚合报错（本仓 TreatWarningsAsErrors 下即失败）：
+         · System.Private.CoreLib / System.Linq.Expressions / System.Net.* / System.Text.Json
+           —— BCL 11.0.0-rc.2 自带注解尚不完整（预发布基线）
+         · Microsoft.Windows.SDK.NET / WinRT.Runtime —— CsWinRT 投影的已知缺口
+         · Vortice.Direct3D11 / Vortice.DirectX —— 上游未标注
+       这些都改不了本仓源码，只能在裁剪开启时放行；风险由 TrimmerRoots（D3D11 闭包全保留）+
+       裁剪产物必须过实机启动回归来兜底。非裁剪构建不受影响。 -->
+  <PropertyGroup Condition="'$(PublishTrimmed)' == 'true'">
+    <NoWarn>$(NoWarn);IL2104</NoWarn>
+  </PropertyGroup>
+
   <!-- ═══ ReadyToRun ═══
        ReadyToRun 默认由 Publish.ps1 以命令行 -p: 开启（复合映像）；
        此处不设默认值，避免与脚本的命令行参数产生双源冲突。 -->

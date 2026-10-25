@@ -170,25 +170,12 @@ public static class AvifHardwareProbe
     /// 读取 QSV/MFT 侧的 LastEncodeUsedHardware 标志（2026-09-18，P1-QSV 探测假绿）。
     /// <para>该标志由 MftAvifEncode 静态承载（QsvAvifBackend 与 MftAvifBackend 共用 MFT 路径），
     /// 仅当真正走 QSV/MFT 硬件路径产出码流时为 true，失败回退 libaom 时为 false。
-    /// 经反射读取：类型/字段不存在（旧构建）或读取异常时返回 false —— 保守方向是"不判可用"，
-    /// 因为探测假绿的代价（用户被 UI 误导）大于漏判的代价（探测少报一次可用，会重试）。</para>
+    /// 2026-10-26 反射 → 直访：经 FormatEncoders.cs 的 internal 出口 MftHardwareFlag 读取
+    /// —— 同程序集内类型/字段必然存在，原先"反射容忍缺失"的防御是死代码，
+    /// 且 Assembly.GetTypes/Type.GetField 在裁剪/AOT 下必爆（IL2026/IL2075）。</para>
     /// </summary>
     private static bool QsvLastEncodeUsedHardware()
-    {
-        try
-        {
-            var asm = typeof(AvifHardwareProbe).Assembly;
-            var t = asm.GetType("TrueToneCap.Core.Encoding.MftAvifEncode", throwOnError: false)
-                     ?? asm.GetTypes().FirstOrDefault(x => x.Name == "MftAvifEncode");
-            var f = t?.GetField("LastEncodeUsedHardware",
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
-            return f?.GetValue(null) is bool b && b;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+        => MftHardwareFlag.LastEncodeUsedHardware;
 
     /// <summary>生成人类可读的探测摘要。</summary>
     public static string GetSummary()

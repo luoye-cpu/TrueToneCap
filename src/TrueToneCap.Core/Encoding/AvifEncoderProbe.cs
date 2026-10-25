@@ -263,26 +263,12 @@ public static class AvifEncoderProbe
     private static bool IsHardwareKind(AvifEncoderKind kind)
         => kind is AvifEncoderKind.Nvenc or AvifEncoderKind.Qsv;
 
-    /// <summary>该硬件后端上一次编码是否真的走了硬件（NVENC 直读，QSV/MFT 经反射 —— 同 AvifHardwareProbe）。</summary>
+    /// <summary>该硬件后端上一次编码是否真的走了硬件（NVENC 与 QSV/MFT 均直读 —— QSV 侧经 FormatEncoders.cs 的 MftHardwareFlag 出口，2026-10-26 反射 → 直访）。</summary>
     private static bool HardwareDelivered(AvifEncoderKind kind)
     {
         if (kind == AvifEncoderKind.Nvenc) return NvencAvifBackend.LastEncodeUsedHardware;
-        if (kind == AvifEncoderKind.Qsv) return MftLastEncodeUsedHardware();
+        if (kind == AvifEncoderKind.Qsv) return MftHardwareFlag.LastEncodeUsedHardware;
         return true;
-    }
-
-    private static bool MftLastEncodeUsedHardware()
-    {
-        try
-        {
-            var asm = typeof(AvifEncoderProbe).Assembly;
-            var t = asm.GetType("TrueToneCap.Core.Encoding.MftAvifEncode", throwOnError: false)
-                     ?? asm.GetTypes().FirstOrDefault(x => x.Name == "MftAvifEncode");
-            var f = t?.GetField("LastEncodeUsedHardware",
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
-            return f?.GetValue(null) is bool b && b;
-        }
-        catch { return false; }
     }
 
     /// <summary>探测样张：256×256 水平渐变 + 竖条纹理（避免纯色图被编码器走捷径）。</summary>

@@ -15,7 +15,9 @@
 #   .\Publish.ps1 -NoReadyToRun                # 禁用 ReadyToRun
 #   .\Publish.ps1 -CoreAot                     # 试验性 Core AOT（当前为占位，见下）
 #   .\Publish.ps1 -Msix                        # 追加产出 MSIX（商店/侧载），并做内容核对
-#   .\Publish.ps1 -Msix -FrameworkDependent    # 商店包：框架依赖，实测 150.9 → 84.6 MB（-44%）
+#   .\Publish.ps1 -Msix                        # 商店包口径（2026-10-26 起）：自包含，不带 -FrameworkDependent
+#   .\Publish.ps1 -Msix -FrameworkDependent    # ⚠️ 已废弃用于商店提交：目标机无 .NET 运行时即启动失败（见 2026-10-26 实测）
+#   .\Publish.ps1 -Msix -Trim                  # 商店包瘦身：裁剪未用托管代码，实测 151 → 114 MB（-25%）
 #   .\Publish.ps1 -Force                       # 允许强制终止运行中的 TrueToneCap.exe
 
 param(
@@ -45,7 +47,20 @@ param(
     # ⚠️ 不加 -Msix 单独用本开关会产出一个框架依赖的未打包构建（合法但不适合分发：
     #    绿色包的价值就是"解压即用"）。故这里显式告警，而不是静默照做。
     # 理由与实测数字详见 TrueToneCap.App.csproj 的 TtcFrameworkDependent 注释。
+    # ⚠️ 2026-10-26 起【不建议用于商店提交】：框架依赖包内没有 .NET 运行时、清单也不声明，
+    #    微软从未发布 .NET 运行时的商店框架包（dotnet/runtime#51574 仍 open）⇒
+    #    干净机器上装上即启动失败。商店提交用自包含（不带本开关），
+    #    实测证据链见 docs/reviews/msix-store/store-readiness-review-2026-10-26.md §6。
     [switch]$FrameworkDependent = $false,
+
+    # ═══ 裁剪（2026-10-26）═══
+    # 开启 IL 裁剪（-p:PublishTrimmed=true），删掉静态可达面之外的托管代码。
+    # 实测：自包含 MSIX 151 → 114.4 MB（-24%）。与 R2R 复合映像互相抵消
+    # （R2R 会把裁掉的体积以原生码加回去），故开启本开关时强制纯 JIT。
+    # ⚠️ 裁剪会静默删除反射可达代码：自有代码的 IL 警告已在源码层清零并受
+    #    TreatWarningsAsErrors 持续把守；上游注解缺口（IL2104）由 App.csproj 条件块
+    #    带理由放行。产出必须过实机启动回归后才可分发（见 store-readiness-review §7.3）。
+    [switch]$Trim = $false,
 
     # 允许强制终止正在运行的 TrueToneCap.exe（默认拒绝，防止误杀造成用户数据丢失）
     [switch]$Force = $false,
@@ -443,8 +458,12 @@ $extraArgs = @()
 #   会产出一个 122 MB 的 TrueToneCap.r2r.dll（实测 MSIX 因此从 84.6 MB 反弹到 175.8 MB），
 #   既与"瘦身"目标相反，也让映像与框架依赖布局不匹配。
 #   ⇒ 框架依赖 = 纯 JIT（这也是官方对 framework-dependent 的常规做法）。
-if ($FrameworkDependent) {
-    Write-Host "   🐢 ReadyToRun 已禁用（框架依赖模式下强制；R2R 映像与框架依赖布局不匹配）" -ForegroundColor DarkGray
+if ($FrameworkDependent -or $Trim) {
+    if ($FrameworkDependent) {
+        Write-Host "   🐢 ReadyToRun 已禁用（框架依赖模式下强制；R2R 映像与框架依赖布局不匹配）" -ForegroundColor DarkGray
+    } else {
+        Write-Host "   🐢 ReadyToRun 已禁用（裁剪模式下强制；R2R 会把裁掉的体积以原生码加回，抵消收益）" -ForegroundColor DarkGray
+    }
 } elseif (-not $NoReadyToRun) {
     $extraArgs += "-p:PublishReadyToRun=true"
     $extraArgs += "-p:PublishReadyToRunComposite=true"
@@ -501,6 +520,14 @@ if ($FrameworkDependent) {
         Write-Host "      绿色包将变成【框架依赖】：用户解压后若没装 .NET / WinAppSDK 运行时则无法启动，" -ForegroundColor Yellow
         Write-Host "      与'解压即用'的定位冲突。发布绿色包请去掉本开关。" -ForegroundColor Yellow
     }
+}
+
+# ═══ 裁剪透传（2026-10-26）═══
+# 只传这一个属性：NoWarn（IL2104）与 TrimmerRootDescriptor 都在 App.csproj 的条件块里，
+# 由它一处决定，避免半套配置。自有代码反射（IL2026/IL2075）不在此压制 —— 会在构建时判红。
+if ($Trim) {
+    $extraArgs += "-p:PublishTrimmed=true"
+    Write-Host "   ✂️  裁剪已启用（实测 151 → 114 MB）—— 产物分发前必须过实机启动回归" -ForegroundColor Cyan
 }
 
 # ══════════════════════════════════════════════════════════════

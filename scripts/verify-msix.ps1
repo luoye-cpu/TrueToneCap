@@ -148,6 +148,16 @@ if (-not (Test-Path $manifestPath)) {
         else { Fail "版本第四段是 $($matches[4])，商店要求必须为 0" }
     } else { Fail "版本号格式不是 x.y.z.w: $($id.Version)" }
 
+    # 包身份版本必须与随包 exe 的 FileVersion 一致。
+    # 2026-10-26 实测：Identity/@Version【不随】dotnet build 的 -p:Version 覆盖
+    # （传 0.3.10-beta 仍产出 0.3.7.0 的包），漂移会让商店包身份与内容版本脱节。
+    $exePath = Join-Path $tmp "TrueToneCap.exe"
+    if (Test-Path $exePath) {
+        $fv = (Get-Item $exePath).VersionInfo.FileVersion
+        if ($fv -eq $id.Version) { Ok "包身份版本与 exe FileVersion 一致（$($id.Version)）" }
+        else { Fail "包身份版本 $($id.Version) ≠ exe FileVersion $fv —— 清单 Identity/@Version 没跟上发布版本，须手动同步" }
+    }
+
     # Publisher 占位符未替换 => 上架必失败
     if ($id.Publisher -match 'PLACEHOLDER') {
         Write-Host "   ⚠️  Publisher 仍是占位符 —— 上架前必须替换为 Partner Center 的标识（本机/侧载可忽略）" -ForegroundColor Yellow

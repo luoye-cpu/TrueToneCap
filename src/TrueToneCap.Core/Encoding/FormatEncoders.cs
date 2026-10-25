@@ -836,7 +836,7 @@ public sealed class LibAomAvifBackend : IAvifEncoder
 file static class MftAvifEncode
 {
     // ═══ 2026-09-18 P1-QSV 探测假绿：仅当真正走 MFT 硬件路径产出码流时为 true，
-    //     回退 libaom 前置 false。AvifHardwareProbe 经反射读取（QSV/MFT 共用本类）。═══
+    //     回退 libaom 前置 false。QSV/MFT 共用本类；探测器经下方 MftHardwareFlag 读取。═══
     internal static volatile bool LastEncodeUsedHardware;
 
     /// <param name="tag">崩溃隔离与日志用的标签（"QSV_MFT" / "MFT"），便于区分两条调用来源。</param>
@@ -900,6 +900,19 @@ file static class MftAvifEncode
             AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
         }, ct);
     }
+}
+
+/// <summary>
+/// MFT/QSV 硬件标志（MftAvifEncode.LastEncodeUsedHardware）的同文件只读出口。
+/// <para>2026-10-26 反射 → 直访：MftAvifEncode 是 file 作用域类（仅本文件可见），两个探测器
+/// （AvifHardwareProbe / AvifEncoderProbe）在别的文件里够不到它 —— 这正是它们当初改用反射的原因。
+/// 但同一程序集内类型与字段必然随本次构建存在，反射那层"容忍类型/字段缺失"的防御是死代码，
+/// 且在裁剪/AOT 下必爆（IL2026/IL2075：Assembly.GetTypes / Type.GetField）。
+/// 开这个 internal 出口后：file 封装保持不变，探测器改读这里，零反射。</para>
+/// </summary>
+internal static class MftHardwareFlag
+{
+    internal static bool LastEncodeUsedHardware => MftAvifEncode.LastEncodeUsedHardware;
 }
 
 public sealed class QsvAvifBackend : IAvifEncoder
