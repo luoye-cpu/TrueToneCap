@@ -29,10 +29,13 @@ if [ ! -f "$verify" ]; then
     exit 1
 fi
 
-if command -v powershell.exe >/dev/null 2>&1; then
-    ps_exe="powershell.exe"
-elif command -v pwsh.exe >/dev/null 2>&1; then
+# 2026-10-26 优先 pwsh：Windows PowerShell 5.1 缺 Get-FileHash 等内建 cmdlet，
+# 门禁里的模型/工具 SHA256 校验在 5.1 下必红（实测 verify.ps1 "4/8 个场景不符"，
+# pwsh 下同树 7 套件 1914 断言全绿）。有 pwsh 用 pwsh，没有再退 5.1。
+if command -v pwsh.exe >/dev/null 2>&1; then
     ps_exe="pwsh.exe"
+elif command -v powershell.exe >/dev/null 2>&1; then
+    ps_exe="powershell.exe"
 else
     echo "[pre-push] ❌ 未找到 powershell.exe / pwsh.exe —— 拒绝放行。" >&2
     echo "           Git Bash 下若 PATH 未含 PowerShell，请把其安装目录加入 PATH；" >&2
