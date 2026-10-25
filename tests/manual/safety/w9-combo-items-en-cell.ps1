@@ -25,6 +25,8 @@ param(
     [string]$Log = 'C:\PLAN\TrueToneCap\tests\output\recovery-2026-10-03\combo-items-en.log'
 )
 $ErrorActionPreference = 'Continue'
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Say([string[]]$ls) { [IO.File]::AppendAllText($Log, (($ls -join "`r`n") + "`r`n"), $utf8) }
 [IO.File]::WriteAllText($Log, '', $utf8)
@@ -61,7 +63,7 @@ if (-not ('System.Windows.Automation.AutomationElement' -as [type])) {
 }
 
 $bytes0 = [IO.File]::ReadAllBytes($set)
-$sha0 = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+$sha0 = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
 Say @("轮前设置 sha256 = $($sha0.Substring(0,16))…")
 
 $raw = [IO.File]::ReadAllText($set, $utf8)
@@ -287,7 +289,7 @@ finally {
     }
     Start-Sleep -Seconds 2
     [IO.File]::WriteAllBytes($set, $bytes0)
-    $shaEnd = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+    $shaEnd = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
     if ($shaEnd -eq $sha0) { Say @("设置还原自检：$($shaEnd.Substring(0,16))… ⇒ 与轮前逐字相同 ✓") }
     else { Say @("❌ 设置还原后指纹不同 轮前=$sha0 现在=$shaEnd ⇒ 必须人工核对"); $exitCode = 3 }
     # GUI 冷启要好几秒：只等 4 s 就报"活着=False"是谎，不是读数

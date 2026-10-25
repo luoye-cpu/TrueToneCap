@@ -29,6 +29,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# 双宿主哈希助手 —— 模型校验不能依赖 Get-FileHash 的 cmdlet 解析（PSModulePath 遮蔽，见该文件头注）
+. (Join-Path $PSScriptRoot "scripts\ps-compat.ps1")
 $outDir = Join-Path $PSScriptRoot "src\TrueToneCap.App\Models"
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
@@ -87,7 +89,7 @@ if ($Proxy -ne "") {
                 throw "文件过小 ($sz MB < $($m.MinMB) MB)，疑似下载未完成或返回了错误页面。"
             }
 
-            $actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actual = (Get-TtcFileHashHex -LiteralPath $tmp -Algorithm SHA256).ToLowerInvariant()
             $want   = $expectedSha256[$m.Name]
             if (-not $SkipHashCheck) {
                 if ([string]::IsNullOrWhiteSpace($want)) {

@@ -11,7 +11,9 @@ $log  = Join-Path $repo (Join-Path 'tests\output' $LogName)
 $out  = Join-Path $repo 'tests\manual\safety\settings-migration'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Say([string[]]$lines) { [System.IO.File]::AppendAllText($log, (($lines -join "`r`n") + "`r`n"), $utf8) }
-function Sha([string]$p) { if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA1).Hash } else { 'ABSENT' } }
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
+function Sha([string]$p) { if (Test-Path -LiteralPath $p) { (Get-TtcFileHashHex -LiteralPath $p -Algorithm SHA1) } else { 'ABSENT' } }
 [System.IO.File]::WriteAllText($log, '', $utf8)
 
 if (-not (Test-Path -LiteralPath $exe)) { Say @("❌ 找不到 exe: $exe"); Write-Output 'RESULT=no-exe'; exit 1 }

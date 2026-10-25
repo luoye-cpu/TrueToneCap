@@ -12,6 +12,8 @@ param(
     [string]$Log = 'C:\PLAN\TrueToneCap\tests\output\realmachine-2026-10-01\dwritecore-arm.log'
 )
 $ErrorActionPreference = 'Continue'
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Say([string[]]$ls) { [IO.File]::AppendAllText($Log, (($ls -join "`r`n") + "`r`n"), $utf8) }
 [System.IO.File]::WriteAllText($Log, '', $utf8)
@@ -20,7 +22,7 @@ Say @("=== DWriteCore 判据臂 · $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===
 $dll = Join-Path $Bin 'DWriteCore.dll'
 $off = Join-Path $Bin 'DWriteCore.dll.off'
 if (-not (Test-Path -LiteralPath $dll)) { Say @('RC=2 未判：DWriteCore.dll 本来就不在位'); exit 2 }
-$sha0 = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+$sha0 = (Get-TtcFileHashHex -LiteralPath $dll -Algorithm SHA256)
 Say @("轮前 DWriteCore.dll sha256 = $($sha0.Substring(0,16))… $((Get-Item -LiteralPath $dll).Length) B")
 
 # 1) 关掉在跑的实例（托盘常驻，CloseMainWindow 常常退不干净 ⇒ 按授权强杀，收尾起回）
@@ -62,7 +64,7 @@ try {
     if ($alive -and $shot) { $rc = 0 }
 } finally {
     if (Test-Path -LiteralPath $off) { Move-Item -LiteralPath $off -Destination $dll -Force }
-    $sha1 = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+    $sha1 = (Get-TtcFileHashHex -LiteralPath $dll -Algorithm SHA256)
     Say @("还原：$($sha1.Substring(0,16))… ⇒ $(if ($sha1 -eq $sha0) { '与轮前逐字相同 ✓' } else { '★ 不同，立即核对' })")
     # 2) 按原样把用户的实例起回去
     $p = Start-Process -FilePath (Join-Path $Bin 'TrueToneCap.exe') -WorkingDirectory $Bin -PassThru

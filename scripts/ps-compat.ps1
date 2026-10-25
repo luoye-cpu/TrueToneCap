@@ -19,20 +19,32 @@
 #
 # 兜底关系：git 钩子在回退 5.1 时还会擦掉继承的 PSModulePath（见 scripts/git-hooks/*），
 #   那是环境层的防线；本文件是脚本层的防线 —— 用户从被污染的控制台手动跑门禁时也安全。
-function Get-Sha256Hex {
-    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+function Get-TtcFileHashHex {
+    # 通用版（SHA1/SHA256）：2026-10-26 第二轮把 tests/manual 旁路探针与 download_models.ps1
+    # 也从 Get-FileHash 迁过来时加的 —— 那批探针有一半用 SHA1 给本机设置文件做指纹（非安全用途）。
+    # 行为约束与 Get-Sha256Hex 相同：.NET 直调、大写无连字符、FileShare 与 Get-FileHash 同款。
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [ValidateSet('SHA1', 'SHA256')][string]$Algorithm = 'SHA256'
+    )
     if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
-        throw "Get-Sha256Hex: 文件不存在: $LiteralPath"
+        throw "Get-TtcFileHashHex: 文件不存在: $LiteralPath"
     }
-    $sha = [System.Security.Cryptography.SHA256]::Create()
+    if ($Algorithm -eq 'SHA1') { $sha = [System.Security.Cryptography.SHA1]::Create() }
+    else { $sha = [System.Security.Cryptography.SHA256]::Create() }
     try {
-        # FileShare 与 Get-FileHash 同款（Read + 允许他人读写）：发布目录正在被并行访问时不炸
+        # FileShare 与 Get-FileHash 同款（Read + 允许他人读写）：文件正被并行访问时不炸
         $fs = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open,
                                      [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try { return ([System.BitConverter]::ToString($sha.ComputeHash($fs))).Replace('-', '') }
         finally { $fs.Dispose() }
     }
     finally { $sha.Dispose() }
+}
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    Get-TtcFileHashHex -LiteralPath $LiteralPath -Algorithm SHA256
 }
 
 # 本轮门禁跑在哪个宿主上 —— 只做日志展示（verify.ps1 头部打印），绝不参与门禁判定：

@@ -17,6 +17,8 @@ param(
     [string]$Log = 'C:\PLAN\TrueToneCap\tests\output\recovery-2026-10-03\ui-en.log'
 )
 $ErrorActionPreference = 'Continue'
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Say([string[]]$ls) { [IO.File]::AppendAllText($Log, (($ls -join "`r`n") + "`r`n"), $utf8) }
 [IO.File]::WriteAllText($Log, '', $utf8)
@@ -78,7 +80,7 @@ public static class EN
 if (-not ('EN' -as [type])) { Say @('RC=2 未判：P/Invoke 类型没编出来'); exit 2 }
 
 $bytes0 = [IO.File]::ReadAllBytes($set)
-$sha0 = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+$sha0 = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
 Say @("轮前设置 sha256 = $($sha0.Substring(0,16))…（本格按字节还原，收尾必须逐字相同）")
 
 $raw = [IO.File]::ReadAllText($set, $utf8)
@@ -110,7 +112,7 @@ try {
 } catch { Say @("★ 异常：$($_.Exception.Message)") } finally {
     if ($proc) { try { Stop-Process -Id $proc.Id -Force } catch { } }
     [IO.File]::WriteAllBytes($set, $bytes0)
-    $nowB = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+    $nowB = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
     $markB = if ($nowB -eq $sha0) { '与轮前逐字相同 ✓' } else { '★ 不同，立即核对' }
     Say @("设置还原自检：$($nowB.Substring(0,16))… ⇒ $markB")
     Start-Sleep -Seconds 1

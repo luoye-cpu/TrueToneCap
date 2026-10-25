@@ -55,7 +55,9 @@ $env:PSModulePath（继承给 5.1）:
 - **脚本层**：`scripts/ps-compat.ps1` 的 `Get-Sha256Hex` 用 `[System.Security.Cryptography.SHA256]`
   .NET 直调，不经任何 cmdlet 解析，两宿主输出逐字符一致（返回与 `Get-FileHash.Hash` 同形的
   大写无连字符 hex，调用方 `.ToLowerInvariant()` 链零改动）。消费方：`Publish.ps1`（模型/工具/
-  锁指纹/SHA256SUMS 四处）、`scripts/verify.ps1`（[1.97/2] 设置指纹）、`scripts/pack.ps1`（包哈希）。
+  锁指纹/SHA256SUMS 四处）、`scripts/verify.ps1`（[1.97/2] 设置指纹）、`scripts/pack.ps1`（包哈希）；
+  同日第三轮追加 `download_models.ps1` 与 `tests/manual/safety/` 全部 23 个旁路探针
+  （通用版 `Get-TtcFileHashHex`，SHA1/SHA256 双算法 —— 那批探针一半用 SHA1 给本机设置文件做指纹）。
 - **环境层**：`scripts/git-hooks/{pre-commit,pre-push}` 在回退 `powershell.exe` 时
   `env -u PSModulePath` 启动，5.1 重建自身默认模块路径，其余 cmdlet 一并脱险。
 - 两层独立成立：钩子层防"钩子路径"，脚本层防"用户从任意控制台手动跑"。
@@ -74,9 +76,10 @@ $env:PSModulePath（继承给 5.1）:
 
 ## 4. 已知边界（诚实记录）
 
-1. `tests/manual/**` 的 20 余个一次性 cell 仍用 `Get-FileHash` —— 它们是开发者手动跑的
-   旁路探针，在干净 5.1 或 pwsh 下正常；被污染的 5.1 控制台里会误红（不产生假绿）。
-   门禁链路已全部免疫，旁路探针留待下次触碰时顺手换。
+1. ~~`tests/manual/**` 的 20 余个一次性 cell 仍用 `Get-FileHash`~~ **已闭环（同日第三轮，见 §8）**：
+   23 个旁路探针与根目录 `download_models.ps1` 全部迁到 `ps-compat.ps1` 的 `Get-TtcFileHashHex`，
+   双宿主与 `Get-FileHash.Hash` 逐字符一致。仓库内现存引用只剩 `pack.ps1:199` 的
+   用户校验指引文本（见下条）。
 2. `pack.ps1:199` 给用户展示的"自行校验"提示文本仍写 `Get-FileHash` —— 那是对用户的
    操作指引（7.x / 干净 5.1 都可用），不是脚本自身的依赖。
 3. 7.1 已于 2022-09 EOL：本仓对 7.x 的承诺按"最新稳定版（7.6.x）实测"兑现，7.1 的
@@ -133,3 +136,24 @@ Windows PowerShell 5.1.26100.9711（env -u PSModulePath）→ EXIT=0（同 1961�
 ```
 
 两轮全量里的 [1.6/2] 发布门禁回归（8/8 场景）与 [1.9/2] 宿主新鲜度均随宿主通过。
+
+## 8. 同日第三轮：旁路探针哈希清空（2026-10-26）
+
+§4.1 那条"留待下次触碰时顺手换"的已知边界本轮主动结掉：`tests/manual/safety/` 全部
+23 个探针（17 个走 `function Sha` 包装、6 个内联调用；SHA1 指纹 10 个 + SHA256 13 个）
+与根目录 `download_models.ps1`（模型下载的 SHA256 校验，任何控制台都可能跑）的
+`Get-FileHash` 全部迁到 `Get-TtcFileHashHex`。
+
+两个当场被验证抓住的坑，都值得记下：
+
+1. **点源路径的层数**：`tests/manual/safety/` 在仓库根下是【三层】（tests/manual/safety），
+   第一版点源写了两层 `Split-Path -Parent`，解析到不存在的 `tests\scripts\ps-compat.ps1`
+   —— 运行时才会炸的错，静态解析根本不报。靠"助手 vs Get-FileHash 等价性测试 +
+   Test-Path 算术检查"在提交前抓到，23 处全部改为三层。
+2. **5.1 测试口径**：`powershell.exe -Command` 里 dot-source 脚本必须带
+   `-ExecutionPolicy Bypass`，否则报"running scripts is disabled"（上一轮已知的坑，
+   本轮在等价性测试里又踩了一次 —— 那是测试命令的问题，不是助手的问题）。
+
+验收：新助手两宿主（pwsh 7.6.8 / 擦 PSModulePath 的 5.1）对同一文件 SHA1 与 SHA256
+输出与 `Get-FileHash.Hash` 逐字符一致（-ceq True）；25 个改动文件双宿主解析零错误；
+`git grep Get-FileHash` 仅剩注释与 `pack.ps1:199` 用户指引文本。

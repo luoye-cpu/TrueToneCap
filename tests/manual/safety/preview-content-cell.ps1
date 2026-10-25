@@ -27,7 +27,9 @@ param(
 $ErrorActionPreference = 'Continue'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Say([string[]]$ls) { [System.IO.File]::AppendAllText($Log, (($ls -join "`r`n") + "`r`n"), $utf8) }
-function Sha([string]$p) { if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } else { 'ABSENT' } }
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
+function Sha([string]$p) { if (Test-Path -LiteralPath $p) { (Get-TtcFileHashHex -LiteralPath $p -Algorithm SHA256) } else { 'ABSENT' } }
 
 $dir = Split-Path -Parent $Exe
 $set = Join-Path $dir 'TrueToneCap.settings.json'

@@ -15,6 +15,8 @@ param(
     [string]$Log = 'C:\PLAN\TrueToneCap\tests\output\realmachine-2026-10-01\format-persist.log'
 )
 $ErrorActionPreference = 'Continue'
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Say([string[]]$ls) { [IO.File]::AppendAllText($Log, (($ls -join "`r`n") + "`r`n"), $utf8) }
 [System.IO.File]::WriteAllText($Log, '', $utf8)
@@ -27,7 +29,7 @@ $bytes0 = [IO.File]::ReadAllBytes($set)
 $raw = [IO.File]::ReadAllText($set)
 $m = [regex]::Matches($raw, '"FormatIndex":\d+')
 if ($m.Count -gt 1) { Say @("RC=2 未判：FormatIndex 锚点命中 $($m.Count) 次"); exit 2 }
-$shaOrig = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+$shaOrig = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
 Say @("轮前盘上 = $(if ($m.Count) { $m[0].Value } else { '★ 键不存在（= 默认 PNG）' })（sha256 前 16 = $($shaOrig.Substring(0,16))）")
 if ($m.Count -eq 1) {
     [IO.File]::WriteAllText($set, $raw.Replace($m[0].Value, '"FormatIndex":' + $Write), $utf8)
@@ -72,7 +74,7 @@ $verdict = if ($ma.Value -eq ('"FormatIndex":' + $Write)) { '键还在 ⇒ 只�
 Say @("判词：$verdict")
 # 还原轮前字节，并用轮前那份字节自己复算一把 sha 当尺
 [IO.File]::WriteAllBytes($set, $bytes0)
-$shaNow = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+$shaNow = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
 $want = [System.BitConverter]::ToString((New-Object System.Security.Cryptography.SHA256Managed).ComputeHash($bytes0)).Replace('-', '')
 Say @("设置还原：写回轮前 $($bytes0.Length) B ⇒ sha $shaNow $(if ($shaNow -eq $want) { '与轮前那份字节复算逐字相同 ✓' } else { '★ 与轮前不同，立即核对' })")
 Write-Output "判词：$verdict"

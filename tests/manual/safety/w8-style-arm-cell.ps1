@@ -16,6 +16,8 @@ param(
     [string]$Log = 'C:\PLAN\TrueToneCap\tests\output\realmachine-2026-10-01\style-arm.log'
 )
 $ErrorActionPreference = 'Continue'
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Say([string[]]$ls) { [IO.File]::AppendAllText($Log, (($ls -join "`r`n") + "`r`n"), $utf8) }
 [IO.File]::WriteAllText($Log, '', $utf8)
@@ -73,7 +75,7 @@ public static class SA
 '@
 if (-not ('SA' -as [type])) { Say @('RC=2 未判：P/Invoke 类型没编出来'); exit 2 }
 
-$bytes0 = [IO.File]::ReadAllBytes($set); $sha0 = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+$bytes0 = [IO.File]::ReadAllBytes($set); $sha0 = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
 $pre = @(Get-Process -Name 'TrueToneCap' -ErrorAction SilentlyContinue)
 if ($pre.Count) {
     Say @("起手 $($pre.Count) 个实例 ⇒ 先停（finally 起回）")
@@ -130,9 +132,9 @@ try {
     Say @('读法：左侧导航"OCR / 翻译"那枚 = Style 臂；右侧页眉"OCR 文字识别"旁那枚 = 内联臂。两枚应当一模一样。')
 } catch { Say @("★ 异常：$($_.Exception.Message)") } finally {
     if ($proc) { try { Stop-Process -Id $proc.Id -Force } catch { } }
-    $now = (Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash
+    $now = (Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256)
     if ($now -ne $sha0) { [IO.File]::WriteAllBytes($set, $bytes0) }
-    $mark = if ((Get-FileHash -LiteralPath $set -Algorithm SHA256).Hash -eq $sha0) { '与轮前逐字相同 ✓' } else { '★ 不同，立即核对' }
+    $mark = if ((Get-TtcFileHashHex -LiteralPath $set -Algorithm SHA256) -eq $sha0) { '与轮前逐字相同 ✓' } else { '★ 不同，立即核对' }
     Say @("设置还原自检：$($mark)（本格不截图不落盘，仍照例复算）")
     Start-Sleep -Seconds 1
     $p2 = Start-Process -FilePath $Exe -WorkingDirectory $dir -PassThru

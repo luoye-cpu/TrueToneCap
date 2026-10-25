@@ -21,8 +21,10 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 function Write-Log([string[]]$lines) {
     [System.IO.File]::AppendAllText($log, (($lines -join "`r`n") + "`r`n"), $utf8)
 }
+# 双宿主哈希助手 —— 不用 Get-FileHash 的原因见 scripts/ps-compat.ps1 头注（PSModulePath 遮蔽）
+. (Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))) "scripts\ps-compat.ps1")
 function Get-Sha1Of([string]$p) {
-    if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA1).Hash } else { 'ABSENT' }
+    if (Test-Path -LiteralPath $p) { (Get-TtcFileHashHex -LiteralPath $p -Algorithm SHA1) } else { 'ABSENT' }
 }
 function Get-Fingerprint {
     $h = @{}
