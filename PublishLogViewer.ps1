@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # TrueToneCap.LogViewer Publish Script
 # TTC 日志查看器 — 独立可选工具 (不随主包发布)

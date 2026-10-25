@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # TrueToneCap 发布包压缩
 #
@@ -37,6 +37,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# 双宿主兼容助手（Get-Sha256Hex）—— 为什么不直接用 Get-FileHash，见该文件头注释。
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "ps-compat.ps1")
 
 if (-not (Test-Path $PackageDir)) {
     Write-Host "❌ 发布目录不存在: $PackageDir" -ForegroundColor Red
@@ -149,7 +152,7 @@ Write-Host ""
 #  [4/4] 把压缩包自身纳入校验和
 # ══════════════════════════════════════════════════════════════
 Write-Host "[4/4] 校验和..."
-$hash = (Get-FileHash $OutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$hash = (Get-Sha256Hex $OutputPath).ToLowerInvariant()
 $arcName = Split-Path $OutputPath -Leaf
 Write-Host "   SHA256: $hash"
 

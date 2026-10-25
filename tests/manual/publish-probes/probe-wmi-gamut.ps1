@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 $ErrorActionPreference = 'Stop'
 # ═══ 用 WMI 拿【当前连接】显示器的原始 EDID，直接读面板原色 ═══

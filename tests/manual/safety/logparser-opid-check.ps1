@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 独立复现 L6b-L7 那条断言：LogViewer 的行解析器认不认带 #opId 前缀的日志行。
 # 判据形状 = 一正一负两条臂（负断言必须先被已知存在的串命中一次，否则分不清"没有"与"我没看到"）：

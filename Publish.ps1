@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # TrueToneCap Publish Script
 # 完整发布流程：校验依赖 → 编译 → 收集资源 → 打包 → 产出校验和
@@ -114,6 +114,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+# 双宿主兼容助手（Get-Sha256Hex）—— 为什么不直接用 Get-FileHash，见该文件头注释。
+. (Join-Path $RepoRoot "scripts\ps-compat.ps1")
 $AppProj  = Join-Path $RepoRoot "src\TrueToneCap.App\TrueToneCap.App.csproj"
 $BuildProps = Join-Path $RepoRoot "Directory.Build.props"
 
@@ -303,7 +305,7 @@ if ($SkipDependencyCheck) {
                     $missing.Add("模型缺失: $($m.name)")
                     continue
                 }
-                $actualHash = (Get-FileHash $mp -Algorithm SHA256).Hash.ToLowerInvariant()
+                $actualHash = (Get-Sha256Hex $mp).ToLowerInvariant()
                 if ($actualHash -ne $m.sha256.ToLowerInvariant()) {
                     Write-Host "   ❌ 模型 SHA256 不匹配: $($m.name)" -ForegroundColor Red
                     Write-Host "      期望: $($m.sha256)" -ForegroundColor Red
@@ -381,7 +383,7 @@ if ($SkipDependencyCheck) {
                 continue
             }
             $wantHash = [string]$t.sha256
-            $actualHash = (Get-FileHash $tp -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actualHash = (Get-Sha256Hex $tp).ToLowerInvariant()
             if ($actualHash -ne $wantHash.ToLowerInvariant()) {
                 Write-Host ""
                 Write-Host "❌ 原生工具校验失败: $($t.file)" -ForegroundColor Red
@@ -612,6 +614,10 @@ $gateSuites = @(
     "--encoding-tests",
     "--service-tests",
     "--ocr-tests",
+    # 2026-10-26 随"识别二维码"新增。⚠ 此列表必须与 scripts/verify.ps1 的 $suites 保持同一集合 ——
+    # 漏一条的直接后果：断言下限(=基线总断言)按 8 套件计，这里只跑 7 个 ⇒ 永远差一条的量 ⇒
+    # B/D 发布场景误红（实测 2026-10-26：1/7 个套件未通过，实为 1914 < 1961 的下限检查）。
+    "--qr-tests",
     "--format-tests",
     "--usability-tests"
 )
@@ -1056,7 +1062,7 @@ if (-not $builtOn) {
 $lockHashParts = foreach ($lp in $lockProjects) {
     $lockPath = Join-Path $RepoRoot "src\TrueToneCap.$lp\packages.lock.json"
     if (Test-Path $lockPath) {
-        "$lp=$((Get-FileHash $lockPath -Algorithm SHA256).Hash.ToLowerInvariant())"
+        "$lp=$((Get-Sha256Hex $lockPath).ToLowerInvariant())"
     }
 }
 $lockFingerprint = ($lockHashParts -join ";")
@@ -1094,7 +1100,9 @@ $buildInfo = [ordered]@{
     smokeTested    = [bool]$SmokePassed
 }
 $buildInfoPath = Join-Path $OutputDir "build-info.json"
-$buildInfo | ConvertTo-Json -Depth 4 | Set-Content -Path $buildInfoPath -Encoding UTF8
+# ⚠ 刻意不用 Set-Content -Encoding UTF8（5.1 必写 BOM / 7 不写 ⇒ 双宿主产物漂移），
+#    与下方 SHA256SUMS.txt 同一条纪律：.NET 直写无 BOM。
+[System.IO.File]::WriteAllText($buildInfoPath, ($buildInfo | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $false))
 Write-Host "   ✅ build-info.json"
 
 # SHA256 校验和（对发布目录内全部文件，排除校验和文件自身）
@@ -1106,7 +1114,7 @@ $lines = @(foreach ($f in $files) {
     # 相对路径统一为正斜杠：coreutils 的 sha256sum 把 '\' 当转义符，
     # 原先写成 "af-ZA\Microsoft.ui.xaml.dll.mui" 时整行无法解析。
     $rel  = $f.FullName.Substring($OutputDir.Length).TrimStart('\', '/').Replace('\', '/')
-    $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = (Get-Sha256Hex $f.FullName).ToLowerInvariant()
     "$hash  $rel"
 })
 # 格式: UTF-8 无 BOM + LF + "<hex>  <path>"（两个空格，coreutils sha256sum 的文本模式惯例），

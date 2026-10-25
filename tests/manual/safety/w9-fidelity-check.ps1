@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # B1 的前提校验：14px 下语义图标看不清，到底是【我抽的轮廓失真】还是【尺寸本身就不够】？
 #

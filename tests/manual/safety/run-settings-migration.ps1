@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 2026-09-29 批次 E：跑 App 侧的 --settings-migration（三条设置自检，毫秒级，无窗口）。
 # 判据 = 真退出码；读数 = 进程 stdout 里的 NORMALIZE / SETTINGS_MIGRATION / GAINMAP_MIGRATION 行。

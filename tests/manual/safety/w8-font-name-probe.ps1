@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 量三件事：注册表里的符号字体友好名、SegoeIcons.ttf 内部真实的名字表、
 # 以及本进程（GDI+ / WPF 两条）能不能按这些名字取到字形。

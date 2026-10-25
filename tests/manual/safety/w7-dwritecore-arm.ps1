@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 判据臂：把 DWriteCore.dll 挪开，看 XAML 引擎是否回落到系统 DirectWrite
 #

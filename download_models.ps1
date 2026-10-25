@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # download_models.ps1 — 下载/更新 PP-OCRv6 ONNX 模型
 # 用法: .\download_models.ps1 [-Proxy "socks5://127.0.0.1:10808"]

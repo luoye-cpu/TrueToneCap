@@ -28,10 +28,17 @@ if [ ! -f "$verify" ]; then
     exit 1
 fi
 
-# 选一个可用的宿主：Windows PowerShell 优先，其次 pwsh
-# 2026-10-26 优先 pwsh：Windows PowerShell 5.1 缺 Get-FileHash 等内建 cmdlet，
-# 门禁里的模型/工具 SHA256 校验在 5.1 下必红（实测 verify.ps1 "4/8 个场景不符"，
-# pwsh 下同树 7 套件 1914 断言全绿）。有 pwsh 用 pwsh，没有再退 5.1。
+# 选一个可用的宿主：优先 pwsh（7.x），其次 Windows PowerShell 5.1
+# 2026-10-26 优先 pwsh 并修正归因：5.1 并不缺 Get-FileHash（4.0 起就有）——
+# 真正的问题是【继承的 PSModulePath 把 pwsh 7 的目录排在前面】时（ZCode / VS Code
+# pwsh 终端 / Git Bash 会话都会这样继承），5.1 的模块解析抢先命中 pwsh 的
+# Microsoft.PowerShell.Utility 清单，而它的程序集 .NET Framework 装不进去
+# ⇒ Get-FileHash "命令不存在" ⇒ 门禁哈希校验必红（实测 "4/8 个场景不符"）。
+# 双层防线：
+#   ① 脚本层 —— verify.ps1/Publish.ps1/pack.ps1 的哈希全走 scripts/ps-compat.ps1
+#     的 .NET 直调（Get-Sha256Hex），不依赖任何 cmdlet 解析；
+#   ② 环境层 —— 本钩子回退 5.1 时用 env -u 擦掉继承的 PSModulePath，
+#     让 5.1 重建自己的默认模块路径（其余 cmdlet 不再暴露在同一风险下）。
 if command -v pwsh.exe >/dev/null 2>&1; then
     ps_exe="pwsh.exe"
 elif command -v powershell.exe >/dev/null 2>&1; then
@@ -50,8 +57,15 @@ if [ -n "$TTC_HOOK_DRYRUN" ]; then
 fi
 
 echo "[pre-commit] 构建校验中（只构建，不跑测试；测试在 pre-push）..."
-if "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$verify" -BuildOnly; then
-    exit 0
+if [ "$ps_exe" = "powershell.exe" ]; then
+    # 5.1 回退：擦掉继承的 PSModulePath（防 pwsh 路径遮蔽 5.1 自带模块，见上方注释）
+    if env -u PSModulePath "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$verify" -BuildOnly; then
+        exit 0
+    fi
+else
+    if "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$verify" -BuildOnly; then
+        exit 0
+    fi
 fi
 
 echo "" >&2

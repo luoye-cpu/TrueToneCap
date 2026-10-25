@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 2026-09-29 批次 E：[1.9/2] 换成"按宿主算输入闭包"之后的两腿实测（跑真 verify.ps1，不跑副本）。
 # 腿 A：只碰 App 的源码（不重编）⇒ 必须【绿】——这是今天反复假红的那一格（gate2/gate4 两轮）。

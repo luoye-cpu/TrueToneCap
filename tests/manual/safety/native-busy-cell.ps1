@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # F 批剩余构造之一：**随包后端被占用**（§15.5 列的"native 目录被占用"那一格）。
 # 为什么用"占用"而不是"改名"：改名会污染 [1.9/2] 的构建输入面（随包 exe 在输入面里），

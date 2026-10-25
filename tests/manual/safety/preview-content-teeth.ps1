@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 给"平白一片"这把尺子配正反控制样本（2026-09-30，用户："你试着通过其他办法分析是否正确"）
 # 只做两件事，都不碰屏幕：

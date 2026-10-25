@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 端到端：SDR 档改道之后，选区→编码→落盘→读回声明，整条链路还能不能用（2026-09-30）
 #

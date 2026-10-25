@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 把 Segoe 符号字体的字形取成 XAML Path Data（离线工具，不改产品）
 #

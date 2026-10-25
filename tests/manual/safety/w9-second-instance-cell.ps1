@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 用户已经开着 TrueToneCap 时再双击一次，最后到底能不能看到已有窗口被带到前面？
 #

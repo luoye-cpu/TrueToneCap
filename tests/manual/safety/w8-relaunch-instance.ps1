@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 把为验证停掉的产品实例按原样起回来（不带任何诊断环境变量、不带参数）。
 $ErrorActionPreference = 'Continue'

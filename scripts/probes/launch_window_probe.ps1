@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 探针对象 = publish/ 下【最新的那个包】。原先写死 TrueToneCap-v0.3.4-beta-pipelinefix，
 # 而交付包是一次性产物、会被清理（2026-09-20 整洁审计清掉了 7 个历史变体）

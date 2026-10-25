@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 独立交叉验证：只走 WmiMonitorColorCharacteristics（驱动自己报的原色，不碰注册表 EDID、不碰我的解码器）
 # 目的：证实 TrueToneCap 的 HMONITOR→EDID 逐屏映射读到的原色，与另一条完全独立的机制一致。

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # scripts/verify-package-content.ps1
 # 「这一轮的代码真的进包了吗」—— 拿发布目录里的 DLL / .xbf 直接查证，不信"我跑过构建了"

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 复制这条腿（SDR 改道后）：选区 → Ctrl+C → 剪贴板里到底有没有那张位图
 #

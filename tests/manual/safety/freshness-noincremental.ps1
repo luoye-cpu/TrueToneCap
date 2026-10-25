@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 2026-09-29 批次 E：把 [1/2] 改成 --no-incremental 之后的两腿实测（跑的是真 verify.ps1，不是副本）。
 # 腿 A：只碰 App 的源码 ⇒ 起【完整门禁】。今天两轮假红（gate2/gate4）正是这一格，改完必须【绿】。

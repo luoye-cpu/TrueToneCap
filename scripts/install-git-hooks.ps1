@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # TrueToneCap —— 安装 git 钩子（把 scripts/verify.ps1 挂到 commit / push 上）
 #

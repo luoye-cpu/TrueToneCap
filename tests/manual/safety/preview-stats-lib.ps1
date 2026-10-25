@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 共用的截图统计尺子（2026-09-30）
 # 为什么单拎出来：`preview-content-cell.ps1` 里那份内联实现如果和"判据有没有牙"那次验证用的是两份代码，

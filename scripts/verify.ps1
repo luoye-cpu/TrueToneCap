@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # TrueToneCap 一键校验（构建 + 测试）
 #
@@ -76,6 +76,9 @@ if ($SkipBuild -and $BuildOnly) {
     Write-Host "❌ -SkipBuild 与 -BuildOnly 不能同时使用（语义矛盾）" -ForegroundColor Red
     exit 2
 }
+
+# 双宿主兼容助手（Get-Sha256Hex）—— 为什么不直接用 Get-FileHash，见该文件头注释。
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "ps-compat.ps1")
 
 $ErrorActionPreference = "Stop"
 
@@ -1011,7 +1014,7 @@ if (-not $appExe) {
 
 $settingsPath = Join-Path $appExe.DirectoryName 'TrueToneCap.settings.json'
 function Get-Sha256OrAbsent([string]$p) {
-    if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } else { 'ABSENT' }
+    if (Test-Path -LiteralPath $p) { Get-Sha256Hex $p } else { 'ABSENT' }
 }
 # 轮前的原件按【字节】留着：还原只信原字节，不信"看起来一样"
 $settingsBytes = if (Test-Path -LiteralPath $settingsPath) { [IO.File]::ReadAllBytes($settingsPath) } else { $null }

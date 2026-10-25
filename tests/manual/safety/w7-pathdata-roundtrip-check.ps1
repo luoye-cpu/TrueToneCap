@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 回环自检：把取出来的 Path Data 再画成图，与 GDI+ 直接画的字形对比
 #

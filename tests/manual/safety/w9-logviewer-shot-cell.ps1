@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 把 LogViewer 那 5 枚换过的图标拍下来 —— 它是独立 exe，主程序修好了不代表它也修好了。
 #

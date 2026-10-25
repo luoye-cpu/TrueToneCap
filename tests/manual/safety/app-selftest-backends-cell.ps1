@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # App 侧进程内自测：把"后端可执行文件缺失"与"真失败"分账的【前后对照】取证片段
 #

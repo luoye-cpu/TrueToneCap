@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # LogViewer 行解析器的对撞判据（2026-09-29 审查轮 §10.3 V12 的取证 + 修复后的复验）。
 # 尺子从源码里【现取】正则，不抄常数：抄一份进脚本 ⇒ 改了 LogParser.cs 而脚本还在测旧的那份，

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # R1 的 T3：逐格式读质量那一行，验"中文模式逐字不变" + "英文模式不留中文"。
 #

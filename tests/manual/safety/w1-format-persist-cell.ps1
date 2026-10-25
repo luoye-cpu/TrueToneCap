@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 一格：盘上写的格式，重启之后还剩什么？（区分"没读回来"与"读回来又被覆写"）
 #

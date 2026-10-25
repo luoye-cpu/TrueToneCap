@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # verify-publish-gates.ps1 —— Publish.ps1 发布门禁的控制流回归测试
 #
@@ -85,6 +85,7 @@ function global:dotnet {
                     '--encoding-tests'  { 14 }
                     '--service-tests'   { 4 }
                     '--ocr-tests'       { 10 }
+                    '--qr-tests'        { 47 }
                     '--format-tests'    { 30 }
                     '--usability-tests' { 152 }
                     default             { 0 }
@@ -161,13 +162,13 @@ Invoke-Scenario 'A 脏工作区/未授权 → 应拒绝发布' `
 #    而本文件仍写 6 → 场景 B/C/D 全部判红；又因 verify.ps1 [1.6/2] 观察期只告警不阻断，
 #    这个红拦不住任何人，观察期也就永远无法转绿。改 Publish.ps1 的套件列表时必改此处。
 Invoke-Scenario 'B 干净工作区 → 应放行' `
-    -GitMode 'clean' -DotnetRunExit 0 -ExpectThrow 'STUB_STOP_AT_PUBLISH' -ExpectDotnetRuns 7
+    -GitMode 'clean' -DotnetRunExit 0 -ExpectThrow 'STUB_STOP_AT_PUBLISH' -ExpectDotnetRuns 8
 
 Invoke-Scenario 'C 测试失败 → 门禁应阻断' `
-    -GitMode 'dirty' -DotnetRunExit 1 -ExpectThrow '测试门禁失败' -ExpectDotnetRuns 7 -AllowDirty
+    -GitMode 'dirty' -DotnetRunExit 1 -ExpectThrow '测试门禁失败' -ExpectDotnetRuns 8 -AllowDirty
 
 Invoke-Scenario 'D 测试通过 → 应放行到发布步骤' `
-    -GitMode 'dirty' -DotnetRunExit 0 -ExpectThrow 'STUB_STOP_AT_PUBLISH' -ExpectDotnetRuns 7 -AllowDirty
+    -GitMode 'dirty' -DotnetRunExit 0 -ExpectThrow 'STUB_STOP_AT_PUBLISH' -ExpectDotnetRuns 8 -AllowDirty
 
 Invoke-Scenario 'E -SkipTests → 应跳过门禁' `
     -GitMode 'dirty' -DotnetRunExit 1 -ExpectThrow 'STUB_STOP_AT_PUBLISH' -ExpectDotnetRuns 0 -AllowDirty -SkipTests

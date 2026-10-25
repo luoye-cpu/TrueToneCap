@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 param([int]$SecondaryX = 4200, [int]$SecondaryY = 300, [int]$PrimaryX = 1200, [int]$PrimaryY = 700)
 $ErrorActionPreference = 'Stop'

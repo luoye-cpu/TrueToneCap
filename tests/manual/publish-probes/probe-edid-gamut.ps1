@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 $ErrorActionPreference = 'Stop'
 # ── EDID 原色解码：先自检，再读真机 ──

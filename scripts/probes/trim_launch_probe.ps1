@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # scripts/probes/trim_launch_probe.ps1 — 裁剪/AOT 产物的实机启动回归探针
 #

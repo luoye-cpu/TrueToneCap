@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # W1b 选区那条腿：Ctrl+C 到底进没进得去（这一格从未判成过一次）
 #

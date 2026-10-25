@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # scripts/verify-msix.ps1 — 解包核对 MSIX 内容（打包后的独立门禁）
 #

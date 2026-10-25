@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # .NET 10 → .NET 11 迁移脚本
 # 一键执行阶段一：框架升级 + 基础编译

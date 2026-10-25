@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 探针：主窗在不在 UIA 树里、格式下拉能不能被驱动（决定 W1 矩阵用哪条路选格式）
 #

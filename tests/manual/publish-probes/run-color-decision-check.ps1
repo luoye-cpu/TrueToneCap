@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 落一枚真产物再读回它的声明：验证"窄屏 + 跟随显示器 + 烘焙关"这个**用户当前默认设置**下，
 # 一次无感截图在文件里到底写了什么色域声明。无 UI 交互、不动鼠标指针。

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 批次 T3 剩下两格：热键冲突回退链 + 无感截图到剪贴板（2026-09-30，用户授权注键鼠）
 #

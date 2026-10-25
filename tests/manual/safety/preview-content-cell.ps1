@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 预览内容是否真的画出来了 —— 不用眼睛的取证（2026-09-30，用户："你试着通过其他办法分析是否正确"）
 #

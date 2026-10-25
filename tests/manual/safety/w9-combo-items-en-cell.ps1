@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 英文界面补完 · 第三批的 T3：展开那 7 个下拉，逐项读 UIA Name，数还剩几个中文。
 #

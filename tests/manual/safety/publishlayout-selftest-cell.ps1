@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 发布布局下 missingBackend 能不能归零 —— 交接账本 §30.5 的第一条"未验"。
 #

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # D4 场景 8 的可做部分：**软件同目录那份设置不见了** ⇒ `MigrateFromLegacyLocation` 会不会把老用户接住。
 # 只做这一半的理由：%LOCALAPPDATA%\TrueToneCap 那份是工作区外的用户数据，要动它得先要一句话

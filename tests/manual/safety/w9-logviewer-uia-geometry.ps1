@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 用 UIA 量 LogViewer 工具条每枚按钮的矩形 —— 判"重叠"和"出界"要数字，不要目视。
 #

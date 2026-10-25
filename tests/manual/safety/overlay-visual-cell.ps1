@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # 覆盖层"看起来变了"的最后一半读数（报告 §23.6 机制 A、任务 #12）
 # 两件一次做掉：

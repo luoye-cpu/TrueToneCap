@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # B0 探针的读数格：同一张图里同时含【Style 形式】与【内联形式】的两枚相同轮廓。
 #
