@@ -5,7 +5,7 @@
 // 真机探针：TrueToneCap.exe --sdr-semantics-probe
 //
 // ── 它回答哪一个具体问题 ──
-// 2026-10-26 用 TTC_FORCE_LEGACY_OVERLAY=1 冒烟时，兜底覆盖层的背景被肉眼看到"比实时桌面亮"。
+// 2026-10-26 用 TTC_FORCE_LEGACY_OVERLAY=1 冒烟时，兜底覆盖层（2026-10-27 已整份删除）的背景被肉眼看到"比实时桌面亮"。
 // 兜底那条路的供帧是【纯字节拷贝】（SelectionOverlay.RenderDesktopBackground 把
 // CaptureResult.SdrPixels 直接写进 8-bit WriteableBitmap，没有任何色彩转换），
 // 所以"更亮"只有两种可能：字节本身已被系统纸白抬升过一次（8-bit 窗显示时 DWM 再抬一次 ⇒ 双重提亮），

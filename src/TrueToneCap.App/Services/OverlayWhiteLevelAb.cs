@@ -7,8 +7,9 @@
 // ── 为什么还要这一步 ──
 // --sdr-semantics-probe 已经把字节侧钉死：8-bit 会话交回的是 authored sRGB，逐枚 bit-exact
 // （读数见 Core/Capture/SdrSessionSemantics.cs 的文件头）。所以"兜底覆盖层背景比实时桌面亮"
-// 如果真存在，只剩呈现这一侧能解释：SelectionOverlay.RenderDesktopBackground 是把字节【原样】
-// 写进 8-bit WriteableBitmap 的（零色彩转换）——万一 XAML/WinUI 在 HDR 屏上给这块表面的待遇
+// 如果真存在，只剩呈现这一侧能解释：原 SelectionOverlay.RenderDesktopBackground（该兜底层已于
+// 2026-10-27 整份删除）是把字节【原样】写进 8-bit WriteableBitmap 的（零色彩转换）——
+// 万一 XAML/WinUI 在 HDR 屏上给这块表面的待遇
 // 和普通 SDR 窗口不同（例如已经当成 EDR 内容，DWM 再抬一次），用户就会看到截图比桌面亮。
 //
 // ── 怎么把观感变成读数 ──
@@ -16,7 +17,7 @@
 //   · 参照臂 = GDI 画的普通置顶窗（复用探针那扇补丁窗，不另写一份 WndProc —— 两台仪器必须
 //     是同一种东西，否则"参照"两个字没有内容）；
 //   · 被试臂 = 一扇无边框置顶 XAML 窗，内容用兜底层一模一样的配方（WriteableBitmap + 字节直写
-//     PixelBuffer + Image 拉伸填满）。刻意不复用 SelectionOverlay 本尊：它一进来就带全屏矩形、
+//     PixelBuffer + Image 拉伸填满）。刻意不复用那份兜底窗本尊：它一进来就带全屏矩形、
 //     暗化层和工具条，那些都会污染要被测量的那一块。
 // 然后用 Float16 会话读两块区域求比值。依据是探针那轮的实测：Float16 恒等于
 // srgb_decode(字节)×(纸白/80) ⇒ 它是这台机器上唯一现成的"屏幕上到底多少尼特"的仪器；
