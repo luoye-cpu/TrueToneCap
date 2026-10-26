@@ -13,6 +13,10 @@ using TrueToneCap.Core.Encoding;
 using TrueToneCap.Core.Logging;   // CoreLog 档位模型（Test_LogDetailLevelIsReachable）
 using TrueToneCap.Core.Services;
 using DEnum = TrueToneCap.Core.Capture.DisplayEnumerator;   // 三档判据的别名（方法体内不能用 var 给类型起别名）
+using Patch = TrueToneCap.Core.Capture.PatchReading;        // 8-bit 会话语义探针的一枚读数
+using Sem = TrueToneCap.Core.Capture.SdrSessionSemantics;   // 同一把尺子：探针与下面这些合成臂共用
+using Sem8 = TrueToneCap.Core.Capture.EightBitSemantics;
+using SemF = TrueToneCap.Core.Capture.Float16Semantics;
 using CDec = TrueToneCap.Core.Capture.ColorDecision;        // 一次截图的唯一色彩决定（§41 收口的落点）
 using FOrder = TrueToneCap.Core.Settings.FormatOrder;       // 格式下拉顺序 + 旧表重映射（§52）
 
@@ -165,6 +169,8 @@ public static class CorePipelineTests
         Test_HdrBakedText_BlindSpotIsCounted();
         Test_ToolbarContract_SingleSource();
 
+        // 兜底层过曝的归因尺子（真机探针 --sdr-semantics-probe 用的就是它）：合成两臂必须先证明它会红
+        Test_SdrSessionSemantics_JudgeControlArmsDiverge();
 
         // MFT（QSV 选项的实际实现路径）真实编码验证
         Test_MftAv1EncodeIfAvailable();
@@ -5518,6 +5524,87 @@ public static class CorePipelineTests
     /// 本地化账本，这是给盲区补的第一路检测。</para>
     /// <para>为什么是源码哨兵：Test 只引用 Core，进不了 App 程序集（与位深协商那组同理由）。</para>
     /// </summary>
+    /// <summary>
+    /// 8-bit 桌面会话语义这把尺子的对抗用例（2026-10-26，兜底覆盖层过曝归因）。
+    /// <para>为什么要有这一条而不是"真机跑一次探针看读数"：那只能证明【这次量出来是什么】，
+    /// 证明不了【尺子会红】。SelfTest 的 JudgeHdrFloat 就是靠合成帧才抓到判据自身两个死缺陷
+    /// （计数从未 ++ ⇒ 永远 SKIP；容差 0.6 &gt; 0.5 ⇒ 判据恒真）。这里同一条纪律：
+    /// authored 臂与抬升臂必须读出【两个不同结论】，容差灰带必须读出 Unknown。</para>
+    /// </summary>
+    static void Test_SdrSessionSemantics_JudgeControlArmsDiverge()
+    {
+        const int WhiteNits = 120;                       // 本机实测档
+        double k = Sem.SdrWhiteScale(WhiteNits);
+        Assert("语义尺子：k = 纸白/80（120nits ⇒ 1.5；读不到纸白时必须回落 0 而不是猜）",
+            Math.Abs(k - 1.5) < 1e-9 && Sem.SdrWhiteScale(0) == 0 && Sem.SdrWhiteScale(-5) == 0);
+
+        static double Enc8(double linear) =>
+            (linear <= 0.0031308 ? linear * 12.92 : 1.05 * Math.Pow(linear, 1.0 / 2.4) - 0.05) * 255.0;
+
+        int[] mid = [32, 64, 128, 192];
+        const double control = 20.0;                     // 补丁隐藏时的同区读数（与所有灰档都差 ≥6）
+
+        // ── 臂 1：字节是 authored（画 128 就回 128），Float16 已抬到纸白 ──
+        var authored = mid.Select(v => new Patch(v, v, 0.4,
+            k * PixelOps.SrgbToLinearLut[v], control)).ToList();
+        var va = Sem.Judge(authored, WhiteNits);
+        Assert("语义尺子：authored 臂判成 AuthoredSrgb", va.SelfCheckPassed && va.EightBit == Sem8.AuthoredSrgb,
+            va.Why);
+
+        // ── 臂 2（对照）：字节里已含一次纸白抬升并钳回 8-bit ⇒ 必须读出【另一个】结论 ──
+        var boosted = mid.Select(v => new Patch(v,
+            Math.Min(255.0, Enc8(PixelOps.SrgbToLinearLut[v] * k)), 0.4,
+            PixelOps.SrgbToLinearLut[v], control)).ToList();
+        var vb = Sem.Judge(boosted, WhiteNits);
+        Assert("语义尺子：抬升臂判成 BoostedToSdrWhite（对照臂真分叉，两臂不许读成同一个）",
+            vb.SelfCheckPassed && vb.EightBit == Sem8.BoostedToSdrWhite && vb.EightBit != va.EightBit,
+            vb.Why);
+
+        // ── 臂 3：落在两条假设之间的灰带 ⇒ 只能 Unknown，不许硬掰成 authored ──
+        var gray = mid.Select(v => new Patch(v, v * 1.06, 0.4,
+            k * PixelOps.SrgbToLinearLut[v], control)).ToList();
+        var vg = Sem.Judge(gray, WhiteNits);
+        Assert("语义尺子：+6% 的灰带判 Unknown（authored 容差 4% / 抬升下限 8% 都在咬人，不是恒真）",
+            vg.SelfCheckPassed && vg.EightBit == Sem8.Unknown, vg.Why);
+
+        // ── 臂 4/5：采样区不均匀、补丁没落地 ⇒ 自检不过，结论不作数 ──
+        var noisy = mid.Select(v => new Patch(v, v, 30.0, 0.0, control)).ToList();
+        var vn = Sem.Judge(noisy, WhiteNits);
+        Assert("语义尺子：采样区不均匀（标准差 30）⇒ 自检不过", !vn.SelfCheckPassed && vn.EightBit == Sem8.Unknown);
+        var notLanded = mid.Select(v => new Patch(v, v, 0.4, 0.0, v)).ToList();
+        var vl = Sem.Judge(notLanded, WhiteNits);
+        Assert("语义尺子：补丁区与「隐藏态」同值 ⇒ 采到的不是补丁，自检不过",
+            !vl.SelfCheckPassed && vl.EightBit == Sem8.Unknown);
+
+        // ── 臂 6：绝对锚点不依赖纸白读数、也不依赖 Float16 会话 ──
+        // 这一臂只把【float 侧】抽空（meanFloat 全 0），8-bit 侧仍是 authored 臂的同一种读数 ——
+        // 要证的正是"8-bit 的结论不需要任何一侧的语义假设就能成立"。
+        var noFloatTable = mid.Select(v => new Patch(v, v, 0.4, 0.0, control)).ToList();
+        var noFloat = Sem.Judge(noFloatTable, 0);
+        Assert("语义尺子：纸白读不到 + 全程没有 float 帧时，8-bit 一侧仍判得出 AuthoredSrgb，" +
+               "而 Float16 一侧诚实报 NotMeasured（锚点是探针自己画的那个字节）",
+            noFloat.SelfCheckPassed && noFloat.EightBit == Sem8.AuthoredSrgb
+            && noFloat.Float16 == SemF.NotMeasured && Math.Abs(noFloat.SdrWhiteScale) < 1e-9);
+
+        // ── 臂 7：Float16 未抬升（scene-referred）时必须读出另一种结论，不许跟着 8-bit 一起报 ──
+        var scene = mid.Select(v => new Patch(v, v, 0.4, PixelOps.SrgbToLinearLut[v], control)).ToList();
+        var vs = Sem.Judge(scene, WhiteNits);
+        Assert("语义尺子：float 侧贴着 authored 线性 ⇒ SceneReferred（与臂 1 的 SdrWhiteScaled 分叉）",
+            vs.SelfCheckPassed && vs.Float16 == SemF.SceneReferred && vs.Float16 != va.Float16, vs.Why);
+
+        // ── 臂 8：可用补丁不足 ⇒ 不判 ──
+        var tooFew = Sem.Judge(authored.Take(1).ToList(), WhiteNits);
+        Assert("语义尺子：只有 1 枚可用补丁 ⇒ 自检不过（下限 2 枚）",
+            !tooFew.SelfCheckPassed && tooFew.EightBit == Sem8.Unknown);
+
+        // ── 含义不许两头都说：authored 那一支必须明确否证"双重提亮" ──
+        string implA = Sem.Implication(va), implB = Sem.Implication(vb);
+        Assert("语义尺子：authored 的含义行否证双重提亮、抬升的含义行确认它（两条互斥，不许同真）",
+            implA.Contains("否证", StringComparison.Ordinal)
+            && !implA.Contains("双重提亮成立", StringComparison.Ordinal)
+            && implB.Contains("双重提亮成立", StringComparison.Ordinal));
+    }
+
     static void Test_ToolbarContract_SingleSource()
     {
         var ctPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "ToolbarContract.cs"));

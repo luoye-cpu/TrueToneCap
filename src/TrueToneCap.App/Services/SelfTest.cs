@@ -66,7 +66,12 @@ public static class SelfTest
         // 毫秒级，随手复验 §49 用；--selftest 里也带）
         bool settingsGate = !selfTest && !probeOnly && !displayAudit
             && args.Any(a => string.Equals(a, "--settings-migration", StringComparison.OrdinalIgnoreCase));
-        if (!selfTest && !probeOnly && !displayAudit && !settingsGate)
+        // --sdr-semantics-probe：8-bit 桌面会话到底交回 authored 还是已按纸白抬升的字节
+        // （兜底覆盖层过曝的归因探针，见 Services/SdrSemanticsProbe.cs 的文件头）。
+        // 它要建一扇置顶补丁窗，但不需要 XAML ⇒ 与其余无头档一样拦在 AppServices.Initialize 之前。
+        bool semanticsProbe = !selfTest && !probeOnly && !displayAudit && !settingsGate
+            && args.Any(a => string.Equals(a, SdrSemanticsProbe.Flag, StringComparison.OrdinalIgnoreCase));
+        if (!selfTest && !probeOnly && !displayAudit && !settingsGate && !semanticsProbe)
             return false;
 
         string outDir = "";
@@ -113,6 +118,17 @@ public static class SelfTest
                 if (RunGainMapMergeCheck(outDir).Status == "fail") bad++;
                 return bad > 0 ? 1 : 0;
             }).GetAwaiter().GetResult();
+            return true;
+        }
+        // 与审计卡同理：证据要落在 exe 同目录，%TEMP% 里的新建文件本机有清理器会秒删。
+        if (semanticsProbe)
+        {
+            string probePath = outDir.StartsWith(Path.GetTempPath())
+                ? Path.Combine(AppContext.BaseDirectory, "sdr-semantics-probe.txt")
+                : Path.Combine(outDir, "sdr-semantics-probe.txt");
+            // 不套 Task.Run：探针自己起一条会 pump 消息的工作线程（补丁窗必须建在那条线程上），
+            // 而捕获与采样都在线程池里跑 ⇒ 这里阻塞主线程不会造出 :85 那条同步上下文死锁。
+            ExitCode = SdrSemanticsProbe.Run(probePath);
             return true;
         }
         ExitCode = Task.Run(() => Run(outDir, only, probeOnly)).GetAwaiter().GetResult();
