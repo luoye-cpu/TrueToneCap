@@ -20,8 +20,8 @@ cbuffer UIState : register(b0)
     float4 MousePos;       // (mx, my, 0, 0)
     float4 Flags;          // (selComplete, down, hoverIndex, dark)
     float4 FrameSize;      // (w, h, 0, 0)
-    float4 TextSubs[40];   // 图集子矩形 (0-6 主按钮, 7 主提示, 8-17 标注, 18 标注提示, 19-26 文字槽 0-7, 27 悬停标题)
-    float4 TextPos[40];    // 帧内位置 (0-6 主, 7 主提示, 8-17 标注, 18 标注提示, 27 悬停标题位置)
+    float4 TextSubs[40];   // 图集子矩形 (0-6 主按钮, 8-17 标注, 18 标注提示, 19-26 文字槽 0-7, 27 悬停标题, 28-34 主逐钮提示)
+    float4 TextPos[40];    // 帧内位置 (0-6 主, 7 主提示位置, 8-17 标注, 18 标注提示, 27 悬停标题位置)
     float4 AnnoState;      // (mode: 0/1, tool: 0..5, down: 0/1, 0)
     float4 AnnoColor;      // 标注颜色 (线性 RGB + A)
     float4 AnnoStroke;     // (strokeW, opacity, 0, 0)
@@ -210,11 +210,13 @@ float4 main(PSInput input) : SV_Target
                 }
             }
 
-            // 悬停提示（工具栏下方/上方; 提示槽: 主=7, 标注=18）
+            // 悬停提示（工具栏下方/上方; 提示槽: 主=28+hover 逐钮, 标注=18）。
+            // 2026-10-26 修复：此前主工具条提示槽 7 是一句静态"保存截图到文件"，悬停哪枚都显示它。
             if (hover >= 0 && hover < btnCount)
             {
-                float4 tipSub = AnnoState.x > 0.5 ? TextSubs[18] : TextSubs[7];
-                float4 tipPos = AnnoState.x > 0.5 ? TextPos[18] : TextPos[7];
+                bool annoMode = AnnoState.x > 0.5;
+                float4 tipSub = annoMode ? TextSubs[18] : TextSubs[28 + hover];
+                float4 tipPos = annoMode ? TextPos[18] : TextPos[7];
                 if (tipSub.z > 0.0 && all(pos >= tipPos.xy - 1.0) && all(pos <= tipPos.xy + tipPos.zw + 1.0))
                 {
                     float2 tipCenter = (tipPos.xy + tipPos.xy + tipPos.zw) * 0.5;

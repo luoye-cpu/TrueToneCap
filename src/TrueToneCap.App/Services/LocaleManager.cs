@@ -423,7 +423,9 @@ public static class LocaleManager
             ["识字"] = "OCR",
             ["翻译图中文字"] = "Translate text in the image",
             // ── 二维码识别（2026-10-26）：工具栏新按钮 + 结果窗（QrResultWindow）──
-            ["识别二维码 (QR)"] = "Recognise QR codes (QR)",
+            // 2026-10-26 契约单源化：工具条悬停提示统一为 ToolbarContract 的措辞（两端共用），
+            // 旧键"识别二维码 (QR)"随 XAML 静态提示一起退役（反向孤儿判据会盯着它不许再回来）。
+            ["识别图中二维码（区域照常保存+复制）"] = "Recognise QR codes in the image (the region is still saved and copied)",
             ["二维码"] = "QR",
             ["TrueToneCap 二维码"] = "TrueToneCap QR Code",
             ["解码在本机完成 · 程序不会自动打开任何内容 · 点「打开链接」才启动浏览器"] =

@@ -163,6 +163,8 @@ public static class CorePipelineTests
         // HDR 抓帧窗的字是画进像素的 ⇒ 本地化闸门/UIA/降级告警三条检测路径全瞎，这里把它钉成可数的数
         StringLiteralScannerTests.RunAll(Assert);   // 尺子自己的对抗用例（先于用它的锁）
         Test_HdrBakedText_BlindSpotIsCounted();
+        Test_ToolbarContract_SingleSource();
+
 
         // MFT（QSV 选项的实际实现路径）真实编码验证
         Test_MftAv1EncodeIfAvailable();
@@ -1210,6 +1212,11 @@ public static class CorePipelineTests
             "AnnotationWindow.xaml", "ThirdPartyNoticesWindow.xaml",
         };
         int totalIcons = 0;
+        // 2026-10-26 契约单源化：主工具条 7 枚按钮的轮廓搬进 Models/ToolbarContract.cs
+        //（仍是内联 Data 字符串，运行时生成 PathIcon），计入总数防"图标凭空消失"。
+        var contractText = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "ToolbarContract.cs"))
+            ?? throw new InvalidOperationException("ToolbarContract.cs 必须存在（图标形态判据的计数面）"));
+        int contractIcons = System.Text.RegularExpressions.Regex.Matches(contractText, "\"F0 ").Count;
         foreach (var name in converted)
         {
             var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", name));
@@ -1223,8 +1230,11 @@ public static class CorePipelineTests
                 fontIcons == 0 && pathIcons >= 1,
                 "符号字体在这个进程解析不出来 ⇒ 回到 FontIcon 就等于回到豆腐块");
         }
-        Assert($"已换成 PathIcon 的图标总数不少于 30（实得 {totalIcons}）", totalIcons >= 30,
-            "数量掉下来说明有人整批改回 FontIcon 或删掉了图标");
+        Assert($"已换成 PathIcon 的图标总数不少于 30（实得 {totalIcons} + 契约 {contractIcons}）",
+            totalIcons + contractIcons >= 30,
+            "数量掉下来说明有人整批改回 FontIcon 或删掉了图标。2026-10-26 起 SDR 主工具条 7 枚按钮由契约生成，"
+            + "它们的轮廓以同样形态（内联 Data mini-language）住在 Models/ToolbarContract.cs，这里一并计数 —— "
+            + "形态判据不变：绝不回 FontIcon。");
 
         var toast = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SilentCaptureToast.xaml"));
         Assert("找到 SilentCaptureToast.xaml（登记例外要用）", toast is not null);
@@ -1293,9 +1303,10 @@ public static class CorePipelineTests
                 lvText, @"Style=""\{StaticResource TtcIcon\.").Count;
             inlineDataIcons += System.Text.RegularExpressions.Regex.Matches(lvText, @"Data=""F0 ").Count;
         }
-        Assert($"不许有图标把轮廓交给 Style 下发（实得 {styleCarriedIcons} 枚），且每一枚都自带内联 Data（实得 {inlineDataIcons} 枚）",
-            styleCarriedIcons == 0 && inlineDataIcons >= 46,
-            "Style 下发 Data 会构建期随机丢图标，而单套件与门禁全绿——这条就是那次踩坑留下的路障");
+        Assert($"不许有图标把轮廓交给 Style 下发（实得 {styleCarriedIcons} 枚），且每一枚都自带内联 Data（实得 {inlineDataIcons} + 契约 {contractIcons} 枚）",
+            styleCarriedIcons == 0 && inlineDataIcons + contractIcons >= 46,
+            "Style 下发 Data 会构建期随机丢图标，而单套件与门禁全绿——这条就是那次踩坑留下的路障。"
+            + "契约里的 7 条轮廓同为内联 Data 形态，一并计入");
         Assert("两个工程都不许出现 Icons.xaml（B0 的生成物）",
             FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Icons.xaml")) is null
             && FindRepoFile(Path.Combine("src", "TrueToneCap.LogViewer", "Icons.xaml")) is null,
@@ -4290,16 +4301,16 @@ public static class CorePipelineTests
         var ov = StripLineComments(File.ReadAllText(ovPath));
         var mw = StripLineComments(File.ReadAllText(mwPath));
 
-        int g = ov.IndexOf("if (result is ActionResult.", System.StringComparison.Ordinal);
-        Assert("SDR 覆盖层：合成守卫必须同时含 Confirm/Copy/Ocr/Translate",
+        int g = ov.IndexOf("if (result is MainToolbarAction.", System.StringComparison.Ordinal);
+        Assert("SDR 覆盖层：合成守卫必须同时含 Save/Copy/Ocr/Translate（契约枚举 2026-10-26 起，原 ActionResult.Confirm 改叫 Save）",
             g >= 0 && ov.Substring(g, System.Math.Min(140, ov.Length - g)) is var guard
-            && guard.Contains("ActionResult.Confirm") && guard.Contains("ActionResult.Copy")
-            && guard.Contains("ActionResult.Ocr") && guard.Contains("ActionResult.Translate"),
+            && guard.Contains("MainToolbarAction.Save") && guard.Contains("MainToolbarAction.Copy")
+            && guard.Contains("MainToolbarAction.Ocr") && guard.Contains("MainToolbarAction.Translate"),
             "少一个目的地 = 那一路读的是未合成的原始桌面像素（马赛克白画）");
 
         foreach (var act in new[] { "Ocr", "Translate" })
         {
-            int c = mw.IndexOf($"case HdrCaptureAction.{act}:", System.StringComparison.Ordinal);
+            int c = mw.IndexOf($"case MainToolbarAction.{act}:", System.StringComparison.Ordinal);
             Assert($"HDR 覆盖层：case {act} 必须走 ComposeAnnotatedSdr（与 Save/Copy 同源）",
                 c >= 0 && mw.Substring(c, System.Math.Min(300, mw.Length - c)).Contains("ComposeAnnotatedSdr(")
                 && !mw.Substring(c, System.Math.Min(300, mw.Length - c))
@@ -5443,10 +5454,12 @@ public static class CorePipelineTests
         // 为什么算在基线里而不是给它开个例外：这把尺的单位本来就是"该文件里的中文字面量条数"——
         // 头六条里 `"CreateWindowExW 失败: {…}"`、`"MPO 检测失败"`、`"VRR 支持: ✓ 启用"` 都是日志串。
         // 单位变了才要改口径；只是数量 +1 就走它自己写的解释①（同一次改动里改基线并说明）。
-        // 2026-10-26：99 → 106（+7）。HDR 工具条补"二维码"按钮（对齐 SDR 覆盖层已有能力）：
-        // 图集主清单 1 条（"\u25A3 二维码"）+ 三份按钮清单（GDI 回退 / 启动预热 / Down() 命中）
-        // 各 2 条（"二维码" + 提示"识别图中二维码（区域照常保存+复制）"）= 7 条，全是画进位图的功能文案。
-        const int BakedCnBaseline = 106;
+        // 2026-10-26：99 → 106（+7，HDR 工具条补"二维码"按钮）→ 45（−61，契约单源化）。
+        // 当天第二次改动的缘故：按钮文字/提示/字形字面量整体搬进 Models/ToolbarContract.cs
+        //（图集 8 + GDI 回退 14 + 预热 14 + Down() 命中 14 + 标注 11 = 61 条离开本文件），
+        // 留下的是日志/诊断串。烘焙文案的可见性由此换了一个更强的把守者：
+        // Test_ToolbarContract_SingleSource 盯着契约形状、两渲染器取数与对照表键位。
+        const int BakedCnBaseline = 45;
 
         var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
         if (p is null)
@@ -5491,6 +5504,109 @@ public static class CorePipelineTests
             fedFromLocale.Count == 0,
             "要么已经本地化 ⇒ 基线必须同批缩小；要么是没接线（拿 LocaleManager 当装饰），两种都要先说清楚：" +
             string.Join("｜", fedFromLocale));
+    }
+
+    /// <summary>
+    /// 工具条契约单源化的判据（2026-10-26）。
+    /// <para>背景：二维码按钮 2026-10-26 只落 SDR 覆盖层、漏了 D3D 预览窗（用户实机发现）——
+    /// 根因是同一份按钮清单存在 5 份副本（HdrCaptureWindow 图集/GDI 回退/启动预热/Down() 命中
+    /// + SelectionOverlay.xaml），改一漏四没有任何闸门会响。收敛后 <c>ToolbarContract</c> 是唯一声明处；
+    /// 本判据盯三件事：① 契约自身形状（主 7 钮/顺序/文案、标注 10 工具）不许被悄悄改动；
+    /// ② 两个渲染器必须真的从契约取数 —— HdrCaptureWindow 里不许再长出按钮提示/字形字面量，
+    /// SelectionOverlay.xaml 里不许再有主工具条按钮；③ 契约每条文案必须是 LocaleManager
+    /// 对照表的键 —— D3D 烘字那扇"三路全盲"的窗（明细报告 §55 / §34.6-3）从声明层接进
+    /// 本地化账本，这是给盲区补的第一路检测。</para>
+    /// <para>为什么是源码哨兵：Test 只引用 Core，进不了 App 程序集（与位深协商那组同理由）。</para>
+    /// </summary>
+    static void Test_ToolbarContract_SingleSource()
+    {
+        var ctPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "ToolbarContract.cs"));
+        var hdrPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        var xamlPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml"));
+        var ovPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
+        var lcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        if (ctPath is null || hdrPath is null || xamlPath is null || ovPath is null || lcPath is null)
+        {
+            Assert("工具条契约单源：五份源文件必须都定位得到", false,
+                "缺文件会让下面的否定断言在空串上恒成立（假绿），不许静默跳过：" +
+                string.Join(",", new[] { ctPath, hdrPath, xamlPath, ovPath, lcPath }.Select(p => p is null ? "空" : "有")));
+            return;
+        }
+
+        var ct = ReadSourceNormalized(ctPath);
+
+        // ── ① 契约形状：主工具条 7 钮，顺序/动作/文字不许漂 ──
+        int m0 = ct.IndexOf("ToolbarButtonDef[] Main", StringComparison.Ordinal);
+        int mEnd = m0 >= 0 ? ct.IndexOf("\n    };", m0, StringComparison.Ordinal) : -1;
+        Assert("契约：Main 声明块找得到（形状变了判据得跟着改，不许静默放行）", m0 >= 0 && mEnd > m0);
+        if (m0 < 0 || mEnd <= m0) return;
+        var mainBlock = ct[m0..mEnd];
+        var entries = Regex.Matches(mainBlock, @"new\(MainToolbarAction\.(\w+), ""([^""]*)"", ""([^""]*)"", ""([^""]*)""")
+            .Select(m => (Action: m.Groups[1].Value, Glyph: m.Groups[2].Value, Text: m.Groups[3].Value, Hint: m.Groups[4].Value))
+            .ToList();
+        Assert($"契约：主工具条必须声明 7 枚按钮（实得 {entries.Count}）", entries.Count == 7,
+            "多一枚少一枚都意味着两个渲染器的按钮数一起变 —— 这种改动必须连 GetToolbarLayout/命中/图集一起核");
+        Assert("契约：主按钮动作序 == 保存/标注/复制/识字/翻译/二维码/取消（SDR 与 HDR 的命中序都由它决定）",
+            string.Join(",", entries.Select(e => e.Action))
+                == "Save,Annotate,Copy,Ocr,Translate,Qr,Cancel",
+            "实得：" + string.Join(",", entries.Select(e => e.Action)));
+        Assert("契约：按钮文字 == 保存/标注/复制/识字/翻译/二维码/取消",
+            string.Join(",", entries.Select(e => e.Text)) == "保存,标注,复制,识字,翻译,二维码,取消",
+            "实得：" + string.Join(",", entries.Select(e => e.Text)));
+        Assert("契约：7 条提示互不相同且都非空（提示槽按句宽取最大值，重复/空串都是声明事故）",
+            entries.All(e => e.Hint.Length > 0) && entries.Select(e => e.Hint).Distinct().Count() == 7);
+
+        var anno0 = ct.IndexOf("ToolbarAnnoTool[] Anno", StringComparison.Ordinal);
+        var annoEnd = anno0 >= 0 ? ct.IndexOf("\n    };", anno0, StringComparison.Ordinal) : -1;
+        Assert("契约：Anno 声明块找得到", anno0 >= 0 && annoEnd > anno0);
+        if (anno0 < 0 || annoEnd <= anno0) return;
+        var annoTexts = Regex.Matches(ct[anno0..annoEnd], @"new\(""([^""]*)"", ""([^""]*)""\)")
+            .Select(m => m.Groups[2].Value).ToList();
+        Assert("契约：标注工具 10 枚，顺序即 OnAnnoToolbarClick 的分支序（矩形…取消）",
+            string.Join(",", annoTexts) == "矩形,椭圆,箭头,画笔,文字,马赛克,撤销,重做,完成,取消",
+            "实得：" + string.Join(",", annoTexts));
+        Assert("契约：AnnoHint 静态提示存在（图集槽 18 的内容）",
+            ct.Contains("AnnoHint = \"拖拽绘制标注\"", StringComparison.Ordinal));
+
+        // ── ③ 文案必须都在本地化对照表（给烘字盲区补的路） ──
+        var lc = File.ReadAllText(lcPath);
+        var missingKeys = entries.SelectMany(e => new[] { e.Text, e.Hint })
+            .Where(s => !lc.Contains("[\"" + s + "\"]", StringComparison.Ordinal)).ToList();
+        Assert("契约：每条按钮文字/提示都是 LocaleManager 对照表的键（缺 " + missingKeys.Count + " 条）",
+            missingKeys.Count == 0,
+            "SDR 的运行时扫描靠这张表翻英文，D3D 烘字靠它留声明账 ⇒ 缺键：" + string.Join("｜", missingKeys));
+
+        // ── ②-1 D3D 预览窗必须从契约取数，不许再长出按钮文案 ──
+        var hdr = StripLineComments(ReadSourceNormalized(hdrPath));
+        int refs = Regex.Matches(hdr, "ToolbarContract\\.").Count;
+        Assert("D3D 预览窗：ToolbarContract 引用 ≥ 4 处（图集/CompositeUI 提示宽/GDI 回退/预热/命中）",
+            refs >= 4, $"实得 {refs} 处 —— 少到 4 以下说明又有人把清单抄回了文件里");
+        var hintsInHdr = entries.Select(e => e.Hint).Where(h => hdr.Contains(h, StringComparison.Ordinal)).ToList();
+        Assert("D3D 预览窗：不再出现任何按钮提示字面量（实得 " + hintsInHdr.Count + " 条）",
+            hintsInHdr.Count == 0,
+            "提示只有契约一处可改 —— 这里再出现就是改一漏四的老路：" + string.Join("｜", hintsInHdr));
+        var glyphsInHdr = entries.Select(e => e.Glyph).Where(g => hdr.Contains(g, StringComparison.Ordinal)).ToList();
+        Assert("D3D 预览窗：不再出现任何按钮字形转义（\\u2611 这批只属于契约；实得 " + glyphsInHdr.Count + " 个）",
+            glyphsInHdr.Count == 0,
+            "字形+文字的合成串在运行时拼 ⇒ 文件里出现字形转义就是手抄清单回归：" + string.Join("｜", glyphsInHdr));
+
+        // ── ②-2 SDR 覆盖层：主工具条按钮必须由契约生成 ──
+        var xaml = ReadSourceNormalized(xamlPath);
+        Assert("SDR 覆盖层：XAML 里不再有主工具条按钮（x:Name=\"Btn…\" 实得 "
+            + Regex.Matches(xaml, "x:Name=\"Btn").Count + " 个）",
+            !xaml.Contains("x:Name=\"Btn", StringComparison.Ordinal),
+            "按钮回到 XAML = 契约外多出一份清单（二维码按钮事故的形状）");
+        var goneHandlers = new[] { "OnConfirm", "OnCopy", "OnOcr", "OnTranslate", "OnQr", "OnCancel" }
+            .Where(h => xaml.Contains("Click=\"" + h + "\"", StringComparison.Ordinal)).ToList();
+        Assert("SDR 覆盖层：被契约生成取代的旧 Click 处理器不许残留（实得 " + goneHandlers.Count + " 个）",
+            goneHandlers.Count == 0, "残留：" + string.Join(",", goneHandlers));
+        var ov = StripLineComments(ReadSourceNormalized(ovPath));
+        Assert("SDR 覆盖层：BuildMainToolbar 从 ToolbarContract.Main 生成按钮（两处锚点都要在）",
+            ov.Contains("ToolbarContract.Main", StringComparison.Ordinal)
+            && ov.Contains("BuildMainToolbar", StringComparison.Ordinal),
+            "事件处理器在而生成逻辑没了 ⇒ 按钮哪来的？");
+        Assert("SDR 覆盖层：旧 ActionResult 枚举不许回来（动作词表已并入 MainToolbarAction）",
+            !ov.Contains("enum ActionResult", StringComparison.Ordinal));
     }
 
 

@@ -2247,13 +2247,13 @@ public sealed partial class MainWindow : Window
                     hdrWnd.Render();
 
                     // 等待用户操作
-                    var tcs = new TaskCompletionSource<(HdrCaptureAction action, int x, int y, int w, int h)>();
+                    var tcs = new TaskCompletionSource<(MainToolbarAction action, int x, int y, int w, int h)>();
                     hdrWnd.ActionCompleted += (action, ax, ay, aw, ah) =>
                         tcs.TrySetResult((action, ax, ay, aw, ah));
                     var (action, rx, ry, rw, rh) = await tcs.Task;
                     _activeHdrWindow = null; // 窗口已完成动作并关闭
 
-                    if (action == HdrCaptureAction.Cancel)
+                    if (action == MainToolbarAction.Cancel)
                     {
                         if (!_isExiting)
                             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = LocaleManager.Ready);
@@ -2272,7 +2272,7 @@ public sealed partial class MainWindow : Window
 
                     switch (action)
                     {
-                        case HdrCaptureAction.Save:
+                        case MainToolbarAction.Save:
                             LogService.Info("MainWindow", "HDR 选区保存");
                             // 2026-08-11 A方案: 窗口内联标注后, 有标注层时输出带标注的 SDR 图像
                             if (hdrWnd.AnnoManager.LayerCount == 0 && hdrRegion is not null)
@@ -2281,29 +2281,29 @@ public sealed partial class MainWindow : Window
                             else if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx1)
                                 await EncodeAndSaveAsync(outPx1, rw, rh);
                             break;
-                        case HdrCaptureAction.Annotate:
+                        case MainToolbarAction.Annotate:
                             // 2026-08-11 A方案: 标注已在窗口内内联完成, 此分支为兼容兜底
                             LogService.Info("MainWindow", "HDR 选区标注（窗口内联，兜底打开独立窗口）");
                             if (sdrRegion is not null)
                                 OpenAnnotationWindow(sdrRegion, rw, rh);
                             break;
-                        case HdrCaptureAction.Copy:
+                        case MainToolbarAction.Copy:
                             LogService.Info("MainWindow", "HDR 选区复制到剪贴板");
                             if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx2)
                                 await EncodeAndCopyAsync(outPx2, rw, rh);
                             break;
-                        case HdrCaptureAction.Ocr:
+                        case MainToolbarAction.Ocr:
                             LogService.Info("MainWindow", "HDR 选区 OCR 识别");
                             // 与保存/复制共用同一份合成结果：识字不许绕过标注去读原始桌面像素
                             if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx3)
                                 await CaptureAndOcrFromPixelsAsync(outPx3, rw, rh);
                             break;
-                        case HdrCaptureAction.Translate:
+                        case MainToolbarAction.Translate:
                             LogService.Info("MainWindow", "HDR 选区翻译");
                             if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx4)
                                 await CaptureAndTranslateFromPixelsAsync(outPx4, rw, rh);
                             break;
-                        case HdrCaptureAction.Qr:
+                        case MainToolbarAction.Qr:
                             // 与 SDR 选区的 Qr 分支同构：区域照常落盘+剪贴板，二维码窗口额外弹出；
                             // 解码/预览/落盘三个出口吃同一份合成像素，马赛克盖住的内容不漏。
                             LogService.Info("MainWindow", "HDR 选区二维码识别（区域照常落盘+剪贴板）");
@@ -2317,7 +2317,7 @@ public sealed partial class MainWindow : Window
                     }
 
                     if (MinimizeTrayChk.IsChecked == true
-                        && action is HdrCaptureAction.Save or HdrCaptureAction.Copy)
+                        && action is MainToolbarAction.Save or MainToolbarAction.Copy)
                         DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
 
                     return;
@@ -2361,7 +2361,7 @@ public sealed partial class MainWindow : Window
                 using var op = CoreLog.ContinueOp(_captureOpId);
                 try
                 {
-                    if (action == SelectionOverlay.ActionResult.Cancel)
+                    if (action == MainToolbarAction.Cancel)
                     {
                         if (!_isExiting)
                             DispatcherQueue.TryEnqueue(() => StatusTxt.Text = LocaleManager.Ready);
@@ -2379,23 +2379,23 @@ public sealed partial class MainWindow : Window
 
                     switch (action)
                     {
-                        case SelectionOverlay.ActionResult.Confirm:
+                        case MainToolbarAction.Save:
                             LogService.Info("MainWindow", $"选区确认保存: {rect.Width}x{rect.Height}");
                             await EncodeAndSaveAsync(regionPixels, rect.Width, rect.Height);
                             break;
-                        case SelectionOverlay.ActionResult.Copy:
+                        case MainToolbarAction.Copy:
                             LogService.Info("MainWindow", "选区复制到剪贴板");
                             await EncodeAndCopyAsync(regionPixels, rect.Width, rect.Height);
                             break;
-                        case SelectionOverlay.ActionResult.Ocr:
+                        case MainToolbarAction.Ocr:
                             LogService.Info("MainWindow", "选区 OCR 识别");
                             await CaptureAndOcrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
                             break;
-                        case SelectionOverlay.ActionResult.Translate:
+                        case MainToolbarAction.Translate:
                             LogService.Info("MainWindow", "选区翻译");
                             await CaptureAndTranslateFromPixelsAsync(regionPixels, rect.Width, rect.Height);
                             break;
-                        case SelectionOverlay.ActionResult.Qr:
+                        case MainToolbarAction.Qr:
                             LogService.Info("MainWindow", "选区二维码识别（区域照常落盘+剪贴板）");
                             // 区域与普通确认走同一条 EncodeAndSaveAsync 管线：落盘 + 文件进剪贴板 +
                             // 成功 toast（保存自吞异常，失败走 ShowCaptureFailed）。解码并行跑让结果
@@ -2408,7 +2408,7 @@ public sealed partial class MainWindow : Window
                     }
 
                     if (MinimizeTrayChk.IsChecked == true
-                        && action is SelectionOverlay.ActionResult.Confirm or SelectionOverlay.ActionResult.Copy)
+                        && action is MainToolbarAction.Save or MainToolbarAction.Copy)
                         DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
                 }
                 catch (Exception ex)

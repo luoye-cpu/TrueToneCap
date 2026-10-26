@@ -16,6 +16,7 @@ using TrueToneCap.Core.Annotation;
 using TrueToneCap.Core.Detection;
 using TrueToneCap.Core.Logging;   // LogLevel / LogCategory（定义已移到 Core）
 using TrueToneCap.App.Services;
+using TrueToneCap.App.Models;      // ToolbarContract / MainToolbarAction（2026-10-26 契约单源化）
 
 namespace TrueToneCap.App;
 
@@ -62,8 +63,9 @@ public sealed partial class SelectionOverlay : Window
     /// <summary>标注完成后的最终像素（调用方在 ActionCompleted 后读取）。</summary>
     public byte[]? AnnotatedRegionPixels { get; private set; }
 
-    public enum ActionResult { Cancel, Confirm, Annotate, Copy, Ocr, Translate, Qr }
-    public event Action<ActionResult, RectInt32>? ActionCompleted;
+    // ═══ 2026-10-26 契约单源化：本类不再有自己的动作枚举（原 ActionResult，Confirm 在
+    // MainToolbarAction 里叫 Save）。按钮清单/文案/顺序也全部来自 ToolbarContract，见 BuildMainToolbar。
+    public event Action<MainToolbarAction, RectInt32>? ActionCompleted;
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -117,6 +119,7 @@ public sealed partial class SelectionOverlay : Window
         DesktopHeight = vh;
         _vx = vx; _vy = vy; _vw = vw; _vh = vh;
         this.InitializeComponent();
+        BuildMainToolbar(); // 契约单源：按钮从 ToolbarContract 生成，须在本地化扫描钩子之前就位
         MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
 
         var hwnd = WindowNative.GetWindowHandle(this);
@@ -246,7 +249,7 @@ public sealed partial class SelectionOverlay : Window
             if (_idleWatch.ElapsedMilliseconds >= SelectionTimeoutMs)
             {
                 LogService.Info("Overlay", "1 分钟无操作，自动取消", LogCategory.Capture);
-                Finish(ActionResult.Cancel);
+                Finish(MainToolbarAction.Cancel);
             }
         };
 
@@ -263,7 +266,7 @@ public sealed partial class SelectionOverlay : Window
         // 先尝试优雅关闭（UI 线程活着时正常走 Finish(Cancel)）
         try
         {
-            DispatcherQueue.TryEnqueue(() => Finish(ActionResult.Cancel));
+            DispatcherQueue.TryEnqueue(() => Finish(MainToolbarAction.Cancel));
         }
         catch { }
 
@@ -291,7 +294,7 @@ public sealed partial class SelectionOverlay : Window
     }
 
     /// <summary>外部强制取消（应用退出时由 MainWindow 调用，触发 ActionCompleted + 关闭）。</summary>
-    public void Cancel() => Finish(ActionResult.Cancel);
+    public void Cancel() => Finish(MainToolbarAction.Cancel);
 
     // ═══════════════════════════════════════
     //  键盘
@@ -323,16 +326,16 @@ public sealed partial class SelectionOverlay : Window
         switch (e.Key)
         {
             case VirtualKey.Escape:
-                Finish(ActionResult.Cancel);
+                Finish(MainToolbarAction.Cancel);
                 e.Handled = true;
                 break;
             case VirtualKey.Enter:
-                if (_selectionComplete) { Finish(ActionResult.Confirm); e.Handled = true; }
+                if (_selectionComplete) { Finish(MainToolbarAction.Save); e.Handled = true; }
                 break;
             default:
                 // ═══ 2026-08-25: 用户自定义保存/取消快捷键支持 ═══
                 if (_selectionComplete && MatchesShortcut(e, AppServices.Settings.Current.SaveShortcut))
-                { Finish(ActionResult.Confirm); e.Handled = true; }
+                { Finish(MainToolbarAction.Save); e.Handled = true; }
                 break;
         }
     }
@@ -645,14 +648,41 @@ public sealed partial class SelectionOverlay : Window
     //  工具栏按钮
     // ═══════════════════════════════════════
 
-    private void OnConfirm(object sender, RoutedEventArgs e) => Finish(ActionResult.Confirm);
-    private void OnCopy(object sender, RoutedEventArgs e) => Finish(ActionResult.Copy);
-    private void OnOcr(object sender, RoutedEventArgs e) => Finish(ActionResult.Ocr);
-    private void OnTranslate(object sender, RoutedEventArgs e) => Finish(ActionResult.Translate);
-    private void OnQr(object sender, RoutedEventArgs e) => Finish(ActionResult.Qr);
-    private void OnCancel(object sender, RoutedEventArgs e) => Finish(ActionResult.Cancel);
+    /// <summary>
+    /// 从 ToolbarContract.Main 生成主工具条按钮（2026-10-26 契约单源化）。
+    /// 宽高/字号/图标/文字/提示/顺序全部来自契约 —— 此前写死在 XAML 里的那份清单是
+    /// "二维码按钮只改 SDR 漏了 D3D 预览窗"事故的一半根因；文案只有一处可改才是解药。
+    /// 提示语都是 LocaleManager 对照表的键，英文模式下运行时扫描会照常翻译它们。
+    /// </summary>
+    private void BuildMainToolbar()
+    {
+        ToolbarPanel.Children.Clear();
+        foreach (var b in ToolbarContract.Main)
+        {
+            var btn = new Button { Width = b.WidthDip, Height = 72 };
+            if (b.Accent)
+            {
+                try { btn.Style = (Style)Application.Current.Resources["AccentButtonStyle"]; }
+                catch { /* 兜底层拿不到系统样式就用默认观感，不因样式丢按钮 */ }
+            }
+            var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            panel.Children.Add((PathIcon)Microsoft.UI.Xaml.Markup.XamlReader.Load(
+                "<PathIcon xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Width='32' Height='32' Data='"
+                + b.IconPath + "'/>"));
+            panel.Children.Add(new TextBlock { Text = b.Text, FontSize = b.FontSizeDip, VerticalAlignment = VerticalAlignment.Center });
+            btn.Content = panel;
+            ToolTipService.SetToolTip(btn, b.Hint);
+            var action = b.Action; // 闭包捕获循环变量
+            btn.Click += (_, _) => OnMainToolbarAction(action);
+            ToolbarPanel.Children.Add(btn);
+        }
+    }
 
-    private void OnAnnotate(object sender, RoutedEventArgs e) => EnterAnnotationMode();
+    private void OnMainToolbarAction(MainToolbarAction action)
+    {
+        if (action == MainToolbarAction.Annotate) { EnterAnnotationMode(); return; }
+        Finish(action);
+    }
 
     private void ResetSelection()
     {
@@ -666,7 +696,7 @@ public sealed partial class SelectionOverlay : Window
         HintText.Visibility = Visibility.Visible;
     }
 
-    private async void Finish(ActionResult result)
+    private async void Finish(MainToolbarAction result)
     {
         if (_finished) return; // 防止双重触发
         _finished = true;
@@ -694,8 +724,8 @@ public sealed partial class SelectionOverlay : Window
         //   桌面像素，用户用马赛克盖住的原文会被 OCR 原样读出来；二维码同理 —— 2026-10-26 起
         //   它与普通截图一样把区域落盘+进剪贴板，马赛克必须先于任何像素出口（解码/预览/落盘）生效。
         Task<byte[]?>? composeTask = null;
-        if (result is ActionResult.Confirm or ActionResult.Copy or ActionResult.Ocr or ActionResult.Translate
-            or ActionResult.Qr)
+        if (result is MainToolbarAction.Save or MainToolbarAction.Copy or MainToolbarAction.Ocr or MainToolbarAction.Translate
+            or MainToolbarAction.Qr)
         {
             composeTask = _annotationManager.Layers.Count > 0
                 ? Task.Run(GetAnnotatedRegionPixels)
@@ -736,7 +766,7 @@ public sealed partial class SelectionOverlay : Window
         if (!_finished)
         {
             _finished = true;
-            ActionCompleted?.Invoke(ActionResult.Cancel, default);
+            ActionCompleted?.Invoke(MainToolbarAction.Cancel, default);
         }
     }
 
