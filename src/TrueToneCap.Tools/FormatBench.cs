@@ -939,6 +939,13 @@ if (args.Length >= 1 && args[0] == "--ramp-sweep")
     Directory.CreateDirectory(rdir);
 
     // 名字里带 nv 的是硬件通路：无 GPU / 无 NVENC 时下面会 ❌，判据侧按 SKIP 处理（不算失败）
+    //
+    // ⚠ 软件 AVIF 两行的质量档是 0（= 无损），不是 60。判据要量的是"声明的位深有没有真兑现"，
+    //   而 CRF 60 在 avifenc 里折算成 -q 4（CrfToQuality），量化步长比台阶本身（10-bit 上 0.6 码）
+    //   还粗 —— 2026-10-27 实测：连 44 级的 10-bit 源都被解回 11~12 级，8-bit 臂同样是 11 级，
+    //   B 条比值恒 ~1，量到的是量化噪声而不是精度。无损档仍走完整生产链（浮点→增益→gamma→
+    //   量化→容器），只是不额外注入有损噪声，44 级源能解回 23 级、8-bit 臂 12 级，比值才有分辨力。
+    //   硬件 AVIF 保持 60：NVENC 在 60 下就能分辨（实测 44 vs 13），改它反而失去"生产档位"这一面。
     var rows = new (string Name, OutputFormat Fmt, string Ext, AvifEncoderKind Kind, float Q, string Chroma, int Depth)[]
     {
         ("r_png_d8",     OutputFormat.PNG,     "png",  AvifEncoderKind.Auto,   100f, "444", 8),
@@ -948,8 +955,8 @@ if (args.Length >= 1 && args[0] == "--ramp-sweep")
         ("r_tiff_d16",   OutputFormat.TIFF,    "tiff", AvifEncoderKind.Auto,   100f, "444", 16),
         ("r_jxl_d8",     OutputFormat.JPEG_XL, "jxl",  AvifEncoderKind.Auto,   1.0f, "444", 8),
         ("r_jxl_d16",    OutputFormat.JPEG_XL, "jxl",  AvifEncoderKind.Auto,   1.0f, "444", 16),
-        ("r_avifsw_d8",  OutputFormat.AVIF,    "avif", AvifEncoderKind.LibAom, 60f,  "444", 8),
-        ("r_avifsw_d10", OutputFormat.AVIF,    "avif", AvifEncoderKind.LibAom, 60f,  "444", 10),
+        ("r_avifsw_d8",  OutputFormat.AVIF,    "avif", AvifEncoderKind.LibAom, 0f,   "444", 8),
+        ("r_avifsw_d10", OutputFormat.AVIF,    "avif", AvifEncoderKind.LibAom, 0f,   "444", 10),
         ("r_avifnv_d8",  OutputFormat.AVIF,    "avif", AvifEncoderKind.Nvenc,  60f,  "420", 8),
         ("r_avifnv_d10", OutputFormat.AVIF,    "avif", AvifEncoderKind.Nvenc,  60f,  "420", 10),
     };
