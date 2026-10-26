@@ -17,6 +17,7 @@ using Patch = TrueToneCap.Core.Capture.PatchReading;        // 8-bit 会话语�
 using Sem = TrueToneCap.Core.Capture.SdrSessionSemantics;   // 同一把尺子：探针与下面这些合成臂共用
 using Sem8 = TrueToneCap.Core.Capture.EightBitSemantics;
 using SemF = TrueToneCap.Core.Capture.Float16Semantics;
+using Pres = TrueToneCap.Core.Capture.SdrSessionSemantics.PresentationVerdict;    // 呈现面 A/B 那一侧的三态结论
 using CDec = TrueToneCap.Core.Capture.ColorDecision;        // 一次截图的唯一色彩决定（§41 收口的落点）
 using FOrder = TrueToneCap.Core.Settings.FormatOrder;       // 格式下拉顺序 + 旧表重映射（§52）
 
@@ -161,8 +162,6 @@ public static class CorePipelineTests
         Test_StatusBarLocale_CsMustNotReWriteChinese();
         Test_HotkeyConflictLog_CarriesRealWin32Error();
         Test_LogViewer_WindowAndInstanceAttribution();
-        Test_OverlayReentryLatch_SitsBeforeWindowCreation();
-        Test_Overlay_HasNoGpuBackgroundPath();
         Test_BusyRejection_DoesNotUseFailureToast();
         // HDR 抓帧窗的字是画进像素的 ⇒ 本地化闸门/UIA/降级告警三条检测路径全瞎，这里把它钉成可数的数
         StringLiteralScannerTests.RunAll(Assert);   // 尺子自己的对抗用例（先于用它的锁）
@@ -950,7 +949,8 @@ public static class CorePipelineTests
     }
 
     /// <summary>
-    /// 选区预览改道的形状锁（2026-09-30，用户口径"以 HDR 下的界面为准，SDR 与 HDR 体验统一"）。
+    /// 选区预览改道的形状锁（2026-09-30，用户口径"以 HDR 下的界面为准，SDR 与 HDR 体验统一"；
+    /// 2026-10-27 起唯一界面之外再无兜底层）。
     /// <para>钉四件事，每件对应一种会把"两套界面 / 白屏"请回来的改法：
     /// ① <c>if (hasHdr)</c> 那道分叉不许回来；
     /// ② 呈现帧必须由带参考白与 alpha 契约的 <c>BgraToScrgbForDisplay</c> 生成，MainWindow 里
@@ -958,8 +958,7 @@ public static class CorePipelineTests
     /// ③ <c>LoadFrame</c> 必须吃那份统一帧 <c>presentFrame</c>，不许退回只有 HDR 才有值的
     ///    <c>hdrDesktopPixels</c>（连带老那句 <c>if (hdrDesktopPixels is null) return;</c> 也不许回来——
     ///    它会把 SDR 档吞成"什么都没发生"）；
-    /// ④ <c>new SelectionOverlay(</c> 全文件只许 1 处，且必须排在 <c>if (initOk)</c>【之后】——
-    ///    它是"预览窗建不起来"的最后兜底，不是 SDR 的正路。</para>
+    /// ④ 旧兜底覆盖层整份删除后不许被接回来，且预览窗建不起来时必须走明确失败出口。</para>
     /// <para>取下标前一律剥整行注释：我这段说明里就带着这些锚文本，不剥注释这条锁就此恒真
     /// （§17.2 记过同一类"哨兵读到注释"）。</para>
     /// </summary>
@@ -980,34 +979,20 @@ public static class CorePipelineTests
             && !code.Contains("if (hdrDesktopPixels is null) return;"),
             "退回 hdrDesktopPixels ⇒ SDR 档要么没帧，要么被那句 return 吞成无声取消");
 
-        int overlays = 0;
-        for (int i = code.IndexOf("new SelectionOverlay(", StringComparison.Ordinal); i >= 0;
-             i = code.IndexOf("new SelectionOverlay(", i + 1, StringComparison.Ordinal)) overlays++;
-        int initOk = code.IndexOf("if (initOk)", StringComparison.Ordinal);
-        int firstOverlay = code.IndexOf("new SelectionOverlay(", StringComparison.Ordinal);
-        Assert($"旧覆盖层只留 1 处创建点（实得 {overlays}），且排在预览窗初始化判定【之后】（覆盖层={firstOverlay} 判定={initOk}）",
-            overlays == 1 && initOk >= 0 && firstOverlay > initOk,
-            "覆盖层回到 if (initOk) 之前 = 它又成了 SDR 的正路，而不是兜底");
+        // 2026-10-27：WinUI 兜底覆盖层整份删除（实机确认它在 SDR 帧上呈现成不透明页底色），
+        // 选区预览只剩 HdrCaptureWindow 一张界面 ⇒ "兜底还在不在"这类断言全部换成反向哨兵。
+        Assert("旧覆盖层不许回来（全文 0 处 SelectionOverlay / TTC_FORCE_LEGACY_OVERLAY）",
+            !code.Contains("SelectionOverlay", StringComparison.Ordinal)
+            && !code.Contains("TTC_FORCE_LEGACY_OVERLAY", StringComparison.Ordinal),
+            "删掉的文件再被引用 = 有人把兜底层又接回来了");
 
-        Assert("预览窗失败的回退会发一条可见提示（不再只写 log；报告 §33.3 那条静默）",
-            code.Contains("PreviewFallbackTitle") && code.Contains("ToastService.ShowToast("),
-            "只记 log ⇒ 用户按了键、看见一张不一样的界面，没有任何一句话解释");
-
-        // 兜底那条路的【可达入口】（报告 §35.5：改道之后这 1662+613 行在正常构建里到不了，
-        // 于是"兜底能不能用"只能引改道前的历史二进制）。判据要钉住三件事：
-        // 存在、默认不改行为、进兜底前先把压在上面的预览窗收掉。
-        // 数的是【读取点】而不是名字出现次数：日志文案里本来就该带上开关名（与 TTC_FORCE_SDR 同形），
-        // 按名字数会把那条消息数成第二个读取点——第一版就是这么红的。
-        int switchSites = System.Text.RegularExpressions.Regex.Matches(
-            code, @"GetEnvironmentVariable\(""TTC_FORCE_LEGACY_OVERLAY""\)").Count;
-        Assert($"诊断开关 TTC_FORCE_LEGACY_OVERLAY 只有一个读取点（实得 {switchSites}）",
-            switchSites == 1, "两处读取 ⇒ 一处改了另一处不变，兜底入口就此半开");
-        Assert("该开关必须与 initOk 取【与】：不置它时默认行为逐字不变",
-            Regex.IsMatch(code, @"if\s*\(initOk\s*&&\s*Environment\.GetEnvironmentVariable\(""TTC_FORCE_LEGACY_OVERLAY""\)\s*==\s*""1""\)"),
-            "不跟 initOk 取与 ⇒ 正常路径也会被它改道，这个开关就不再是「只让兜底可达」");
-        Assert("主动进兜底前先 Close 预览窗并清注册（否则量到的是压在覆盖层上面的那扇窗）",
-            code.Contains("hdrWnd.Close()") && code.Contains("_activeHdrWindow = null"),
-            "不 Close ⇒ 自绘窗还挂在 topmost 上，harness 拍到的是它而不是覆盖层，读数全假");
+        // 预览窗建不起来 = 选区模式不可用：必须状态栏 + Toast + Error 日志三条都留痕，
+        // 不许再出现"悄悄换一张界面"或"只写一句状态串"的静默失败。
+        Assert("预览窗初始化失败有明确失败出口（Error 日志 + SetStatus + ShowCaptureFailed，文案走对照表）",
+            code.Contains("预览窗初始化失败，选区模式中止")
+            && code.Contains("LocaleManager.Tr(\"预览窗无法创建\")")
+            && code.Contains("ToastService.ShowCaptureFailed("),
+            "三条出口缺一条 = 用户按了键没有任何解释，或日志里查不到那一拍");
 
         // 参考白这条规则现在只有一处实现；拼接那侧若把 80 重新抄回字面量，这条会红
         var wgc = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
@@ -1015,15 +1000,6 @@ public static class CorePipelineTests
             wgc is not null && StripLineComments(ReadSourceNormalized(wgc))
                 .Contains("PixelOps.NominalSdrReferenceWhiteNits"),
             "两处各自抄 80 ⇒ 一处改了另一处不变，亮度基准就此分叉");
-
-        // 兜底那侧的钳制常数：§33.1 用真实拖拽量到"写死 460×50 vs 实测约 932×72" ⇒ 贴右边缘必然把
-        // 最后两枚按钮推出屏幕。改道后主路不再走它，但兜底还在，就把这条也钉住（它此前没有判据覆盖）。
-        var ovp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
-        var ovc = ovp is null ? "" : StripLineComments(ReadSourceNormalized(ovp));
-        int bare460 = System.Text.RegularExpressions.Regex.Matches(ovc, @"-\s*460\b").Count;
-        Assert($"兜底覆盖层按实测尺寸钳工具条（实得裸 460 = {bare460} 处，要求 0）",
-            ovc.Contains("ToolbarWidthDip()") && ovc.Contains("ToolbarHeightDip()") && bare460 == 0,
-            "460 回来 = 贴右边缘那一臂又是『6 枚按钮只看得见 4 枚』");
     }
 
     /// <summary>
@@ -1214,7 +1190,7 @@ public static class CorePipelineTests
     {
         var converted = new[]
         {
-            "MainWindow.xaml", "SelectionOverlay.xaml", "OcrPreviewWindow.xaml",
+            "MainWindow.xaml", "OcrPreviewWindow.xaml",
             "AnnotationWindow.xaml", "ThirdPartyNoticesWindow.xaml",
         };
         int totalIcons = 0;
@@ -1236,8 +1212,9 @@ public static class CorePipelineTests
                 fontIcons == 0 && pathIcons >= 1,
                 "符号字体在这个进程解析不出来 ⇒ 回到 FontIcon 就等于回到豆腐块");
         }
-        Assert($"已换成 PathIcon 的图标总数不少于 30（实得 {totalIcons} + 契约 {contractIcons}）",
-            totalIcons + contractIcons >= 30,
+        // 2026-10-27：旧兜底覆盖层整份删除，随它消失的 13 枚 PathIcon 不再计入 ⇒ 地板从 30 降到 22。
+        Assert($"已换成 PathIcon 的图标总数不少于 22（实得 {totalIcons} + 契约 {contractIcons}）",
+            totalIcons + contractIcons >= 22,
             "数量掉下来说明有人整批改回 FontIcon 或删掉了图标。2026-10-26 起 SDR 主工具条 7 枚按钮由契约生成，"
             + "它们的轮廓以同样形态（内联 Data mini-language）住在 Models/ToolbarContract.cs，这里一并计数 —— "
             + "形态判据不变：绝不回 FontIcon。");
@@ -1309,8 +1286,9 @@ public static class CorePipelineTests
                 lvText, @"Style=""\{StaticResource TtcIcon\.").Count;
             inlineDataIcons += System.Text.RegularExpressions.Regex.Matches(lvText, @"Data=""F0 ").Count;
         }
+        // 2026-10-27：随旧覆盖层删除的内联轮廓同步减 13 枚 ⇒ 地板 46 → 34（实得 38）。
         Assert($"不许有图标把轮廓交给 Style 下发（实得 {styleCarriedIcons} 枚），且每一枚都自带内联 Data（实得 {inlineDataIcons} + 契约 {contractIcons} 枚）",
-            styleCarriedIcons == 0 && inlineDataIcons + contractIcons >= 46,
+            styleCarriedIcons == 0 && inlineDataIcons + contractIcons >= 34,
             "Style 下发 Data 会构建期随机丢图标，而单套件与门禁全绿——这条就是那次踩坑留下的路障。"
             + "契约里的 7 条轮廓同为内联 Data 形态，一并计入");
         Assert("两个工程都不许出现 Icons.xaml（B0 的生成物）",
@@ -2946,7 +2924,15 @@ public static class CorePipelineTests
         int begins = CountOccurrences(mwCode, "CoreLog.BeginOp(");
         int continues = CountOccurrences(mwCode, "CoreLog.ContinueOp(");
         Assert("OpId ⑥：MainWindow 至少两条截图根各开一拍（选区 + 无感）", begins >= 2, $"BeginOp {begins} 处");
-        Assert("OpId ⑥b：选区动作回调续用外层 ID", continues >= 1, $"ContinueOp {continues} 处");
+        // 2026-10-27：旧覆盖层是【另一个 UI 根】⇒ 回调里干活必须显式 ContinueOp。现在选区窗只把结果
+        // 投给 TCS，真正的工作跑在 `await tcs.Task` 之后的本方法续体里（AsyncLocal 随
+        // ExecutionContext 自动流动）⇒ 正确的形状是「回调体不干活、不 ContinueOp」。
+        int cbAt = mwCode.IndexOf("hdrWnd.ActionCompleted +=", StringComparison.Ordinal);
+        var cbBody = cbAt < 0 ? "" : mwCode.Substring(cbAt, Math.Min(140, mwCode.Length - cbAt));
+        Assert("OpId ⑥b：选区回调只投递结果、不跨 UI 根干活（于是也不需要 ContinueOp）",
+            cbAt >= 0 && cbBody.Contains("TrySetResult") && !cbBody.Contains("await ")
+            && continues == 0,
+            $"回调体锚点={cbAt} / ContinueOp {continues} 处 —— 在回调里干活而不续 ID = 那一拍挂到别的操作上");
         Assert("OpId ⑥c：建 OCR 预览窗口时把 ID 交下去",
             mwCode.Contains("CaptureOpId = _captureOpId"), "未见赋值");
         Assert("OpId ⑥d：预览窗口的复制/翻译/保存三个根都续用",
@@ -3822,7 +3808,7 @@ public static class CorePipelineTests
             && st.Contains("probeEsFlipped.PngFallbackEnabled"),
             "退回单向比较 = 关态那一格零判据；删掉取反那趟 = 只有盘上恰好开着时才判得到");
         // ═══ 台账 §17.6 第 1 条（2026-09-30 接手轮）：落点·全局这一段与"哪块屏"无关 ⇒ 必须排在
-        // 逐屏循环【之外】。钉的是【顺序】而不是"有没有这句话"（同 Test_OverlayReentryLatch 的写法），
+        // 逐屏循环【之外】。钉的是【顺序】而不是"有没有这句话"（拿两个下标比大小，同本卡下方几处），
         // 挪回循环里 = 下面三刀各红一次。为什么值得钉：
         //   ① 卡片末尾"管线落点判红 N 条"的那个 N，在多屏那天会把同一句分叉数成 N 条 ⇒ N 不是缺陷数；
         //   ② 这一段里的 Load() 不是纯读 —— 迁移门触发时它末尾会 Save()、还会写 SecretStore，
@@ -4297,31 +4283,22 @@ public static class CorePipelineTests
     /// </summary>
     static void Test_AnnotationComposedForAllDestinations()
     {
-        var ovPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
         var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
-        if (ovPath is null || mwPath is null)
+        if (mwPath is null)
         {
-            Skip("标注合成覆盖四个目的地", "未找到 SelectionOverlay.xaml.cs / MainWindow.xaml.cs");
+            Skip("标注合成覆盖四个目的地", "未找到 MainWindow.xaml.cs");
             return;
         }
-        var ov = StripLineComments(File.ReadAllText(ovPath));
         var mw = StripLineComments(File.ReadAllText(mwPath));
 
-        int g = ov.IndexOf("if (result is MainToolbarAction.", System.StringComparison.Ordinal);
-        Assert("SDR 覆盖层：合成守卫必须同时含 Save/Copy/Ocr/Translate（契约枚举 2026-10-26 起，原 ActionResult.Confirm 改叫 Save）",
-            g >= 0 && ov.Substring(g, System.Math.Min(140, ov.Length - g)) is var guard
-            && guard.Contains("MainToolbarAction.Save") && guard.Contains("MainToolbarAction.Copy")
-            && guard.Contains("MainToolbarAction.Ocr") && guard.Contains("MainToolbarAction.Translate"),
-            "少一个目的地 = 那一路读的是未合成的原始桌面像素（马赛克白画）");
-
-        foreach (var act in new[] { "Ocr", "Translate" })
+        foreach (var act in new[] { "Save", "Copy", "Ocr", "Translate", "Qr" })
         {
             int c = mw.IndexOf($"case MainToolbarAction.{act}:", System.StringComparison.Ordinal);
-            Assert($"HDR 覆盖层：case {act} 必须走 ComposeAnnotatedSdr（与 Save/Copy 同源）",
-                c >= 0 && mw.Substring(c, System.Math.Min(300, mw.Length - c)).Contains("ComposeAnnotatedSdr(")
-                && !mw.Substring(c, System.Math.Min(300, mw.Length - c))
+            Assert($"HDR 覆盖层：case {act} 必须走合成后的像素（与保存/复制同源）",
+                c >= 0 && mw.Substring(c, System.Math.Min(600, mw.Length - c)).Contains("ComposeAnnotatedSdr(")
+                && !mw.Substring(c, System.Math.Min(600, mw.Length - c))
                        .Contains($"{act}FromPixelsAsync(sdrRegion", System.StringComparison.Ordinal),
-                "把未合成的 sdrRegion 直接交给识字/翻译 ⇒ 标注与马赛克在这两路上失效");
+                "把未合成的 sdrRegion 直接交给下游 ⇒ 标注与马赛克在这条路上失效");
         }
     }
 
@@ -5197,7 +5174,8 @@ public static class CorePipelineTests
             "直写字面量会盖掉可视树扫描的结果 ⇒ 英文模式下每次操作后状态栏变回中文（UIA 实测抓到 3 处）");
         int via = System.Text.RegularExpressions.Regex
             .Matches(main, @"StatusTxt\.Text\s*=\s*LocaleManager\.Ready").Count;
-        Assert($"三处复位点都走 LocaleManager.Ready（实得 {via}，应为 3）", via == 3,
+        // 2026-10-27：旧覆盖层的取消路径随文件删除，复位点 3 → 2（剩余：HDR 选区取消、主窗关闭）。
+        Assert($"两处复位点都走 LocaleManager.Ready（实得 {via}，应为 2）", via == 2,
             "少一处 = 那条路径仍然直写或写了别的串，英文界面按路径随机回退成中文");
     }
 
@@ -5343,74 +5321,6 @@ public static class CorePipelineTests
     }
 
     /// <summary>
-    /// 覆盖层里不许再出现 GPU 背景那一路（B 档的反向哨兵，2026-10-01 报告 §39）。
-    /// <para>被删的那条路不是"性能选型没选中"，是【实测从来没上屏】：标记帧实验里下层窗整帧品红 +
-    /// 跳过覆盖层 CPU 合成，屏幕读到 0/6400 品红、三通道均值中性灰（判据与亮度无关，报告 §37.7）。
-    /// 它当时会报"呈现成功"，而成功恰好把唯一画得出来的那段关掉 —— 这就是"预览全白"的成因。
-    /// 所以本卡锁的不是形状好看，是【别再把它请回来】。</para>
-    /// </summary>
-    static void Test_Overlay_HasNoGpuBackgroundPath()
-    {
-        var ov = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
-        if (ov is null) { Assert("覆盖层源文件在（缺文件不许静默过去）", false, "未找到 SelectionOverlay.xaml.cs"); return; }
-        var src = StripLineComments(ReadSourceNormalized(ov));
-
-        Assert("下层供帧窗的类不许被覆盖层再引用（删掉的是一条被证明不上屏的供帧路）",
-            !src.Contains("HdrPreviewWindow"), "覆盖层里又出现了 HdrPreviewWindow");
-        Assert("覆盖层里不许再有按名字找字节码去呈现的那一步",
-            !src.Contains("PresentFrame("), "覆盖层里又出现了 PresentFrame");
-        Assert("CPU 背景合成必须仍是无条件（当年那个「GPU 成功就跳过」的开关就是全白的成因）",
-            !src.Contains("gpuBgOk") && src.Contains("RenderDesktopBackground(desktopPixels, vw, vh)"),
-            "出现 gpuBgOk 这类「成功就跳过」的条件 = 恢复「预览全白」");
-        Assert("就绪那行不许再承诺一个不存在的 GPU 字段（读数不能指向没有的东西）",
-            !src.Contains("GPU背景="), "覆盖层就绪那行又写回了 GPU背景=");
-        Assert("DWM 那套四边 -1 的透明尝试不许回来（实测在 WinUI 3 岛窗上没兑现）",
-            !src.Contains("DwmExtendFrameIntoClientArea"),
-            "又想靠透下去让另一扇窗供帧 ⇒ 先重做 §37.7 那个标记帧实验再说");
-    }
-
-    /// <summary>
-    /// 选区覆盖层的防再入闩锁必须钉在 Activated 回调【入口】（2026-09-30 报告 §23.3 / §24.4 的实机风暴）。
-    /// <para>起因：<c>tests/manual/safety/overlay-visual-cell.ps1</c> 在真身上量到——单实例（打点只有
-    /// 实例#1）却打了 30 条「进入背景创建」、只有 1 条「背景渲染」，同一时刻 EnumWindows 数到
-    /// 36 个可见的 <c>HDR Preview</c> 全屏窗。旧写法把 <c>_bgRendered = true</c> 放在回调【底部】，
-    /// 而 CreateWindowEx / GPU 呈现这一段会跑嵌套消息泵 ⇒ Activated 在同一次调用里被再次派发，
-    /// 每一层进来都看见 false ⇒ 每层建一个背景窗；最深那层置位后往外退，其余各层在底部看见 true，
-    /// 又把 CPU 兜底跳过了 ⇒ 所以是"几十个窗 + 只渲染一次"这种看着矛盾的形状。</para>
-    /// <para>为什么只能钉源码：Test 工程不引用 App，运行时够不到这个回调（同族的 App 侧盲区见报告 §18）。
-    /// 而且这条不变量是【顺序】不变量——不是"有没有这句话"，是"这句话在那次分配之前"，
-    /// 所以判据拿两个下标比大小；复位与包裹形态各钉一刀。</para>
-    /// </summary>
-    static void Test_OverlayReentryLatch_SitsBeforeWindowCreation()
-    {
-        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
-        if (p is null) { Skip("覆盖层防再入闩锁", "未找到 SelectionOverlay.xaml.cs"); return; }
-        var src = StripLineComments(ReadSourceNormalized(p));
-
-        int latch = src.IndexOf("_bgRendered = true", StringComparison.Ordinal);
-        // 2026-10-01 B 档：原来的右锚点是 `new HdrPreviewWindow(`，那扇窗整个删了（报告 §39）。
-        // 顺序不变量本身没变——闩锁必须先于【回调里那段会跑消息泵的重活】，所以右锚点换成仍然存在的
-        // 背景渲染 + 区域检测那一步，语义不变：闩锁在后面 = 每次激活都再跑一遍。
-        int alloc = src.IndexOf("RenderDesktopBackground(desktopPixels, vw, vh)", StringComparison.Ordinal);
-        Assert("闩锁写入点与背景渲染段都还在（少一个说明锚点漂了，不是代码坏了）",
-            latch >= 0 && alloc >= 0, $"实得 latch={latch} alloc={alloc}");
-        Assert($"闩锁必须【先于】背景渲染段（实得 latch={latch} < alloc={alloc}）",
-            latch >= 0 && alloc >= 0 && latch < alloc,
-            "把 `_bgRendered = true` 挪回回调底部 = 恢复『一次捕获叠 30 个全屏窗』的那个形状");
-        Assert("闩锁全文件只许写一次 true、不许有复位",
-            System.Text.RegularExpressions.Regex.Matches(src, @"_bgRendered\s*=\s*true").Count == 1
-            && !src.Contains("_bgRendered = false"),
-            "GPU 成功路径上那句重复置位是当年风暴的伴生物；多一个复位入口，入口闩锁就退化成『每次激活都重建』");
-        Assert("CPU 兜底 + 窗口检测不许再被闩锁包着",
-            !src.Contains("if (!_bgRendered)"),
-            "闩锁移到入口后若仍留着这个判断，兜底和窗口检测会被静默关死——比风暴更糟");
-        Assert("入口早退守卫只许有一处（防再入的唯一出口）",
-            System.Text.RegularExpressions.Regex.Matches(src, @"if\s*\(_bgRendered\)").Count == 1,
-            "多于一个说明有人把守卫复制进了分支里，两处读的是同一个闩锁却是两套行为");
-    }
-
-
-    /// <summary>
     /// 被防重入闸拦下的那一次按键【不是失败】，不许再借"截图失败"的通知通道。
     /// <para>起因（2026-09-30，造 GPU 失败腿时撞出来的）：同一毫秒两行日志
     /// <c>截图已在进行中，忽略重复触发</c> 紧跟 <c>已提交系统通知: ❌ 截图失败</c>
@@ -5465,7 +5375,9 @@ public static class CorePipelineTests
         //（图集 8 + GDI 回退 14 + 预热 14 + Down() 命中 14 + 标注 11 = 61 条离开本文件），
         // 留下的是日志/诊断串。烘焙文案的可见性由此换了一个更强的把守者：
         // Test_ToolbarContract_SingleSource 盯着契约形状、两渲染器取数与对照表键位。
-        const int BakedCnBaseline = 45;
+        // 2026-10-27：45 → 49（+4）。新增全是背景面契约那三条日志/诊断串（颜色空间协商成功/失败、
+        // 徽标纹理失败）与尺寸徽标位置换算里的那条；它们都是【日志】串，不是画进位图的字变多了。
+        const int BakedCnBaseline = 49;
 
         var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
         if (p is null)
@@ -5518,8 +5430,8 @@ public static class CorePipelineTests
     /// 根因是同一份按钮清单存在 5 份副本（HdrCaptureWindow 图集/GDI 回退/启动预热/Down() 命中
     /// + SelectionOverlay.xaml），改一漏四没有任何闸门会响。收敛后 <c>ToolbarContract</c> 是唯一声明处；
     /// 本判据盯三件事：① 契约自身形状（主 7 钮/顺序/文案、标注 10 工具）不许被悄悄改动；
-    /// ② 两个渲染器必须真的从契约取数 —— HdrCaptureWindow 里不许再长出按钮提示/字形字面量，
-    /// SelectionOverlay.xaml 里不许再有主工具条按钮；③ 契约每条文案必须是 LocaleManager
+    /// ② 唯一渲染器必须真的从契约取数 —— HdrCaptureWindow 里不许再长出按钮提示/字形字面量，
+    /// 且动作词表不许在 MainWindow 里另起第二份；③ 契约每条文案必须是 LocaleManager
     /// 对照表的键 —— D3D 烘字那扇"三路全盲"的窗（明细报告 §55 / §34.6-3）从声明层接进
     /// 本地化账本，这是给盲区补的第一路检测。</para>
     /// <para>为什么是源码哨兵：Test 只引用 Core，进不了 App 程序集（与位深协商那组同理由）。</para>
@@ -5603,20 +5515,49 @@ public static class CorePipelineTests
             implA.Contains("否证", StringComparison.Ordinal)
             && !implA.Contains("双重提亮成立", StringComparison.Ordinal)
             && implB.Contains("双重提亮成立", StringComparison.Ordinal));
+
+        // ── 呈现面 A/B 那把尺子（--overlay-whitelevel-ab 用的就是它）──
+        const int W100 = 100;                                   // 本机实测纸白 ⇒ k=1.25
+        var sameArm = Sem.JudgePresentationAb(new[] { 1.000, 0.999, 1.001 }, W100);
+        var boostArm = Sem.JudgePresentationAb(new[] { 1.250, 1.244, 1.256 }, W100);
+        Assert("呈现尺子：ratio≈1 判 SameTreatment、ratio≈k 判 SecondBoost，两臂必须分叉",
+            sameArm.SelfCheckPassed && sameArm.Verdict == Pres.SameTreatment
+            && boostArm.SelfCheckPassed && boostArm.Verdict == Pres.SecondBoost
+            && sameArm.Verdict != boostArm.Verdict, sameArm.Why + " ／ " + boostArm.Why);
+
+        var grayArm = Sem.JudgePresentationAb(new[] { 1.08, 1.12 }, W100);
+        Assert("呈现尺子：1.10 这条灰带判 Unknown（±3% 与 k×±10% 两道带都在咬人，不是恒真）",
+            grayArm.SelfCheckPassed && grayArm.Verdict == Pres.Unknown, grayArm.Why);
+
+        var noK = Sem.JudgePresentationAb(new[] { 1.25, 1.25 }, 0);
+        Assert("呈现尺子：纸白读不到时【不许】把 1.25 冒充成第二抬 ⇒ Unknown（第二抬那一支没有标尺就不判）",
+            noK.Verdict == Pres.Unknown && Math.Abs(noK.SdrWhiteScale) < 1e-9, noK.Why);
+
+        var presTooFew = Sem.JudgePresentationAb(new[] { 1.0 }, W100);
+        Assert("呈现尺子：只有 1 档 ⇒ 自检不过（下限 2 档）",
+            !presTooFew.SelfCheckPassed && presTooFew.Verdict == Pres.Unknown);
+
+        var dirty = Sem.JudgePresentationAb(new[] { double.NaN, 1.0, double.PositiveInfinity, 0.0, -3.0, 1.0 }, W100);
+        Assert("呈现尺子：NaN/Inf/非正数的脏读数被剔除后仍能判（而不是把中位数污染成 NaN 冒充「没判到」）",
+            dirty.SelfCheckPassed && dirty.Verdict == Pres.SameTreatment && Math.Abs(dirty.MedianRatio - 1.0) < 1e-9,
+            dirty.Why);
+
+        string implS = Sem.Implication(sameArm), implB2 = Sem.Implication(boostArm);
+        Assert("呈现尺子：同等待遇的含义行动不许动捕获层也不动 D3D 那条路；第二抬的含义行只许改兜底渲染器（互斥）",
+            implS.Contains("否证", StringComparison.Ordinal) && !implS.Contains("÷k", StringComparison.Ordinal)
+            && implB2.Contains("÷k", StringComparison.Ordinal) && implB2.Contains("只", StringComparison.Ordinal));
     }
 
     static void Test_ToolbarContract_SingleSource()
     {
         var ctPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "ToolbarContract.cs"));
         var hdrPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
-        var xamlPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml"));
-        var ovPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "SelectionOverlay.xaml.cs"));
         var lcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
-        if (ctPath is null || hdrPath is null || xamlPath is null || ovPath is null || lcPath is null)
+        if (ctPath is null || hdrPath is null || lcPath is null)
         {
-            Assert("工具条契约单源：五份源文件必须都定位得到", false,
+            Assert("工具条契约单源：三份源文件必须都定位得到", false,
                 "缺文件会让下面的否定断言在空串上恒成立（假绿），不许静默跳过：" +
-                string.Join(",", new[] { ctPath, hdrPath, xamlPath, ovPath, lcPath }.Select(p => p is null ? "空" : "有")));
+                string.Join(",", new[] { ctPath, hdrPath, lcPath }.Select(p => p is null ? "空" : "有")));
             return;
         }
 
@@ -5677,23 +5618,13 @@ public static class CorePipelineTests
             glyphsInHdr.Count == 0,
             "字形+文字的合成串在运行时拼 ⇒ 文件里出现字形转义就是手抄清单回归：" + string.Join("｜", glyphsInHdr));
 
-        // ── ②-2 SDR 覆盖层：主工具条按钮必须由契约生成 ──
-        var xaml = ReadSourceNormalized(xamlPath);
-        Assert("SDR 覆盖层：XAML 里不再有主工具条按钮（x:Name=\"Btn…\" 实得 "
-            + Regex.Matches(xaml, "x:Name=\"Btn").Count + " 个）",
-            !xaml.Contains("x:Name=\"Btn", StringComparison.Ordinal),
-            "按钮回到 XAML = 契约外多出一份清单（二维码按钮事故的形状）");
-        var goneHandlers = new[] { "OnConfirm", "OnCopy", "OnOcr", "OnTranslate", "OnQr", "OnCancel" }
-            .Where(h => xaml.Contains("Click=\"" + h + "\"", StringComparison.Ordinal)).ToList();
-        Assert("SDR 覆盖层：被契约生成取代的旧 Click 处理器不许残留（实得 " + goneHandlers.Count + " 个）",
-            goneHandlers.Count == 0, "残留：" + string.Join(",", goneHandlers));
-        var ov = StripLineComments(ReadSourceNormalized(ovPath));
-        Assert("SDR 覆盖层：BuildMainToolbar 从 ToolbarContract.Main 生成按钮（两处锚点都要在）",
-            ov.Contains("ToolbarContract.Main", StringComparison.Ordinal)
-            && ov.Contains("BuildMainToolbar", StringComparison.Ordinal),
-            "事件处理器在而生成逻辑没了 ⇒ 按钮哪来的？");
-        Assert("SDR 覆盖层：旧 ActionResult 枚举不许回来（动作词表已并入 MainToolbarAction）",
-            !ov.Contains("enum ActionResult", StringComparison.Ordinal));
+        // ── ②-2 动作词表也只有一处：枚举住在契约里，MainWindow 不许再声明自己那份 ──
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("动作词表单一来源：MainToolbarAction 只声明在 ToolbarContract.cs",
+            mwPath is not null
+            && ct.Contains("enum MainToolbarAction", StringComparison.Ordinal)
+            && !ReadSourceNormalized(mwPath).Contains("enum MainToolbarAction", StringComparison.Ordinal),
+            "第二份枚举回来 = SDR/HDR 两套动作词表重新分叉");
     }
 
 
@@ -8894,16 +8825,17 @@ public static class CorePipelineTests
         // 已把标题补进使用面）。留 0 的意义：以后删一处界面忘了清表，这里就红并点名。
         const int OrphanBaseline = 0;
         var orphanKeys = OrphansOf(table);
-        // 夹具④ = 这一节真正要为 B/C 档报的数：把覆盖层那两份文件（.xaml 与 .xaml.cs）整个从使用面里摘掉，
+        // 夹具④ = 这一节真正要为 B/C 档报的数：把主窗那两份文件（.xaml 与 .xaml.cs）整个从使用面里摘掉，
         // 表里立刻死掉几条？这就是"删界面却忘了清表"的翻译代价，实测数直接打进日志。
-        var goneXaml = attrs.Where(a => !a.File.StartsWith("SelectionOverlay", StringComparison.Ordinal)).ToList();
-        var goneCs = FaceOf(new[] { "SelectionOverlay" });
-        var ifOverlayGone = OrphanKeys(table, goneXaml, winTitles, goneCs);
-        Console.WriteLine($"  ⓘ 反向孤儿·夹具④：摘掉 SelectionOverlay 那两份文件 ⇒ 表里立刻死 {ifOverlayGone.Count} 条："
-                          + string.Join(" | ", ifOverlayGone.Select(Cut).Take(15)));
-        Assert("反向判据能报出删除代价（摘掉覆盖层 ⇒ 表里必须立刻出现死键；当前树自己是零死键）",
-            ifOverlayGone.Count >= 1 && orphanKeys.Count == OrphanBaseline,
-            $"摘掉后死 {ifOverlayGone.Count} 条 / 当前树死 {orphanKeys.Count} 条");
+        // （2026-10-27：原来摘的是 SelectionOverlay 那两份文件，那份界面已整份删除 ⇒ 夹具改成摘主窗。）
+        var goneXaml = attrs.Where(a => !a.File.StartsWith("MainWindow", StringComparison.Ordinal)).ToList();
+        var goneCs = FaceOf(new[] { "MainWindow" });
+        var ifMainGone = OrphanKeys(table, goneXaml, winTitles, goneCs);
+        Console.WriteLine($"  ⓘ 反向孤儿·夹具④：摘掉 MainWindow 那两份文件 ⇒ 表里立刻死 {ifMainGone.Count} 条："
+                          + string.Join(" | ", ifMainGone.Select(Cut).Take(15)));
+        Assert("反向判据能报出删除代价（摘掉主窗 ⇒ 表里必须立刻出现死键；当前树自己是零死键）",
+            ifMainGone.Count >= 1 && orphanKeys.Count == OrphanBaseline,
+            $"摘掉后死 {ifMainGone.Count} 条 / 当前树死 {orphanKeys.Count} 条");
         Assert($"表里的死键数量 == 基线 {OrphanBaseline}（实得 {orphanKeys.Count}）",
             orphanKeys.Count == OrphanBaseline,
             $"基线 {OrphanBaseline} vs 实得 {orphanKeys.Count}：" +

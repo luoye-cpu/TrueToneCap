@@ -67,8 +67,9 @@
 │          HdrPixels / SdrPixels / GpuTexture / IccProfile                    │
 │                    │                                                       │
 │                    ▼                                                       │
-│          [SelectionOverlay 选区覆盖层]                                      │
-│          RegionDetector 窗口检测 / AnnotationManager 标注 / 裁剪            │
+│          [HdrCaptureWindow 选区预览窗（唯一界面）]                          │
+│          D3D11 16-bit scRGB 背景面 + RegionDetector 窗口检测                │
+│          + AnnotationManager 标注 / 裁剪（2026-10-27 起无 XAML 兜底层）     │
 │                    │                                                       │
 │                    ▼                                                       │
 │          [CapturePipelineService] ──── [ColorProfileProvider]              │
@@ -202,7 +203,7 @@ TrueToneCap/
     ├── TrueToneCap.App/                  # WinUI 3 应用
     │   ├── App.xaml / .xaml.cs           # 应用入口 + 主题
     │   ├── MainWindow.xaml / .xaml.cs    # 设置主窗口
-    │   ├── SelectionOverlay.xaml / .cs   # 选区覆盖层 + 标注
+    │   ├── Services/HdrCaptureWindow.cs  # 选区预览窗（D3D11 16-bit scRGB + 内联标注）
     │   ├── AnnotationWindow.xaml / .cs   # 独立标注窗口
     │   ├── OcrPreviewWindow.xaml / .cs   # OCR/翻译预览
     │   ├── Services/

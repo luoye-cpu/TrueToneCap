@@ -117,7 +117,6 @@ public sealed partial class MainWindow : Window
         });
     }
     private bool _isExiting;           // 托盘退出标志（跳过最小化）
-    private SelectionOverlay? _activeSelectionOverlay;   // 当前活动选区覆盖层（应用退出时强制关闭）
     private Services.HdrCaptureWindow? _activeHdrWindow; // 当前活动 HDR 覆盖窗口（应用退出时强制关闭）
     private AnnotationWindow? _activeAnnotationWindow;   // 当前活动标注窗口（应用退出时强制关闭）
     private OcrPreviewWindow? _activeOcrPreview;         // 当前活动 OCR 预览窗口 (2026-08-16 P3-20 新增)
@@ -1865,6 +1864,19 @@ public sealed partial class MainWindow : Window
         return result;
     }
 
+    /// <summary>
+    /// 选区动作拿不到像素时的唯一出口：此前这几个分支都是 `is { }` 模式匹配，
+    /// 取不到像素就什么都不做 —— 用户点了保存/复制没有任何反应，日志里也查不到那一拍。
+    /// </summary>
+    private void ReportEmptyRegion(Services.HdrCaptureWindow hdrWnd, MainToolbarAction action, int rw, int rh)
+    {
+        LogService.Error("MainWindow",
+            $"HDR 选区未取到像素，动作已放弃（动作={action}，选区={rw}x{rh}，标注层={hdrWnd.AnnoManager.LayerCount}）",
+            LogCategory.Capture);
+        SetStatus("❌ " + LocaleManager.Tr("提取区域失败"));
+        ToastService.ShowCaptureFailed(LocaleManager.Tr("提取区域失败"));
+    }
+
     /// <summary>打开独立标注窗口（HDR 路径的"标注"动作：SDR 预览 + 标注 + 保存/复制）。</summary>
     private void OpenAnnotationWindow(byte[] regionPixels, int w, int h)
     {
@@ -2067,7 +2079,6 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        bool overlayShown = false;
         try
         {
             // ── 这一拍的关联 ID ──
@@ -2177,21 +2188,18 @@ public sealed partial class MainWindow : Window
             sw.Restart();
 
             // ═══ 选区预览只有一张界面：HdrCaptureWindow（2026-09-30 用户口径"以 HDR 下的界面为准，
-            // SDR 与 HDR 的用户体验统一"）═══
-            // 原先 hasHdr==false 会另开一套 WinUI 覆盖层（SelectionOverlay）。那套覆盖层【没有任何
-            // 让窗变透明的机制】（全 App 工程里 SystemBackdrop 只在 SilentCaptureToast 出现过一次），
-            // 而 GPU 供帧用的是另一扇被压在它下面的窗 ⇒ "GPU 成功"这一档真正画出来的是不透明页底色
-            // （维护者肉眼看到的"全白"），反倒是失败时那段会亲手把像素画进可见表面的 CPU 兜底有画面。
-            // 统一到这张自绘 D3D 窗以后，"画面从哪儿来"两条路变成同一件事，工具条钳制也一并换成
-            // 按实测宽度算的那份（原先覆盖层写死 460，而它自己的工具条实测约 932 DIP ⇒ 贴右边缘必然溢出屏幕）。
+            // SDR 与 HDR 的用户体验统一"；2026-10-27 旧 XAML 兜底层整份删除）═══
+            // 原先 hasHdr==false 会另开一套 WinUI 覆盖层（SelectionOverlay）：它没有让窗变透明的机制，
+            // GPU 供帧又压在它下面 ⇒ "GPU 成功"那档真正画出来的是不透明页底色（维护者肉眼看到的"全白"）。
+            // 后来它只作为"预览窗初始化失败"的兜底，实机再测仍是同一种灰 ⇒ 已删除，失败走明确失败出口。
             //
             // 帧来源仍分两档，界面只有一条：
             //   · HDR 帧：WGC 的 Float16 场景参考数据（1.0 = 名义 80 nits，抬到系统白点是 OS 那一层做的）；
             //   · SDR 帧：BGRA→scRGB，参考白与 alpha 由 PixelOps.BgraToScrgbForDisplay 负责 ——
             //     乘白点只允许发生在"HDR 输出正激活"那一档（普通屏上 DWM 对 FP16 scRGB 做数值钳位，
             //     "everything outside of the [0, 1] numeric range is clipped"，乘了就把白削成一团白），
-            //     且 A 一律写 1：这张窗是 AlphaMode.Ignore + flip + WS_EX_NOREDIRECTIONBITMAP，
-            //     而源帧的 A 由驱动决定，不参与"这一帧长什么样"。
+            //     且 A 一律写 1：这张窗的背景面是 R16G16B16A16_Float + RgbFullG10NoneP709 + AlphaMode.Ignore
+            //     （契约唯一出处见 HdrCaptureWindow.CreateOverlayDesc），源帧的 A 由驱动决定，不参与呈现。
             bool hdrFrame = hdrDesktopPixels is not null;
             var (sysHdrNow, _, _) = CapabilityService.DetectDisplayState();
             int sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
@@ -2223,23 +2231,6 @@ public sealed partial class MainWindow : Window
                 LogService.Info("MainWindow", "预览窗口初始化...");
                 bool initOk = hdrWnd.Initialize(vx, vy, vw, vh);
                 LogService.Info("MainWindow", $"预览窗口初始化 {(initOk ? "成功" : $"失败: {hdrWnd.LastError}")}");
-
-                // ═══ 诊断开关 TTC_FORCE_LEGACY_OVERLAY=1：把"兜底"那条路变成可达路 ═══
-                // 2026-09-30 把 SDR 预览统一到这张自绘窗之后，`SelectionOverlay` 只剩"预览窗初始化失败"
-                // 这一个入口，而全 App 没有任何开关能造出这个失败（明细报告 §35.5）⇒ 那 1662 + 613 行
-                // 在正常构建里根本到不了，于是"兜底到底能不能用"这类判断只能去引**改道前的历史二进制**，
-                // 那批读数又恰好全带 TTC_FORCE_SDR=1（同一个会话里连"预览帧来源"这行都没有）。
-                // 这个开关不改动任何默认行为：只有显式置 1 才主动关掉刚建好的预览窗去走兜底，
-                // 目的是让那条路可以被主动进入、被取证，而不是靠猜。
-                if (initOk && Environment.GetEnvironmentVariable("TTC_FORCE_LEGACY_OVERLAY") == "1")
-                {
-                    LogService.Warn("MainWindow",
-                        "诊断开关 TTC_FORCE_LEGACY_OVERLAY=1: 主动关闭已建好的预览窗 ⇒ 改走兜底覆盖层（正常构建不会到这里）",
-                        LogCategory.Capture);
-                    hdrWnd.Close();        // 正常收尾路径就是 Close() → using 作用域 Dispose()，两步都幂等
-                    _activeHdrWindow = null;
-                    initOk = false;
-                }
 
                 if (initOk)
                 {
@@ -2280,28 +2271,33 @@ public sealed partial class MainWindow : Window
                                 await EncodeAndSaveHdrAsync(hdrRegion, rw, rh, captureResult.IccProfile);
                             else if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx1)
                                 await EncodeAndSaveAsync(outPx1, rw, rh);
+                            else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Annotate:
                             // 2026-08-11 A方案: 标注已在窗口内内联完成, 此分支为兼容兜底
                             LogService.Info("MainWindow", "HDR 选区标注（窗口内联，兜底打开独立窗口）");
                             if (sdrRegion is not null)
                                 OpenAnnotationWindow(sdrRegion, rw, rh);
+                            else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Copy:
                             LogService.Info("MainWindow", "HDR 选区复制到剪贴板");
                             if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx2)
                                 await EncodeAndCopyAsync(outPx2, rw, rh);
+                            else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Ocr:
                             LogService.Info("MainWindow", "HDR 选区 OCR 识别");
                             // 与保存/复制共用同一份合成结果：识字不许绕过标注去读原始桌面像素
                             if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx3)
                                 await CaptureAndOcrFromPixelsAsync(outPx3, rw, rh);
+                            else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Translate:
                             LogService.Info("MainWindow", "HDR 选区翻译");
                             if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx4)
                                 await CaptureAndTranslateFromPixelsAsync(outPx4, rw, rh);
+                            else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Qr:
                             // 与 SDR 选区的 Qr 分支同构：区域照常落盘+剪贴板，二维码窗口额外弹出；
@@ -2313,6 +2309,7 @@ public sealed partial class MainWindow : Window
                                 await CaptureAndQrFromPixelsAsync(outPx5, rw, rh);
                                 await qrSaveTask;
                             }
+                            else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                     }
 
@@ -2322,111 +2319,16 @@ public sealed partial class MainWindow : Window
 
                     return;
                 }
-                // 预览窗初始化失败 → 回退到旧版 WinUI 覆盖层（最后兜底，不再是静默降级）。
-                // 原因必须内联在这一条：上一行那条带堆栈的是 Info，Brief 档不落盘，
-                // 若这里只写"见紧邻日志"，用户手上的 log 文件里就没有原因了。取首行 = 异常类型+消息。
-                var fallbackReason = (hdrWnd.LastError ?? "未知原因").Split('\n')[0].Trim();
-                LogService.Warn("MainWindow",
-                    $"预览窗失败，回退旧版覆盖层：{fallbackReason}", LogCategory.Capture);
-                // 2026-09-30：这条以前只有 log —— 用户按了键，屏幕上一张"长得不一样的"界面出来了，
-                // 却没有任何一句话告诉他"这不是平时那张"（报告 §33.3 记的就是这个空档）。
-                // 走统一入口 + Overlay 通道（与 ShowCaptureDegraded 同形），文案按语言取。
-                ToastService.ShowToast(LocaleManager.PreviewFallbackTitle,
-                    $"{LocaleManager.PreviewFallbackHint}：{fallbackReason}",
-                    ToastTone.Warning, ToastChannel.Overlay);
-                // 这里原先还有一句 `hdrDesktopPixels = null;`，注释写"以免下面误判成还有 HDR 路可走"。
-                // 2026-10-01 复核：这一支之后全文再无读取（最近的读点在 :2063，在它上面）⇒ 那是句死赋值，
-                // 注释描述的防护并不存在。删赋值留此说明（报告 §40 采纳项 2）。
-            }
-
-            // ═══ SDR 路径：SelectionOverlay（WinUI 3）═══
-            StatusTxt.Text = "📷 选区模式";
-            if (desktopPixels is null)
-            {
-                DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 桌面像素数据为空");
+                // ═══ 预览窗建不起来 ⇒ 选区模式明确失败（2026-10-27 删掉 WinUI 兜底覆盖层）═══
+                // 旧逻辑在这里悄悄换一张"长得不一样"的界面；那张界面在 SDR 帧上呈现成不透明页底色
+                // （维护者实测「覆盖层完全灰色、没有桌面」），用户按了键却看不出自己已降级。
+                // 现在只剩一张界面：建不起来就报失败，状态栏 + Toast + Error 日志三条都留痕。
+                var failReason = (hdrWnd.LastError ?? "未知原因").Split('\n')[0].Trim();
+                LogService.Error("MainWindow", $"预览窗初始化失败，选区模式中止：{failReason}", LogCategory.Capture);
+                SetStatus("❌ " + LocaleManager.Tr("预览窗无法创建"));
+                ToastService.ShowCaptureFailed($"{LocaleManager.Tr("预览窗无法创建")}：{failReason}");
                 return;
             }
-            var overlay = new SelectionOverlay(desktopPixels, vx, vy, vw, vh);
-            _activeSelectionOverlay = overlay; // 注册：应用退出时强制关闭
-            overlay.Activate();
-            overlayShown = true; // 标记覆盖层已激活，由 ActionCompleted 负责释放锁
-            var overlayReady = new TaskCompletionSource<bool>();
-            overlay.Activated += (_, _) => overlayReady.TrySetResult(true);
-            _ = Task.Run(async () => { await Task.Delay(1000); overlayReady.TrySetResult(false); });
-
-            overlay.ActionCompleted += async (action, rect) =>
-            {
-                // 这是**另一个 UI 根**（覆盖层在自己那边回调），AsyncLocal 不会从 StartSelectionCapture
-                // 流过来 ⇒ 必须显式续到那一拍的 ID，否则"选区确认→编码→落盘"这几行会挂在新 ID 上。
-                using var op = CoreLog.ContinueOp(_captureOpId);
-                try
-                {
-                    if (action == MainToolbarAction.Cancel)
-                    {
-                        if (!_isExiting)
-                            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = LocaleManager.Ready);
-                        return;
-                    }
-
-                    var regionPixels = overlay.AnnotatedRegionPixels
-                        ?? ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy, rect);
-
-                    if (regionPixels is null)
-                    {
-                        DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "❌ 提取区域失败");
-                        return;
-                    }
-
-                    switch (action)
-                    {
-                        case MainToolbarAction.Save:
-                            LogService.Info("MainWindow", $"选区确认保存: {rect.Width}x{rect.Height}");
-                            await EncodeAndSaveAsync(regionPixels, rect.Width, rect.Height);
-                            break;
-                        case MainToolbarAction.Copy:
-                            LogService.Info("MainWindow", "选区复制到剪贴板");
-                            await EncodeAndCopyAsync(regionPixels, rect.Width, rect.Height);
-                            break;
-                        case MainToolbarAction.Ocr:
-                            LogService.Info("MainWindow", "选区 OCR 识别");
-                            await CaptureAndOcrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
-                            break;
-                        case MainToolbarAction.Translate:
-                            LogService.Info("MainWindow", "选区翻译");
-                            await CaptureAndTranslateFromPixelsAsync(regionPixels, rect.Width, rect.Height);
-                            break;
-                        case MainToolbarAction.Qr:
-                            LogService.Info("MainWindow", "选区二维码识别（区域照常落盘+剪贴板）");
-                            // 区域与普通确认走同一条 EncodeAndSaveAsync 管线：落盘 + 文件进剪贴板 +
-                            // 成功 toast（保存自吞异常，失败走 ShowCaptureFailed）。解码并行跑让结果
-                            // 窗口尽快弹出，保存任务随后收尾。三个出口（解码/预览/落盘）吃的是
-                            // Finish 合成名单产出的同一份像素 —— 马赛克盖住的内容不会从任何一条路漏出。
-                            var qrSaveTask = EncodeAndSaveAsync(regionPixels, rect.Width, rect.Height);
-                            await CaptureAndQrFromPixelsAsync(regionPixels, rect.Width, rect.Height);
-                            await qrSaveTask;
-                            break;
-                    }
-
-                    if (MinimizeTrayChk.IsChecked == true
-                        && action is MainToolbarAction.Save or MainToolbarAction.Copy)
-                        DispatcherQueue.TryEnqueue(() => _trayIcon?.MinimizeToTray());
-                }
-                catch (Exception ex)
-                {
-                    LogService.Error("MainWindow", $"选区动作异常: {ex.Message}", ex);
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        StatusTxt.Text = $"❌ {ex.Message}";
-                        ToastService.ShowCaptureFailed(ex.Message);
-                    });
-                }
-                finally
-                {
-                    _activeSelectionOverlay = null; // 覆盖层已关闭，取消注册
-                    // 确保锁释放：覆盖层完成时无论成功/失败都释放防重入锁
-                    Interlocked.Exchange(ref _isCapturing, 0);
-                }
-            };
         }
         catch (Exception ex)
         {
@@ -2438,10 +2340,8 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
-            // 覆盖层未激活时(即异常/早期返回路径)由外层 finally 释放锁；
-            // 覆盖层已激活时由 ActionCompleted 回调负责释放锁，外层不再释放。
-            if (!overlayShown)
-                Interlocked.Exchange(ref _isCapturing, 0);
+            // 预览窗无论成功/取消/失败/提前返回，都在这里释放防重入锁
+            Interlocked.Exchange(ref _isCapturing, 0);
         }
     }
 
@@ -3348,13 +3248,11 @@ public sealed partial class MainWindow : Window
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
-        // ── 应用退出：强制关闭可能仍打开的全屏选区覆盖层（避免残留遮挡屏幕/挂起）──
-        try { _activeSelectionOverlay?.Cancel(); } catch { }
+        // ── 应用退出：强制关闭可能仍打开的全屏选区窗（避免残留遮挡屏幕/挂起）──
         try { _activeHdrWindow?.RequestCancel(); } catch { }
         try { _activeAnnotationWindow?.Close(); } catch { }
         try { _activeOcrPreview?.Close(); } catch { } // ═══ 2026-08-16 P3-20: OCR 预览窗口一并关闭 ═══
         try { _activeQrWindow?.Close(); } catch { }   // ═══ 2026-10-26: 二维码结果窗口一并关闭 ═══
-        _activeSelectionOverlay = null;
         _activeHdrWindow = null;
         _activeAnnotationWindow = null;
         _activeOcrPreview = null;

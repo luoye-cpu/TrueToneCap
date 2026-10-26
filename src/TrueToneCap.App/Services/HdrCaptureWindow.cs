@@ -68,6 +68,14 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private ID3D11ShaderResourceView? _textAtlasSrv;
     private double _atlasScale;                  // 图集对应的 DPI 缩放 (失效重建)
     private bool _useGpuCompositor;              // GPU 合成可用标志 (失败回退 CPU)
+    // ── 选区尺寸徽标：独立小动态纹理（拖拽时每帧可能改字，放图集里就要 5MB 级全量重建）──
+    private const int BadgeTexW = 512, BadgeTexH = 128;
+    private ID3D11Texture2D? _badgeTex;
+    private ID3D11ShaderResourceView? _badgeSrv;
+    private string _badgeText = "";
+    private double _badgeScale;
+    private int _badgeW, _badgeH;
+    private int _idleHintW = 1, _idleHintH = 1;   // 静置提示在图集里的像素尺寸（随 DPI 重建）
     private ID3D11SamplerState? _samp;
     private ID3D11Texture2D? _desktopTex;
     private ID3D11ShaderResourceView? _desktopSrv;
@@ -262,6 +270,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         public System.Numerics.Vector4 AnnoColor;     // 标注颜色 (线性 RGBA)
         public System.Numerics.Vector4 AnnoStroke;    // (strokeW, opacity, 0, 0)
         public System.Numerics.Vector4 HoverRect;     // 悬停窗口矩形 (x,y,w,h); w<=0 无悬停
+        public System.Numerics.Vector4 SizeBadgeSub;  // 尺寸徽标纹理子矩形 (u0,v0,du,dv); w<=0 不画
+        public System.Numerics.Vector4 SizeBadgePos;  // 尺寸徽标帧内位置 (x,y,w,h)
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 1024)]
         public float[] AnnoLayers; // 256 槽 × 4 (16 层 × 16 vec)
     }
@@ -270,6 +280,50 @@ public sealed partial class HdrCaptureWindow : IDisposable
     {
         int o = idx * 4;
         arr[o] = v.X; arr[o + 1] = v.Y; arr[o + 2] = v.Z; arr[o + 3] = v.W;
+    }
+
+    // ═══ 背景面契约（唯一出处：建窗与设备丢失重建都走这里）═══
+    // Format = R16G16B16A16_Float + ColorSpaceType.RgbFullG10NoneP709 == 16-bit scRGB：
+    // 每通道线性 float，1.0 = 80 nits 名义白，HDR 高光用 >1 的扩展范围表示。
+    // 纸白换算（×k，k = 纸白/80）只在 CPU 侧 BgraToScrgbForDisplay 乘一次，这里不乘第二次。
+    // AlphaMode.Ignore：整屏不透明覆盖层，合成 PS 恒输出 alpha=1，不参与 DWM 的 alpha 混合。
+    // ⚠ 本文件曾有一段「AlphaMode.Ignore → Premultiplied 关键修复」的注释，与代码从未相符
+    //   （git 历史里没有那次改动），其前提 WS_EX_NOREDIRECTIONBITMAP 也已从 WS_EX 常量处移除——
+    //   不要照着它把这里改成 Premultiplied。
+    private static SwapChainDescription1 CreateOverlayDesc(int w, int h) => new()
+    {
+        Width = (uint)w,
+        Height = (uint)h,
+        Format = Format.R16G16B16A16_Float,
+        SampleDescription = new SampleDescription(1, 0),
+        BufferUsage = Usage.RenderTargetOutput,
+        BufferCount = 2,
+        Scaling = Scaling.Stretch,
+        SwapEffect = SwapEffect.FlipSequential,
+        AlphaMode = AlphaMode.Ignore,
+        Flags = SwapChainFlags.None,
+    };
+
+    /// <summary>
+    /// 把背景面颜色空间钉成 linear scRGB；不支持时把实际协商结果写进日志，
+    /// 而不是静默留在上一个颜色空间（那会让线性帧被按 sRGB 解释，画面整体偏亮/偏暗）。
+    /// </summary>
+    private static void ApplyOverlayColorSpace(IDXGISwapChain3 sc3)
+    {
+        const ColorSpaceType want = ColorSpaceType.RgbFullG10NoneP709;
+        var support = sc3.CheckColorSpaceSupport(want);
+        if ((support & SwapChainColorSpaceSupportFlags.Present) != 0)
+        {
+            sc3.SetColorSpace1(want);
+            LogService.Info("HdrCapture", "背景面: R16G16B16A16_Float + RgbFullG10NoneP709 (16-bit scRGB)");
+        }
+        else
+        {
+            LogService.Warn("HdrCapture",
+                $"背景面不支持 RgbFullG10NoneP709（CheckColorSpaceSupport={support}），"
+                + "帧仍按 16-bit 提交但颜色空间未生效 —— 画面可能整体偏亮/偏暗",
+                LogCategory.Capture);
+        }
     }
 
     /// <summary>独立 D3D11 设备：渲染线程独占 context，不与 WGC 共享设备竞争。</summary>
@@ -331,18 +385,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
         // 用户环境 Present(1, AllowTearing) 静默失败 (不抛异常, 画面不更新)。
         // 即使 VRR 支持, 也先创建不带 AllowTearing 的交换链, 确保 Present(0) 正常。
         // 若后续需要在 PresentFrame 中尝试 VRR, 可在此处加 AllowTearing 并在失败时重建。
-        // ═══ 2026-08-26 关键修复: AlphaMode.Ignore → Premultiplied ═══
-        // 窗口为 WS_EX_NOREDIRECTIONBITMAP (DWM 直接合成交换链)。此模式下 DWM 按
-        // 后台缓冲 alpha 与桌面混合 — Ignore 使 DWM 将窗口视为不透明, 但 Flip 模型
-        // 合成路径实际按预乘 alpha 处理; PS 输出 alpha=1 的区域正常, 而未写入区域
-        // (alpha=0) 透出实时桌面 → 表现为"覆盖层透明/只有桌面"。
-        // Premultiplied + PS 输出 alpha=1 (OverlayComposite 已 return float4(rgb,1))
-        // → DWM 完全不透明合成, 修复透明问题。
-        var desc = new SwapChainDescription1 { Width = (uint)w, Height = (uint)h, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 2, Scaling = Scaling.Stretch, SwapEffect = SwapEffect.FlipSequential, AlphaMode = AlphaMode.Ignore, Flags = SwapChainFlags.None };
-            _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, desc);
+            // 背景面格式/颜色空间契约见 CreateOverlayDesc 上方注释（唯一出处）
+            _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, CreateOverlayDesc(w, h));
             factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);
             using var sc3 = _swapChain.QueryInterface<IDXGISwapChain3>();
-            sc3.SetColorSpace1(ColorSpaceType.RgbFullG10NoneP709);
+            ApplyOverlayColorSpace(sc3);
             _backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
             _rtv = _device.CreateRenderTargetView(_backBuffer);
 
@@ -371,11 +418,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
                     // ═══ 2026-08-26 根因修复: 常量缓冲大小必须 ≥ HLSL cbuffer 声明大小 ═══
                     // 旧: ByteWidth = Marshal.SizeOf<UiCbData>() = 4624
                     // HLSL 需要: 9×vec4(144) + TextSubs[40]×16(640) + TextPos[40]×16(640)
-                    //           + 4×vec4(64) + AnnoLayers[256]×16(4096) = 5584
+                    //           + 6×vec4(96) + AnnoLayers[256]×16(4096) = 5616
                     // D3D11 规则: ByteWidth < 着色器声明 → Draw 静默失败/无输出
                     //   (桌面帧仍显示因为走 CopyResource 不依赖 cbuffer; UI 层全灭)
-                    // 硬编码 5584 而非依赖 Marshal.SizeOf (ByValArray float[] 封送大小不可靠)
-                    const uint UiCbByteWidth = 5584;
+                    // 硬编码 5616 而非依赖 Marshal.SizeOf (ByValArray float[] 封送大小不可靠)
+                    const uint UiCbByteWidth = 5616;
                     _uiCb = _device.CreateBuffer(new BufferDescription
                     {
                         ByteWidth = UiCbByteWidth,
@@ -680,6 +727,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         void Safe(System.IDisposable? d) { try { d?.Dispose(); } catch { } }
         Safe(_desktopSrv); Safe(_desktopTex); Safe(_pooledStaging);
         Safe(_textAtlasSrv); Safe(_textAtlas);
+        Safe(_badgeSrv); Safe(_badgeTex);
         Safe(_samp); Safe(_rsNoCull); Safe(_uiCb);
         Safe(_overlayPs); Safe(_vs);   // _ps 已删除（死代码，见文件头说明）
         Safe(_rtv); Safe(_backBuffer); Safe(_swapChain);
@@ -688,6 +736,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
         _desktopSrv = null; _desktopTex = null; _pooledStaging = null;
         _textAtlasSrv = null; _textAtlas = null;
+        _badgeSrv = null; _badgeTex = null; _badgeText = "";
         _samp = null; _rsNoCull = null; _uiCb = null;
         _overlayPs = null; _vs = null;
         _rtv = null; _backBuffer = null; _swapChain = null;
@@ -721,22 +770,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
             using (var adapter = dxgiD.GetAdapter())
             using (var factory = adapter.GetParent<IDXGIFactory7>())
             {
-                var desc = new SwapChainDescription1
-                {
-                    Width = (uint)_winW, Height = (uint)_winH,
-                    Format = Format.R16G16B16A16_Float,
-                    SampleDescription = new SampleDescription(1, 0),
-                    BufferUsage = Usage.RenderTargetOutput,
-                    BufferCount = 2,
-                    Scaling = Scaling.Stretch,
-                    SwapEffect = SwapEffect.FlipSequential,
-                    AlphaMode = AlphaMode.Ignore,
-                    Flags = SwapChainFlags.None
-                };
+                var desc = CreateOverlayDesc(_winW, _winH);
                 _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, desc);
                 factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);
                 using var sc3 = _swapChain.QueryInterface<IDXGISwapChain3>();
-                sc3.SetColorSpace1(ColorSpaceType.RgbFullG10NoneP709);
+                ApplyOverlayColorSpace(sc3);
             }
             _backBuffer = _swapChain!.GetBuffer<ID3D11Texture2D>(0);
             _rtv = _device.CreateRenderTargetView(_backBuffer);
@@ -758,7 +796,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 {
                     _overlayPs = _device.CreatePixelShader(File.ReadAllBytes(osp));
                     // 必须与 Initialize 中的 UiCbByteWidth 一致（HLSL cbuffer 声明大小）
-                    const uint UiCbByteWidth = 5584;
+                    const uint UiCbByteWidth = 5616;
                     _uiCb = _device.CreateBuffer(new BufferDescription
                     {
                         ByteWidth = UiCbByteWidth,
@@ -862,6 +900,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _ctx.PSSetConstantBuffer(0, _uiCb!);
         _ctx.PSSetShaderResource(0, _desktopSrv!);
         _ctx.PSSetShaderResource(1, _textAtlasSrv ?? _desktopSrv!); // 图集缺失时兜底绑定桌面（无文字）
+        // 徽标纹理缺失时同样兜底绑定桌面：SizeBadgePos.w<=0 本来就不进采样分支
+        _ctx.PSSetShaderResource(2, _badgeSrv ?? _desktopSrv!);
         _ctx.PSSetSampler(0, _samp!);
         _ctx.Draw(3, 0);
     }
@@ -870,9 +910,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     /// <summary>
     /// 确保工具栏文字图集存在（按 _uiScale 构建）。
-    /// 布局 2048×640: 行0 = 主工具栏 7 按钮 (槽 0-6), 行1 = 标注工具栏 11 项 (槽 8-18),
+    /// 布局 2048×704: 行0 = 主工具栏 7 按钮 (槽 0-6), 行1 = 标注工具栏 11 项 (槽 8-18),
     /// 行2 = 文字槽 8 个 × 256×64 (槽 19-26), 行3 = 悬停标题 (槽 27),
-    /// 行4-7 = 主工具条逐钮悬停提示 7 个 (槽 28-34, shader 按 hover 取 TextSubs[28+hover])。
+    /// 行4-7 = 主工具条逐钮悬停提示 7 个 (槽 28-34, shader 按 hover 取 TextSubs[28+hover]),
+    /// 行8 = 静置操作提示 (槽 35, 未框选时居中)。
     /// 按钮文字/提示一律取自 ToolbarContract（契约单源）——本文件不许再出现按钮文案字面量。
     /// </summary>
     private void EnsureTextAtlas()
@@ -885,8 +926,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
             _textAtlasSrv?.Dispose(); _textAtlasSrv = null;
             _textAtlas?.Dispose(); _textAtlas = null;
 
-            // 布局: 2048×640 图集
-            const int atlasW = 2048, atlasH = 640;
+            // 布局: 2048×704 图集
+            const int atlasW = 2048, atlasH = 704;
             const int row1Y = 128, row2Y = 256;
             var mainItems = ToolbarContract.Main
                 .Select(b => (text: $"{b.Glyph} {b.Text}", w: 0, h: 0))
@@ -986,6 +1027,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
                             Buffer.BlockCopy(bmp, row * hintW * 4, atlasBytes, ((dstY + row) * atlasW + dstX) * 4, hintW * 4);
                     }
                 }
+                // 行 8: 静置操作提示 (槽 35, 整行 2048×64) —— 未框选/未拖拽时居中显示一句操作说明。
+                {
+                    const int idleRowY = 640, idleH = 64;
+                    int idleW = Math.Min(atlasW, ToolbarContract.EstimateTextWidthPx(ToolbarContract.IdleHint, fontSize));
+                    subs[35] = new System.Numerics.Vector4(0, idleRowY / (float)atlasH, idleW / (float)atlasW, idleH / (float)atlasH);
+                    var bmp = RenderTextBitmap(device, ToolbarContract.IdleHint, idleW, idleH, fontSize);
+                    if (bmp is not null)
+                    {
+                        for (int row = 0; row < idleH; row++)
+                            Buffer.BlockCopy(bmp, row * idleW * 4, atlasBytes, ((idleRowY + row) * atlasW + 0) * 4, idleW * 4);
+                    }
+                    _idleHintW = idleW; _idleHintH = idleH;
+                }
             }
             _atlasScale = _uiScale;
             _annoTextSlotsDirty = false;
@@ -1031,6 +1085,65 @@ public sealed partial class HdrCaptureWindow : IDisposable
             LogService.Error("HdrCapture", $"文字图集构建失败（GPU 合成降级）: {ex.Message}");
             _textAtlasSrv?.Dispose(); _textAtlasSrv = null;
             _textAtlas?.Dispose(); _textAtlas = null;
+        }
+    }
+
+    /// <summary>
+    /// 尺寸徽标纹理：文字变化时才重烘（拖拽中每个像素都可能改数，但一次只有十几字节的排版）。
+    /// 独立于图集 —— 图集是 2048×704 全量上传，不能每帧重建。
+    /// </summary>
+    private void EnsureSizeBadge(string text)
+    {
+        if (_badgeTex is not null && _badgeText == text && Math.Abs(_badgeScale - _uiScale) < 0.01)
+            return;
+
+        try
+        {
+            float fontPx = 16f * (float)_uiScale;
+            int bw = Math.Min(BadgeTexW, ToolbarContract.EstimateTextWidthPx(text, fontPx) + (int)Math.Round(8 * _uiScale));
+            int bh = Math.Min(BadgeTexH, Math.Max(24, (int)Math.Round(28 * _uiScale)));
+            var bmp = RenderTextBitmap(AnnotationRasterizer.SharedCanvasDevice, text, bw, bh, fontPx);
+            if (bmp is null) return;
+
+            if (_badgeTex is null)
+            {
+                _badgeTex = _device.CreateTexture2D(new Texture2DDescription
+                {
+                    Width = BadgeTexW, Height = BadgeTexH, MipLevels = 1, ArraySize = 1,
+                    Format = Format.B8G8R8A8_UNorm, SampleDescription = new(1, 0),
+                    Usage = ResourceUsage.Dynamic, BindFlags = BindFlags.ShaderResource,
+                    CPUAccessFlags = CpuAccessFlags.Write
+                });
+                _badgeSrv = _device.CreateShaderResourceView(_badgeTex);
+            }
+
+            var m = _ctx.Map(_badgeTex, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            if (m.DataPointer != 0)
+            {
+                try
+                {
+                    unsafe
+                    {
+                        fixed (byte* src = bmp)
+                        {
+                            int rowBytes = bw * 4;
+                            for (int row = 0; row < bh; row++)
+                                Buffer.MemoryCopy(src + row * rowBytes, (byte*)m.DataPointer.ToPointer() + row * m.RowPitch, rowBytes, rowBytes);
+                        }
+                    }
+                }
+                finally { _ctx.Unmap(_badgeTex, 0); }
+            }
+
+            _badgeText = text; _badgeScale = _uiScale;
+            _badgeW = bw; _badgeH = bh;
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("HdrCapture", $"尺寸徽标纹理构建失败（徽标隐藏）: {ex.Message}");
+            _badgeSrv?.Dispose(); _badgeSrv = null;
+            _badgeTex?.Dispose(); _badgeTex = null;
+            _badgeText = "";
         }
     }
 
@@ -1127,6 +1240,30 @@ public sealed partial class HdrCaptureWindow : IDisposable
             cb.HoverRect = System.Numerics.Vector4.Zero;
         }
 
+        // ── 选区尺寸徽标（拖拽中/完成后, 选区上方居中; SDR 兜底层 SizeLabel 同形）──
+        int selL = Math.Min(_sx1, _sx2), selR = Math.Max(_sx1, _sx2);
+        int selT = Math.Min(_sy1, _sy2), selB = Math.Max(_sy1, _sy2);
+        if (!_annoMode && (_down || _selComplete) && selR - selL >= 1 && selB - selT >= 1)
+        {
+            EnsureSizeBadge(ToolbarContract.SizeBadgeText(selR - selL, selB - selT));
+            if (_badgeSrv is not null)
+            {
+                int bx = Math.Clamp(selL + (selR - selL) / 2 - _badgeW / 2, 4, Math.Max(4, w - _badgeW - 4));
+                int by = selT - _badgeH - 6;
+                if (by < 4) by = Math.Min(selT + 6, h - _badgeH - 4);
+                cb.SizeBadgeSub = new System.Numerics.Vector4(0, 0, _badgeW / (float)BadgeTexW, _badgeH / (float)BadgeTexH);
+                cb.SizeBadgePos = new System.Numerics.Vector4(bx, by, _badgeW, _badgeH);
+            }
+        }
+
+        // ── 静置操作提示（未框选、未拖拽时居中; 图集槽 35）──
+        if (!_selComplete && !_down)
+        {
+            int ix = Math.Clamp((w - _idleHintW) / 2, 4, Math.Max(4, w - _idleHintW - 4));
+            int iy = Math.Max(4, (h - _idleHintH) / 2);
+            SetV4(cb.TextPos, 35, new System.Numerics.Vector4(ix, iy, _idleHintW, _idleHintH));
+        }
+
         // 图集子矩形（40 槽）
         for (int i = 0; i < 40 && i < _atlasSubs.Length; i++)
             SetV4(cb.TextSubs, i, _atlasSubs[i]);
@@ -1160,8 +1297,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 *(System.Numerics.Vector4*)(p + 1440) = cb.AnnoColor;
                 *(System.Numerics.Vector4*)(p + 1456) = cb.AnnoStroke;
                 *(System.Numerics.Vector4*)(p + 1472) = cb.HoverRect;
+                *(System.Numerics.Vector4*)(p + 1488) = cb.SizeBadgeSub;
+                *(System.Numerics.Vector4*)(p + 1504) = cb.SizeBadgePos;
                 fixed (float* al = cb.AnnoLayers)
-                    Buffer.MemoryCopy(al, p + 1488, 4096, 4096);
+                    Buffer.MemoryCopy(al, p + 1520, 4096, 4096);
             }
             }
             finally { _ctx.Unmap(_uiCb!, 0); } // 异常路径也必须 Unmap，否则常量缓冲永久无法再写入
@@ -2445,6 +2584,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _rsNoCull?.Dispose(); _rsNoCull = null;
         _textAtlasSrv?.Dispose(); _textAtlasSrv = null;
         _textAtlas?.Dispose(); _textAtlas = null;
+        _badgeSrv?.Dispose(); _badgeSrv = null;
+        _badgeTex?.Dispose(); _badgeTex = null;
         _desktopSrv?.Dispose(); _desktopSrv = null;
         _desktopTex?.Dispose(); _desktopTex = null;
         _pooledStaging?.Dispose(); _pooledStaging = null;

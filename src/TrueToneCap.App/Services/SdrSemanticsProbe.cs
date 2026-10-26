@@ -131,7 +131,7 @@ public static partial class SdrSemanticsProbe
     private static partial nint GetModuleHandleW(nint name);
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
+    internal struct RECT { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MSG
@@ -200,6 +200,71 @@ public static partial class SdrSemanticsProbe
         }
         return DefWindowProcW(hWnd, msg, wParam, lParam);
     }
+
+    // ═══ 补丁窗的唯一实现：探针（自己那条线程泵消息）与 --overlay-whitelevel-ab（UI 线程泵）共用
+    // 同一扇窗、同一个 WndProc、同一份 FillRect 配方。两处各写一份的话，"参照臂和被试臂到底是不是
+    // 同一种东西"这个问题就没有答案了 —— 而那正是 A/B 唯一要问的事。
+    // ⚠ 静态刷柄只支持进程内一扇在世；两个诊断档互斥（各自独立进程），不做多实例支持。
+
+    /// <summary>建一扇置顶无边框补丁窗，并读回【实测】矩形（调用方要按这个矩形采样，别按请求值）。
+    /// 失败返回 0 并在 error 里带上 Win32 错误码。</summary>
+    internal static unsafe nint CreatePatchWindow(int x, int y, int w, int h,
+        out RECT actual, out string? error)
+    {
+        actual = default;
+        error = null;
+        nint hInst = GetModuleHandleW(0);
+        var classNamePtr = Marshal.StringToHGlobalUni(ClassName);
+        var wc = new WNDCLASSEXW
+        {
+            cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
+            // Win32 回调是 stdcall；`delegate* unmanaged` 默认 cdecl，显式写 [Stdcall] 才与
+            // WndProc 上的 CallConvs 匹配（少写会报 CS8757「没有匹配的重载」）。
+            lpfnWndProc = (nint)(delegate* unmanaged[Stdcall]<nint, uint, nint, nint, nint>)&WndProc,
+            hInstance = hInst,
+            lpszClassName = classNamePtr,
+        };
+        ushort atom = RegisterClassExW(ref wc);
+        Marshal.FreeHGlobal(classNamePtr);
+        if (atom == 0)
+        {
+            error = $"RegisterClassExW 失败 err={Marshal.GetLastPInvokeError()}";
+            return 0;
+        }
+
+        nint hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            ClassName, ClassName, WS_POPUP | WS_VISIBLE, x, y, w, h, 0, 0, hInst, 0);
+        if (hwnd == 0)
+        {
+            error = $"CreateWindowExW 失败 err={Marshal.GetLastPInvokeError()}";
+            return 0;
+        }
+        if (!GetWindowRect(hwnd, out actual))
+        {
+            error = $"GetWindowRect 失败 err={Marshal.GetLastPInvokeError()} ⇒ 采样几何无从校验";
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        return hwnd;
+    }
+
+    /// <summary>换色 + 立刻同步重绘一帧（UpdateWindow 直接派发 WM_PAINT，不等消息循环）。</summary>
+    internal static void PaintPatch(nint hwnd, byte gray)
+    {
+        SetPatchColor((uint)((gray << 16) | (gray << 8) | gray));
+        InvalidateRect(hwnd, 0, false);
+        UpdateWindow(hwnd);
+    }
+
+    internal static void ShowPatch(nint hwnd, bool on) => ShowWindow(hwnd, on ? SW_SHOW : SW_HIDE);
+
+    internal static void ClosePatchWindow(nint hwnd)
+    {
+        if (s_brush != 0) { DeleteObject(s_brush); s_brush = 0; }
+        if (hwnd != 0) DestroyWindow(hwnd);
+    }
+
+    internal static int PatchPaintErrors => s_paintErrors;
 
     /// <summary>探针主体。返回退出码（0=判到了，1=没判到）；全文同时落盘到 <paramref name="artifactPath"/>。</summary>
     public static int Run(string artifactPath)
@@ -283,32 +348,11 @@ public static partial class SdrSemanticsProbe
             Say2("        float/linear(authored)≈1 ⇒ Float16 在 80nits 参考白；≈k ⇒ Float16 已抬到系统纸白。");
 
             // ── 1. 建补丁窗（WS_POPUP 无边框 ⇒ 客户区≈窗口矩形；NOACTIVATE ⇒ 不动用户焦点）──
-            nint hInst = GetModuleHandleW(0);
-            var classNamePtr = Marshal.StringToHGlobalUni(ClassName);
-            var wc = new WNDCLASSEXW
-            {
-                cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
-                // Win32 回调是 stdcall；`delegate* unmanaged` 默认 cdecl，显式写 [Stdcall] 才与
-                // WndProc 上的 CallConvs 匹配（少写会报 CS8757「没有匹配的重载」）。
-                lpfnWndProc = (nint)(delegate* unmanaged[Stdcall]<nint, uint, nint, nint, nint>)&WndProc,
-                hInstance = hInst,
-                lpszClassName = classNamePtr,
-            };
-            ushort atom = RegisterClassExW(ref wc);
-            Marshal.FreeHGlobal(classNamePtr);
-            if (atom == 0)
-            {
-                Say2($"★ RegisterClassExW 失败 err={Marshal.GetLastPInvokeError()} ⇒ 判为【没判】");
-                return 1;
-            }
-
-            nint hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                ClassName, ClassName, WS_POPUP | WS_VISIBLE,
-                target.X + MonitorInset, target.Y + MonitorInset, PatchW, PatchH,
-                0, 0, hInst, 0);
+            nint hwnd = CreatePatchWindow(target.X + MonitorInset, target.Y + MonitorInset,
+                                           PatchW, PatchH, out var wr, out string? winErr);
             if (hwnd == 0)
             {
-                Say2($"★ CreateWindowExW 失败 err={Marshal.GetLastPInvokeError()} ⇒ 判为【没判】");
+                Say2($"★ {winErr} ⇒ 判为【没判】");
                 return 1;
             }
 
@@ -321,11 +365,6 @@ public static partial class SdrSemanticsProbe
                 // ── 2. 采样矩形以 GetWindowRect 的【实测】为准，不用我请求的那个 ──
                 // 「CreateWindowEx 的坐标在 PMv2 进程里是否等于物理像素」在这一侧没有本机之外的证据；
                 // 读回矩形并把"整块必须落在目标屏内"做成硬自检 ⇒ 几何错了会显形，不会悄悄采到桌面。
-                if (!GetWindowRect(hwnd, out var wr))
-                {
-                    Say2($"★ GetWindowRect 失败 err={Marshal.GetLastPInvokeError()} ⇒ 判为【没判】");
-                    return 1;
-                }
                 bool inside = wr.Left >= target.X && wr.Top >= target.Y &&
                               wr.Right <= target.X + target.Width && wr.Bottom <= target.Y + target.Height;
                 Say2($"  补丁实得矩形=({wr.Left},{wr.Top})-({wr.Right},{wr.Bottom}) " +
@@ -553,12 +592,13 @@ public static partial class SdrSemanticsProbe
         }
     }
 
-    private readonly record struct RectI(int X, int Y, int W, int H);
+    internal readonly record struct RectI(int X, int Y, int W, int H);
 
-    private readonly record struct SampleStats(double Mean, double Std, double FloatMean, int Pixels, int MissPixels);
+    internal readonly record struct SampleStats(double Mean, double Std, double FloatMean, int Pixels, int MissPixels);
 
-    /// <summary>区域内灰度（三通道平均）统计；float 帧同样取三通道平均 —— 中性灰下通道顺序不影响结果。</summary>
-    private static SampleStats SampleRect(byte[] sdr, float[]? hdr, int w, int h, RectI r)
+    /// <summary>区域内灰度（三通道平均）统计；float 帧同样取三通道平均 —— 中性灰下通道顺序不影响结果。
+    /// 对 A/B 也开放：两台仪器必须用同一把尺子量同一块像素。</summary>
+    internal static SampleStats SampleRect(byte[] sdr, float[]? hdr, int w, int h, RectI r)
     {
         double sum = 0, sumSq = 0, fSum = 0;
         int n = 0, fN = 0, miss = 0;

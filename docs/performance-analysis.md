@@ -111,16 +111,16 @@ EncodeAndCopyAsync()
 
 | 操作 | 4K 耗时 | 说明 |
 |------|---------|------|
-| `SelectionOverlay` 窗口创建+加载 | ~20-50ms | XAML 窗口 + WriteableBitmap 加载 |
-| `SelectionOverlay` 像素提取 | <1ms | `Buffer.BlockCopy` 行复制 |
-| `SelectionOverlay` 标注合成 | ~10-50ms | `Task.Run` + `AnnotationRasterizer.RenderLayer` |
+| 选区窗创建+加载 | ~20-50ms | **2026-10-27 起只有 `HdrCaptureWindow`**（旧 XAML 覆盖层已删） |
+| 选区像素提取 | <1ms | `Buffer.BlockCopy` 行复制 |
+| 选区标注合成 | ~10-50ms | `Task.Run` + `AnnotationRasterizer.RenderLayer` |
 | **HdrCaptureWindow** GPU 合成 | ~2-5ms | Direct3D 11 OverlayComposite PS |
 | HdrCaptureWindow CPU 回退合成 | ~20-30ms | `CompositeUI` + `Parallel.For` 混合 |
 | `AnnotationWindow` 窗口创建+加载 | ~20-60ms | `SoftwareBitmap` + `SetBitmapAsync` |
 
 ### 4.2 当前已修复
 
-✅ **2026-08-25 先关窗修复**：`SelectionOverlay.Finish()` 先 `Close()` 再编码 → 用户感知零延迟
+✅ **先关窗后编码**：选区动作完成即关窗再编码 → 用户感知零延迟（原实现见已删除的 `SelectionOverlay.Finish()`）
 ✅ **HdrCaptureWindow VRR + GPU 合成**：拖拽帧 ~2ms (2026-08-16)
 ✅ **HdrCaptureWindow CPU 锁修复**：`InvalidateRect` + 独立渲染线程 (2026-08-10)
 
@@ -129,7 +129,7 @@ EncodeAndCopyAsync()
 | 序号 | 优化点 | 收益 | 复杂度 | 工作量 | 说明 |
 |------|--------|------|--------|--------|------|
 | **P1** | **SoftwareBitmap 改 WriteableBitmap** | 中 (~20ms) | 低 | 1h | `AnnotationWindow.RenderRawPixels()` 用 `SoftwareBitmap` + `SoftwareBitmapSource` 异步加载大图。4K 图像 `SetBitmapAsync` 耗时 ~20-40ms。改为 `WriteableBitmap` + `PixelData.AsStream().Write()` 同步填充，节省 ~20ms |
-| **P2** | **SelectionOverlay ExtractRegionPixels 零拷贝** | 低 (~1ms) | 中 | 2h | 当前 `ExtractRegionPixels` 从全桌面 `Buffer.BlockCopy` 行提取区域。若 `desktopPixels` 用 `ArrayPool<byte>` 共享，区域提取可变为 `Memory<byte>.Slice` 视图。但桌面像素编码后即释放，共享生命周期复杂 |
+| **P2** | **选区像素提取零拷贝** | 低 (~1ms) | 中 | 2h | 当前 `ExtractRegionFromDesktop` 从全桌面 `Buffer.BlockCopy` 行提取区域。若 `desktopPixels` 用 `ArrayPool<byte>` 共享，区域提取可变为 `Memory<byte>.Slice` 视图。但桌面像素编码后即释放，共享生命周期复杂 |
 | **P3** | **HdrCaptureWindow 首帧 UploadFrame 延迟** | 中 (~23ms) | 低 | 1h | 日志显示首帧 UploadFrame 23ms。当前 `UploadFrame` 在 `RenderCore` 首次调用时执行。可提前到 `LoadFrame` 阶段异步上传 → 窗口打开时纹理已就绪 |
 | **P4** | **MainWindow StatusTxt 高频更新去重** | 低 | 低 | 0.5h | 多处 `DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "...")` 可能连续触发。可合并为延时更新 (100ms 去抖) |
 

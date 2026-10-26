@@ -169,8 +169,6 @@ public static class LocaleManager
     // 2026-09-30：选区预览统一到 HDR 那张自绘窗之后，SDR 与 HDR 用同一句状态提示
     // （原先两句分别写死 "🖥️ HDR 预览" 与 "📷 选区模式"，都是 .cs 里的中文直写）。
     public static string SelectionPreview => s_lang == AppLanguage.Chinese ? "🖼️ 选区预览" : "Selection preview";
-    public static string PreviewFallbackTitle => s_lang == AppLanguage.Chinese ? "⚠️ 预览已回退旧界面" : "⚠️ Preview fell back to the legacy UI";
-    public static string PreviewFallbackHint => s_lang == AppLanguage.Chinese ? "预览窗创建失败，本次改用旧版选区界面" : "Preview window failed to initialize; the legacy selection overlay is used this time";
 
     // ── 格式提示 ──
     // ── 格式提示 ──
@@ -450,14 +448,9 @@ public static class LocaleManager
             ["打开链接失败"] = "Failed to open the link",
             ["预览渲染失败: {0}"] = "Preview render failed: {0}",
             ["取消选区 (Esc)"] = "Cancel selection (Esc)",
+            ["提取区域失败"] = "Failed to extract the region",
+            ["预览窗无法创建"] = "Could not create the preview window",
             ["取消"] = "Cancel",
-            ["矩形 (R)"] = "Rectangle (R)",
-            ["椭圆 (E)"] = "Ellipse (E)",
-            ["箭头 (A)"] = "Arrow (A)",
-            ["画笔 (P)"] = "Pen (P)",
-            ["文字 (T)"] = "Text (T)",
-            ["马赛克 (M)"] = "Mosaic (M)",
-            ["完成标注 (Esc)"] = "Finish annotating (Esc)",
             ["完成"] = "Done",
             ["打开文件夹"] = "Open folder",
             ["打开文件"] = "Open file",

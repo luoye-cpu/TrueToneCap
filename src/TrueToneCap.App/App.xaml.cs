@@ -516,6 +516,31 @@ public partial class App : Application
                     Environment.Exit(bad == 0 ? 0 : 1);
                 });
             }
+            // ── --overlay-whitelevel-ab：兜底那一路的【呈现面】亮度 A/B（判据与读法见该文件头）──
+            // 与 --window-probe 同一形状：必须在 XAML 应用真起来之后才跑得动（被试臂就是一扇 XAML 窗），
+            // 而参照臂复用探针那扇 GDI 补丁窗 —— 两台仪器共用一段实现，"参照"才有内容。
+            if (Environment.GetCommandLineArgs().Any(a =>
+                    string.Equals(a, Services.OverlayWhiteLevelAb.Flag, StringComparison.OrdinalIgnoreCase)))
+            {
+                _ = window.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await Task.Delay(1200);
+                    int rc = await Services.OverlayWhiteLevelAb.RunAsync();
+                    Environment.Exit(rc);
+                });
+            }
+            // ── --preview-ui-probe：选区预览窗的静置提示/尺寸徽标有没有真的画上去 ──
+            // 这两件是烘进位图的字，UIA 与本地化扫描都看不见；只能从呈现面像素上取证。
+            if (Environment.GetCommandLineArgs().Any(a =>
+                    string.Equals(a, Services.PreviewUiProbe.Flag, StringComparison.OrdinalIgnoreCase)))
+            {
+                _ = window.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await Task.Delay(1200);
+                    int rc = await Services.PreviewUiProbe.RunAsync();
+                    Environment.Exit(rc);
+                });
+            }
         }
         // 开机启动：不显示窗口，由 MainWindow 构造函数中自动缩放到托盘
         LogService.Info("App", isAutostart ? "开机自启动模式，不显示窗口" : "窗口已激活");

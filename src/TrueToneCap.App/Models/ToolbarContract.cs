@@ -75,6 +75,12 @@ public static class ToolbarContract
     /// <summary>标注工具条的悬停提示（图集槽 18）。</summary>
     public const string AnnoHint = "拖拽绘制标注";
 
+    /// <summary>静置提示（未框选、未拖拽时居中显示；图集槽 35）。原 SDR 兜底层 HintText 用的也是这一句。</summary>
+    public const string IdleHint = "单击 = 全屏  |  拖拽 = 框选  |  Esc = 取消";
+
+    /// <summary>选区尺寸徽标文字（画在选区上方居中；与已删除的 SDR 兜底层 SizeLabel 同形）。</summary>
+    public static string SizeBadgeText(int w, int h) => $"{w} × {h}";
+
     /// <summary>
     /// 估算一句提示在 <paramref name="fontPx"/> 字号下的像素宽（CJK/全角 ≈ 1em，其余 ≈ 0.6em，加 12px 余量）。
     /// 图集构建、CompositeUI 提示位、GDI 回退三处共用 —— 之前提示框写死 160 逻辑像素，

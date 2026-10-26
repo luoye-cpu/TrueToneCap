@@ -7,6 +7,7 @@
 
 Texture2D<float4> DesktopTex : register(t0); // 桌面帧 (scRGB 线性, 与交换链同尺寸)
 Texture2D<float4> TextTex    : register(t1); // 工具栏文字图集 (BGRA8, alpha=覆盖率)
+Texture2D<float4> BadgeTex   : register(t2); // 选区尺寸徽标 (BGRA8, alpha=覆盖率; 拖拽时逐帧更新)
 SamplerState Samp : register(s0);
 
 cbuffer UIState : register(b0)
@@ -20,12 +21,14 @@ cbuffer UIState : register(b0)
     float4 MousePos;       // (mx, my, 0, 0)
     float4 Flags;          // (selComplete, down, hoverIndex, dark)
     float4 FrameSize;      // (w, h, 0, 0)
-    float4 TextSubs[40];   // 图集子矩形 (0-6 主按钮, 8-17 标注, 18 标注提示, 19-26 文字槽 0-7, 27 悬停标题, 28-34 主逐钮提示)
+    float4 TextSubs[40];   // 图集子矩形 (0-6 主按钮, 8-17 标注, 18 标注提示, 19-26 文字槽 0-7, 27 悬停标题, 28-34 主逐钮提示, 35 静置提示)
     float4 TextPos[40];    // 帧内位置 (0-6 主, 7 主提示位置, 8-17 标注, 18 标注提示, 27 悬停标题位置)
     float4 AnnoState;      // (mode: 0/1, tool: 0..5, down: 0/1, 0)
     float4 AnnoColor;      // 标注颜色 (线性 RGB + A)
     float4 AnnoStroke;     // (strokeW, opacity, 0, 0)
     float4 HoverRect;      // 悬停窗口矩形 (x, y, w, h); w<=0 无悬停 (QQ截图式高亮)
+    float4 SizeBadgeSub;   // 尺寸徽标纹理子矩形 (u0,v0,du,dv) — 动态小纹理, w<=0 不画
+    float4 SizeBadgePos;   // 尺寸徽标帧内位置 (x, y, w, h)
     float4 AnnoLayers[256]; // 16 层 × 16 vec (V0: type,opacity,strokeW,0; V1: x1,y1,x2,y2; V2: 颜色; V3: 参数,槽,0,0; V4-15: 画笔段 12)
 };
 
@@ -104,6 +107,36 @@ float4 main(PSInput input) : SV_Target
                 float2 atlTip = (pos - tipPos.xy) / tipPos.zw * tipSub.zw + tipSub.xy;
                 float4 glyphTip = TextTex.Sample(Samp, atlTip);
                 base.rgb = lerp(base.rgb, float3(1.0, 1.0, 1.0), glyphTip.a);
+            }
+        }
+    }
+
+    // ═══ 1.6 静置操作提示（未框选、未拖拽时居中; 图集槽 35, 原 SDR 兜底层用的也是这一句）═══
+    if (selComplete < 0.5 && down < 0.5)
+    {
+        float4 hintSub = TextSubs[35];
+        float4 hintPos = TextPos[35];
+        if (hintSub.z > 0.0 && all(pos >= hintPos.xy) && all(pos <= hintPos.xy + hintPos.zw))
+        {
+            float2 atlHint = (pos - hintPos.xy) / hintPos.zw * hintSub.zw + hintSub.xy;
+            float4 glyphHint = TextTex.Sample(Samp, atlHint);
+            base.rgb = lerp(base.rgb, float3(1.0, 1.0, 1.0), glyphHint.a * 0.8);
+        }
+    }
+
+    // ═══ 1.7 选区尺寸徽标（拖拽中/完成后, 选区上方居中; 与已删除的 SDR 兜底层 SizeLabel 同形）═══
+    // 文字来自独立小纹理 (t2) 而非图集: 拖拽时每个像素都可能改数, 全图集重建是 5MB 级上传。
+    if ((selComplete > 0.5 || down > 0.5) && SizeBadgePos.z > 0.0)
+    {
+        if (all(pos >= SizeBadgePos.xy - 1.0) && all(pos <= SizeBadgePos.xy + SizeBadgePos.zw + 1.0))
+        {
+            float2 bgCenter = SizeBadgePos.xy + SizeBadgePos.zw * 0.5;
+            if (RoundRectSDF(pos, bgCenter, SizeBadgePos.zw * 0.5, 3.0) <= 0.0)
+            {
+                base.rgb = lerp(base.rgb, float3(0.27, 0.53, 1.0), 1.0);
+                float2 atlBadge = (pos - SizeBadgePos.xy) / SizeBadgePos.zw * SizeBadgeSub.zw + SizeBadgeSub.xy;
+                float4 glyphBadge = BadgeTex.Sample(Samp, atlBadge);
+                base.rgb = lerp(base.rgb, float3(1.0, 1.0, 1.0), glyphBadge.a);
             }
         }
     }

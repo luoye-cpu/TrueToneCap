@@ -150,4 +150,58 @@ public static class SdrSessionSemantics
         int n = sorted.Length;
         return n == 0 ? double.NaN : (n & 1) == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  呈现面 A/B 的判定 —— --overlay-whitelevel-ab 用的就是这把尺子
+    // ══════════════════════════════════════════════════════════════════════
+    //
+    // 与上面同一个理由：真机跑一次只证明"这次量出来是什么"，证明不了尺子会红。
+    // 两臂画的是【同一个 authored 字节】，所以比值把纸白、面板峰值、EOTF 一并约掉 ——
+    // 这也是为什么 k 只用来【认第二抬的形状】，而不是用来归一化被试臂。
+
+    public const double SameTreatmentBand = 0.03;    // |ratio−1| ≤ 此值 ⇒ 两臂同等待遇
+    public const double SecondBoostBand = 0.10;      // ratio 落在 k×(1±此值) ⇒ 被试面被多抬一次
+    public const int MinValidRatios = 2;             // 不足 ⇒ 不判
+
+    public enum PresentationVerdict { Unknown, SameTreatment, SecondBoost }
+
+    public readonly record struct PresentationAbVerdict(
+        PresentationVerdict Verdict, double MedianRatio, double SdrWhiteScale, bool SelfCheckPassed, string Why);
+
+    /// <param name="ratios">逐档的 被试float均值 / 参照float均值（调用方只交稳定档；k≤0 时第二抬那一支无从认）。</param>
+    /// <param name="sdrWhiteNits">系统 SDR 白点，用来算 k=白点/80；≤0 ⇒ 只判"同等待遇"那一支。</param>
+    public static PresentationAbVerdict JudgePresentationAb(IReadOnlyList<double> ratios, int sdrWhiteNits)
+    {
+        ArgumentNullException.ThrowIfNull(ratios);
+        double k = SdrWhiteScale(sdrWhiteNits);
+        var valid = new List<double>();
+        foreach (var r in ratios)
+            if (!double.IsNaN(r) && !double.IsInfinity(r) && r > 0) valid.Add(r);
+
+        if (valid.Count < MinValidRatios)
+            return new PresentationAbVerdict(PresentationVerdict.Unknown, double.NaN, k, false,
+                $"有效档数 {valid.Count}/{ratios.Count} < {MinValidRatios} ⇒ 不判");
+
+        double med = Median(valid.ToArray());
+        bool same = Math.Abs(med - 1.0) <= SameTreatmentBand;
+        bool boost = k > 0 && Math.Abs(med - k) <= SecondBoostBand * k;
+        var v = same ? PresentationVerdict.SameTreatment : boost ? PresentationVerdict.SecondBoost : PresentationVerdict.Unknown;
+        string why = $"中位 ratio = {med:0.000}（{valid.Count} 档）| k = " +
+                     (k > 0 ? k.ToString("0.000") : "读不到") +
+                     $" | 阈值 同等待遇 1±{SameTreatmentBand:0.##} / 第二抬 k×(1±{SecondBoostBand:0.##})";
+        return new PresentationAbVerdict(v, med, k, true, why);
+    }
+
+    /// <summary>结论对"改哪儿"的含义。三条互斥，不许同真。</summary>
+    public static string Implication(in PresentationAbVerdict v) => v.Verdict switch
+    {
+        PresentationVerdict.SameTreatment =>
+            "同等待遇 ⇒ 兜底那一路的 XAML 呈现面与普通 SDR 窗被 DWM 同样对待，供帧语义正确；" +
+            "「XAML 面被多抬一次」这一支被否证，过曝只能回到观测本身/另一套显示配置去解释，不许动捕获层也不许动 D3D 那条路。",
+        PresentationVerdict.SecondBoost =>
+            "第二抬坐实 ⇒ 只在兜底渲染器内部先 ÷k 再交给 DWM；捕获层与 D3D 那条已经正确的路都不许跟着改。",
+        _ => v.SelfCheckPassed
+            ? "ratio 落在两条假设之间的灰带 ⇒ 本轮不判，换档或补测再跑，不许硬掰成任何一个结论。"
+            : "自检未过 ⇒ 本轮【没判】，不是通过。",
+    };
 }
