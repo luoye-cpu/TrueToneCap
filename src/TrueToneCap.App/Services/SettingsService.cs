@@ -245,6 +245,33 @@ public sealed class SettingsService
         Current.FreeEndpointsMigrated = true;
         var json = SerializeDiffs(Current);
 
+        // ═══ 2026-10-31：内容与盘上逐字节相同 ⇒ 不重开一次原子写 ═══
+        // 真机 117/117 次启动里，主窗口之前那 3 次 Save() 有 2 次写出的字节与盘上现有内容【完全相同】
+        // （成因：MainWindow.RebuildFormatCombo() 换 ItemsSource 会把 SelectedIndex 打回 -1，
+        //   于是 FormatCbo 的 SelectionChanged 各补一发 OnFormatChanged，而 _uiReady 那时已经是 true
+        //   ⇒ 每次都把同一个 FormatIndex 原样再落一遍盘）。见本轮报告②。
+        // 口径边界（三条都是刻意的）：
+        //   · 只跳【文件 IO】，不跳 SaveSecret —— LlmApiKey/YoudaoAppSecret 是 [JsonIgnore]，
+        //     改了凭据时这份 JSON 完全可以不变，拿"JSON 相同"当"整次保存没内容"会把凭据写丢。
+        //   · 迁移落盘不受影响：迁移必然改动差集或修订号 ⇒ 内容不同，照写。
+        //   · "键没了"不作数：判据是整份序列化结果相等，不是"某个键缺不缺"
+        //     （差集写盘下键不存在本来就只说明"等于默认"，推不出用户没设过）。
+        // 判据：Diagnose 档日志里"设置内容与盘上相同"计数应等于省下的写盘次数；
+        //       Brief 档下这行不落盘，"设置已保存到"那条只在真写时出现 ⇒ 两者可分。
+        // 还原即回退：删掉下面这个 if 块（含 Debug 行）就是原行为，无开关。
+        if (File.Exists(SettingsPath))
+        {
+            string? onDisk = null;
+            try { onDisk = File.ReadAllText(SettingsPath); } catch { /* 读不动就照写，保守 */ }
+            if (string.Equals(onDisk, json, StringComparison.Ordinal))
+            {
+                _savedToDisk = true;   // 内存这份与盘上确实一致
+                LogService.Debug("SettingsService",
+                    $"设置内容与盘上相同，跳过写盘（{SettingsPath}）");
+                return;
+            }
+        }
+
         // ═══ 2026-09-15 修复：原子写入（与 SecretStore.cs:121-137 对齐）═══
         // 原实现直接 File.WriteAllText：写入过程中崩溃/断电会留下【截断的 settings.json】，
         // 下次启动 Deserialize 抛 JsonException → 整份设置静默重置为默认值

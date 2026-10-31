@@ -94,8 +94,68 @@ public sealed partial class WgcCaptureService : IDisposable
     // P3 修复: 使用 (HMONITOR, IsHdr) 元组 key，避免位或标记碰撞
     private readonly Dictionary<(nint Monitor, bool IsHdr), PooledSession> _sessionPool = [];
     private readonly object _poolLock = new();
+
+    // ═══ F5 仪表：_poolLock 每一处持锁的【次数 / 合计 / 峰值】（2026-10-31 批，只测不改）═══
+    // 要回答的问题（审查 §3-F5「TryGetLatestFrame 持 _poolLock 整段做回读」）：这把锁到底被持有多久、
+    // 是哪一处持有它。原指控给不出读数的原因很具体：持锁段里那次回读本身要等 GPU 锁（最多 500ms）
+    // 加一次 33MB 拷贝，而这三件事今天没有任何一处计时。
+    // 口径（今天点名的 `_engines` 那类"静态可变跨调用状态"，这里刻意避开）：
+    //   · 数组是本**实例**的字段 —— WgcCaptureService 由 DI 建一份，多进程/多实例互不串账；
+    //   · 并发截图（s_captureLock 只拦 CaptureMonitorAsync，TryGetLatestFrame/ReleaseSharedFrame 不排队）
+    //     会同刻进入不同站点，所以一律 Interlocked：计数/合计用 Add，峰值用 CAS 环，
+    //     两线程同时到峰最多一个赢，不会写坏也不会丢总数；
+    //   · 单位存【微秒】：4K 一次区域回读常在 1ms 以下，按 ms 记账会整列读成 0。
+    // 逐帧/逐次一律零日志，只在诊断档按结算点打一行（见 DumpPoolLockMeters）。
+    private static readonly string[] s_poolLockNames =
+    [
+        "建SDR会话", "建Float16会话", "空闲回收", "会话失效", "探针取帧龄",
+        "交还共享槽", "选区回读(Float16)", "选区回读(SDR)", "录制取最新帧",
+    ];
+    private const int PoolLockSites = 9;
+    private const int LockGetSdr = 0, LockGetHdr = 1, LockIdleStop = 2, LockInvalidate = 3,
+        LockProbeAge = 4, LockReleaseShared = 5, LockReadHdr = 6, LockReadSdr = 7, LockTryLatest = 8;
+    private readonly long[] _mPoolLockN = new long[PoolLockSites];
+    private readonly long[] _mPoolLockUs = new long[PoolLockSites];
+    private readonly long[] _mPoolLockMaxUs = new long[PoolLockSites];
     private CancellationTokenSource? _idleStopCts;
     private const int IdleStopDelayMs = 15000; // 15 秒无截图则自动停止会话
+
+    /// <summary>结算一次 _poolLock 持有（在锁**外面**调用：先出锁再记账，绝不让仪表把临界区延长）。</summary>
+    private void RecordPoolLock(int site, long t0)
+        => PerfMeter.Record(_mPoolLockN, _mPoolLockUs, _mPoolLockMaxUs, site, PerfMeter.SinceMicro(t0));
+
+    /// <summary>把 _poolLock 的持锁账目打成一行（诊断档）。空站点不写，读数短。</summary>
+    private void DumpPoolLockMeters(string reason)
+    {
+        if (!PerfMeter.DumpEnabled) return;
+        var sb = new System.Text.StringBuilder(160);
+        sb.Append($"[Meter/F5] _poolLock 持锁账目（{reason}）:");
+        bool any = false;
+        for (int i = 0; i < PoolLockSites; i++)
+        {
+            long n = Interlocked.Read(ref _mPoolLockN[i]);
+            if (n == 0) continue;
+            any = true;
+            sb.Append($" {s_poolLockNames[i]} n={n} 合计{PerfMeter.Ms(Interlocked.Read(ref _mPoolLockUs[i]))}"
+                + $" 峰值{PerfMeter.Ms(Interlocked.Read(ref _mPoolLockMaxUs[i]))}");
+        }
+        Log(any ? sb.ToString() : sb.Append(" 一次都没进过锁").ToString());
+    }
+
+    /// <summary>对外结算入口（探针/CLI 需要"现在就报"时调；本批不接 Program.cs 的参数）。</summary>
+    internal void DumpPerfMetersOnDemand(string reason)
+    {
+        DumpPoolLockMeters(reason);
+        lock (_poolLock)
+        {
+            if (_sessionPool.Count == 0) { Log($"[Meter/F5] 当前在场会话: 0 条（{reason}）"); return; }
+            var sb = new System.Text.StringBuilder(200);
+            sb.Append($"[Meter/F5] 当前在场会话: {_sessionPool.Count} 条（{reason}，未结算，结算行在会话 Dispose 时打）");
+            foreach (var (key, s) in _sessionPool)
+                sb.Append($" | 0x{key.Monitor:X}{(key.IsHdr ? "/HDR" : "/SDR")} {s.Width}x{s.Height}");
+            Log(sb.ToString());
+        }
+    }
 
     // ═══ 2026-10-07 性能轮：单帧取帧缓冲复用 ═══
     // 单屏捕获路径（CaptureMonitorInternal）每帧各取一次 SDR/HDR，复用这两块把
@@ -231,6 +291,21 @@ public sealed partial class WgcCaptureService : IDisposable
         // Staging 纹理复用
         private ID3D11Texture2D? _stagingTex;
         private int _stagingW, _stagingH;
+
+        // ═══ F5 仪表（2026-10-31 批：先补仪表，不改任何行为）═══
+        // 要回答的问题（审查 §3-F5 / §9 那两行"仍未量"）：一条会话活多久，其间 staging 纹理被
+        // 【重建】了几次、其中几次是"尺寸切换"造成的（整屏 ↔ 选区来回切就是那条指控的形状），
+        // 以及这一趟 CreateTexture2D 到底贵不贵（4K 8-bit 单块实测 42.2MB，尺寸即体积）。
+        // 口径：这是**每条会话自己的实例字段**，不是进程级静态 —— 会话由
+        // (HMONITOR, IsHdr) 唯一确定，多屏并发时各数各的，不会互相认领计数；
+        // 帧回调（FreeThreaded 池）与消费者线程可能并发进入同一条会话 ⇒ 一律 Interlocked。
+        // 落盘点 = Dispose 一行（会话一条），逐帧零日志。
+        private long _mStagingAsk;          // 问过几次要 staging（含命中复用）
+        private long _mStagingCreate;       // 真的新建了几块
+        private long _mStagingResize;       // 其中"尺寸与上一块不同"的几次（拆掉重建）
+        private long _mStagingCreateUs;     // CreateTexture2D 本体耗时合计（微秒）
+        private long _mStagingCreateMaxUs;  // 峰值
+        private long _mStagingBytes;        // 累计向驱动申请的 staging 字节数
 
         // ═══ GPU 纹理缓存：最新帧的 GPU 拷贝，用于直通编码路径（跳过 CPU 回读）═══
         private ID3D11Texture2D? _latestTexture;
@@ -777,8 +852,14 @@ public sealed partial class WgcCaptureService : IDisposable
         /// <summary>确保 staging 纹理与给定尺寸/格式匹配（调用方须持 GPU 锁）。</summary>
         private void EnsureStaging(int w, int h, Vortice.DXGI.Format format)
         {
+            Interlocked.Increment(ref _mStagingAsk);   // F5 仪表：命中复用也算"问过"，否则分母只剩新建
             if (_stagingTex is not null && _stagingW == w && _stagingH == h) return;
             _stagingTex?.Dispose();
+            // ── F5 仪表：上一块存在且尺寸不同 ⇒ 这就是"选区回读把整屏 staging 拆掉重建"的直接读数 ──
+            // （_stagingW/_stagingH 只在成功新建之后被赋值，所以">0"就是"这条会话之前有过一块"。）
+            if (_stagingW > 0 && _stagingH > 0) Interlocked.Increment(ref _mStagingResize);
+            Interlocked.Increment(ref _mStagingCreate);
+            long tStaging = PerfMeter.Now();
             _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
             {
                 Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
@@ -788,6 +869,8 @@ public sealed partial class WgcCaptureService : IDisposable
                 BindFlags = BindFlags.None,
                 CPUAccessFlags = CpuAccessFlags.Read,
             });
+            PerfMeter.AddStagingCreate(ref _mStagingCreateUs, ref _mStagingCreateMaxUs,
+                ref _mStagingBytes, PerfMeter.SinceMicro(tStaging), w, h, format);
             _stagingW = w;
             _stagingH = h;
         }
@@ -1129,9 +1212,13 @@ public sealed partial class WgcCaptureService : IDisposable
                 var ctx = _d3dDevice.ImmediateContext;
 
                 // P2: 复用 staging 纹理
+                Interlocked.Increment(ref _mStagingAsk);   // F5 仪表（与 EnsureStaging 同口径：命中复用也计"问过"）
                 if (_stagingTex is null || _stagingW != w || _stagingH != h)
                 {
                     _stagingTex?.Dispose();
+                    if (_stagingW > 0 && _stagingH > 0) Interlocked.Increment(ref _mStagingResize);
+                    Interlocked.Increment(ref _mStagingCreate);
+                    long tStaging = PerfMeter.Now();
                     _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                     {
                         Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
@@ -1141,6 +1228,9 @@ public sealed partial class WgcCaptureService : IDisposable
                         BindFlags = BindFlags.None,
                         CPUAccessFlags = CpuAccessFlags.Read
                     });
+                    PerfMeter.AddStagingCreate(ref _mStagingCreateUs, ref _mStagingCreateMaxUs,
+                        ref _mStagingBytes, PerfMeter.SinceMicro(tStaging), w, h,
+                        Vortice.DXGI.Format.B8G8R8A8_UNorm);
                     _stagingW = w; _stagingH = h;
                 }
 
@@ -1198,9 +1288,13 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 var ctx = _d3dDevice.ImmediateContext;
 
+                Interlocked.Increment(ref _mStagingAsk);   // F5 仪表（HDR 逐帧整屏回读这一腿）
                 if (_stagingTex is null || _stagingW != w || _stagingH != h)
                 {
                     _stagingTex?.Dispose();
+                    if (_stagingW > 0 && _stagingH > 0) Interlocked.Increment(ref _mStagingResize);
+                    Interlocked.Increment(ref _mStagingCreate);
+                    long tStaging = PerfMeter.Now();
                     _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
                     {
                         Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
@@ -1210,6 +1304,9 @@ public sealed partial class WgcCaptureService : IDisposable
                         BindFlags = BindFlags.None,
                         CPUAccessFlags = CpuAccessFlags.Read
                     });
+                    PerfMeter.AddStagingCreate(ref _mStagingCreateUs, ref _mStagingCreateMaxUs,
+                        ref _mStagingBytes, PerfMeter.SinceMicro(tStaging), w, h,
+                        Vortice.DXGI.Format.R16G16B16A16_Float);
                     _stagingW = w; _stagingH = h;
                 }
 
@@ -1275,6 +1372,20 @@ public sealed partial class WgcCaptureService : IDisposable
             }
             _firstFrameEvent.Dispose();
             _callbacksDrained.Dispose();
+
+            // ═══ F5 仪表结算：一条会话一行（诊断档才落盘；逐帧只累加内存，不碰磁盘）═══
+            // 落点选在这里是因为"每条会话各几次"就是这条路的原问题：会话生命周期由
+            // (HMONITOR,IsHdr) + 15s 空闲回收决定，一条一结既是"per session"的字面口径，
+            // 也不会像逐帧打点那样把判据淹掉。Environment.Exit 的探针不走这里 ⇒ 那种跑法
+            // 请改看 WgcCaptureService 侧的空闲回收/失效结算（同一批字段，跨会话合计）。
+            if (PerfMeter.DumpEnabled)
+                Log($"[Meter/F5] 会话 0x{_hmonitor:X} {(IsHdr ? "Float16" : "BGRA8")} {_width}x{_height}："
+                    + $" staging 问 {Interlocked.Read(ref _mStagingAsk)} 次 ⇒ 新建 {Interlocked.Read(ref _mStagingCreate)} 块"
+                    + $"（其中尺寸切换 {Interlocked.Read(ref _mStagingResize)} 次）"
+                    + $"，CreateTexture2D 合计 {PerfMeter.Ms(Interlocked.Read(ref _mStagingCreateUs))}"
+                    + $" 峰值 {PerfMeter.Ms(Interlocked.Read(ref _mStagingCreateMaxUs))}"
+                    + $"，累计申请 {Interlocked.Read(ref _mStagingBytes) / (1024 * 1024)}MB"
+                    + $"（逐帧回读的次数/总耗时由 FlushSdrWindowIfExpired 每 2s 一结，不在这里重复）");
         }
     }
 
@@ -1458,28 +1569,33 @@ public sealed partial class WgcCaptureService : IDisposable
     private PooledSession GetOrCreateSdrSession(nint hmonitor)
     {
         var key = (hmonitor, false);
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表：包住原有临界区，不改其中任何一步
+        try
         {
-            if (_sessionPool.TryGetValue(key, out var existing))
+            lock (_poolLock)
             {
-                // 会话已存在（无论是否有帧），直接复用
-                return existing;
+                if (_sessionPool.TryGetValue(key, out var existing))
+                {
+                    // 会话已存在（无论是否有帧），直接复用
+                    return existing;
+                }
+
+                var device = GetOrCreateDevice(hmonitor);
+                // WGC 仅支持 B8G8R8A8UIntNormalized 和 R16G16B16A16Float 两种帧池格式。
+                // HDR 显示器上 DWM 自动将 HDR 内容色调映射为 SDR 后交付，输出已是 sRGB gamma 编码。
+                var session = new PooledSession(hmonitor, DirectXPixelFormat.B8G8R8A8UIntNormalized, device, _d3dContextLock);
+                if (!session.Start())
+                    // ⚠ 用 CreateItemForMonitor 留下的那句归因（提权 vs 被挡），而不是复述显示器号：
+                    //   旧文案「无法为显示器 0x… 创建 WGC 会话」对用户是零信息 ——
+                    //   它既没说为什么，也指不出任何可做的动作（本机 EnableLUA=0 那次就是这么被卡住的）。
+                    throw new InvalidOperationException(
+                        TakeItemFailureMessage() ?? $"无法为显示器 0x{hmonitor:X} 创建 WGC 会话");
+
+                _sessionPool[key] = session;
+                return session;
             }
-
-            var device = GetOrCreateDevice(hmonitor);
-            // WGC 仅支持 B8G8R8A8UIntNormalized 和 R16G16B16A16Float 两种帧池格式。
-            // HDR 显示器上 DWM 自动将 HDR 内容色调映射为 SDR 后交付，输出已是 sRGB gamma 编码。
-            var session = new PooledSession(hmonitor, DirectXPixelFormat.B8G8R8A8UIntNormalized, device, _d3dContextLock);
-            if (!session.Start())
-                // ⚠ 用 CreateItemForMonitor 留下的那句归因（提权 vs 被挡），而不是复述显示器号：
-                //   旧文案「无法为显示器 0x… 创建 WGC 会话」对用户是零信息 ——
-                //   它既没说为什么，也指不出任何可做的动作（本机 EnableLUA=0 那次就是这么被卡住的）。
-                throw new InvalidOperationException(
-                    TakeItemFailureMessage() ?? $"无法为显示器 0x{hmonitor:X} 创建 WGC 会话");
-
-            _sessionPool[key] = session;
-            return session;
         }
+        finally { RecordPoolLock(LockGetSdr, tLock); }
     }
 
     /// <summary>
@@ -1580,54 +1696,59 @@ public sealed partial class WgcCaptureService : IDisposable
         }
 
         var key = (hmonitor, true);
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表：包住原有临界区（注意锁内还有 Dispose 等待回调，最长可到 2s）
+        try
         {
-            if (_sessionPool.TryGetValue(key, out var existing) && existing.HasFrame)
-                return existing;
-
-            // ═══ 2026-09-19 软冷却判定：位置很讲究，必须在「复用已出帧会话」之后、「新建」之前 ═══
-            // 在复用之后 ⇒ 冷却绝不会挡掉一个正在正常出帧的 Float16 会话（那才是我们要的高精度源）；
-            // 在新建之前 ⇒ 才有意义：不再为"建得起来却从不成帧"的屏每次截图都付满一次 FrameTimeoutMs。
-            // 这里不 Dispose 那条"没帧的旧会话"：留着它，DWM 万一随后补上首帧，下一次就走上面的复用路径；
-            // 真一直不出帧则由 ScheduleIdleStop 的闲置回收统一收走。
-            if (HdrStalledAndShouldSkip(hmonitor))
+            lock (_poolLock)
             {
-                Log($"[WGC] 显示器 0x{hmonitor:X}: Float16 软冷却中（连续未成帧），本次不新建 Float16 会话，用 8-bit BGRA");
-                return null;
-            }
+                if (_sessionPool.TryGetValue(key, out var existing) && existing.HasFrame)
+                    return existing;
 
-            if (existing is not null)
-            {
-                existing.Dispose();
-                _sessionPool.Remove(key);
-            }
+                // ═══ 2026-09-19 软冷却判定：位置很讲究，必须在「复用已出帧会话」之后、「新建」之前 ═══
+                // 在复用之后 ⇒ 冷却绝不会挡掉一个正在正常出帧的 Float16 会话（那才是我们要的高精度源）；
+                // 在新建之前 ⇒ 才有意义：不再为"建得起来却从不成帧"的屏每次截图都付满一次 FrameTimeoutMs。
+                // 这里不 Dispose 那条"没帧的旧会话"：留着它，DWM 万一随后补上首帧，下一次就走上面的复用路径；
+                // 真一直不出帧则由 ScheduleIdleStop 的闲置回收统一收走。
+                if (HdrStalledAndShouldSkip(hmonitor))
+                {
+                    Log($"[WGC] 显示器 0x{hmonitor:X}: Float16 软冷却中（连续未成帧），本次不新建 Float16 会话，用 8-bit BGRA");
+                    return null;
+                }
 
-            var device = GetOrCreateDevice(hmonitor);
-            var session = new PooledSession(hmonitor, DirectXPixelFormat.R16G16B16A16Float, device, _d3dContextLock);
-            if (!session.Start())
-            {
-                // ═══ 2026-09-15 修复：不要把"本次启动失败"当成"该显示器不支持 HDR" ═══
-                // 原实现在此写入 s_hdrCapabilityCache[hmonitor] = false，而该缓存
-                // 【进程内没有任何重置路径】⇒ 一次**瞬时**失败（D3D 设备忙、分辨率正在切换、
-                // 系统显存紧张、刚从休眠恢复）就会让该显示器永久走 SDR 路径：
-                // HDR 与广色域全部静默降级，用户零感知，只能重启程序才能恢复。
-                //
-                // s_hdrCapabilityCache 的语义应是"能力"（capability），
-                // 只该由能力层面的判定写入（如 IsDisplayHdr 为假）；
-                // 会话启动失败属**瞬时状态**，不应污染能力缓存 —— 下次截图仍应重试。
-                //
-                // 2026-09-19：但完全不管它也不行 —— 一直启动失败的屏同样在反复浪费会话创建开销。
-                // 于是记进上面的【软冷却】计数器（有额度、会自己恢复、配置一变就作废），
-                // 而不是记进能力缓存：这就是"瞬时状态"与"能力"分家的落点。
-                Log($"[WGC] Float16 会话启动失败（多为瞬时原因，不记为能力不支持）: 0x{hmonitor:X}");
-                session.Dispose();   // 原实现未释放：Start 失败的会话会泄漏
-                NoteHdrAttemptOutcome(hmonitor, false);
-                return null;
-            }
+                if (existing is not null)
+                {
+                    existing.Dispose();
+                    _sessionPool.Remove(key);
+                }
 
-            _sessionPool[key] = session;
-            return session;
+                var device = GetOrCreateDevice(hmonitor);
+                var session = new PooledSession(hmonitor, DirectXPixelFormat.R16G16B16A16Float, device, _d3dContextLock);
+                if (!session.Start())
+                {
+                    // ═══ 2026-09-15 修复：不要把"本次启动失败"当成"该显示器不支持 HDR" ═══
+                    // 原实现在此写入 s_hdrCapabilityCache[hmonitor] = false，而该缓存
+                    // 【进程内没有任何重置路径】⇒ 一次**瞬时**失败（D3D 设备忙、分辨率正在切换、
+                    // 系统显存紧张、刚从休眠恢复）就会让该显示器永久走 SDR 路径：
+                    // HDR 与广色域全部静默降级，用户零感知，只能重启程序才能恢复。
+                    //
+                    // s_hdrCapabilityCache 的语义应是"能力"（capability），
+                    // 只该由能力层面的判定写入（如 IsDisplayHdr 为假）；
+                    // 会话启动失败属**瞬时状态**，不应污染能力缓存 —— 下次截图仍应重试。
+                    //
+                    // 2026-09-19：但完全不管它也不行 —— 一直启动失败的屏同样在反复浪费会话创建开销。
+                    // 于是记进上面的【软冷却】计数器（有额度、会自己恢复、配置一变就作废），
+                    // 而不是记进能力缓存：这就是"瞬时状态"与"能力"分家的落点。
+                    Log($"[WGC] Float16 会话启动失败（多为瞬时原因，不记为能力不支持）: 0x{hmonitor:X}");
+                    session.Dispose();   // 原实现未释放：Start 失败的会话会泄漏
+                    NoteHdrAttemptOutcome(hmonitor, false);
+                    return null;
+                }
+
+                _sessionPool[key] = session;
+                return session;
+            }
         }
+        finally { RecordPoolLock(LockGetHdr, tLock); }
     }
 
     /// <summary>
@@ -1701,15 +1822,24 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 await Task.Delay(IdleStopDelayMs, cts.Token);
                 // 超时 → 停止所有会话释放资源
-                lock (_poolLock)
+                long tLock = PerfMeter.Now();   // F5 仪表
+                try
                 {
-                    if (_sessionPool.Count > 0)
+                    lock (_poolLock)
                     {
-                        foreach (var s in _sessionPool.Values) s.Dispose();
-                        _sessionPool.Clear();
-                        Log("[WGC] 空闲超时，所有会话已自动停止");
+                        if (_sessionPool.Count > 0)
+                        {
+                            foreach (var s in _sessionPool.Values) s.Dispose();
+                            _sessionPool.Clear();
+                            Log("[WGC] 空闲超时，所有会话已自动停止");
+                        }
                     }
                 }
+                finally { RecordPoolLock(LockIdleStop, tLock); }
+                // 结算点：一批截图结束时把 _poolLock 的持锁账打成一行（诊断档）。
+                // 选这里而不是"每 N 次"：空闲回收本来就是"这一批结束了"的天然边界，
+                // 一次回收一行，量级与截图批数同阶。
+                DumpPoolLockMeters($"空闲回收 {IdleStopDelayMs / 1000}s");
             }
             catch (OperationCanceledException) { }
         });
@@ -1718,11 +1848,16 @@ public sealed partial class WgcCaptureService : IDisposable
     /// <summary>使所有会话失效（显示器配置变更时调用）。</summary>
     public void InvalidateSessions()
     {
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表
+        try
         {
-            foreach (var s in _sessionPool.Values) s.Dispose();
-            _sessionPool.Clear();
+            lock (_poolLock)
+            {
+                foreach (var s in _sessionPool.Values) s.Dispose();
+                _sessionPool.Clear();
+            }
         }
+        finally { RecordPoolLock(LockInvalidate, tLock); }
         lock (s_hdrCapabilityCache) { s_hdrCapabilityCache.Clear(); }
         // 2026-09-19：软冷却的账也一起作废。显示器配置变了（插拔/切分辨率/休眠恢复）之后，
         // "这块屏之前一直没成帧"这件事已经没有参考价值 —— 让它重新试，而不是带着旧账继续跳过 Float16。
@@ -1733,6 +1868,7 @@ public sealed partial class WgcCaptureService : IDisposable
         // 换来的是不会拿着失效设备去跑 NVENC（该崩溃在 .NET 上不可捕获）。
         NvencAvifBackend.NotifySharedDeviceDisposed();
         Log("[WGC] 所有会话已失效");
+        DumpPoolLockMeters("会话失效（显示器变更/服务退出）");
     }
 
     /// <summary>探针出口（--capture-freshness-probe）：读某块屏某条池"最新一帧已经存了多少毫秒"。
@@ -1741,12 +1877,17 @@ public sealed partial class WgcCaptureService : IDisposable
     /// 反射在打包形态下会静默失败（那类事故在本仓留过记录）。</summary>
     internal long? ProbeFrameAgeMs(nint hmonitor, bool hdr)
     {
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表
+        try
         {
-            if (!_sessionPool.TryGetValue((hmonitor, hdr), out var s) || !s.HasFrame)
-                return null;
-            return s.GetFrameAge();
+            lock (_poolLock)
+            {
+                if (!_sessionPool.TryGetValue((hmonitor, hdr), out var s) || !s.HasFrame)
+                    return null;
+                return s.GetFrameAge();
+            }
         }
+        finally { RecordPoolLock(LockProbeAge, tLock); }
     }
 
     // ═══════════════════════════════════════
@@ -1774,22 +1915,32 @@ public sealed partial class WgcCaptureService : IDisposable
     /// <summary>交还共享槽（预览窗关闭时调）。会话已被回收时无事可做。</summary>
     internal void ReleaseSharedFrame(nint targetMonitor, bool hdr)
     {
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表
+        try
         {
-            if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
-                session.ReleaseSharedFrame();
+            lock (_poolLock)
+            {
+                if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
+                    session.ReleaseSharedFrame();
+            }
         }
+        finally { RecordPoolLock(LockReleaseShared, tLock); }
     }
 
     /// <summary>从冻结的共享槽里只回读一个矩形（路线 B-3：选区定了才调）。会话已被回收时返回 null。</summary>
     internal float[]? ReadSharedRegion(nint targetMonitor, bool hdr, nint expectedHandle,
         int x, int y, int w, int h)
     {
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表：这一段今天【整段在锁内做 GPU 回读】，持锁时长就是那条指控要的读数
+        try
         {
-            if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
-                return session.ReadSharedRegion(expectedHandle, x, y, w, h);
+            lock (_poolLock)
+            {
+                if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
+                    return session.ReadSharedRegion(expectedHandle, x, y, w, h);
+            }
         }
+        finally { RecordPoolLock(LockReadHdr, tLock); }
         return null;
     }
 
@@ -1801,11 +1952,16 @@ public sealed partial class WgcCaptureService : IDisposable
     /// 按会话的 HDR 标志去猜返回类型。</remarks>
     internal byte[]? ReadSharedRegionSdr(nint targetMonitor, nint expectedHandle, int x, int y, int w, int h)
     {
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表（SDR 腿，同上：回读整段在锁内）
+        try
         {
-            if (_sessionPool.TryGetValue((targetMonitor, false), out var session))
-                return session.ReadSharedRegionBytes(expectedHandle, x, y, w, h);
+            lock (_poolLock)
+            {
+                if (_sessionPool.TryGetValue((targetMonitor, false), out var session))
+                    return session.ReadSharedRegionBytes(expectedHandle, x, y, w, h);
+            }
         }
+        finally { RecordPoolLock(LockReadSdr, tLock); }
         return null;
     }
 
@@ -1815,20 +1971,25 @@ public sealed partial class WgcCaptureService : IDisposable
     /// 录制器用它接住"被判为未变化、随即丢弃"的帧 —— 静态画面下原先每 tick 都白分配一整帧。</param>
     public CaptureResult? TryGetLatestFrame(nint targetMonitor, byte[]? reuse = null)
     {
-        lock (_poolLock)
+        long tLock = PerfMeter.Now();   // F5 仪表：GetLatestSdr 可能在这里等 GPU 锁最多 500ms + 拷一整帧
+        try
         {
-            var key = (targetMonitor, false);
-            if (!_sessionPool.TryGetValue(key, out var session) || !session.HasFrame)
-                return null;
-            var pixels = session.GetLatestSdr(reuse);
-            if (pixels is null) return null;
-            return new CaptureResult
+            lock (_poolLock)
             {
-                SdrPixels = pixels,
-                Width = session.Width,
-                Height = session.Height
-            };
+                var key = (targetMonitor, false);
+                if (!_sessionPool.TryGetValue(key, out var session) || !session.HasFrame)
+                    return null;
+                var pixels = session.GetLatestSdr(reuse);
+                if (pixels is null) return null;
+                return new CaptureResult
+                {
+                    SdrPixels = pixels,
+                    Width = session.Width,
+                    Height = session.Height
+                };
+            }
         }
+        finally { RecordPoolLock(LockTryLatest, tLock); }
     }
 
     /// <summary>捕获主体（同步，在调用线程执行）。
@@ -3017,5 +3178,76 @@ public sealed partial class WgcCaptureService : IDisposable
         _disposed = true;
         InvalidateSessions();
         try { _d3dDevice?.Dispose(); } catch { }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  性能仪表的公共算法（2026-10-31 批 4 追加：F5「staging 重建 / _poolLock 持锁」、
+//  F4「预览窗逐帧与 3s 静置唤醒」）
+// ═══════════════════════════════════════════════════════════════════════════
+// 只做一件事：把 Stopwatch 读数原子累加进【调用方自己的】字段。本类没有任何可变静态状态
+// （今天审查点名的 `_engines` 那类形状 ⇒ 刻意避开）：计数器的宿主依次是
+//   PooledSession（每屏每精度档一条）/ WgcCaptureService（DI 单例）/ HdrCaptureWindow（每扇窗一份）/
+//   CapturePipelineService（DI 单例，一次保存累加一次），
+// 所以"并发截图会怎样"这件事的答案是按宿主分的：
+//   · 同一宿主被多线程进入（帧回调 FreeThreaded、预览渲染线程、后台保存腿）⇒ 全部走 Interlocked，
+//     峰值用 CAS 环；交界处最多丢一次峰值，不会丢总数、不会把两次的账并成一条；
+//   · 不同宿主（两块屏 / 两扇预览窗 / 两次保存）⇒ 各记各的账，结算行点名自己的宿主身份
+//     （会话点名 HMONITOR+精度档，窗口点名客户区尺寸，保存点名格式），不共享桶。
+// 单位一律【微秒】存 long：4K 一次区域回读常在 1ms 以下，按毫秒记账会整列读成 0。
+internal static class PerfMeter
+{
+    /// <summary>QPC 时间戳（不分配）。</summary>
+    public static long Now() => System.Diagnostics.Stopwatch.GetTimestamp();
+
+    /// <summary>距 <paramref name="t0"/> 的微秒数（QPC 差值，与挂钟/调整无关）。</summary>
+    public static long SinceMicro(long t0)
+        => (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>仪表落盘闸：默认【简】档一行不写 —— 计数照常累加（几纳秒），但绝不产生磁盘 IO。
+    /// 这一条是硬要求：LogService 的 writer 是 AutoFlush=true 的 StreamWriter，落盘一次就是一次 WriteFile，
+    /// 它不能被放在捕获/渲染的逐帧路上，也不能在默认档把日志撑开。</summary>
+    public static bool DumpEnabled => CoreLog.Detail >= LogDetail.Diagnose;
+
+    public static string Ms(long microSeconds) => $"{microSeconds / 1000.0:F2}ms";
+
+    /// <summary>一次事件记账：次数 +1、合计 += deltaUs、峰值按 CAS 更新。数组版（多站点共用）。</summary>
+    public static void Record(long[] n, long[] totalUs, long[] maxUs, int site, long deltaUs)
+    {
+        Interlocked.Increment(ref n[site]);
+        Interlocked.Add(ref totalUs[site], deltaUs);
+        UpdateMax(ref maxUs[site], deltaUs);
+    }
+
+    /// <summary>一次事件记账（单字段版，含次数）。</summary>
+    public static void Record(ref long n, ref long totalUs, ref long maxUs, long deltaUs)
+    {
+        Interlocked.Increment(ref n);
+        Interlocked.Add(ref totalUs, deltaUs);
+        UpdateMax(ref maxUs, deltaUs);
+    }
+
+    /// <summary>一次事件记账（只记毫秒账，次数由调用方自己 +1）。</summary>
+    public static void Record(ref long totalUs, ref long maxUs, long deltaUs)
+    {
+        Interlocked.Add(ref totalUs, deltaUs);
+        UpdateMax(ref maxUs, deltaUs);
+    }
+
+    private static void UpdateMax(ref long maxUs, long deltaUs)
+    {
+        long cur;
+        while (deltaUs > (cur = Interlocked.Read(ref maxUs)))
+            if (Interlocked.CompareExchange(ref maxUs, deltaUs, cur) == cur) break;
+    }
+
+    /// <summary>staging 纹理新建的账（耗时 + 向驱动申请的字节数）。尺寸即体积：4K 8-bit 单块实测 42.2MB。</summary>
+    public static void AddStagingCreate(ref long createUs, ref long createMaxUs, ref long bytes,
+        long deltaUs, int w, int h, Vortice.DXGI.Format format)
+    {
+        Interlocked.Add(ref createUs, deltaUs);
+        UpdateMax(ref createMaxUs, deltaUs);
+        int bpp = format == Vortice.DXGI.Format.R16G16B16A16_Float ? 8 : 4;
+        Interlocked.Add(ref bytes, (long)w * h * bpp);
     }
 }

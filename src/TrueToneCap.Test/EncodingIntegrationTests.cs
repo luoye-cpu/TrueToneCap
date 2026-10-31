@@ -69,6 +69,9 @@ public static class EncodingIntegrationTests
         // 色调映射管线测试
         Test_ToneMappingPipeline(hdrPixels, w, h);
 
+        // 无损编码形状（2026-10-31）：流式 IDAT 的结构判据 + 给外部裁判落夹具
+        Test_LosslessShapesAndExternalFixtures();
+
         // 边界条件
         Test_SdrEncode(OutputFormat.PNG, GenerateTestPattern(1, 1), 1, 1, 100f);
         Test_SdrEncode(OutputFormat.PNG, GenerateTestPattern(3, 3), 3, 3, 100f);
@@ -358,6 +361,182 @@ public static class EncodingIntegrationTests
         OutputFormat.JPEG_GAINMAP => ".jpg",
         _ => ".bin"
     };
+
+    // ═══════════════════════════════════════
+    //  无损编码形状（2026-10-31）：流式 IDAT / 分条 TIFF
+    // ═══════════════════════════════════════
+
+    /// <summary>
+    /// 流式 IDAT 的结构判据 + 给外部裁判（Pillow/tifffile）留夹具。
+    /// <para>为什么要单独一条：IDAT 现在按 64 KiB 载荷切成多条，拼接后的 zlib 码流才是图像数据。
+    /// "看起来能打开"只说明有解码器肯试 ⇒ 这一条钉三件事：① 确实跨了多条；② 除末条外每条恰 64 KiB
+    /// （边界写歪一位就是整幅图错位）；③ 每条的 CRC 由<b>本文件自带的另一份 CRC32</b>复算，
+    /// 不借编码器自己那套 CRC ⇒ 编解码同错时这条照样红（审查点名的"自洽 CRC"缺口）。</para>
+    /// <para>正控（<see cref="Crc32Test"/> 与翻转字节）：改掉某条 IDAT 的一个字节，
+    /// ① 复算 CRC 必须判红，② 拼接后解压必须失败或长度不符 ⇒ 证明多条载荷是【真被拼接使用】的，
+    /// 而不是没人读的填充。</para>
+    /// </summary>
+    static void Test_LosslessShapesAndExternalFixtures()
+    {
+        const int W = 320, H = 240;
+        // 夹具刻意用"压不动"的伪随机料：结构化图案（渐变/文字）压到 <64 KiB 时只会落一条 IDAT，
+        // 那样上面三条判据一个都看不见东西 —— 夹具必须比真实素材更苛刻。
+        var px = new byte[W * H * 4];
+        uint seed = 0x1234ABCD;
+        for (int i = 0; i < px.Length; i++)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            px[i] = (byte)(seed >> 24);
+        }
+
+        string pngPath = Path.Combine(OutDir, "png_multi_idat.png");
+        ManagedPngEncoder.Encode(px, W, H, pngPath, 8);
+        var bytes = File.ReadAllBytes(pngPath);
+
+        var (ok, chunks) = SplitPngChunks(bytes);
+        Assert("流式 IDAT：PNG 分块能被逐块切开（切不开=判据失明，后面全不算数）", ok,
+            ok ? $"{chunks.Count} 条 chunk" : "分块形状不合法");
+
+        var idats = chunks.Where(c => c.Type == "IDAT").ToList();
+        Assert("流式 IDAT：产物确实跨多条 IDAT（只有一条时下面两格看不见东西）", idats.Count >= 2,
+            $"实得 {idats.Count} 条");
+        Assert("流式 IDAT：除末条外每条载荷恰为 64 KiB（边界歪一位=整幅图错位）",
+            idats.Count >= 2 && idats.Take(idats.Count - 1).All(c => c.Data.Length == 64 * 1024),
+            string.Join("/", idats.Select(c => c.Data.Length)));
+        Assert("流式 IDAT：IHDR 打头、IEND 收尾",
+            chunks.Count >= 3 && chunks[0].Type == "IHDR" && chunks[^1].Type == "IEND",
+            chunks.Count > 0 ? $"{chunks[0].Type}…{chunks[^1].Type}" : "空");
+
+        // ③ 独立 CRC：这份实现只服务判据，与编码器同错就会露出来（表值 0xEDB88320 是公开的 zlib 多项式）
+        Assert("流式 IDAT：每条 chunk 的 CRC 用测试自带的另一份 CRC32 复算全对",
+            ok && chunks.All(c => Crc32Test(c.TypeBytes, c.Data) == c.Crc),
+            ok ? string.Join(",", chunks.Where(c => Crc32Test(c.TypeBytes, c.Data) != c.Crc)
+                    .Select(c => c.Type)) : "分块已不合法");
+
+        var payload = new byte[idats.Sum(c => (long)c.Data.Length)];
+        int at = 0;
+        foreach (var c in idats) { Buffer.BlockCopy(c.Data, 0, payload, at, c.Data.Length); at += c.Data.Length; }
+        long inflatedLen;
+        try
+        {
+            using var zs = new System.IO.Compression.ZLibStream(
+                new MemoryStream(payload), System.IO.Compression.CompressionMode.Decompress);
+            using var sink = new MemoryStream();
+            zs.CopyTo(sink);
+            inflatedLen = sink.Length;
+        }
+        catch (Exception ex) { inflatedLen = -1; Console.WriteLine($"  ⚠ 拼接码流解压抛错: {ex.GetType().Name}"); }
+        Assert("流式 IDAT：各条载荷【拼接后】是一条能解压的完整 zlib 流，长度=各行(1+宽×4)",
+            inflatedLen == (long)H * (1 + W * 4), $"解压得 {inflatedLen}，应为 {(long)H * (1 + W * 4)}");
+
+        // 正控：翻转中间那条 IDAT 的一个载荷字节 ⇒ CRC 与解压必须同时变红
+        var corrupted = (byte[])bytes.Clone();
+        var mid = idats[Math.Min(1, idats.Count - 1)];
+        int flipAt = mid.HeaderEnd + 1 + (mid.Data.Length / 2);   // +1 跳过长度字段? 见 SplitPngChunks 的偏移定义
+        corrupted[flipAt] ^= 0x01;
+        var (ok2, chunks2) = SplitPngChunks(corrupted);
+        bool crcCaught = !ok2 || chunks2.Any(c => Crc32Test(c.TypeBytes, c.Data) != c.Crc);
+        bool inflateBroke;
+        try
+        {
+            var p2 = new byte[chunks2.Where(c => c.Type == "IDAT").Sum(c => (long)c.Data.Length)];
+            int o = 0;
+            foreach (var c in chunks2.Where(c => c.Type == "IDAT"))
+            { Buffer.BlockCopy(c.Data, 0, p2, o, c.Data.Length); o += c.Data.Length; }
+            using var z2 = new System.IO.Compression.ZLibStream(new MemoryStream(p2),
+                System.IO.Compression.CompressionMode.Decompress);
+            using var s2 = new MemoryStream();
+            z2.CopyTo(s2);
+            inflateBroke = s2.Length != (long)H * (1 + W * 4);
+        }
+        catch { inflateBroke = true; }
+        Assert("流式 IDAT 正控：翻掉一条载荷里的一个字节，复算 CRC 与解压必须至少一路判红",
+            crcCaught && inflateBroke,
+            $"CRC 抓到={crcCaught}，解压/长度坏掉={inflateBroke}（两路都毫无反应=这些字节没人读，判据是空的）");
+
+        // 夹具交给外部裁判（scripts/precision/tiff_png_referee.py）：PIL 独立解一遍像素，
+        // 并读一份 16-bit TIFF 验端序与 ExtraSamples —— 判据不许只由产品自己的字节解释自己的字节。
+        File.WriteAllBytes(Path.Combine(OutDir, "png_multi_idat.src.bin"), px);
+        string tifPath = Path.Combine(OutDir, "tiff16_referee.tif");
+        ManagedTiffEncoder.Encode(px, W, H, tifPath, 16, iccProfile: null, inputBitDepth: 8,
+            effort: CompressionEffort.Smallest);
+        // ⚠ 上面这份的样本恒等于 v×257 ⇒ 每个 uint16 都是 0xNNNN 回文，端序臂在它上【必然不判别】
+        //   （10-31 已量到这件事）。所以再备一份真 16-bit 输入的夹具：样本非回文占比 >0 时，
+        //   按大端误读才可能变红 —— 裁判脚本必须先证这一点，再宣布端序判据成立。
+        var px16 = new byte[W * H * 8];
+        uint s16 = 0xBEEF0001;
+        int palindromes = 0, total16 = W * H * 4;
+        for (int i = 0; i < W * H * 4; i++)
+        {
+            s16 = s16 * 1664525u + 1013904223u;
+            ushort v = (ushort)(s16 >> 16);
+            if ((v >> 8) == (v & 0xFF)) palindromes++;
+            // 每通道大端（与产品对 16-bit 输入的既有口径一致）
+            px16[i * 2] = (byte)(v >> 8);
+            px16[i * 2 + 1] = (byte)(v & 0xFF);
+        }
+        string tif16Path = Path.Combine(OutDir, "tiff16_direct_referee.tif");
+        ManagedTiffEncoder.Encode(px16, W, H, tif16Path, 16, iccProfile: null, inputBitDepth: 16,
+            effort: CompressionEffort.Smallest);
+        Assert("端序裁判夹具：16-bit 直入夹具里非回文样本占多数（全回文=端序臂必然假绿，10-31 量过）",
+            palindromes < total16 / 2, $"回文 {palindromes}/{total16}");
+        File.WriteAllBytes(Path.Combine(OutDir, "tiff16_direct_referee.src.bin"), px16);
+        Assert("外部裁判夹具：16-bit TIFF 与 PNG 夹具都落到盘上（裁判没料可吃就是没判）",
+            new FileInfo(tifPath).Length > 1_000 && new FileInfo(pngPath).Length > 1_000
+            && new FileInfo(tif16Path).Length > 1_000,
+            $"tif8src={new FileInfo(tifPath).Length}B tif16src={new FileInfo(tif16Path).Length}B "
+            + $"png={new FileInfo(pngPath).Length}B");
+        Console.WriteLine($"  📁 外部裁判夹具目录: {OutDir}"
+            + "（png_multi_idat.png / .src.bin / tiff16_referee.tif / tiff16_direct_referee.tif / .src.bin）");
+    }
+
+    internal static readonly byte[] PngSignatureBytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    /// <summary>PNG 逐块切开：返回 (形状是否合法, 各块)。HeaderEnd = 该块数据起始的绝对偏移。</summary>
+    internal static (bool Ok, List<(string Type, byte[] TypeBytes, byte[] Data, uint Crc, int HeaderEnd)> Chunks)
+        SplitPngChunks(byte[] b)
+    {
+        var list = new List<(string Type, byte[] TypeBytes, byte[] Data, uint Crc, int HeaderEnd)>();
+        for (int i = 0; i < 8; i++) if (b[i] != PngSignatureBytes[i]) return (false, list);
+        int p = 8;
+        while (p + 8 <= b.Length)
+        {
+            int len = (b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3];
+            if (len < 0 || p + 12 + (long)len > b.Length) return (false, list);
+            var type = new byte[4];
+            Buffer.BlockCopy(b, p + 4, type, 0, 4);
+            var data = new byte[len];
+            Buffer.BlockCopy(b, p + 8, data, 0, len);
+            uint crc = (uint)((b[p + 8 + len] << 24) | (b[p + 9 + len] << 16)
+                | (b[p + 10 + len] << 8) | b[p + 11 + len]);
+            list.Add((System.Text.Encoding.ASCII.GetString(type), type, data, crc, p + 8));
+            p += 12 + len;
+            if (list[^1].Type == "IEND") break;
+        }
+        return (p == b.Length && list.Count >= 3, list);
+    }
+
+    internal static uint Crc32Test(ReadOnlySpan<byte> type, byte[] data)
+    {
+        uint c = 0xFFFFFFFFu;
+        for (int i = 0; i < 4; i++) { c ^= type[i]; c = (c >> 8) ^ CrcTable[(byte)(c & 0xFF)]; }
+        for (int i = 0; i < data.Length; i++) { c ^= data[i]; c = (c >> 8) ^ CrcTable[(byte)(c & 0xFF)]; }
+        return c ^ 0xFFFFFFFFu;
+    }
+
+    internal static readonly uint[] CrcTable = BuildCrcTable();
+
+    internal static uint[] BuildCrcTable()
+    {
+        var t = new uint[256];
+        for (uint n = 0; n < 256; n++)
+        {
+            uint c = n;
+            for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[n] = c;
+        }
+        return t;
+    }
 
     static void Assert(string name, bool condition, string detail = "")
     {

@@ -78,6 +78,7 @@ public static class FormatStructureTests
             Assert("TIFF8/必需标签齐备",
                 tif.HasAll(new ushort[] { 256, 257, 258, 259, 262, 273, 277, 278, 279, 282, 283, 296 }),
                 $"实际 {tif.Tags.Count} 个标签");
+            AssertExtraSamplesContract(tif, "TIFF8", 13);
 
             Assert("TIFF8/尺寸", tif.Width == w && tif.Height == h, $"{tif.Width}x{tif.Height}");
             Assert("TIFF8/压缩=Deflate(8)", tif.Compression == 8, $"compression={tif.Compression}");
@@ -145,6 +146,7 @@ public static class FormatStructureTests
             Assert("TIFF16/头部", tif.Ok, tif.Error ?? "");
             if (!tif.Ok) return;
 
+            AssertExtraSamplesContract(tif, "TIFF16", 13);
             Assert("TIFF16/BitsPerSample 全为 16",
                 tif.BitsPerSample.Length == 4 && tif.BitsPerSample.All(b => b == 16),
                 string.Join(",", tif.BitsPerSample));
@@ -290,6 +292,7 @@ public static class FormatStructureTests
             if (!tif.Ok) return;
 
             Assert("TIFF-ICC/含 ICC 标签(34675)", tif.Tags.ContainsKey(34675), "");
+            AssertExtraSamplesContract(tif, "TIFF-ICC", 14);
             Assert("TIFF-ICC/像素数据与值区不重叠(ICC 计入值区)",
                 tif.StripOffset >= tif.ValueAreaEnd,
                 $"stripOffset={tif.StripOffset} 值区终点={tif.ValueAreaEnd}");
@@ -416,6 +419,8 @@ public static class FormatStructureTests
         public uint StripOffset, StripByteCount;
         public long ValueAreaEnd;                 // 值区终点（像素数据必须在其后）
         public Dictionary<ushort, (ushort Type, uint Count, uint Value)> Tags = [];
+        /// <summary>IFD 里条目的【实际先后】（Tags 是字典，看不出顺序；升序是 TIFF 6.0 的硬要求）。</summary>
+        public List<ushort> TagOrder = [];
         private byte[] _data = [];
         private int _bpsField, _xresField, _yresField;
         private uint _iccLen;
@@ -466,6 +471,7 @@ public static class FormatStructureTests
                     uint cnt = U32(d, p + 4);
                     uint val = U32(d, p + 8);
                     info.Tags[tag] = (type, cnt, val);
+                    info.TagOrder.Add(tag);
                 }
 
                 // 解析关键标签。count=1 且 type=3(SHORT) 时值在低 2 字节（小端）
@@ -512,6 +518,29 @@ public static class FormatStructureTests
     }
 
     private static TiffInfo ParseTiff(string path) => TiffInfo.Parse(path);
+
+    /// <summary>
+    /// Alpha 语义的三条硬判据（2026-10-31 补）。
+    /// <para>为什么值得单独一条：本仓一直写 <c>SamplesPerPixel=4</c> 却不发 Tag 338 ExtraSamples，
+    /// 第 4 个样本的含义是【留给读者猜】。libtiff/tifffile/Pillow 都默认按 alpha 收了，
+    /// 所以"外部解码器读着对"并不能证明我们声明过 —— 它只证明别人肯猜。规范口径是
+    /// Photometric=2 且 SamplesPerPixel=4 时必须带 338；我们的 alpha 未与颜色预乘 ⇒ 只能取 2
+    /// （取 1=Associated 就是在撒谎，读方会按预乘反乘回去）。</para>
+    /// <para>再带一条 IFD 升序：漏发/错位的标签最容易在"补一个标签"时被插错位置，
+    /// 而插错位置的老 TIFF 阅读器不一定报错，它会【安静地少读一个标签】。</para>
+    /// </summary>
+    static void AssertExtraSamplesContract(TiffInfo tif, string tag, int expectCount)
+    {
+        Assert($"{tag}/338 ExtraSamples 在场且=2（未预乘 alpha）",
+            tif.Tags.TryGetValue(338, out var ex) && ex.Type == 3 && ex.Count == 1 && ex.Value == 2,
+            tif.Tags.TryGetValue(338, out var e2)
+                ? $"type={e2.Type} count={e2.Count} value={e2.Value}（3=SHORT/1=条数/2=Unassociated alpha）"
+                : "标签缺席 ⇒ 第 4 样本的语义仍由读者猜");
+        Assert($"{tag}/标签数 {expectCount}（338 补进来之后总数是写死的契约）",
+            tif.Tags.Count == expectCount, $"实得 {tif.Tags.Count}");
+        Assert($"{tag}/IFD 条目按 tag 升序（插错位置的读者会安静少读一个标签）",
+            tif.TagOrder.SequenceEqual(tif.TagOrder.Order()), string.Join(",", tif.TagOrder));
+    }
 
     // ═══════════════════════════════════════
     //  ISOBMFF box 解析

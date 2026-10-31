@@ -209,7 +209,8 @@ public static class NativeAvifEncoder
         // avifenc 的 `-d,--depth D` = 输出位深，D 只能取 8/10/12，且**仅对 JPEG/PNG 输入做转换**
         // （libavif apps/avifenc.c；y4m 要求 D 与输入一致、不支持转换）。
         // 本路径输入是 8-bit PNG，故传 --depth 10/12 即可让 avifenc 升采样输出高位深。
-        // HDR 路径走 y4m（头已声明 C444p10），BuildCicpArgs 内已固定 --depth 10，此处不再叠加。
+        // HDR 不经本方法：现行 HDR 的 avifenc 兜底路是 EncodeFile + 16-bit PNG 中转（见 FormatEncoders
+        // 的 HDR 分支），下面这两处调用都写 isHdr: false ⇒ 这里的位深只服务 SDR 升位深。
         string depthArg = isHdr ? "" : GetDepthArg(bitDepth);
 
         // ICC 参数（仍需临时文件，avifenc 不支持 stdin ICC）
@@ -493,112 +494,5 @@ public static class NativeAvifEncoder
         {
             if (tmpIccPath is not null) try { File.Delete(tmpIccPath); } catch { }
         }
-    }
-
-    /// <summary>从 scRGB linear float[] 编码 HDR AVIF 文件（PQ + BT.2020 + 10-bit）。</summary>
-    /// <remarks>
-    /// <b>死代码，没有调用方</b>（评估记录见 docs/reviews/encoder/avif-encoder-benchmark-2026-09-16.md 的"Y4M 直传"一节）。
-    /// ⚠ 若将来要启用：下面那句 <c>--cicp 9/16/9</c> 是<b>写死</b>的，而现行 HDR 路一律问
-    /// <see cref="FormatHelper.BuildCicpArgs"/> / <see cref="FormatHelper.AvifMatrixCoefficients"/>
-    /// 取值 —— 直接启用本方法会重新造出第二个事实源（交接 §31.3-10 同型问题）。
-    /// </remarks>
-    public static void EncodeHdrFromScrgb(float[] scRgbLinear, int w, int h, string path, int crf, string codec = "Auto",
-        CompressionEffort effort = CompressionEffort.Balanced)
-    {
-        if (!IsAvailable)
-            throw new DllNotFoundException("[AVIF] avifenc 不可用");
-
-        // scRGB linear → PQ 10-bit → 临时 Y4M 文件 → avifenc
-        var tmpY4m = Path.Combine(Path.GetTempPath(), $"ttc_avif_hdr_{Guid.NewGuid():N}.y4m");
-        try
-        {
-            // 写入 Y4M 文件（10-bit 大端序）
-            using (var fs = new FileStream(tmpY4m, FileMode.Create, FileAccess.Write))
-            {
-                // 写入 Y4M 头（使用二进制写入避免 StreamWriter 缓冲问题）
-                byte[] header = System.Text.Encoding.ASCII.GetBytes($"YUV4MPEG2 W{w} H{h} F1:1 Ip A0:0 C444p10\nFRAME\n");
-                fs.Write(header, 0, header.Length);
-                int pixelCount = w * h;
-                for (int i = 0; i < pixelCount; i++)
-                {
-                    int si = i * 4;
-                    float rLin = scRgbLinear[si];
-                    float gLin = scRgbLinear[si + 1];
-                    float bLin = scRgbLinear[si + 2];
-                    int y10 = FloatToPq10(rLin, gLin, bLin, out int cb10, out int cr10);
-                    WriteU16BE(fs, y10);
-                    WriteU16BE(fs, cb10);
-                    WriteU16BE(fs, cr10);
-                }
-            }
-
-            var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
-            int q = CrfToQuality(crf);
-            // HDR 路的 libaom 高级选项（同 EncodeFile：只在确实走 aom 时下发）
-            var advArgsY4m = BuildAomAdvancedArgs(codec, effort);
-            string advArgY4m = advArgsY4m.Length > 0 ? " " + string.Join(' ', advArgsY4m) : "";
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = exePath,
-                // ═══ 2026-08-10 修复: matrix 9 (BT.2020 NCL) 替代 identity (兼容性) ═══
-                Arguments = $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} --depth 10 --cicp 9/16/9{advArgY4m} \"{tmpY4m}\" \"{path}\"".Trim(),
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true
-            };
-            using var proc = System.Diagnostics.Process.Start(psi);
-            if (proc is null) throw new InvalidOperationException("无法启动 avifenc");
-            var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "avifenc(y4m)");
-            if (exitCode != 0 || !File.Exists(path))
-                throw new InvalidOperationException($"[AVIF] avifenc 失败 (exit={exitCode}) {stderr.Trim()}");
-        }
-        finally
-        {
-            try { File.Delete(tmpY4m); } catch { }
-        }
-    }
-
-    private static void WriteU16BE(Stream s, int val)
-    {
-        s.WriteByte((byte)(val >> 8));
-        s.WriteByte((byte)val);
-    }
-
-    /// <summary>scRGB linear RGB → BT.2020 PQ 10-bit YCbCr (BT.2020 矩阵)。</summary>
-    private static int FloatToPq10(float r, float g, float b, out int cb, out int cr)
-    {
-        // scRGB linear (BT.709 原色 + 线性 gamma) → BT.2020 RGB 色域转换
-        // 矩阵: ITU-R BT.709 linear → ITU-R BT.2020 linear (D65→D65)
-        float r2020 = 0.627404f * r + 0.329283f * g + 0.043313f * b;
-        float g2020 = 0.069097f * r + 0.919541f * g + 0.011362f * b;
-        float b2020 = 0.016391f * r + 0.088013f * g + 0.895596f * b;
-
-        // PQ 编码 (ST.2084)
-        float pqR = LinearToPq(r2020);
-        float pqG = LinearToPq(g2020);
-        float pqB = LinearToPq(b2020);
-
-        // BT.2020 非恒定亮度 YCbCr (10-bit 范围)
-        float yVal  = 0.2627f * pqR + 0.6780f * pqG + 0.0593f * pqB;
-        float cbVal = (-0.2627f * pqR - 0.6780f * pqG + 0.9407f * pqB) / 1.8814f;
-        float crVal = (0.9373f * pqR - 0.6780f * pqG - 0.0593f * pqB) / 1.4746f;
-
-        // 量化到 10-bit (0-1023)
-        int yInt  = (int)Math.Round(Math.Clamp(yVal, 0f, 1f) * 1023f);
-        cb = (int)Math.Round(Math.Clamp(cbVal * 0.5f + 0.5f, 0f, 1f) * 1023f);
-        cr = (int)Math.Round(Math.Clamp(crVal * 0.5f + 0.5f, 0f, 1f) * 1023f);
-        return yInt;
-    }
-
-    /// <summary>scRGB linear → PQ (ST.2084) 编码。</summary>
-    private static float LinearToPq(float linear)
-    {
-        float nits = Math.Max(linear * 80f, 0f);
-        float L = Math.Clamp(nits / 10000f, 0f, 1f);
-        float Lp = MathF.Pow(L, 2610f / 16384f);
-        float num = 3424f / 4096f + (2413f / 128f) * Lp;
-        float den = 1f + (2392f / 128f) * Lp;
-        return MathF.Pow(num / den, 2523f / 32f);
     }
 }

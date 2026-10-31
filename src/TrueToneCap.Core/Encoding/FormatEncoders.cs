@@ -515,7 +515,14 @@ public sealed class AvifEncoder : ImageEncoder
         var be = AvifEncoderSelector.SelectByKind(s.AvifEncoderKind, s.ChromaSubsampling, s.OutputBitDepth);
         try
         {
-            await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct, s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile, s.GpuTexture);
+            // ═══ 必须显式具名传 effort：这条是 8-bit AVIF 的【成品出口】═══
+            // IAvifEncoder.EncodeAsync 的第 12 参带默认值（CompressionEffort.Balanced）⇒ 少写这一个实参
+            // 既不报错也不警告，只表现为"界面那三档对产物毫无影响"。而 SelectByKind 出来的四个后端
+            // 全都从这一行进编码器，所以漏它的后果覆盖了多数实际截图（默认请求就是 8-bit）：
+            // NVENC 恒拿 Balanced ⇒ preset P4（CompressionEffortMap.NvencPresetNumber，
+            // 驱动枚举失败时进一步退到 P1）、avifenc 恒 -s 6（同表 AvifencSpeed）。
+            // 用具名而不是第 12 个位置参：位置已经排到 GpuTexture，接口再插形参时位置传法会静默错位。
+            await be.EncodeAsync(px, w, h, (int)s.Quality, path, ct, s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile, s.GpuTexture, effort: s.Effort);
         }
         catch (Exception ex) when (s.PngFallbackEnabled && ex is not (OperationCanceledException or ArgumentException or AggregateException))
         {
@@ -882,6 +889,18 @@ file static class MftAvifEncode
                     if (result.Success)
                     {
                         LastEncodeUsedHardware = true;
+                        // ═══ 本腿【无可下发的压缩强度落点】⇒ 不造假档位，改为如实留痕（判界面禁用用）═══
+                        // 依据（逐条核对 MftEncoderNative 全文）：构造函数只有 (width, height, useAv1)、
+                        // ConfigureMft 恒写 MF_MT_AVG_BITRATE = 10_000_000 且从不设码控模式或质量类属性、
+                        // Encode 只收像素 —— 整个类没有一个 effort/preset/quality 形参，也没有任何
+                        // CODECAPI/IMFAttributes 档位入口。⇒ effort 传到这里确实没有落点。
+                        // 为什么不自造一个折算（例如按档位去动那 10 Mbps）：那 10 Mbps 是【码率】，
+                        // 而 Effort 与质量在本仓是正交两轴（见 EncodingSettings.Effort 与 MftEncoderNative
+                        // 文件头那条"码率与画质无关、也没人核对过产物"的更正）；把档位折算成码率，
+                        // 等于造出一个没人验证过的产物差异还让用户以为他在调"压缩强度"。
+                        // ⇒ 宁可让界面禁用这个控件并点名原因，也不给一条假绿的路。接通的正路见
+                        //   MftEncoderNative 文件头（先把那五个 vtable 声明改成真 COM 互操作）。
+                        MftEffortSupport.NoteHardwareLegIgnored(effort);
                         IvfWriter.WriteAvif(result.Value!, w, h, path, colorSpaceTag, iccProfile);
                         return;
                     }
@@ -905,7 +924,9 @@ file static class MftAvifEncode
             EncoderFallbackNotifier.LastReason =
                 $"系统 MFT 硬件编码（{tag}）本次失败：{mftFailure?.Message} —— 已回退 libaom 软件编码，"
                 + "文件正常但会明显变慢";
-            AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+            // 回退这条腿【有】档位落点（avifenc -s），所以必须把 effort 送走 ——
+            // 不传的话"硬件失败退软件"时用户还会以为自己的档位生效了，实际恒 -s 6。
+            AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
         }, ct);
     }
 }
@@ -921,6 +942,46 @@ file static class MftAvifEncode
 internal static class MftHardwareFlag
 {
     internal static bool LastEncodeUsedHardware => MftAvifEncode.LastEncodeUsedHardware;
+}
+
+/// <summary>MFT/QSV 硬件腿与「压缩强度」档位的关系 —— 界面据此决定放行还是禁用该控件。
+/// <para><b>为什么要这个出口</b>：<c>MftAvifEncode</c> 是 file 作用域类，界面在另一个工程里够不到它的字段，
+/// 与 <see cref="MftHardwareFlag"/> 当初为两个探测器开口的理由是同一件事（别再用反射读它）。</para>
+/// <para><b>为什么这里只给判据、不给文案</b>：用户可见措辞归界面 —— 见 <see cref="QualityScale"/> 那段
+/// 口径（Core 曾返回成品中文串，逼得 App 在显示点往回翻下层生成的文案）。</para></summary>
+public static class MftEffortSupport
+{
+    /// <summary>MFT 硬件编码腿有没有能接收压缩强度的入口 —— <b>恒 false</b>。
+    /// <para>逐条依据见 <c>MftAvifEncode.EncodeAsync</c> 硬件成功分支那段注释：
+    /// <c>MftEncoderNative</c> 的构造函数只有 <c>(width, height, useAv1)</c>、
+    /// <c>ConfigureMft</c> 恒写 <c>MF_MT_AVG_BITRATE = 10_000_000</c>、<c>Encode</c> 只收像素，
+    /// 全类没有一个 effort/preset/quality 形参或档位类属性 ⇒ 没有任何可下发的落点。</para>
+    /// <para><b>界面该怎么用</b>：选中该后端时禁用"压缩强度"控件并点名"该后端无此旋钮"。
+    /// 这与本仓既有做法同源 —— <c>AvifEncoderCapabilities</c> 的 Qsv <c>UiNote</c> 已经为
+    /// <b>质量</b>那一根轴声明过同一件事（恒 10 Mbps ⇒ 质量滑块不适用）；本属性补的是档位这根轴。
+    /// 若将来把档位真接进 MFT（先修 MftEncoderNative 文件头记的那五个 vtable 声明），
+    /// 改这个属性为真的<b>同一批</b>必须删掉下面那条留痕。</para>
+    /// <para>⚠ 为什么写成属性而不是 <c>const bool</c>：<c>const false</c> 会让以它为条件的分支被编译器
+    /// 判成不可达代码（CS0162），而本仓 <c>TreatWarningsAsErrors=true</c> ⇒ 界面只要写
+    /// <c>if (MftEffortSupport.HardwareLegAcceptsEffort)</c> 就直接编不过。属性不做常量折叠。</para></summary>
+    public static bool HardwareLegAcceptsEffort => false;
+
+    private static int _loggedOnce;
+
+    /// <summary>硬件腿产出码流时把"档位未生效"落一条日志。只留痕，不改任何编码行为、不抛。</summary>
+    internal static void NoteHardwareLegIgnored(CompressionEffort effort)
+    {
+        // Balanced 不登记：它恰好等于本腿的既有行为，此时说"你的档位没生效"是空话，
+        // 而且会让默认路径（绝大多数截图）每次都带一条无意义的告警。
+        if (effort == CompressionEffort.Balanced) return;
+        // 每进程只落一条日志：这是一条"该后端没有这个旋钮"的静态事实，逐张重复只会淹掉编码日志；
+        // 本条日志就是这件事【唯一】的事后通道 —— 不再另存逐张状态位（写而无人读的状态必然烂掉）。
+        if (System.Threading.Interlocked.Exchange(ref _loggedOnce, 1) == 0)
+            CoreLog.Warn("AVIF MFT",
+                $"MFT 硬件编码腿无可下发的压缩强度落点 ⇒ 本次请求档位 {CompressionEffortMap.ToTag(effort)} "
+                + "对产物无影响（同进程不再重复此条；界面据此应禁用该控件，接通见 MftEncoderNative 文件头）",
+                LogCategory.Encoding);
+    }
 }
 
 public sealed class QsvAvifBackend : IAvifEncoder
@@ -1174,7 +1235,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
             if (!HardwareEncodingEnabled)
             {
                 CoreLog.Debug("AVIF", "硬件编码已在设置中禁用 → 走软件编码", LogCategory.Encoding);
-                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
                 return;
             }
 
@@ -1188,7 +1249,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
                 CoreLog.Debug("AVIF",
                     $"尺寸 {w}x{h} 低于 NVENC 最小支持边长({MinNvencDimension}) → 直接走软件编码",
                     LogCategory.Encoding);
-                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
                 return;
             }
 
@@ -1202,7 +1263,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
                 CoreLog.Warn("AVIF", "NVENC 上次曾导致进程崩溃（哨兵残留）→ 本次禁用，回退 libaom", LogCategory.Encoding);
                 s_nvencFailed = true;
                 LastFallbackReason = "上次 NVENC 导致进程崩溃，本次已自动改用软件编码（可在设置中重新启用硬件编码）";
-                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
                 return;
             }
 
@@ -1211,7 +1272,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
             {
                 CoreLog.Warn("AVIF", "NVENC 已缓存失败, 直接回退 libaom", LogCategory.Encoding);
                 LastFallbackReason = "硬件编码当前不可用（此前失败已被记住），已改用软件编码 —— 重启程序或重新启用硬件编码可恢复";
-                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+                AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
                 return;
             }
 
@@ -1398,7 +1459,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
                 ? "当前图像不适用于硬件编码，已改用软件编码（不影响后续截图）"
                 : "硬件编码初始化/编码失败，已改用软件编码 —— 更新显卡驱动后通常可恢复")
                 + $" 原因: {result2.Error?.GetType().Name}: {result2.Error?.Message}";
-            AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+            AvifFallbackHelper.FallbackToLibAom(bgra, w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
             }
             finally
             {
@@ -1445,8 +1506,10 @@ public sealed class NvencAvifBackend : IAvifEncoder
 
         // 真 10-bit 通路没走成 ⇒ 退回成熟的 8-bit 通路（哨兵 / 缓存 / libaom 回退都在那边）。
         // 这里把精度降到 8-bit 是**诚实的降级**：不假装保留了 10-bit 精度。
-        await EncodeAsync(AvifPixelFormat.Argb10ToBgra8(argb10), w, h, crf, path, ct,
-            chroma, displayBitDepth, colorSpaceTag, iccProfile);
+        // ⚠ effort 同样必须显式带走：本方法自己收 effort（上面 TryEncodeNvencArgb10 已按它选 preset），
+        //   若这次转交漏掉，接口默认值会把刚降下去的 8-bit 通路又钉回 Balanced ⇒ 同一次编码里
+        //   "10-bit 按用户档位、退到 8-bit 就换档"，产物差异被读成精度差异而非档位差异。
+        await EncodeAsync(AvifPixelFormat.Argb10ToBgra8(argb10), w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
 
         // ═══ 2026-09-18 P2：真 10-bit → 8-bit 输入的降级必须可感知 ═══
         // 内层 EncodeAsync 回退 libaom 等场景会写自己的 LastFallbackReason；
@@ -1664,6 +1727,13 @@ public sealed class MftAvifBackend : IAvifEncoder
 file static class AvifFallbackHelper
 {
     /// <summary>安全回退到 libaom 软件编码。libaom 本身也做异常隔离，防止回退链断裂。</summary>
+    /// <param name="effort">压缩强度档位。
+    /// <para>⚠ <b>七个调用点全部必须具名传 <c>effort:</c>，一个都不能省</b>：本参数带默认值
+    /// <see cref="CompressionEffort.Balanced"/> ⇒ 漏传既不报错也不警告，只表现为"硬件失败退到软件时，
+    /// 用户的档位被悄悄换成均衡"（avifenc 恒 <c>-s 6</c>，见 <see cref="CompressionEffortMap.AvifencSpeed"/>）。
+    /// 回退链的调用点分散在 MFT 一条 + NVENC 五条 + ARGB10 转交一处，逐个核对过；
+    /// 钉住它们的源码判据见 CorePipelineTests 的档位接线那一段（按行切、不是数子串）。
+    /// 默认值本身留着，是因为这些出口里有几处（如外部裁判脚本直调）本来就没有档位概念。</para></param>
     public static void FallbackToLibAom(byte[] bgra, int w, int h, int crf, string path,
         CancellationToken ct, string chroma = "420", int displayBitDepth = 8, string? colorSpaceTag = null, byte[]? iccProfile = null,
         CompressionEffort effort = CompressionEffort.Balanced)
@@ -2229,9 +2299,11 @@ public static class FormatHelper
             }
 
             // PQ 编码 → 直接量化到目标位深 → 左对齐到 16-bit 容器
-            float pqR = LinearToPQ(r);
-            float pqG = LinearToPQ(g);
-            float pqB = LinearToPQ(b);
+            // 走查表（按位深自选：>12-bit 容器仍回原式）——这一趟是 4K 整帧 ×3 通道 ×2 个 pow，
+            // 实测 134.6→58.4ms/帧，10/12-bit 码字最大偏差 1。
+            float pqR = Processing.PqTransfer.Encode(r, maxValue);
+            float pqG = Processing.PqTransfer.Encode(g, maxValue);
+            float pqB = Processing.PqTransfer.Encode(b, maxValue);
             a = Math.Clamp(a, 0f, 1f);
 
             // 量化到 maxValue 范围，然后左移到 16-bit 容器高位
@@ -2410,16 +2482,12 @@ public static class FormatHelper
         return peak < contentPeakNits ? contentPeakNits : peak;
     }
 
-    /// <summary>scRGB 线性光 → PQ (ST.2084) 感知量化编码。</summary>
+    /// <summary>scRGB 线性光 → PQ (ST.2084) 感知量化编码。
+    /// <para>式子只该有一份：查表与对照臂都在 <see cref="Processing.PqTransfer"/>，
+    /// 这里留作旧入口的别名（<c>JxlColorProductProbe</c> 的备注就把它当"×80 换算"的唯一口径）。
+    /// 产物路径现在走 <see cref="Processing.PqTransfer.Encode"/>，别再往这里加第二份算术。</para></summary>
     internal static float LinearToPQ(float scRgbLinear)
-    {
-        float nits = Math.Max(scRgbLinear * 80f, 0f);
-        float L = Math.Clamp(nits / 10000f, 0f, 1f);
-        float Lp = MathF.Pow(L, PQ_m1);
-        float numerator = PQ_c1 + PQ_c2 * Lp;
-        float denominator = 1f + PQ_c3 * Lp;
-        return MathF.Pow(numerator / denominator, PQ_m2);
-    }
+        => Processing.PqTransfer.EncodeExact(scRgbLinear);
 }
 
 // ────── 工厂（无状态编码器单例缓存，减少 GC 压力）──────

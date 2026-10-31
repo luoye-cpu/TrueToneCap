@@ -333,6 +333,19 @@ public static class AvifEncoderCapabilities
     public static bool SupportsHdrPath(AvifEncoderKind kind) =>
         kind is not AvifEncoderKind.Qsv;
 
+    /// <summary>该后端有没有「压缩强度」这个旋钮。
+    /// <para><b>为什么 QSV 没有</b>：它经 <c>MftAvifEncode</c> 走系统 MFT，而那条腿整个类
+    /// 没有任何档位/preset 落点（见 <see cref="MftEffortSupport.HardwareLegAcceptsEffort"/> 里逐条核对的
+    /// 构造函数、<c>ConfigureMft</c> 与 <c>Encode</c>）⇒ 选了这个后端再调档位，界面在改一个没人读的字段。</para>
+    /// <para><b>为什么这里不另写一份 <c>kind is not Qsv</c> 了事</b>：档位能不能下发是 MFT 那条腿的事实，
+    /// 判据只有 <see cref="MftEffortSupport.HardwareLegAcceptsEffort"/> 一处。等哪天有人给 MFT 接上档位、
+    /// 把那个属性翻成 true，这条就自动放行——两处各写一遍正是本仓反复修的那类分叉。</para>
+    /// <para>Auto 视为有旋钮：它由管线在编码时才解析，选中那一刻判不了落点；
+    /// 事后通道只剩 <c>MftEffortSupport.NoteHardwareLegIgnored</c> 那条每进程一次的 Warn 日志
+    ///（2026-10-31 撤掉了与它并存的逐张状态位：写了没人读的事实必然烂掉，而界面禁用一直问的是本方法）。</para></summary>
+    public static bool EffortApplies(AvifEncoderKind kind) =>
+        kind is not AvifEncoderKind.Qsv || MftEffortSupport.HardwareLegAcceptsEffort;
+
     /// <summary>该编码器允许的 <b>CRF 下限</b>（软件档 0，硬件档 1）。</summary>
     /// <remarks>
     /// <para><b>为什么硬件到不了 0</b>：NVENC 侧把 CRF 直接写进

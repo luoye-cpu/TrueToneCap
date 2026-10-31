@@ -259,8 +259,28 @@ public static class PerfMeasureBench
 
         var rawMi = typeof(ManagedPngEncoder).GetMethod("BuildRawScanlines16", BindingFlags.NonPublic | BindingFlags.Static)
             ?? throw new MissingMethodException("ManagedPngEncoder.BuildRawScanlines16");
-        var defMi = typeof(ManagedPngEncoder).GetMethod("CompressDeflate", BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new MissingMethodException("ManagedPngEncoder.CompressDeflate");
+        // ═══ 2026-10-31：ManagedPngEncoder.CompressDeflate 已被流式入口替掉（IDAT 现在直写 sink，
+        // 全帧压缩数组不再存在）。这一段量的必须是【产品此刻真正走的那条腿】，所以照产品的形状
+        // 分两步反射调 DeflateZlib 的内部入口：整帧判一次后端（SelectNativeBackend）→
+        // 增量压给一条流（CompressTo）。反射只读、不改产品代码；签名变了这里立刻抛
+        // MissingMethodException —— 与原口径同一个 fail-closed 形状，不许静默量到别的东西上。
+        var dzType = typeof(DeflateZlib);
+        var selectMi = dzType.GetMethod("SelectNativeBackend",
+            BindingFlags.NonPublic | BindingFlags.Static, null,
+            new[] { typeof(byte[]), typeof(int) }, null)
+            ?? throw new MissingMethodException("DeflateZlib.SelectNativeBackend(byte[], int)");
+        var compressToMi = dzType.GetMethod("CompressTo", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new MissingMethodException("DeflateZlib.CompressTo(Stream, byte[], int, bool)");
+
+        // deflate 段的形状 = 产品的形状：不留住一整份压缩结果，只报产出的字节数
+        long DeflateSegment(byte[] data, CompressionEffort eff)
+        {
+            int level = CompressionEffortMap.PngTiffDeflateLevel(eff);
+            bool useNative = (bool)selectMi.Invoke(null, new object[] { data, level })!;
+            using var sink = new MemoryStream();
+            compressToMi.Invoke(sink, new object[] { data, level, useNative });
+            return sink.Length;
+        }
 
         Console.WriteLine($"═══ PNG 16-bit 保存拆分 ═══");
         Console.WriteLine($"size={w}x{h} (10-bit 量化, 左对齐)");
@@ -279,10 +299,9 @@ public static class PerfMeasureBench
                 for (int i = 0; i < reps; i++)
                 {
                     var sw = Stopwatch.StartNew();
-                    var packed = (byte[])defMi.Invoke(null, new object[] { raw, effort })!;
+                    bytes = DeflateSegment(raw, effort);
                     sw.Stop();
                     times.Add(sw.ElapsedMilliseconds);
-                    bytes = packed.Length;
                 }
                 long ms = Median(times);
                 Console.WriteLine($"real,{effort},0,{ms},{ms},{bytes},{raw.Length / 1048576.0:F1},1.00");
@@ -333,7 +352,7 @@ public static class PerfMeasureBench
                 for (int i = 0; i < reps; i++)
                 {
                     var sw = Stopwatch.StartNew();
-                    defMi.Invoke(null, new object[] { raw, effort });
+                    DeflateSegment(raw, effort);
                     sw.Stop();
                     defTimes.Add(sw.ElapsedMilliseconds);
                 }

@@ -57,15 +57,18 @@ public static class ShaderCompiler
     /// <summary>确保所有 CSO 文件存在。缺失时后台自动编译。应在应用启动最开始调用。</summary>
     public static void EnsureCompiled(string shaderDir, string outputDir)
     {
-        // 必须与构建期 CompileShaders.ps1 用【同一个编译器】(fxc)，否则产出的 CSO 规格不一致。
-        var fxcPath = FindFxc();
-        if (fxcPath is null)
-        {
-            LogService.Warn("Shader", "fxc.exe 未找到（需 Windows SDK），跳过运行时编译（GPU 将回退 CPU）", LogCategory.Capture);
-            return;
-        }
-
-        Directory.CreateDirectory(outputDir);
+        // ═══ 2026-10-31：存在性检查【前置】到找编译器之前 ═══
+        // 原实现的第一句就是 FindFxc()（起 `where fxc.exe` 子进程 + WaitForExit(2000)，
+        // 失败再 LINQ 枚举 Windows Kits\10\bin 的各版本目录逐个 File.Exists），
+        // 而真机 117/117 次启动里两枚 .cso 都已存在（构建期 CompileShaders.ps1 已产出）
+        // ⇒ 每次启动都为一条不会走的路径白付一次进程创建（本机静置后第一次创建进程多付约 200ms）。
+        // 现在只有【确实缺 .cso 且源文件在】时才去找 fxc。
+        // ⚠ 刻意不动编译参数与 SM5.0 口径（见上面 s_shaders 的注释）：换 dxc/ps_6_0 会产出
+        //   D3D11 根本加载不了的着色器，那条事实与本条性能无关。
+        // 行为差异（都是可观察的）：
+        //   · 齐全时不再有机会走到 "fxc.exe 未找到" 那条 Warn —— 缺件的那台机器仍然会走到；
+        //   · "…cso 已存在" 的 Info 行数不变（原本每枚已存在的 .cso 也各打一条）。
+        var pending = new List<ShaderDef>();
 
         foreach (var shader in s_shaders)
         {
@@ -84,8 +87,28 @@ public static class ShaderCompiler
                 continue;
             }
 
+            pending.Add(shader);
+        }
+
+        if (pending.Count == 0) return;
+
+        // 必须与构建期 CompileShaders.ps1 用【同一个编译器】(fxc)，否则产出的 CSO 规格不一致。
+        var fxcPath = FindFxc();
+        if (fxcPath is null)
+        {
+            LogService.Warn("Shader", "fxc.exe 未找到（需 Windows SDK），跳过运行时编译（GPU 将回退 CPU）", LogCategory.Capture);
+            return;
+        }
+
+        Directory.CreateDirectory(outputDir);
+
+        foreach (var shader in pending)
+        {
             // 后台编译
-            Task.Run(() => CompileShader(fxcPath, inputPath, outputPath, shader.File, shader.Profile));
+            Task.Run(() => CompileShader(fxcPath,
+                Path.Combine(shaderDir, shader.File),
+                Path.Combine(outputDir, shader.File + ".cso"),
+                shader.File, shader.Profile));
         }
     }
 

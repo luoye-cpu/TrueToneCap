@@ -624,6 +624,14 @@ public sealed partial class MainWindow : Window
     {
         if (!_uiReady) return;
         UpdateQualityPanel();
+        // ═══ 重建格式下拉时的中间态不许写盘 ═══
+        // 换 ItemsSource 会把 SelectedIndex 打回 -1（WinUI 行为），而这个事件在 _uiReady 之后
+        // 会一路走到 SaveQuiet —— 于是每次启动/每次换语言都把 FormatIndex=-1 原样落进设置文件
+        // （2026-10-31 全管线审查批3 归因：主窗口之前那 3 次写盘的第 2 发）。
+        // 崩在中间态与恢复之间，盘上就留下 -1，下次启动靠 LoadSettings 的钳制才没出事。
+        // ⚠ 只拦持久化，界面刷新（上面那行 UpdateQualityPanel）照做 —— 换语言后质量面板的
+        //    标签必须重画，把整条 handler 挡掉会退回"默认选项缺失"那一族。
+        if (_formatComboRebuilding) return;
         _settings.FormatIndex = FormatCbo.SelectedIndex;
         AppServices.Settings.SaveQuiet();
     }
@@ -974,6 +982,13 @@ public sealed partial class MainWindow : Window
             //   ② 编码器：只有支持【真 10-bit 输入】的后端（当前 NVENC）能把源精度送进编码器；
             //      其余后端的 10/12-bit 是容器级升位深 —— 文件按所选位深声明，源精度仍 8-bit。
             // 两者都满足才谈得上"真高位深"，提示必须如实区分，否则就是新一轮"看起来生效了"。
+            // 2026-10-31：「压缩强度」对当前后端到底有没有落点，判据只在 Core 那一份
+            // （QSV 经系统 MFT，整条腿没有档位入口）。无效就禁用并点名，
+            // 而不是留一根"划得动、也真的写进了设置，但没人读"的控件 —— 同族既有做法是上面
+            // QualitySld 的 noQualityKnob（判据问 Core，不在这里点名格式/后端）。
+            bool effortApplies = AvifEncoderCapabilities.EffortApplies(kind);
+            if (EffortAvifCbo is not null) EffortAvifCbo.IsEnabled = effortApplies;
+
             if (hdr)
             {
                 // HDR 不再是"恒走 avifenc"：NVENC 已接通 HDR 10-bit 直通（PQ 10-bit 输入 +
@@ -1024,7 +1039,10 @@ public sealed partial class MainWindow : Window
                              && NativeAvifEncoder.SvtUnavailableReason is { } why
                                 ? $"（{why}）"
                                 : "")
-                          + "，将自动回退。");
+                          + "，将自动回退。")
+                    // 禁用必须说清为什么被禁用：只灰掉不给理由，用户会以为是自己配错了
+                    // （这条与上面 "不可用必须给出可行动的原因" 同一个口径）。
+                    + (effortApplies ? "" : LocaleManager.Tr(" ⚠ 该后端没有压缩强度入口（系统 MFT 无此旋钮），上面的下拉已禁用。"));
             }
         }
         finally { _avifOptionsUpdating = false; }
@@ -3007,18 +3025,28 @@ public sealed partial class MainWindow : Window
         //    于是"刚按设置选好的格式"被抹成空白：2026-09-26 用户报的"默认选项缺失"就是这个。
         //    所以选中项必须由本函数自己取回来，不能指望调用顺序。
         int keep = FormatCbo.SelectedIndex;
-        FormatCbo.ItemsSource = _formats
-            .Select(f => LocaleManager.GetFormatLabel(f))
-            .ToList();
-        // keep<0 的回落必须取 _settings.FormatIndex，不能取 DefaultIndex：
-        // 构造期第一次调用（LoadSettings 之前）控件尚未实化，SelectedIndex 就是 -1，
-        // 那时盘上读进来的用户选择还在 _settings 里 ⇒ 拿 DefaultIndex 会把它抹成 PNG；
-        // 而下面这一次赋值会触发 OnFormatChanged（此刻 _uiReady 已是 true），
-        // 于是"界面显示 PNG"之外还会连带 `_settings.FormatIndex = 0` + SaveQuiet() 写盘
-        // —— 用户选的格式不仅下次开机失效，连文件里那个键都被删掉（2026-10-01 实机量到：
-        // 产品自己写入 FormatIndex=3，重启后界面回到 PNG，再保存后键整个消失）。
-        FormatCbo.SelectedIndex = Math.Clamp(
-            keep < 0 ? _settings.FormatIndex : keep, 0, FormatOrder.MaxIndex);
+        // 中间态（SelectedIndex=-1）不许被当成用户选择写进盘 —— 判据在 OnFormatChanged。
+        _formatComboRebuilding = true;
+        try
+        {
+            FormatCbo.ItemsSource = _formats
+                .Select(f => LocaleManager.GetFormatLabel(f))
+                .ToList();
+            // keep<0 的回落必须取 _settings.FormatIndex，不能取 DefaultIndex：
+            // 构造期第一次调用（LoadSettings 之前）控件尚未实化，SelectedIndex 就是 -1，
+            // 那时盘上读进来的用户选择还在 _settings 里 ⇒ 拿 DefaultIndex 会把它抹成 PNG；
+            // 而下面这一次赋值会触发 OnFormatChanged（此刻 _uiReady 已是 true）。
+            // 2026-10-01 的教训是"界面显示 PNG 之外还连带把 FormatIndex 改掉并写盘"，回落取值
+            // 修的是那一半；2026-10-31 补的是另一半 —— 事件本身在重建期内不许落盘（见 OnFormatChanged）。
+            FormatCbo.SelectedIndex = Math.Clamp(
+                keep < 0 ? _settings.FormatIndex : keep, 0, FormatOrder.MaxIndex);
+        }
+        finally
+        {
+            // 必须 finally 放：中途抛异常却把闩锁留着，之后所有真实的用户选择都不会再落盘，
+            // 而那表现与"实时保存坏了"完全一样、日志里一个字都不写。
+            _formatComboRebuilding = false;
+        }
         CheckFormatComboContract();
     }
 
@@ -3147,6 +3175,11 @@ public sealed partial class MainWindow : Window
     /// <para>与 <c>_avifOptionsUpdating</c> 同一手法：只挡程序赋值，用户拖动时该标志恒为 false。</para>
     /// </summary>
     private bool _qualityPanelUpdating;
+
+    /// <summary>格式下拉正在重建 —— 期间 <c>SelectedIndex</c> 会短暂变成 -1（换 ItemsSource 的
+    /// WinUI 行为），那道中间态不能被 <see cref="OnFormatChanged"/> 当成用户选择写进设置。
+    /// 形状照 <see cref="_qualityPanelUpdating"/>：程序性刷新只拦持久化，不拦界面刷新。</summary>
+    private bool _formatComboRebuilding;
     // 程序性置位 HDR 开关时置真：Toggled 在程序赋值时也会触发，不挡就会把 UI 约束写成用户偏好。
     private bool _hdrSwitchUpdating;
 

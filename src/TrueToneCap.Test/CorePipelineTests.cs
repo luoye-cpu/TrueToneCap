@@ -261,6 +261,9 @@ public static class CorePipelineTests
         Test_PerfWiring_OcrBatchAndSpan();                             // 2026-10-30：OCR rec 合批 + Span 读取（候选 E）
         Test_PerfWiring_LazyCpuOcr();                                  // 2026-10-30：CPU OCR 会话按需构建（候选 D）
         Test_DeflateZlib_BackendProbeAndFallback();                    // 2026-10-31：无损 deflate 可选 libdeflate + 自动回退
+        Test_PerfWiring_AvifEffortProductLegAndFallbacks();            // 2026-10-31 批1：AVIF 8-bit 成品腿 + 六个回退出口的档位接线 + MFT 不造假档位
+        Test_PerfWiring_PqTransferTable();                              // 2026-10-31 批2：PQ 查表 ≤1 码字、16-bit 回原式、弱表正控
+        Test_PerfWiring_TiffStripsAndLosslessShapes();                  // 2026-10-31 批2：TIFF 分条并行 / 整帧判一次后端 / 缓冲初值 / Y4M 每行写
         Test_BingWebEndpointShapeAndOptIn();            // 必应网页端点：同一条闸门 + 三个"看着像成功"的坑
         Test_OpIdScopeSemanticsAndWiring();             // 每拍关联 ID：语义 + "App 侧真的开了作用域"的接线判据
         Test_NoRawDebugWritesOutsideTheWhitelistedSinks(); // 防回潮：白名单外不许有裸 Debug.WriteLine
@@ -4273,6 +4276,29 @@ public static class CorePipelineTests
     }
 
     /// <summary>
+    /// 按花括号配平截出某个方法的方法体（找不到返回 null）。
+    /// <para>用在"某句必须在某方法体内"这类判据上，替代 <c>签名[\s\S]{0,N}目标</c> 的窗口式写法：
+    /// 窗口宽度随排版漂移 —— 2026-10-31 给 <c>RebuildFormatCombo</c> 加了 finally 之后，
+    /// 原本 400 字符的窗口把行为完全正确的代码判红，而这种红只会教人把数字改大，不会教人改判据。</para>
+    /// <para>调用方须先过 StripLineComments；字符串内的插值花括号成对出现，配平计数不受影响。</para>
+    /// </summary>
+    static string? MethodBodyOf(string src, string signature)
+    {
+        int at = src.IndexOf(signature, StringComparison.Ordinal);
+        if (at < 0) return null;
+        int open = src.IndexOf('{', at + signature.Length);
+        if (open < 0) return null;
+        int depth = 0;
+        for (int i = open; i < src.Length; i++)
+        {
+            if (src[i] == '{') depth++;
+            else if (src[i] == '}' && --depth == 0)
+                return src.Substring(open + 1, i - open - 1);
+        }
+        return null;
+    }
+
+    /// <summary>
     /// 选区起点预烘图集（2026-10-30，阶段 1）：图集那趟排版 + 11.5MB 读回只用 Win2D 进程级共享设备，
     /// 不需要预览窗自己的 D3D 设备 ⇒ 在按下热键、WGC 捕获之前就用一个"无设备壳"提前烘，真窗口建好后
     /// 直接吃跨窗缓存。三件事各挡一种"看着正常"的坏法：
@@ -4726,6 +4752,273 @@ public static class CorePipelineTests
     }
 
     /// <summary>
+    /// 2026-10-31 全管线审查批1：AVIF「压缩强度」要接到 <b>8-bit 成品腿</b>与<b>全部硬件失败回退出口</b>。
+    /// <para>缺陷形状（本轮实读定位）：<c>IAvifEncoder.EncodeAsync</c> 的第 12 参与
+    /// <c>AvifFallbackHelper.FallbackToLibAom</c> 的 <c>effort</c> 都带默认值 <c>Balanced</c> ⇒
+    /// 漏传既不报错也不警告，只表现为"界面那三档对产物毫无影响"。上面那条测试只接了真 10-bit
+    /// 三条腿，8-bit 家族与回退链当时不在任何锁面内。</para>
+    /// <para>口径：<b>按行切并显式排掉声明行，且把总数一起钉死</b>——只断"带 effort 的行数够多"
+    /// 会在有人新增第七个漏传出口时恒绿（同族先例见 <see cref="Test_PerfWiring_PngTiffEffortTiers"/>
+    /// 里那句"只数子串就数到 9 还通过"）。</para>
+    /// </summary>
+    static void Test_PerfWiring_AvifEffortProductLegAndFallbacks()
+    {
+        var fmtPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"));
+        var mftPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "MftEncoderNative.cs"));
+        Assert("找到 FormatEncoders.cs / MftEncoderNative.cs（缺一=本条失明）",
+            fmtPath is not null && mftPath is not null);
+        if (fmtPath is null || mftPath is null) return;
+
+        var fmt = StripLineComments(ReadSourceNormalized(fmtPath));
+        var lines = fmt.Split('\n');
+        var mft = StripLineComments(ReadSourceNormalized(mftPath));
+
+        var fallbacks = lines.Where(l => l.Contains("FallbackToLibAom(")
+                                       && !l.Contains("static void FallbackToLibAom")).ToList();
+        int withEffort = fallbacks.Count(l => l.Contains("effort: effort"));
+        Assert("① 六个 libaom 回退出口全部具名传档位（总数同时钉死：新增一个漏传出口必须红）",
+            fallbacks.Count == 6 && withEffort == 6,
+            $"回退出口 {fallbacks.Count} 个、带档位 {withEffort} 个；没带的："
+            + string.Join(" | ", fallbacks.Where(l => !l.Contains("effort: effort")).Select(l => l.Trim())));
+
+        var productLeg = lines.Where(l => l.Contains("be.EncodeAsync(px, w, h,")).ToList();
+        Assert("② 8-bit 成品出口把 s.Effort 交给所选后端（NVENC 恒 P4、avifenc 恒 -s 6 就是这条漏出来的）",
+            productLeg.Count == 1 && productLeg[0].Contains("effort: s.Effort"),
+            $"数到 {productLeg.Count} 条成品出口；内容：{productLeg.FirstOrDefault()?.Trim() ?? "(无)"}");
+
+        var degrade = lines.Where(l => l.Contains("await EncodeAsync(AvifPixelFormat.Argb10ToBgra8")).ToList();
+        Assert("③ 真 10-bit 退回 8-bit 时档位一起带走（同一次编码里不许'10-bit 按档位、退 8-bit 就换档'）",
+            degrade.Count == 1 && degrade[0].Contains("effort: effort"),
+            $"数到 {degrade.Count} 处降级转交；内容：{degrade.FirstOrDefault()?.Trim() ?? "(无)"}");
+
+        // 2026-10-31：那个"事后旗标"被删了 —— 全仓 0 处读它，而界面早已按下发能力禁用控件，
+        // 留着它等于多一处没人维护的"第二事实源"。判据因此改查"能力恒 false + 逐张只留一条痕"，
+        // 并显式钉住那个旗标不许回来（回来就必须同时带一个真读者）。
+        Assert("④ MFT/QSV 腿按'不造假档位'处理：能力恒 false + 逐张留痕，且不留无读者的状态位",
+            CountOf(fmt, "public static bool HardwareLegAcceptsEffort => false;") == 1
+            && CountOf(fmt, "MftEffortSupport.NoteHardwareLegIgnored(effort);") == 1
+            && !fmt.Contains("HardwareLegIgnoredEffort"),
+            $"能力声明 {CountOf(fmt, "HardwareLegAcceptsEffort => false")} 处、"
+            + $"登记 {CountOf(fmt, "NoteHardwareLegIgnored(effort);")} 处、"
+            + $"残留状态位 {(fmt.Contains("HardwareLegIgnoredEffort") ? 1 : 0)} 处"
+            + "（要么有人读，要么删干净 —— 半接的通道就是下一轮'忘了改第二处'）");
+
+        // 跨文件同源锁：谁给 MFT 加了档位入口，就必须同时翻上面那个属性，否则这里先红。
+        Assert("⑤ 正向对照——MftEncoderNative 至今仍没有任何档位落点（有而没有翻属性=假'不支持'）",
+            !mft.Contains("CompressionEffort") && !mft.Contains("presetGuid") && !mft.Contains("qualityMode"),
+            "MftEncoderNative 里出现了档位类字样，但 FormatEncoders 那份 HardwareLegAcceptsEffort 还是 false");
+
+        // 界面侧：控件必须按 Core 的判据禁用并点名，判据不许在 App 里再算一遍 kind
+        //（同族先例：QualitySld 的 noQualityKnob 问 encoder.QualityIsFixed，而不是 `format != PNG`）。
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var capsPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "AvifEncoderCapabilities.cs"));
+        var locPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        Assert("找到 MainWindow.xaml.cs / AvifEncoderCapabilities.cs / LocaleManager.cs（缺一=本条失明）",
+            mwPath is not null && capsPath is not null && locPath is not null);
+        if (mwPath is null || capsPath is null || locPath is null) return;
+        var mw = StripLineComments(ReadSourceNormalized(mwPath));
+        var caps = StripLineComments(ReadSourceNormalized(capsPath));
+        var loc = ReadSourceNormalized(locPath);
+
+        Assert("⑥ 界面按 Core 那份判据禁用无效档位控件，且不在 App 里自己点名 kind",
+            CountOf(caps, "kind is not AvifEncoderKind.Qsv || MftEffortSupport.HardwareLegAcceptsEffort") == 1
+            && mw.Contains("AvifEncoderCapabilities.EffortApplies(kind)")
+            && mw.Contains("EffortAvifCbo.IsEnabled = effortApplies"),
+            "App 侧自己判 kind=禁用与 Core 分叉；或 Core 里又写了一遍 kind 白名单");
+
+        Assert("⑦ 禁用的那句点名必须同时进 ZhToEn（英文界面不许漏翻）",
+            mw.Contains("该后端没有压缩强度入口（系统 MFT 无此旋钮），上面的下拉已禁用。")
+            && loc.Contains("[\" ⚠ 该后端没有压缩强度入口（系统 MFT 无此旋钮），上面的下拉已禁用。\"]"),
+            "只在中文里点名、英文界面漏翻 = 判据\"这句话在代码里出现过\"并不等于\"这句话会被翻译\"");
+    }
+
+    /// <summary>
+    /// 2026-10-31 全管线审查批2（内核形状）：ST.2084 的逐像素 pow 换成按 s=L^(1/4) 均匀分段的查表。
+    /// <para>实测口径见 docs/reviews/performance/full-pipeline-review-2026-10-31.md §2.4：
+    /// 4K 一帧 134.6ms → 58.4ms（2.30×），同形状内存下限 40.2ms；10/12-bit 码字最大偏差 1。
+    /// 同场判死的是"判界表 + 二分"（0.88×，比 pow 还慢且密扫仍有 8,865 处不同码）。</para>
+    /// <para><b>为什么还要在测试里重扫一遍</b>：表是运行时构建的，常数或分段一改就可能悄悄越界；
+    /// 而这条改动的产品语义承诺是"最多 1 LSB、16-bit 容器逐字节不变"。</para>
+    /// </summary>
+    static void Test_PerfWiring_PqTransferTable()
+    {
+        var pqPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Processing", "PqTransfer.cs"));
+        var fmtPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"));
+        var tmPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Processing", "ToneMapper.cs"));
+        Assert("找到 PqTransfer.cs / FormatEncoders.cs / ToneMapper.cs（缺一=本条失明）",
+            pqPath is not null && fmtPath is not null && tmPath is not null);
+        if (pqPath is null || fmtPath is null || tmPath is null) return;
+
+        // ── 行为臂①：确定性逐格内点扫描（按构造覆盖每个格内部，不是抽样）──
+        const int Seg = 4096;
+        int max10 = 0, max12 = 0, diff10 = 0, cells = 0;
+        foreach (var (lin, _) in ScanLinearValues(Seg))
+        {
+            float ex = TrueToneCap.Core.Processing.PqTransfer.EncodeExact(lin);
+            float tb = TrueToneCap.Core.Processing.PqTransfer.EncodeTable(lin);
+            // 两种量化形状都要过：HdrToPq16 用 Math.Round，HdrToArgb10Pq 用 +0.5f 截断
+            int d10a = Math.Abs((int)Math.Round(tb * 1023f) - (int)Math.Round(ex * 1023f));
+            int d10b = Math.Abs((int)(tb * 1023f + 0.5f) - (int)(ex * 1023f + 0.5f));
+            int d12 = Math.Abs((int)Math.Round(tb * 4095f) - (int)Math.Round(ex * 4095f));
+            int d10 = Math.Max(d10a, d10b);
+            if (d10 > max10) max10 = d10;
+            if (d12 > max12) max12 = d12;
+            if (d10 != 0) diff10++;
+            cells++;
+        }
+        Assert("① 查表与逐像素 pow 的 10-bit 码字最大偏差 ≤1（两种量化形状都算）",
+            max10 <= 1, $"max10={max10} 不同码占比={diff10 / (double)cells:P4} 扫描格数={cells}");
+        Assert("② 12-bit 容器同样 ≤1 码字（表的精度预算按位深花完）",
+            max12 <= 1, $"max12={max12}");
+
+        // ── 判据自证：同一形状的弱表（64 格）必须被这套扫描判红，否则上面两条是恒绿的尺子 ──
+        int weakMax = 0;
+        foreach (var (lin, _) in ScanLinearValues(64))
+        {
+            float ex = TrueToneCap.Core.Processing.PqTransfer.EncodeExact(lin);
+            float weak = WeakTableEncode(lin, 64);
+            int d = Math.Abs((int)Math.Round(weak * 1023f) - (int)Math.Round(ex * 1023f));
+            if (d > weakMax) weakMax = d;
+        }
+        Assert("③ 正控——64 格弱表必须超出 1 码字（不超=这台误差扫描器本身是死的）",
+            weakMax > 1, $"弱表 max={weakMax}（期望 >1）");
+
+        // ── 行为臂④：16-bit 容器不许吃表（"16-bit 产物逐字节不变"这条边界的活体证明）──
+        int sixteenMismatch = 0;
+        foreach (var (lin, _) in ScanLinearValues(256))
+            if (TrueToneCap.Core.Processing.PqTransfer.Encode(lin, 65535)
+                != TrueToneCap.Core.Processing.PqTransfer.EncodeExact(lin)) sixteenMismatch++;
+        Assert("④ maxValue=65535 时 Encode 必须逐字回原式（16-bit 容器走表=悄悄改像素）",
+            sixteenMismatch == 0, $"有 {sixteenMismatch} 个取值在 16-bit 档与精确式不一致");
+
+        // ── 开关两侧都要有活体：表臂与 pow 臂各真的被走到（不是"形参收下、内部只用一条"）──
+        bool anyDiffers = false;
+        foreach (var (lin, _) in ScanLinearValues(512))
+            if (TrueToneCap.Core.Processing.PqTransfer.EncodeTable(lin)
+                != TrueToneCap.Core.Processing.PqTransfer.EncodeExact(lin)) { anyDiffers = true; break; }
+        Assert("⑤ 表臂与精确臂确实是两条实现（逐格全等=其中一条是假的）", anyDiffers,
+            "两臂在 512×内点上完全相同");
+
+        // ── 接线锁：PQ 的算术只该有一份，产物路径必须走表 ──
+        var fmt = StripLineComments(ReadSourceNormalized(fmtPath));
+        var tm = StripLineComments(ReadSourceNormalized(tmPath));
+        Assert("⑥ HdrToPq16 与 HdrToArgb10Pq 各三处改走 PqTransfer.Encode（按位深自选）",
+            CountOf(fmt, "Processing.PqTransfer.Encode(r, maxValue)") == 1
+            && CountOf(fmt, "Processing.PqTransfer.Encode(g, maxValue)") == 1
+            && CountOf(fmt, "Processing.PqTransfer.Encode(b, maxValue)") == 1
+            && CountOf(tm, "PqTransfer.Encode(r, 1023)") == 1
+            && CountOf(tm, "PqTransfer.Encode(g, 1023)") == 1
+            && CountOf(tm, "PqTransfer.Encode(b, 1023)") == 1,
+            $"fmt={CountOf(fmt, "PqTransfer.Encode(")} tm={CountOf(tm, "PqTransfer.Encode(")}");
+        Assert("⑦ 旧入口 LinearToPQ 只做别名，不再自己写第二份算式（式子只该在 PqTransfer 里有一份）",
+            CountOf(fmt, "Processing.PqTransfer.EncodeExact(scRgbLinear)") == 1
+            && !fmt.Contains("MathF.Pow(numerator / denominator"),
+            "FormatEncoders 里还留着自己的 PQ 算式");
+        Assert("⑧ 开关与位深上限各只有一处（两处事实源=漏改其一就静默变味）",
+            CountOf(StripLineComments(ReadSourceNormalized(pqPath)), "TTC_PQ_TABLE") == 1
+            && CountOf(StripLineComments(ReadSourceNormalized(pqPath)), "maxValue > TableMaxQuantum") == 1);
+    }
+
+    /// <summary>按 s=L^(1/K) 逐格取内点，返回 (linear, 是否半点) 序列；segments 由调用方给定，
+    /// 同一份生成器既喂产品表也喂弱表，保证正控与被试同一条尺子。</summary>
+    static IEnumerable<(float linear, bool halfUp)> ScanLinearValues(int segments)
+    {
+        const int PerCell = 64;
+        for (int seg = 0; seg < segments; seg++)
+            for (int k = 0; k < PerCell; k++)
+            {
+                double s = ((double)seg + k / (double)PerCell) / segments;
+                double L = s * s * s * s;                      // s = L^(1/4)
+                yield return ((float)(L * 125.0), false);      // linear = L*125（nits=linear*80, L=nits/10000）
+            }
+    }
+
+    /// <summary>被故意做弱的同一形状（格数可给），只用于证明误差扫描器有牙。</summary>
+    static float WeakTableEncode(float linear, int segments)
+    {
+        double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0;
+        double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
+        double[] t = new double[segments + 1];
+        for (int i = 0; i <= segments; i++)
+        {
+            double ss = (double)i / segments, L = ss * ss * ss * ss;
+            double Lp = Math.Pow(L, m1);
+            t[i] = Math.Pow((c1 + c2 * Lp) / (1 + c3 * Lp), m2);
+        }
+        double Lv = Math.Clamp((double)linear / 125.0, 0.0, 1.0);
+        if (Lv <= 0.0) return 0f;
+        if (Lv >= 1.0) return 1f;
+        double s4 = Math.Sqrt(Math.Sqrt(Lv));
+        double pos = s4 * segments;
+        int idx = (int)pos;
+        double f = pos - idx;
+        return (float)(t[idx] + (t[idx + 1] - t[idx]) * f);
+    }
+
+    /// <summary>
+    /// 2026-10-31 全管线审查批2（无损段的搬运与形状）：TIFF 分条并行、deflate 缓冲初值、
+    /// AVIF 软件 HDR 的 Y4M 每行写盘。
+    /// <para>靶子：本文件在 2026-10-31 之前全文 0 处 <c>Parallel.</c>、单 strip，全尺寸 TIFF 耗时
+    /// 至今零读数；<c>DeflateZlib.CompressBuiltin</c> 无初值 MemoryStream 在 4K 规模要翻倍扩容约 18 次。
+    /// 实测（同一份 4K 10-bit 内容）：转换+滤波 399–432ms、deflate 内置 15.9–16.1s / libdeflate 3.1–3.6s。</para>
+    /// <para>⚠ 分条之后<b>大图容器与压缩字节会变</b>（每 strip 一条独立 zlib 流），解压后像素不变；
+    /// 小图（未压缩整帧 ≤1 MiB）自动落回单 strip ⇒ 与历史逐字节相同。这条边界由 ② 守着。</para>
+    /// </summary>
+    static void Test_PerfWiring_TiffStripsAndLosslessShapes()
+    {
+        var tifPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ManagedTiffEncoder.cs"));
+        var dzPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "DeflateZlib.cs"));
+        var avifPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeAvifEncoder.cs"));
+        Assert("找到 ManagedTiffEncoder.cs / DeflateZlib.cs / NativeAvifEncoder.cs（缺一=本条失明）",
+            tifPath is not null && dzPath is not null && avifPath is not null);
+        if (tifPath is null || dzPath is null || avifPath is null) return;
+
+        var tif = StripLineComments(ReadSourceNormalized(tifPath));
+        var dz = StripLineComments(ReadSourceNormalized(dzPath));
+
+        Assert("① 转 RGBA 与逐条压缩都并行（本文件历史上是单线程逐像素 + 单 strip 无并行入口）",
+            CountOf(tif, "System.Threading.Tasks.Parallel.For(0, h, y =>") == 1
+            && CountOf(tif, "System.Threading.Tasks.Parallel.For(0, stripCount, s =>") == 1,
+            $"行并行 {CountOf(tif, "Parallel.For(0, h")} 处、条并行 {CountOf(tif, "Parallel.For(0, stripCount")} 处");
+
+        Assert("② 后端按【整帧】判一次再交给各条，逐条不许各判一次（一帧≈64 条 ⇒ 探针从几毫秒变几十毫秒）",
+            CountOf(tif, "DeflateZlib.SelectNativeBackend(stripRaw, level)") == 1
+            && CountOf(tif, "DeflateZlib.CompressWithDecision(stripRaw[s], level, useNative)") == 1
+            && !tif.Contains("DeflateZlib.Compress(stripRaw[s]"),
+            "分条循环里又出现了逐条判定/逐条 Compress");
+
+        Assert("③ 单 strip（小图）分支仍是一次整帧 Compress ⇒ 产物字节与历史逐字相同这条承诺才成立",
+            CountOf(tif, "DeflateZlib.Compress(raw, CompressionEffortMap.PngTiffDeflateLevel(effort))") == 1);
+
+        Assert("④ Tag 278 写的是规划值 rowsPerStrip；多条时 273/279 转值区数组，单条仍内联回填",
+            CountOf(tif, "writer.Write((uint)rowsPerStrip);") == 1
+            && CountOf(tif, "stripOffsetValuePos = writer.BaseStream.Position;") == 1
+            && CountOf(tif, "byteCountValuePos = writer.BaseStream.Position;") == 1,
+            "把内联值改成值区指针 = 2026-09-19 那次全黑的形状");
+
+        Assert("⑤ 值区布局分叉在 Release 也必须拒绝写出（Debug.Assert 只在 Debug 生效，坏件会静默交出去）",
+            tif.Contains("if (pixelDataStart != expectedPixelDataStart)")
+            && !tif.Contains("Debug.Assert(pixelDataStart"),
+            "这条不变量又退回了只给人眼看的断言");
+
+        Assert("⑥ deflate 缓冲有预估初值且容量只当缓冲用（估错=退化回旧行为，不许影响产物）",
+            CountOf(dz, "new MemoryStream(EstimatedCapacity(data.Length))") == 1
+            && dz.Contains("if (buf.Length == len) return buf;"),
+            $"初值 {CountOf(dz, "new MemoryStream(EstimatedCapacity")} 处");
+
+        Assert("⑦ 分流判据只有一份式子（两版采样共用 ProbeSample，否则同一张图两条路能判得不一样）",
+            CountOf(dz, ">= LibDeflateMinRatio") == 1
+            && CountOf(dz, "s_allowLibDeflate && level == 9 && IsAvailable") == 2,
+            $"比值式子 {CountOf(dz, ">= LibDeflateMinRatio")} 处");
+
+        // ⑧（原"Y4M 每行一次 Write"）随 2026-10-31 删除零调用方的 EncodeHdrFromScrgb 一并撤掉：
+        // 那条承诺量在一条【没人调用】的腿上（289.7→113.4ms 是同机实测，但落点错了），
+        // 现在产品唯一在跑的 AVIF 路不写 Y4M ⇒ 没有可钉的对象。留着一条永远为真的锁比删掉更坏。
+        // 出货 AVIF 若哪天真接上 Y4M，这条要连【实测】一起重新写，不许照抄旧数字。
+    }
+
+
+    /// <summary>
     /// 2026-10-30 性能审查候选 E + 仪表：OCR rec 的合批与 Span 读取。
     /// <para>实测（1200×800 / 14 框 / DirectML，交替换臂 10 次）：原多维索引器 total 730ms、
     /// Span 586ms、Span+合批 503–538ms；三臂 OCR 文本 SHA 全同（5C4B82FD）⇒ 只动"怎么读/跑几次"。
@@ -4829,13 +5122,31 @@ public static class CorePipelineTests
         Assert("① 路径覆盖开关 TTC_DEFLATE_DLL 只读一次",
             CountOf(dz, "Environment.GetEnvironmentVariable(\"TTC_DEFLATE_DLL\")") == 1);
 
-        Assert("② PNG 与 TIFF 都只经 DeflateZlib.Compress，不再各写一份 ZLibStream",
-            CountOf(png, "DeflateZlib.Compress(data, CompressionEffortMap.PngTiffDeflateLevel(effort))") == 1
-            && CountOf(tif, "DeflateZlib.Compress(raw, CompressionEffortMap.PngTiffDeflateLevel(effort))") == 1);
+        // 2026-10-31 流式化：PNG 不再"压完整一帧再写一条 IDAT"，改成把压缩字节增量推给分块 sink。
+        // 判据跟着换成"PNG 的压缩腿 = SelectNativeBackend 判一次 + CompressTo 写出去"，
+        // 而"不各写一份 ZLibStream"这半句仍然要查（中转件那条 Fastest 是刻意的例外，见下）。
+        Assert("② PNG 与 TIFF 都只经 DeflateZlib 这一条压缩腿，不再各写一份 ZLibStream",
+            CountOf(png, "DeflateZlib.SelectNativeBackend(rawData, level)") == 1
+            && CountOf(png, "DeflateZlib.CompressTo(sink, rawData, level, useNative)") == 1
+            && CountOf(tif, "DeflateZlib.Compress(raw, CompressionEffortMap.PngTiffDeflateLevel(effort))") == 1
+            && CountOf(png, "new ZLibStream(") == 2
+            && CountOf(png, "new ZLibStream(sink, CompressionLevel.Fastest") == 1
+            && CountOf(png, "new ZLibStream(ms, CompressionLevel.Fastest") == 1,
+            "PNG 的压缩腿必须只有流式入口那一处；两处 ZLibStream 都必须是写死 Fastest 的旁路"
+            + $"（IDAT 中转件 + iCCP 各一处，实得 {CountOf(png, "new ZLibStream(")} 处）—— "
+            + "任何一处改用档位 level，就等于给无损产物开了第二条口径不同的压缩路");
 
         Assert("③ 原生失败必须回到内置实现（两条 return 是空输入与失败回退）",
-            dz.Contains("if (s_allowLibDeflate && level == 9 && IsAvailable && IsLibDeflateCandidate(data)", StringComparison.Ordinal)
-            && CountOf(dz, "return CompressBuiltin(data, level);") == 2);
+            dz.Contains("if (useNative && TryCompressNative(data, LibDeflateLevel, out var compressed)) return compressed;", StringComparison.Ordinal)
+            && CountOf(dz, "return CompressBuiltin(data, level);") == 2,
+            "CompressWithDecision 里没了这条回退 ⇒ native 一失败就没有内置兜底");
+
+        // 2026-10-31：判档位的式子从 Compress 体内挪进 SelectNativeBackend 的两个重载（整帧判一次），
+        // 上面那条查的是"回退还在"，这条查的是"判定只有一处口径、没有第三份"。
+        Assert("③b 后端判定式只允许两份（单块与分条各一），且公开入口 Compress 不再自己写判式",
+            CountOf(dz, "s_allowLibDeflate && level == 9 && IsAvailable") == 2
+            && CountOf(dz, ">= LibDeflateMinRatio") == 1,
+            $"判定式 {CountOf(dz, "s_allowLibDeflate && level == 9 && IsAvailable")} 份、比值式子 {CountOf(dz, ">= LibDeflateMinRatio")} 份");
 
         Assert("③ libdeflate 用 level 10（真实 HDR 截图实测它同时更快且小 6%）；入口仍只接管 Smallest(9)",
             CountOf(dz, "private const int LibDeflateLevel = 10;") == 1
@@ -6422,12 +6733,28 @@ public static class CorePipelineTests
             .Matches(srvCode, @"SaveSecret\([^;]*SecretClearanceIsUserIntent\)").Count;
         Assert($"两个凭据写点都走同一道门（实得 {saveCallsGated}，应为 2）", saveCallsGated == 2,
             "漏一个 = 那条凭据的空值仍然无条件当成用户意图");
-        Assert("写成功也算「本次可信」，且必须排在真正落盘之后",
-            srvCode.Contains("_savedToDisk = true;")
-            && srvCode.IndexOf("File.Move(tmp, SettingsPath", System.StringComparison.Ordinal) >= 0
-            && srvCode.IndexOf("File.Move(tmp, SettingsPath", System.StringComparison.Ordinal)
-               < srvCode.IndexOf("_savedToDisk = true;", System.StringComparison.Ordinal),
-            "写盘失败却把标志抬起来 ⇒ 又回到\"空值即用户要删\"的假前提");
+        // 2026-10-31 起"写成功"有两条出口：真正落盘之后，或"盘上现有内容与本次逐字节相同"之后
+        // （后者吃掉启动里那两次空写）。旧锁用 IndexOf 比"Move 在前、标志在后"，两条出口一出现就必然假红；
+        // 真正要钉的是【每个标志都排在它自己的证据之后】，以及【跳过文件 IO 不许顺带跳过凭据写点】——
+        // 凭据是 [JsonIgnore] 不在这份 JSON 里，内容相同≠整次保存没内容。
+        int moveAt = srvCode.IndexOf("File.Move(tmp, SettingsPath", System.StringComparison.Ordinal);
+        int equalAt = srvCode.IndexOf("string.Equals(onDisk, json, StringComparison.Ordinal)", System.StringComparison.Ordinal);
+        int readAt = srvCode.IndexOf("File.ReadAllText(SettingsPath)", System.StringComparison.Ordinal);
+        int secretAt = srvCode.IndexOf("SaveSecret(SecretStore.LlmApiKeyName", System.StringComparison.Ordinal);
+        var flagAt = new System.Collections.Generic.List<int>();
+        for (int at = srvCode.IndexOf("_savedToDisk = true;", System.StringComparison.Ordinal);
+             at >= 0;
+             at = srvCode.IndexOf("_savedToDisk = true;", at + 1, System.StringComparison.Ordinal))
+            flagAt.Add(at);
+        Assert("写成功的两条出口各自排在证据之后；跳过 IO 的那条排在凭据写点之后",
+            moveAt >= 0 && equalAt >= 0 && readAt >= 0 && secretAt >= 0
+            && flagAt.Count == 2
+            && flagAt[0] > equalAt && flagAt[1] > moveAt && equalAt > readAt
+            && srvCode.Contains("if (File.Exists(SettingsPath))")
+            && secretAt < equalAt,
+            $"出口 {flagAt.Count} 处（skip@{(flagAt.Count > 0 ? flagAt[0] : -1)} "
+            + $"落盘@{(flagAt.Count > 1 ? flagAt[1] : -1)}）Move@{moveAt} 相同判定@{equalAt} "
+            + $"读盘@{readAt} 凭据@{secretAt}；缺 File.Exists 前置=文件被删过仍自称可信");
         Assert("Load() 开头把读、写两个可信来源一起复位",
             srvCode.Contains("_loadedFromDisk = false;") && srvCode.Contains("_savedToDisk = false;"),
             "只复位读的那半 ⇒ 上一次写留下的可信度会穿过一次失败的 Load，坏文件又能删凭据了");
@@ -6717,6 +7044,21 @@ public static class CorePipelineTests
             mw.Contains("private OutputFormat CurrentFormat()") && mw.Contains("Format: CurrentFormat()"));
         Assert("增益图开关的落盘必须挡住程序赋值（§49 那条缺陷在复选框上的同一形态）",
             mw.Contains("if (!_uiReady || _qualityPanelUpdating) return;"));
+        // 2026-10-31 批3：启动日志 117/117 次都在主窗口之前写 3 次设置，逐次归因全部出自
+        // RebuildFormatCombo → OnFormatChanged；其中换 ItemsSource 那发的中间态是 SelectedIndex=-1，
+        // 会被原样写进盘。守卫必须【只拦持久化】—— UpdateQualityPanel 要留在拦截之前，
+        // 否则换语言后质量面板不重画，退回 2026-09-26 用户报的"默认选项缺失"那一族。
+        Assert("格式下拉重建期的中间态不写盘，但界面刷新照做（顺序必须是 先 UpdateQualityPanel 后 return）",
+            System.Text.RegularExpressions.Regex.IsMatch(
+                mw, @"OnFormatChanged[\s\S]{0,400}?UpdateQualityPanel\(\);[\s\S]{0,200}?if \(_formatComboRebuilding\) return;[\s\S]{0,200}?_settings\.FormatIndex = FormatCbo\.SelectedIndex;",
+                System.Text.RegularExpressions.RegexOptions.Singleline)
+            && mw.Contains("_formatComboRebuilding = true;")
+            && CountOf(mw, "_formatComboRebuilding = false;") == 1,
+            "拦在 UpdateQualityPanel 之前=换语言后面板不重画；闩锁没在 finally 里放=一次异常后所有真实选择都不再落盘");
+        Assert("闩锁的清除必须排在 finally 里（钉结构，不钉那一句在不在）",
+            System.Text.RegularExpressions.Regex.IsMatch(
+                mw, @"finally\s*\{\s*(//[^\n]*\n\s*)*_formatComboRebuilding = false;",
+                System.Text.RegularExpressions.RegexOptions.Singleline));
         Assert("管线里不得再有第二份「格式→质量字段」switch（三份抄写就是这次合并要消掉的东西）",
             !pipe.Contains("OutputFormat.JPEG_GAINMAP => s.QualityGainMap")
             && pipe.Contains("s.GetQuality(format)"));
@@ -6751,10 +7093,15 @@ public static class CorePipelineTests
         }
         Assert("整个 App 只有一处能给格式下拉赋值（两处以上就等于允许第二份清单）",
             assignSites.Count == 1, $"实得 {assignSites.Count} 处：{string.Join(",", assignSites)}");
+        var rebuildBody = MethodBodyOf(mw, "private void RebuildFormatCombo()");
+        Assert("能解析到 RebuildFormatCombo 的方法体（解析不到就是改了写法，下面那条判据会静默失效）",
+            rebuildBody is not null);
         Assert("唯一的构建口自带显示层↔编码层↔契约表三方自检，且错位只报 Error 不静默修复",
-            Regex.IsMatch(mw, "private void RebuildFormatCombo\\(\\)[\\s\\S]{0,400}CheckFormatComboContract\\(\\);")
+            rebuildBody is not null
+            && CountOf(rebuildBody, "CheckFormatComboContract();") == 1
             && mw.Contains("private void CheckFormatComboContract()")
-            && mw.Contains("LogService.Error(\"MainWindow\""));
+            && mw.Contains("LogService.Error(\"MainWindow\""),
+            "自检调用必须落在构建口体内且只有一次：跑在方法外=换了写法就静默不测，跑两次=一次错位刷两条 Error");
         // 界面格式表 vs Core 的 FormatIndex 契约表：逐项同序。这两张表任何一张单独漂了，
         // 老配置里的裸索引就会"静默指向别的格式"——§52 与本轮的错位都是这么来的。
         var fmtBlock = Regex.Match(mw, "_formats\\s*=\\s*\\[([\\s\\S]*?)\\];");
@@ -7615,7 +7962,12 @@ public static class CorePipelineTests
         // 同前：全是日志串；壳烘的图集里没有新文案。
         // 2026-10-30（第十三次）：87 → 93（+6）。阶段 4 共享设备：构造日志的自建/复用两档、建立/失败/丢失换新/
         // 预热就绪各一条。同前：全是日志串，没有新增画给用户看的字。
-        const int BakedCnBaseline = 93;
+        // 2026-10-31（第十四次）：93 → 110（+17）。批4 仪表：F4/F5 的计量行与结算串
+        // （[Meter/F4] 预览窗存活/渲染帧数/每帧均值/RTV 重建/静置帧、[Meter/F5] staging 问答、
+        //  `_poolLock` 持锁分档、整帧回读兜底原因等）。
+        // 逐条核过：全部只在 CoreLog.Detail(...) 的实参里，没有一条赋给界面属性
+        // ⇒ 没有新增画给用户看的字，英文对照表不需要跟着动（同前十几次的口径）。
+        const int BakedCnBaseline = 110;
 
         var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
         if (p is null)
@@ -11615,7 +11967,8 @@ public static class CorePipelineTests
     /// 掩盖根因、子进程留在后台吃 CPU。查出的现场：cjxl ×3、cjpegli ×2、avifenc ×2。</para>
     /// <para>② 就算判了返回值也白判：<c>ReadToEnd()</c> 同步阻塞，子进程只要不退出就不关管道写端，
     /// 于是这句<b>永不返回</b>，后面那句 <c>WaitForExit</c> 根本执行不到 —— 5s/30s 全是摆设。
-    /// 探测通路 6 处（<c>IsAvailable</c> 与 PATH 回退）+ 编码通路 8 处同一个写法。
+    /// 探测通路 6 处（<c>IsAvailable</c> 与 PATH 回退）+ 编码通路 7 处同一个写法
+    /// （2026-10-31：原 8 处，其中一处在零调用方的 HDR 死路上，随它一起删）。
     /// ⇒ 现统一走 <c>NativeProcess.DrainProbe</c> / <c>DrainAndFinish</c>：两条管道同时挂异步读，
     /// 排空与等待并行，既不因管道满而死锁，也不因进程不退出而丢超时。</para>
     /// <para>⚠ 本条只钉形态；"真的挂住时超时到底可不可达"由下面
@@ -11644,8 +11997,10 @@ public static class CorePipelineTests
             drain += CountOfStatic(code, "NativeProcess.DrainAndFinish(");
             awaitedWait += CountOfStatic(code, "if (!proc.WaitForExit(");
         }
-        Assert($"探测 6 处 + 编码 8 处都走 Drain*（实得 {drain}）", drain >= 14,
-            "avifenc/jxl/jpegli/webp 的 IsAvailable 与 PATH 回退共 6 处，编码等待共 8 处");
+        // 2026-10-31：编码通路 8 → 7 —— 零调用方的 EncodeHdrFromScrgb 被删，它带着第 8 处等待一起走。
+        // 统一层的口径没变（该 Drain 的仍然必须 Drain），变的只是计数对象少了一条死路。
+        Assert($"探测 6 处 + 编码 7 处都走 Drain*（实得 {drain}）", drain >= 13,
+            "avifenc/jxl/jpegli/webp 的 IsAvailable 与 PATH 回退共 6 处，编码等待共 7 处");
         Assert($"保留手写等待的只剩「喂 stdin 那一处」（实得 {awaitedWait}）", awaitedWait == 1,
             "那一处必须先起异步读再往 stdin 写 PNG，Drain* 不适用；多出来说明有地方绕过了统一层");
     }

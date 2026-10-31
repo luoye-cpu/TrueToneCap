@@ -55,6 +55,19 @@ function Count-Desc($el) {
     try { return @($el.FindAll([System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.Condition]::TrueCondition)).Count } catch { return -1 }
 }
+# UIA 对"此刻没有有效布局"的元素（托盘隐藏态 / 尚未实化的 WinUI 窗）给的是 ±∞ 或 NaN，
+# 而 `[int]` 转换会直接抛 "Cannot convert value ∞ to type Int32" —— 2026-10-31 实测：
+# 探针在 ShowWindow(SW_RESTORE) 之后正好死在这一行，于是"界面显示哪一个格式"整格没判。
+# 仪器不许把待判的读数炸掉：非有限值就原样印出来，读数仍然留在日志里。
+# 不用 [double]::IsFinite —— 那是 .NET Core 3+ 才有的，PS 5.1 宿主下会抛 NoSuchMethod。
+function Fmt-Rect($r) {
+    $bad = [double]::IsInfinity($r.X) -or [double]::IsInfinity($r.Y) -or
+           [double]::IsInfinity($r.Width) -or [double]::IsInfinity($r.Height) -or
+           [double]::IsNaN($r.X) -or [double]::IsNaN($r.Y) -or
+           [double]::IsNaN($r.Width) -or [double]::IsNaN($r.Height)
+    if ($bad) { return '不可得(∞/NaN：该窗此刻没有有效布局)' }
+    return "$([int]$r.X),$([int]$r.Y),$([int]$r.Width)x$([int]$r.Height)"
+}
 
 $dir = Split-Path -Parent $Exe
 $appLog = Join-Path $dir ("log\app_" + (Get-Date).ToString('yyyy-MM-dd') + ".log")
@@ -78,7 +91,7 @@ try {
     Say @("按 PID 枚举到顶层窗 $($tops.Count) 个：")
     foreach ($w in $tops) {
         $r = $w.Current.BoundingRectangle
-        Say @("  id=$($w.Current.AutomationId) class<$($w.Current.ClassName)> name=「$($w.Current.Name)」 rect=$([int]$r.X),$([int]$r.Y),$([int]$r.Width)x$([int]$r.Height) 可见=$($w.Current.IsOffscreen) 子树=$(Count-Desc $w)")
+        Say @("  id=$($w.Current.AutomationId) class<$($w.Current.ClassName)> name=「$($w.Current.Name)」 rect=$(Fmt-Rect $r) 可见=$($w.Current.IsOffscreen) 子树=$(Count-Desc $w)")
     }
     # 主窗 = 子树元素数最大的那块（不是枚举第一个）
     $main = $null; $best = -1
@@ -89,11 +102,11 @@ try {
     # ① 隐藏态就 ShowWindow(SW_RESTORE=9) 再量（记忆：宿主窗会被外部点击序列意外最小化）
     $r0 = $main.Current.BoundingRectangle
     if ($r0.Width -lt 100 -or $main.Current.IsOffscreen) {
-        Say @("★ 主窗 rect=$([int]$r0.Width)x$([int]$r0.Height) offscreen=$($main.Current.IsOffscreen) ⇒ ShowWindow(SW_RESTORE) 后再看")
+        Say @("★ 主窗 rect=$(Fmt-Rect $r0) offscreen=$($main.Current.IsOffscreen) ⇒ ShowWindow(SW_RESTORE) 后再看")
         foreach ($w in $tops) { $null = [PF]::ShowWindow($w.Current.NativeWindowHandle, 9) }
         Start-Sleep -Milliseconds 900
         $r0 = $main.Current.BoundingRectangle
-        Say @("  还原后 rect=$([int]$r0.X),$([int]$r0.Y),$([int]$r0.Width)x$([int]$r0.Height)")
+        Say @("  还原后 rect=$(Fmt-Rect $r0)")
     }
 
     $cbs = @($main.FindAll([System.Windows.Automation.TreeScope]::Descendants,

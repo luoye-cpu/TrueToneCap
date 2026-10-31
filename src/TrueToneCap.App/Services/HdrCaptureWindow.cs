@@ -252,6 +252,37 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private int _hoverTipW = 200, _hoverTipH = 28; // 悬停标题 tooltip 屏幕尺寸 (物理像素, 随 DPI)
     private System.Threading.Timer? _regionRefreshTimer; // 窗口检测定时刷新 (QQ截图式实时)
 
+    // ═══ F4 仪表（2026-10-31 批：预览窗逐帧与 3s 静置唤醒，只测不改）═══
+    // 要回答的问题（审查 §3-F4 / §9「F4 整族仍未量」）：
+    //   ① 一帧 RenderCore 到底多少钱（今天只有首帧那一行有数）；
+    //   ② FlipSequential 下每帧 GetBuffer→RTV 重建到底触发了几次（审查说"每帧"，无人数过）；
+    //   ③ 静置时每 3s 那次唤醒干了什么：EnumWindows 的耗时，以及它顺手 RequestRedraw 引出的那一帧；
+    //   ④ 悬停换标题逼出来的整张图集重排（2048×1408）发生了几次、每次多少毫秒（今天只给首帧计时）。
+    // 口径与并发（今天点名过 `_engines` 那类"静态可变跨调用状态"，这里刻意不用静态桶）：
+    //   计数器全是**每扇窗自己的实例字段** ⇒ 两扇窗重叠（探针"旧窗未 Dispose、新窗已渲染"那种）各记各的账，
+    //   结算行随窗走、点名自己的客户区尺寸。写入者有两个线程（渲染线程与定时器线程池回调），
+    //   所以一律 Interlocked（峰值 CAS 环）；单位微秒 —— 一帧常在 1ms 以下，按毫秒会整列读成 0。
+    // 逐帧一律零日志：只在 Close 结算一行，且只有诊断档落盘（默认简档连这一行都不写）。
+    private long _mFrames;             // RenderCore 帧数
+    private long _mFrameUs;            // 帧耗时合计
+    private long _mFrameMaxUs;         // 帧耗时峰值
+    private long _mIdleWakeFrames;     // 其中由 3s 静置定时器唤醒的那几帧
+    private long _mIdleWakeUs;
+    private long _mIdleWakeMaxUs;
+    private long _mRtvRebuilds;        // EnsureBackBuffer 真的换缓冲+建 RTV 的次数（早退不算）
+    private long _mRegionTicks;        // 3s 定时器进回调的次数
+    private long _mRegionDetectUs;     // 回调里 EnumWindows 一趟的耗时合计
+    private long _mRegionDetectMaxUs;
+    private long _mRegionRedraws;      // 回调里真的发了 RequestRedraw 的次数（未框选时才发）
+    private long _mAtlasRebuilds;      // 图集重建次数（含首建与 hover/脏标记逼出来的重排）
+    private long _mAtlasUs;
+    private long _mAtlasMaxUs;
+    private long _mHoverTitleSwitches; // 标题变化逼整张图集作废的次数
+    private int _mIdleWakePending;     // 1 = 下一次 RenderCore 是静置唤醒引出的那一帧
+    private long _mRegionRedrawsAfterClose;  // 关闭后再被唤醒（应当恒 0；非 0 说明定时器没停干净）
+    private int _mDumped;              // 结算行每扇窗只打一次（Close 与 Cleanup 都会走到 StopRenderThread）
+    private readonly long _mOpenedAtQpc = System.Diagnostics.Stopwatch.GetTimestamp();  // 本窗存活起点（算帧率的分母）
+
     // 自动超时关闭
     private System.Threading.Timer? _autoTimer;
     private const int AutoTimeoutMs = 60_000; // 1 分钟无操作自动关闭
@@ -934,7 +965,14 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 // ═══ 阶段 4：ImmediateContext 可能被多扇窗共用（进程级设备）⇒ 渲染段串行 ═══
                 // 产品路径同一时刻只有一扇窗在渲染，这把锁在真机上恒无竞争；它挡的是探针那种
                 // "旧窗还没 Dispose、新窗已在渲染"的叠加场景（Map/Unmap 交错 = 偶发花屏/设备丢失）。
+                long tFrame = PerfMeter.Now();   // F4 仪表：只圈住渲染段，不含下面那次定步长 Sleep
                 lock (s_ctxLock) { RenderCore(); }
+                long frameUs = PerfMeter.SinceMicro(tFrame);
+                PerfMeter.Record(ref _mFrames, ref _mFrameUs, ref _mFrameMaxUs, frameUs);
+                // 静置唤醒的那一帧单独归一桶：判据是"这一帧是不是由 3s 定时器发信号引出来的"，
+                // 不是"用户没动"—— 用户动的时候 RequestRedraw 也走同一个信号，混在一起就成了"静置税"虚高。
+                if (Interlocked.Exchange(ref _mIdleWakePending, 0) == 1)
+                    PerfMeter.Record(ref _mIdleWakeFrames, ref _mIdleWakeUs, ref _mIdleWakeMaxUs, frameUs);
                 frameCount++;
                 // 每 10 帧打点属调试信息，降级为 Debug（默认不落盘），
                 // 避免正常使用时日志文件被高频渲染打点持续撑大。
@@ -1285,6 +1323,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _rtv?.Dispose();
         _backBuffer = bb;
         _rtv = _device.CreateRenderTargetView(bb);
+        Interlocked.Increment(ref _mRtvRebuilds);   // F4 仪表：指针真的换了才计（早退那一趟不算"每帧重建"）
     }
 
     /// <summary>GPU 合成：桌面帧 + UI 覆盖层一次绘制到后台缓冲（Phase 2）。</summary>
@@ -1490,6 +1529,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
             && Math.Abs(_pendingAtlasScale - _uiScale) < 0.01;
         _uiTextDirty = false;
         _annoTextSlotsDirty = false;
+        // ── F4 仪表：每一次重建都计时（含 hover/脏标记逼出来的整张 2048×1408 重排）──
+        // 刻意只用自己的一对累加字段，不去碰下面那组 swAtlas/_atlasTotalMsAtlas：
+        // 那组是【首帧】分解打点的输入（只在 _textAtlas 为 null 时起表），改了它的存活条件
+        // 就等于改首帧那行日志的读数 —— 仪表不许动被测量的口径。
+        long tAtlas = PerfMeter.Now();
         // 首建打点：图集 = 几十条 DirectWrite 排版 + 2048×1408 全量上传，而它现在落在首帧合成的
         // 关键路径上（RenderGpuComposite 的第一句）。命中上面的早退时不计时，逐帧零开销。
         var swAtlas = _textAtlas is null ? System.Diagnostics.Stopwatch.StartNew() : null;
@@ -1546,6 +1590,12 @@ public sealed partial class HdrCaptureWindow : IDisposable
             LogService.Error("HdrCapture", $"文字图集构建失败（GPU 合成降级）: {ex.Message}");
             _textAtlasSrv?.Dispose(); _textAtlasSrv = null;
             _textAtlas?.Dispose(); _textAtlas = null;
+        }
+        finally
+        {
+            // F4 仪表：失败的那一趟同样要计（"重建了几次"包含没做成的那次，否则读数会把故障藏起来）
+            PerfMeter.Record(ref _mAtlasRebuilds, ref _mAtlasUs, ref _mAtlasMaxUs,
+                PerfMeter.SinceMicro(tAtlas));
         }
     }
 
@@ -4261,10 +4311,22 @@ public sealed partial class HdrCaptureWindow : IDisposable
         {
             try
             {
+                Interlocked.Increment(ref _mRegionTicks);   // F4 仪表：静置时每 3s 到底醒了几次
+                long tDetect = PerfMeter.Now();
                 var regions = RegionDetector.DetectWindows(_winX, _winY, _winW, _winH, new HashSet<nint> { _hwnd });
+                long detectUs = PerfMeter.SinceMicro(tDetect);
+                PerfMeter.Record(ref _mRegionDetectUs, ref _mRegionDetectMaxUs, detectUs);
                 _regions = regions;
                 if (_hoverRegion >= regions.Count) _hoverRegion = -1;
-                if (!_selComplete && !_down) RequestRedraw(); // 悬停高亮可能变化
+                if (!_selComplete && !_down)
+                {
+                    // 静置唤醒的账：先立记号再发信号 ⇒ 渲染线程下一次 RenderCore 归到"静置那一帧"的桶里。
+                    // 顺序不能反：反过来会有极小概率把用户拖动引出的一帧记成静置帧（判据是"谁发的信号"，不是时间差）。
+                    Volatile.Write(ref _mIdleWakePending, 1);
+                    RequestRedraw(); // 悬停高亮可能变化
+                    Interlocked.Increment(ref _mRegionRedraws);
+                    if (_closing || _disposed) Interlocked.Increment(ref _mRegionRedrawsAfterClose);
+                }
             }
             catch { }
         }, null, 3000, 3000);
@@ -4279,6 +4341,36 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _hoverTitle = title;
         _atlasScale = -1;      // 强制重建
         _annoTextSlotsDirty = true;
+        Interlocked.Increment(ref _mHoverTitleSwitches);   // F4 仪表：每一次都会逼整张图集在下一帧重排
+    }
+
+    /// <summary>F4 仪表结算：把这扇窗的逐帧/静置账打成一行（只诊断档、每扇窗一次）。
+    /// 落点选在渲染线程已经停下之后（StopRenderThread 末尾），否则读到的是一半的账。</summary>
+    private void DumpPreviewMeters(string reason)
+    {
+        if (!PerfMeter.DumpEnabled) return;
+        if (Interlocked.CompareExchange(ref _mDumped, 1, 0) != 0) return;
+        long frames = Interlocked.Read(ref _mFrames);
+        long lifeUs = PerfMeter.SinceMicro(_mOpenedAtQpc);
+        LogService.Debug("HdrCapture",
+            $"[Meter/F4] 预览窗 {_winW}x{_winH}（{reason}）: 存活 {lifeUs / 1_000_000.0:F1}s"
+            + $"，渲染 {frames} 帧（合计 {PerfMeter.Ms(Interlocked.Read(ref _mFrameUs))}"
+            + $"，均 {(frames == 0 ? 0 : Interlocked.Read(ref _mFrameUs) / frames / 1000.0):F2}ms/帧"
+            + $"，峰 {PerfMeter.Ms(Interlocked.Read(ref _mFrameMaxUs))}）"
+            + $"≈{(lifeUs == 0 ? 0 : frames * 1_000_000.0 / lifeUs):F2} 帧/s"
+            + $"｜RTV 真重建 {Interlocked.Read(ref _mRtvRebuilds)} 次（帧数={frames}：两者相等就坐实「每帧重建」，差一大截就是只在换缓冲时才建）"
+            + $"｜3s 静置定时器醒 {Interlocked.Read(ref _mRegionTicks)} 次"
+            + $"（EnumWindows 合计 {PerfMeter.Ms(Interlocked.Read(ref _mRegionDetectUs))}"
+            + $" 峰 {PerfMeter.Ms(Interlocked.Read(ref _mRegionDetectMaxUs))}），"
+            + $"其中发过 redraw {Interlocked.Read(ref _mRegionRedraws)} 次"
+            + $"⇒ 静置帧 {Interlocked.Read(ref _mIdleWakeFrames)} 帧"
+            + $"（合计 {PerfMeter.Ms(Interlocked.Read(ref _mIdleWakeUs))}"
+            + $" 峰 {PerfMeter.Ms(Interlocked.Read(ref _mIdleWakeMaxUs))}）"
+            + $"｜图集重建 {Interlocked.Read(ref _mAtlasRebuilds)} 次"
+            + $"（合计 {PerfMeter.Ms(Interlocked.Read(ref _mAtlasUs))} 峰 {PerfMeter.Ms(Interlocked.Read(ref _mAtlasMaxUs))}），"
+            + $"由悬停标题逼出来的 {Interlocked.Read(ref _mHoverTitleSwitches)} 次"
+            + $"｜关闭后仍被定时器唤醒 {Interlocked.Read(ref _mRegionRedrawsAfterClose)} 次（应为 0）",
+            LogCategory.Capture);
     }
 
     public void Close()
@@ -4295,6 +4387,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _closing = true;
         _renderSignal.Set(); // 唤醒渲染线程检查退出
         StopRenderThread(); // 先停渲染线程，再销毁窗口/释放资源
+        DumpPreviewMeters("Close");   // F4 仪表：渲染线程已停 ⇒ 账是齐的（定时器在上面已 Dispose）
         if (_hwnd != 0) { s_windows.TryRemove(_hwnd, out _); DestroyWindow(_hwnd); _hwnd = 0; }
         IsInitialized = false;
     }

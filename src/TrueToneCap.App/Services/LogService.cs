@@ -333,11 +333,33 @@ public static class LogService
     private static void Write(LogLevel level, LogCategory category, string tag, string msg, string? detail,
         string? callerFile, int callerLine, string? opId = null)
     {
+        // ═══ 门控与 Scrub 的先后：只有【只进文件】的那一半能提前门控 ═══
+        // 先读 CoreLog.IsEnabled 的语义（CoreLog.cs:139）：`level >= Warning` 恒真，
+        // 否则按"分类地板 or 全局档位"的下限判 —— 所以 Warn/Error（含崩溃兜底、初始化失败那些行）
+        // 在任何档位都落盘，提前 return 丢不掉"必须无条件落盘"的东西。
+        // 但 msg 的 Scrub 【不能】跟着这道门走：同一条 msg 还要进 UI 环形缓冲区并推给
+        // OnLogEntry（下面那段刻意不受档位门控 —— 档位管的是"文件里留不留"，不是"屏幕上看不看"）。
+        // 把它挪到门后 = Brief 档下把未刮敏的原文（ex.Message 里可能挂着 q=<OCR 全文> 的 URI）
+        // 送进界面日志面板，那是隐私地板的破口，不是省时间。
         // 隐私地板：判据只有一份，在 CoreLog.Scrub（App 与 Core 共用）。
         // 这条路径今天就已经用得上 —— Error(tag, msg, ex) 把 ex.ToString() 当 detail 传进来，
         // 而 HttpRequestException 的文本可能带请求 URI，翻译请求的 URI 里挂着 q=<OCR 原文>。
         msg = CoreLog.Scrub(msg);
-        if (detail is not null) detail = CoreLog.Scrub(detail);
+
+        // 档位门控只决定"文件里留不留"，UI 与控制台镜像照常走。
+        bool toFile = CoreLog.IsEnabled(category, level);
+
+        // detail（异常全文）只被文件那一条路消费：全仓没有任何 UI 读 LogEntry.Detail
+        // （日志面板只用 FormattedLine；LogViewer 那边解析的是文件里的 `└─` 续行）。
+        // ⇒ 它的 Scrub 可以、也应该排在门后：Brief 档下被丢弃的那 41 处 Debug/Trace
+        //   不再为整段 ex.ToString()（动辄上千字符）付两条正则。
+        // ⚠ 不进文件时把 detail 置 null，而不是"留着未刮的原文挂在 entry 上"：
+        //   将来真有人把 Detail 绑到界面上，也拿不到没刮过的东西。
+        if (detail is not null)
+        {
+            if (toFile) detail = CoreLog.Scrub(detail);
+            else detail = null;
+        }
 
         var entry = new LogEntry
         {
@@ -368,7 +390,7 @@ public static class LogService
         // 文件日志的门控与 Core 共用一个判据（档位 + 分类地板），Warn/Error 恒写。
         // UI 环形缓冲区与上面的控制台镜像不受此门控 —— 档位管的是"文件里留不留"，
         // 不是"屏幕上看不看"。
-        if (!CoreLog.IsEnabled(category, level)) return;
+        if (!toFile) return;
 
         lock (s_lock)
         {

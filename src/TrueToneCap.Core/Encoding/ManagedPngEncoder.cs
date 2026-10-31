@@ -3,9 +3,11 @@
 // TrueToneCap.Core/Encoding/ManagedPngEncoder.cs
 // 托管 PNG 编码器 — 零原生依赖，使用 System.IO.Compression
 // 支持: 8-bit / 16-bit, RGBA, iCCP chunk, cICP chunk, 最大压缩
+// 2026-10-31：IDAT 改成流式分块写出（压缩字节直接落成多条 chunk，不再物化整帧压缩结果）。
 
 using System.IO.Compression;
 using System.Buffers.Binary;
+using TrueToneCap.Core.Logging;
 
 namespace TrueToneCap.Core.Encoding;
 
@@ -13,6 +15,19 @@ namespace TrueToneCap.Core.Encoding;
 public static class ManagedPngEncoder
 {
     private static readonly byte[] PngSignature = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    /// <summary>
+    /// 一条 IDAT 的载荷上限（PNG 允许多条 IDAT，把各条数据首尾相接才是完整 zlib 流）。
+    /// <para>为什么取 64 KiB（本仓可指出的两条理由，不是"别人也这么干"）：
+    /// ① 每条 chunk 的固定开销是 12 字节（4 长度 + 4 类型 + 4 CRC），64 KiB 时它占产物的
+    ///    0.018% —— 再小到 4 KiB 就变 0.3%，纯 UI 帧那种 ~200 KB 产物上会被看出来；
+    /// ② 65,536 B 恰好在 x64 的 LOH 门槛（85,000 B，见 SavePathBench 顶部同一口径）之下，
+    ///    于是 sink 那份【整帧复用】的缓冲不进大对象堆，一次保存只分配它一份。</para>
+    /// <para>与 libpng / 常见编码器的写出粒度同量级；PNG 3.0 对单条 chunk 只设
+    /// "长度 &lt; 2^31" 的上界，故这个数远够不着规范限制。改这个常数会改产物字节（chunk 边界变了），
+    /// 但【不会】改解压结果 —— 承诺是"拼接后的 zlib 码流逐字节相同"。</para>
+    /// </summary>
+    private const int IdatPayloadBytes = 64 * 1024;
 
     /// <summary>编码 BGRA 像素为 PNG 文件。</summary>
     /// <param name="bgra">BGRA 像素数据。</param>
@@ -73,10 +88,7 @@ public static class ManagedPngEncoder
         }
 
         // Fastest 压缩 (ZLibStream 已包含 zlib 头 + Adler32)
-        using var ms = new MemoryStream();
-        using (var zlib = new ZLibStream(ms, CompressionLevel.Fastest, leaveOpen: true))
-            zlib.Write(raw);
-        WriteChunk(output, "IDAT"u8, ms.ToArray());
+        WriteIdatFastest(output, raw);
 
         WriteChunk(output, "IEND"u8, []);
     }
@@ -128,9 +140,9 @@ public static class ManagedPngEncoder
         }
 
         // IDAT
+        // 2026-10-31：分块流式写出（见 WriteIdat）—— 整帧压缩字节不再落成一份 byte[]。
         var rawData = BuildRawScanlines(bgra, w, h, outDepth);
-        var compressed = CompressDeflate(rawData, effort);
-        WriteChunk(output, "IDAT"u8, compressed);
+        WriteIdat(output, rawData, effort);
 
         WriteChunk(output, "IEND"u8, []);
     }
@@ -197,21 +209,134 @@ public static class ManagedPngEncoder
         // 那种场景文件用完即删，压缩率毫无意义，而 SmallestSize 在 4K 上要多花数秒 ——
         // 实测这正是 4K HDR AVIF 前处理的主要耗时。故提供 fastest 开关。
         var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth);
-        var compressed = fastest ? CompressDeflateFast(rawData) : CompressDeflate(rawData, effort);
-        WriteChunk(output, "IDAT"u8, compressed);
+        if (fastest) WriteIdatFastest(output, rawData);
+        else WriteIdat(output, rawData, effort);
 
         // IEND
         WriteChunk(output, "IEND"u8, []);
     }
 
-    /// <summary>Deflate 压缩（最快）。用于临时中转文件 —— 压缩率不影响最终产物质量。</summary>
-    private static byte[] CompressDeflateFast(byte[] data)
+    /// <summary>
+    /// IDAT（档位路线）：把扫描线【增量】压缩并直接落成多条 IDAT chunk。
+    /// <para>与旧形状（整帧压进 MemoryStream → <c>ToArray()</c> → 一条 IDAT）的差别只在
+    /// <b>chunk 边界</b>：zlib 码流逐字节相同（同 level、同一次 <c>Write(rawData)</c>、同一后端判定），
+    /// 少掉的是一整份压缩字节的物化 + 裁剪拷贝。承诺口径仍是"解压后逐字节相同"。</para>
+    /// <para>后端判定仍是【整帧一次】（<see cref="DeflateZlib.SelectNativeBackend"/>）：判的是这一帧
+    /// 可不可压缩，不是某一块；结论顺带进 Debug 日志（一次保存一行，见该方法的留痕说明）。</para>
+    /// </summary>
+    private static void WriteIdat(Stream output, byte[] rawData, CompressionEffort effort)
     {
-        using var ms = new MemoryStream();
-        // Fastest 压缩 (ZLibStream 已包含 zlib 头 + Adler32)
-        using (var zlib = new ZLibStream(ms, CompressionLevel.Fastest, leaveOpen: true))
-            zlib.Write(data, 0, data.Length);
-        return ms.ToArray();
+        int level = CompressionEffortMap.PngTiffDeflateLevel(effort);
+        bool useNative = DeflateZlib.SelectNativeBackend(rawData, level);
+        var sink = new IdatChunkSink(output);
+        DeflateZlib.CompressTo(sink, rawData, level, useNative);
+        sink.FinishIdat();
+    }
+
+    /// <summary>
+    /// IDAT（中转/临时文件路线）：固定内置 Fastest，不参与后端分流 ——
+    /// 这条的产物是"用完即删"的中转件（AVIF/JXL/WebP 的 stdin/临时 PNG），压缩率无意义，
+    /// 旧实现走的也是 <c>CompressionLevel.Fastest</c> 而不是 DeflateZlib，故码流口径不变。
+    /// </summary>
+    private static void WriteIdatFastest(Stream output, byte[] rawData)
+    {
+        var sink = new IdatChunkSink(output);
+        using (var zlib = new ZLibStream(sink, CompressionLevel.Fastest, leaveOpen: true))
+            zlib.Write(rawData);
+        sink.FinishIdat();
+    }
+
+    /// <summary>
+    /// IDAT 分块写出器：一条只缓冲 <see cref="IdatPayloadBytes"/> 字节，凑满立刻带
+    /// [长度][类型][数据][CRC] 落到目标流并复用缓冲；整帧压缩字节从头到尾不聚成一块。
+    /// <para><b>CRC 口径</b>（PNG 3.0 §5.3）：CRC 覆盖的是<b>本 chunk</b> 的类型码 + 数据，
+    /// 长度域与 CRC 自身不在内 ⇒ 每条 chunk 一个独立 CRC，状态在块首（喂入 "IDAT"）开始、
+    /// 块尾（取反）结束，不需要回溯任何已写出的字节。这就是分块能把 CRC 也做成增量的原因。</para>
+    /// <para>不实现读/定位：本类只被 ZLibStream 当目的地写，<c>Flush()</c> 刻意<b>不</b>把半满的块
+    /// 提前写成一条 IDAT（合法但会把产物打成大量小块），半块只在 <see cref="FinishIdat"/> 收尾。</para>
+    /// </summary>
+    private sealed class IdatChunkSink : Stream
+    {
+        private readonly Stream _output;
+        private readonly byte[] _payload = new byte[IdatPayloadBytes];
+        private int _used;
+        private uint _crc = CrcSeed;
+        private long _totalBytes;
+        private int _chunkCount;
+
+        public IdatChunkSink(Stream output) => _output = output;
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _totalBytes;
+        public override long Position { get => _totalBytes; set => throw new NotSupportedException(); }
+
+        public override void Flush() { /* 见类说明：半块不许提前落成一条 IDAT */ }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+
+        public override void Write(ReadOnlySpan<byte> source)
+        {
+            _totalBytes += source.Length;
+            while (!source.IsEmpty)
+            {
+                if (_used == 0) BeginChunk();
+                int take = Math.Min(IdatPayloadBytes - _used, source.Length);
+                var slice = source[..take];
+                slice.CopyTo(_payload.AsSpan(_used));
+                _crc = Crc32Update(_crc, slice);
+                _used += take;
+                source = source[take..];
+                if (_used == IdatPayloadBytes) EndChunk();
+            }
+        }
+
+        /// <summary>收尾：写出未满的最后一块。整帧恰好是 64 KiB 整数倍时【不】补一条 0 长度 IDAT
+        /// （已有块就够"至少一条"这条规范前提）；一块都没凑满过但确有压缩字节时补一条空的。</summary>
+        public void FinishIdat()
+        {
+            // 一个压缩字节都没有 = 上面那条压缩调用根本没写东西（ deflate/zlib 对任何输入都至少产出
+            // 头 + 空块 + Adler ≈ 7 字节），这种产物是"没有 IDAT 的 PNG"，与 2026-09-19 那次
+            // "值区布局分叉"同族 ⇒ 按 TIFF 的先例做成 Release 也生效的【拒绝写出】，
+            // 不要留一条只有 Debug.Assert 挡得住的坏件（AtomicFileWriter 会把临时文件删掉，
+            // 最终路径不落半成品）。
+            if (_totalBytes == 0)
+                throw new InvalidOperationException(
+                    $"IDAT 压缩字节为 0（{_chunkCount} 块）—— 拒绝写出没有图像数据的坏 PNG");
+
+            if (_used > 0 || _chunkCount == 0)
+            {
+                if (_used == 0) BeginChunk();
+                EndChunk();
+            }
+        }
+
+        private void BeginChunk()
+        {
+            // 块首：CRC 状态从 0xFFFFFFFF 起，先把 4 字节类型码喂进去（长度域不参与 CRC）。
+            _crc = Crc32Update(CrcSeed, "IDAT"u8);
+        }
+
+        private void EndChunk()
+        {
+            // 栈上小端头：每条 chunk 两次 4 字节小数组在 4K 帧 ≈ 80 条 = 白付的 gen0，
+            // 整个 sink 一辈子只该有那一份 64 KiB 缓冲。
+            Span<byte> header = stackalloc byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(header, _used);
+            _output.Write(header);
+            _output.Write("IDAT"u8);
+            _output.Write(_payload.AsSpan(0, _used));
+            Span<byte> crcBuf = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(crcBuf, Crc32Finish(_crc));
+            _output.Write(crcBuf);
+            _used = 0;
+            _chunkCount++;
+        }
     }
 
     /// <summary>构建 16-bit 扫描线: 输入 BGRA16 BE → 输出 RGBA16 BE + filter byte。
@@ -513,26 +638,13 @@ public static class ManagedPngEncoder
         return (ushort)(q * step);
     }
 
-    /// <summary>Deflate 压缩。档位由 <see cref="CompressionEffortMap.PngTiffDeflateLevel"/> 唯一决定；
-    /// 实际实现由 <see cref="DeflateZlib"/> 选：libdeflate 可用就用它，否则内置 zlib-ng。
-    /// <para>⚠ 必须走 9/8/6/1 这组 level，而不是 <c>CompressionLevel</c> 枚举：
-    /// 枚举只有 0/1/6/9 四个点，表达不了用户要的"稍微放宽"那一档（level 8）。</para>
-    /// <para>⚠ 产物口径从"逐字节不变"改成"zlib 解压后逐字节相同"：libdeflate 输出的压缩字节与
-    /// zlib-ng 不同（实测体积 +0.23%），但两者都能被标准 zlib 解回同一份扫描线。</para></summary>
-    private static byte[] CompressDeflate(byte[] data, CompressionEffort effort)
-        => DeflateZlib.Compress(data, CompressionEffortMap.PngTiffDeflateLevel(effort));
-
-    private static uint ComputeAdler32(byte[] data)
-    {
-        uint a = 1, b = 0;
-        const uint MOD = 65521;
-        for (int i = 0; i < data.Length; i++)
-        {
-            a = (a + data[i]) % MOD;
-            b = (b + a) % MOD;
-        }
-        return (b << 16) | a;
-    }
+    // ═══ 2026-10-31：IDAT 的整帧压缩形态（CompressDeflate / CompressDeflateFast）已收进
+    //     WriteIdat / WriteIdatFastest 两条流式路径；档位→level 的映射仍由
+    //     CompressionEffortMap.PngTiffDeflateLevel 唯一决定，后端选择仍由 DeflateZlib 决定。
+    //     ⚠ 口径两条没变：① 无损档必须走 9/8/6/1 这组 level，而不是 CompressionLevel 枚举
+    //     （枚举只有 0/1/6/9 四个点，表达不了用户要的"稍微放宽"那一档 = level 8）；
+    //     ② 产物承诺是"zlib 解压后逐字节相同"而不是"压缩字节逐字节不变"，因为 libdeflate 与
+    //     zlib-ng 的码流本来就不同（实测体积 +0.23%）。
 
     /// <summary>构建 iCCP chunk 数据: profile_name\0 compression_method deflate(profile)。</summary>
     private static byte[] BuildIccpChunk(byte[] iccProfile)
@@ -558,14 +670,25 @@ public static class ManagedPngEncoder
         output.Write(type);
         output.Write(data);
 
-        // CRC32 over type + data
-        uint crc = Crc32(type, data);
+        // CRC32 over type + data —— 增量推进必须一路传【未取反】的状态，只在最后取反一次。
+        // ⚠ 2026-10-31 流式化时这里多取反了一次（先 Finish 再喂 data 再 Finish），产物只有 IDAT 的
+        //   CRC 是对的，IHDR/sBIT/cICP/IEND 全错 ⇒ PIL 直接拒收整张图。判据在
+        //   EncodingIntegrationTests 的「每条 chunk 的 CRC 用测试自带的另一份 CRC32 复算」那一格，
+        //   它不复用本文件的实现，所以这类错不会自洽地蒙过去。
+        uint crc = Crc32Update(CrcSeed, type);
+        crc = Crc32Update(crc, data);
+        crc = Crc32Finish(crc);
         var crcBuf = new byte[4];
         BinaryPrimitives.WriteUInt32BigEndian(crcBuf, crc);
         output.Write(crcBuf);
     }
 
     private static readonly uint[] CrcTable = BuildCrcTable();
+
+    /// <summary>CRC 的起始状态（PNG 3.0 §5.3：crcReg 从全 1 开始）。
+    /// 分块写出（<see cref="IdatChunkSink"/>）与这里的整块写法共用同一套推进函数，
+    /// 所以"chunk 边界变了"不可能把 CRC 算成两种结果。</summary>
+    private const uint CrcSeed = 0xFFFFFFFF;
 
     private static uint[] BuildCrcTable()
     {
@@ -580,13 +703,22 @@ public static class ManagedPngEncoder
         return table;
     }
 
-    private static uint Crc32(ReadOnlySpan<byte> type, byte[] data)
+    /// <summary>CRC32 推进一段字节：传入上一段结束的【未取反】状态，返回下一段的输入状态。
+    /// <para>为什么留着手写表法而不上 <c>System.IO.Hashing.Crc32</c>：该包在本仓
+    /// <c>TrueToneCap.Core.csproj</c> / <c>Directory.Packages.props</c> / 各 packages.lock.json
+    /// 里 0 处引用（实测），要吃得先加一条 PackageReference 并重生锁文件 —— 为一个每保存一次的
+    /// CRC 给零原生依赖的托管编码器加一条随包分发的依赖不值当。分块之后 CRC 本来就是增量的，
+    /// 表法这一趟的字节数与旧版逐字节法完全相同（只是不再有一次整帧物化）。</para>
+    /// <para>⚠ 若将来换实现：必须替换 <see cref="Crc32Finish"/>/<see cref="CrcSeed"/> 这一对
+    /// 口径（初值全 1 + 末位取反 + 反射多项式 0xEDB88320），而不是只换一处 —— 否则
+    /// IDAT 与其它 chunk 会算出两套 CRC。</para></summary>
+    private static uint Crc32Update(uint crc, ReadOnlySpan<byte> data)
     {
-        uint crc = 0xFFFFFFFF;
-        foreach (byte b in type)
-            crc = CrcTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
         foreach (byte b in data)
             crc = CrcTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
-        return crc ^ 0xFFFFFFFF;
+        return crc;
     }
+
+    /// <summary>CRC 收尾：取反得到写进文件的那 4 字节。</summary>
+    private static uint Crc32Finish(uint crc) => crc ^ 0xFFFFFFFF;
 }

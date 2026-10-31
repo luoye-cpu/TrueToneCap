@@ -7,6 +7,7 @@
 using TrueToneCap.Core.Capture;
 using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Encoding;
+using TrueToneCap.Core.Logging;   // LogCategory（保存腿仪表的结算行走 Capture/Encoding 分类地板）
 using TrueToneCap.Core.Metadata;
 using TrueToneCap.Core.Processing;
 using TrueToneCap.App.Models;
@@ -21,6 +22,49 @@ public sealed class CapturePipelineService
 
     // 审查 P2-6：降级 Toast 去重 —— 同一降级组合只弹一次（跨线程读写，volatile 与文件内既有模式一致）
     private static volatile string? s_lastDegradedToast;
+
+    // ═══ 保存腿仪表（2026-10-31 批：F5/F4 的配套，也是"去克隆"那件事的前置）═══
+    // 要回答的问题：一次保存里【搬运/烘焙】与【编码】各多少钱、过手多少字节 ——
+    // 「每帧 132.7MB 整帧克隆能不能删」这条的判据前置就是它（未量之前不许动，审查 §5 不重开清单）。
+    // 口径与并发（今天点名过 `_engines` 那类"静态可变跨调用状态" ⇒ 这里用实例字段而不是静态）：
+    //   本服务由 DI 建一份，所以账目是**进程内保存腿的累计**；并发保存确实存在（编码队列会连着排，
+    //   多格式/多张连拍时两条腿可以同时在跑），因此每次累加都走 Interlocked，峰值用 CAS 环。
+    //   ⇒ 读数口径必须这样读：n=这一份累计里第几次，字节数=所有腿过手的总量；
+    //     要拿"某一张"的数就看结算行里的"本次"那三项（局部 Stopwatch，不经过这些桶）。
+    // 逐次零日志：只在诊断档、每次保存结束时打一行聚合。默认简档一行不写。
+    private long _mSavesSdr, _mSavesHdr;
+    private long _mPrepUs, _mPrepMaxUs;         // SDR 腿：ICC 烘焙/色域搬运（PreparePixelsWithIcc）
+    private long _mEncodeUs, _mEncodeMaxUs;      // 两条腿的编码调用本体
+    private long _mToSdrUs, _mToSdrMaxUs;        // HDR 腿：编码器不支持 HDR 时那次整帧下变换
+    private long _mTotalUs, _mTotalMaxUs;        // 两条腿各自"进这个方法→出方法"
+    private long _mInBytes;                      // 过手像素字节合计（SDR byte[] + HDR float[] 都算）
+
+    /// <summary>保存腿仪表结算：先原子入账，再（只诊断档）打一行进程累计 + 本次。</summary>
+    private void DumpSaveMeters(bool hdrLeg, string format, long inBytes,
+        long prepUs, long encodeUs, long toSdrUs, long totalUs)
+    {
+        // 入账【不看档位】：计数是内存里几条 Interlocked（纳秒级），档位只决定要不要落这一行日志。
+        // 反过来做会让"简档跑过的那几次"从累计里消失，同一份日志里的累计行就不再是全部。
+        if (hdrLeg) Interlocked.Increment(ref _mSavesHdr);
+        else Interlocked.Increment(ref _mSavesSdr);
+        Interlocked.Add(ref _mInBytes, inBytes);
+        PerfMeter.Record(ref _mEncodeUs, ref _mEncodeMaxUs, encodeUs);
+        if (hdrLeg) PerfMeter.Record(ref _mToSdrUs, ref _mToSdrMaxUs, toSdrUs);
+        else PerfMeter.Record(ref _mPrepUs, ref _mPrepMaxUs, prepUs);
+        PerfMeter.Record(ref _mTotalUs, ref _mTotalMaxUs, totalUs);
+
+        if (!PerfMeter.DumpEnabled) return;
+        long nSdr = Interlocked.Read(ref _mSavesSdr), nHdr = Interlocked.Read(ref _mSavesHdr);
+        LogService.Debug("Pipeline",
+            $"[Meter/保存腿] {(hdrLeg ? "HDR" : "SDR")}腿 {format} 本次：进像素 {inBytes / (1024 * 1024)}MB"
+            + $" 烘焙/下变换 {PerfMeter.Ms(prepUs + toSdrUs)} 编码 {PerfMeter.Ms(encodeUs)} 整腿 {PerfMeter.Ms(totalUs)}"
+            + $"｜进程累计 SDR={nSdr} HDR={nHdr} 次，过手 {Interlocked.Read(ref _mInBytes) / (1024 * 1024)}MB"
+            + $"，编码合计 {PerfMeter.Ms(Interlocked.Read(ref _mEncodeUs))}（峰 {PerfMeter.Ms(Interlocked.Read(ref _mEncodeMaxUs))}）"
+            + $"，烘焙合计 {PerfMeter.Ms(Interlocked.Read(ref _mPrepUs))}（峰 {PerfMeter.Ms(Interlocked.Read(ref _mPrepMaxUs))}）"
+            + $"，HDR 下变换合计 {PerfMeter.Ms(Interlocked.Read(ref _mToSdrUs))}（峰 {PerfMeter.Ms(Interlocked.Read(ref _mToSdrMaxUs))}）"
+            + $"，整腿合计 {PerfMeter.Ms(Interlocked.Read(ref _mTotalUs))}（峰 {PerfMeter.Ms(Interlocked.Read(ref _mTotalMaxUs))}）",
+            LogCategory.Encoding);
+    }
 
     public CapturePipelineService(SettingsService settings)
     {
@@ -605,13 +649,18 @@ public sealed class CapturePipelineService
 
         LogService.Info("Pipeline", $"开始编码: {settings.Format} {w}x{h} → {Path.GetFileName(path)}");
 
+        // ── 保存腿仪表（SDR 腿）：本次的分段账是局部量，累计才进实例桶 ──
+        long tLeg = PerfMeter.Now();
+        long prepUs = 0, encodeUs = 0;
         PowerManager.PreventSleep();
         try
         {
         await Task.Run(async () =>
         {
             ct.ThrowIfCancellationRequested();
+            long tPrep = PerfMeter.Now();
             var (pixels, iccProfile, degradedToTag) = PreparePixelsWithIcc(bgra, w, h, decision);
+            prepUs = PerfMeter.SinceMicro(tPrep);
             if (iccProfile is not null)
                 settings.IccProfile = iccProfile;
             // ═══ 2026-09-19 缺陷 D-1：烘焙没做成 ⇒ 声明跟着像素走，不跟着请求走 ═══
@@ -627,7 +676,9 @@ public sealed class CapturePipelineService
 
             ct.ThrowIfCancellationRequested();
             // 始终走 SDR 路径
+            long tEncode = PerfMeter.Now();
             await encoder.EncodeSdrAsync(pixels, w, h, settings, path, ct);
+            encodeUs = PerfMeter.SinceMicro(tEncode);
         }, ct);
         }
         finally
@@ -647,6 +698,8 @@ public sealed class CapturePipelineService
         var actualPath = FormatHelper.ResolveActualPath(path);
         var fileSize = File.Exists(actualPath) ? new FileInfo(actualPath).Length : 0;
         LogService.Info("Pipeline", $"编码完成: {Path.GetFileName(actualPath)} ({fileSize / 1024.0:F1} KB)");
+        DumpSaveMeters(hdrLeg: false, settings.Format.ToString(), (long)w * h * 4,
+            prepUs, encodeUs, 0, PerfMeter.SinceMicro(tLeg));
         return actualPath;
     }
 
@@ -683,6 +736,9 @@ public sealed class CapturePipelineService
         LogService.Info("Pipeline",
             $"HDR 编码启动: {settings.Format} {hdrFrame.Width}x{hdrFrame.Height} HDR={settings.HdrOutput} 色域={settings.ColorSpaceTag} → {Path.GetFileName(path)} | 内存(起) {MemText()}");
 
+        // ── 保存腿仪表（HDR 腿）：本次的分段账是局部量，累计才进实例桶 ──
+        long tLeg = PerfMeter.Now();
+        long encodeUs = 0, toSdrUs = 0;
         PowerManager.PreventSleep();
         try
         {
@@ -706,7 +762,9 @@ public sealed class CapturePipelineService
                 LogService.Info("Pipeline",
                     $"scRGB(Float16) 源 ⇒ 内部走高精度浮点链；输出容器位深按用户请求 = {settings.OutputBitDepth}-bit"
                     + $"，委托 {settings.Format} 编码器 SDR 分派（矩阵/色调映射/gamma 不因 8-bit 请求跳过）");
+                long tEncode = PerfMeter.Now();
                 await encoder.EncodeAsync(hdrFrame, settings, path, ct);
+                encodeUs = PerfMeter.SinceMicro(tEncode);
                 return;
             }
 
@@ -732,13 +790,17 @@ public sealed class CapturePipelineService
                     settings.IccProfile = null;
                 }
                 LogService.Debug("Pipeline", $"HDR 直通编码: {settings.Format}");
+                long tHdrEncode = PerfMeter.Now();
                 await encoder.EncodeAsync(hdrFrame, settings, path, ct);
+                encodeUs = PerfMeter.SinceMicro(tHdrEncode);
             }
             else
             {
                 // 编码器不支持 HDR → 色调映射到 SDR
                 LogService.Info("Pipeline", $"编码器不支持 HDR，色调映射到 SDR: {settings.Format}");
+                long tToSdr = PerfMeter.Now();
                 var sdrPixels = FormatHelper.ToSdr(hdrFrame, settings);
+                toSdrUs = PerfMeter.SinceMicro(tToSdr);
                 // ═══ 2026-08-16 P1-2 修复: 派生像素禁止带 GPU 纹理 (同上) ═══
                 settings.GpuTexture = null;
                 // ⚠ 2026-09-19：这里不再无条件把 ColorSpaceTag 覆写成 "sRGB"。
@@ -746,7 +808,9 @@ public sealed class CapturePipelineService
                 //   广色域时像素已被搬到目标色域 ⇒ 必须保留 tag 让容器同色域声明，
                 //   再覆写成 sRGB 就成了"声明与像素矛盾"（查看器按 sRGB 解释广色域像素 → 偏色）。
                 settings.HdrOutput = false;
+                long tSdrEncode = PerfMeter.Now();
                 await encoder.EncodeSdrAsync(sdrPixels, hdrFrame.Width, hdrFrame.Height, settings, path, ct);
+                encodeUs = PerfMeter.SinceMicro(tSdrEncode);
             }
         }, ct);
         }
@@ -762,6 +826,8 @@ public sealed class CapturePipelineService
         var fileSize = File.Exists(actualPath) ? new FileInfo(actualPath).Length : 0;
         LogService.Info("Pipeline",
             $"HDR 编码完成: {Path.GetFileName(actualPath)} ({fileSize / 1024.0:F1} KB) 总耗时={swTotal.ElapsedMilliseconds}ms | 内存(终) {MemText()}");
+        DumpSaveMeters(hdrLeg: true, settings.Format.ToString(),
+            hdrFrame.Pixels.LongLength * sizeof(float), 0, encodeUs, toSdrUs, PerfMeter.SinceMicro(tLeg));
         return actualPath;
     }
 

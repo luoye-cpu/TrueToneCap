@@ -1,39 +1,39 @@
 {
-    "取数时间":  "2026-10-31 08:34:56",
-    "总断言":  2390,
-    "各套件":  {
-                "--unit-tests":  {
-                                     "断言":  1777,
-                                     "跳过":  2
-                                 },
-                "--color-tests":  {
-                                      "断言":  270,
-                                      "跳过":  0
-                                  },
-                "--encoding-tests":  {
-                                         "断言":  14,
-                                         "跳过":  0
-                                     },
-                "--service-tests":  {
-                                        "断言":  2,
-                                        "跳过":  1
-                                    },
-                "--ocr-tests":  {
-                                    "断言":  12,
-                                    "跳过":  0
-                                },
-                "--qr-tests":  {
-                                   "断言":  47,
-                                   "跳过":  0
-                               },
-                "--format-tests":  {
-                                       "断言":  43,
-                                       "跳过":  0
-                                   },
-                "--usability-tests":  {
-                                          "断言":  225,
-                                          "跳过":  0
-                                      },
-                "_说明":  "用 scripts\\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里"
-            }
+    "取数时间": "2026-10-31 15:10:24",
+    "总断言": 2438,
+    "各套件": {
+        "--unit-tests": {
+            "断言": 1807,
+            "跳过": 2
+        },
+        "--color-tests": {
+            "断言": 270,
+            "跳过": 0
+        },
+        "--encoding-tests": {
+            "断言": 23,
+            "跳过": 0
+        },
+        "--service-tests": {
+            "断言": 2,
+            "跳过": 1
+        },
+        "--ocr-tests": {
+            "断言": 12,
+            "跳过": 0
+        },
+        "--qr-tests": {
+            "断言": 47,
+            "跳过": 0
+        },
+        "--format-tests": {
+            "断言": 52,
+            "跳过": 0
+        },
+        "--usability-tests": {
+            "断言": 225,
+            "跳过": 0
+        },
+        "_说明": "用 scripts\\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里。2026-10-31 10:28 手改（不重生成）：unit 1777→1805（+28，全管线性能审查批1/批2 的新锁：AVIF 档位七处接线与 MFT 不造假档位、PQ 查表精度、TIFF 分条与无损段形状），总断言 2390→2418；其余套件本轮逐个现跑，读数与旧基线逐格相同（color 270 / encoding 14 / service 2 跳 1 / ocr 12 / qr 47 / format 43 / usability 225）。2026-10-31 10:49 再手改：unit 1805→1808（+3，格式下拉持久化修复：重建期中间态不落盘但界面照刷、闩锁必须在 finally、以及新增的「方法体解析得到」失明守卫），总断言 2418→2421；同一轮 ocr 12 现跑相同，其余六格沿用 10:28 的现跑读数（本批只动了 MainWindow.xaml.cs 与 CorePipelineTests.cs，而读前者源码的锁全在 unit/ocr 两套里）。2026-10-31 15:10 再手改（八格全部来自同一次 scripts\u000berify.ps1 -Configuration Release 现跑，artifacts/verify_gate_r1.log；那份跑之后没有任何再改源，只有这份 json 与 docs/*.md 动过）：encoding 14→23（+9，无损形状新裁判：多 IDAT 切分与逐块 CRC 的独立算式、拼接后 inflate 长度、翻一字节必须让解压变红的正控、真 16-bit 大端料且先证非回文）、format 43→52（+9，TIFF 容器契约：ExtraSamples(338) 在 TIFF8/TIFF16/TIFF-ICC 三张料上各钉'标签存在 + 计数=1 + 值=2'，另加标签序与 IFD 偏移回归）、unit 1808→1807（−1，删的是原 ⑧ 那条 Y4M 行切锁：它钉的 NativeAvifEncoder.EncodeHdrFromScrgb 全仓零调用方、本批连同两个私有助手一并删除，判据与被判对象同退场——留着就是把'死路也上锁'当覆盖）；总断言 2421→2438。同轮 --gainmap-color-product 仍 ⏭ SKIP（外部件能力探测不过），不是通过。"
+    }
 }

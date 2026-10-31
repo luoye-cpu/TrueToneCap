@@ -189,6 +189,10 @@ public static class LocaleManager
             ["广色域自动缩限到目标色域。"] = "Wide gamut is clamped into the target gamut.",
             ["自动优先硬件编码器；色度或位深不满足时自动降级并提示。"] =
                 "Auto prefers hardware encoders and falls back with a notice when chroma or bit depth is unsupported.",
+            // 2026-10-31：QSV/MFT 后端禁用「压缩强度」时点名原因的那句（键必须与 MainWindow 里
+            // LocaleManager.Tr(...) 的字面量逐字相同，含前导空格 —— 差一个空格就是英文界面漏翻）。
+            [" ⚠ 该后端没有压缩强度入口（系统 MFT 无此旋钮），上面的下拉已禁用。"] =
+                " ⚠ This backend has no compression-effort control (the system MFT exposes none); the dropdown above is disabled.",
             ["AVIF 位深"] = "AVIF bit depth",
             ["位深"] = "Bit depth",
             ["上限取决于编码器：软件 ≤12-bit，NVENC ≤10-bit，QSV 8-bit；HDR 至少 10-bit。8-bit 源恒输出 8-bit。"] =

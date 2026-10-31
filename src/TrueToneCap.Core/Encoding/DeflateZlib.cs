@@ -72,8 +72,14 @@ public static class DeflateZlib
         }
     }
 
+    /// <summary>后端名（留痕与日志共用一份字面量，别让两处各拼一遍）。</summary>
+    internal const string BackendLibDeflate = "libdeflate";
+
+    /// <summary>内置后端名。</summary>
+    internal const string BackendZlibNg = "zlib-ng";
+
     /// <summary>当前后端名（用于启动日志/诊断）：`libdeflate` 或 `zlib-ng`。</summary>
-    public static string BackendName => IsAvailable ? "libdeflate" : "zlib-ng";
+    public static string BackendName => IsAvailable ? BackendLibDeflate : BackendZlibNg;
 
     /// <summary>启动期探测一次并记日志。重复调用只探测一次，不产生重复日志。</summary>
     public static void Initialize() => Probe();
@@ -84,46 +90,217 @@ public static class DeflateZlib
         if (data.Length == 0) return CompressBuiltin(data, level);
         // 只有 Smallest(9) 且内容不是"几乎纯色/文字"时才外包：那种 UI 内容交给 libdeflate 会变大
         // （UI raw 实测 +7.7%），违背「极高 = 体积最小」这格菜单的承诺。
-        if (s_allowLibDeflate && level == 9 && IsAvailable && IsLibDeflateCandidate(data)
-            && TryCompressNative(data, LibDeflateLevel, out var compressed))
-            return compressed;
-        return CompressBuiltin(data, level);
+        return CompressWithDecision(data, level, SelectNativeBackend(data, level));
+    }
+
+    /// <summary>
+    /// 流式压缩入口：把 zlib 封装的字节【增量】推给 <paramref name="destination"/>，调用方不需要
+    /// 一整份压缩结果（PNG 的 IDAT 分块写出就是它的消费者）。
+    /// <para><b>码流与 <see cref="Compress"/> 逐字节相同</b>：同 level、同一次 <c>Write(data)</c>、
+    /// 同一后端判定 ⇒ 分段只发生在【搬运】那一层，不进 deflate。</para>
+    /// <para>⚠ 只有内置臂是真流式（destination 侧那块 64 KiB 缓冲就是全部中间量）；
+    /// libdeflate 侧本文件只绑定了【一次性】API（<c>libdeflate_zlib_compress</c>，见 BindExports），
+    /// 没有流式入口，所以那条仍会先产出尺寸精确的数组再分块喂出去 —— 省掉的是 MemoryStream 的
+    /// 扩容链与裁剪拷贝，不是那个数组本身。</para>
+    /// </summary>
+    /// <returns>实际使用的后端名（native 运行中失败会如实返回内置）。</returns>
+    internal static string CompressTo(Stream destination, byte[] data, int level, bool useNative)
+    {
+        if (useNative && TryCompressNative(data, LibDeflateLevel, out var packed))
+        {
+            destination.Write(packed, 0, packed.Length);
+            return BackendLibDeflate;
+        }
+        WriteBuiltinZlib(destination, data, level);
+        return BackendZlibNg;
+    }
+
+    /// <summary>内置实现的流式写法：与 <see cref="CompressBuiltin"/> 同一 options、同一写入形状，
+    /// 只差在目的地是调用方的流（因此没有缓冲初值可估，也没有末尾裁剪拷贝）。</summary>
+    private static void WriteBuiltinZlib(Stream destination, byte[] data, int level)
+    {
+        var options = new ZLibCompressionOptions { CompressionLevel = level };
+        using var zlib = new ZLibStream(destination, options, leaveOpen: true);
+        zlib.Write(data);
     }
 
     /// <summary>
     /// 廉价可压缩性探针：从整帧均匀取最多 256 个 4 KiB 块（合计 1 MiB），用内置 level 1 压一次。
     /// <para>均匀取样而不是只取开头：UI 截图常见"大片纯色 + 一块照片/噪声"，只看开头会把
     /// 整帧误判成可压缩。1 MiB 的 level 1 在 4K 帧上约几毫秒，相对要省的秒级开销可忽略。</para>
+    /// <para>一帧只判一次：分条并行的调用方走 <see cref="IsLibDeflateCandidate(byte[][])"/>
+    /// 那条重载，判完把结论交给各条（见 <see cref="CompressWithDecision"/>）。</para>
     /// </summary>
     internal static bool IsLibDeflateCandidate(byte[] data)
     {
         const int chunk = 4096, maxChunks = 256;
         int total = chunk * maxChunks;
-        byte[] sample;
-        if (data.Length <= total)
+        if (data.Length <= total) return ProbeSample(data);
+
+        var sample = new byte[total];
+        int stride = data.Length / maxChunks;
+        for (int i = 0; i < maxChunks; i++)
+            Buffer.BlockCopy(data, i * stride, sample, i * chunk, chunk);
+        return ProbeSample(sample);
+    }
+
+    /// <summary>整帧判定一次，结论交给各条复用（<see cref="CompressWithDecision"/>）。
+    /// <para>存在的全部理由：分条并行后若每条各调一次 <see cref="Compress"/>，探针会从"一次几毫秒"
+    /// 变成 4K 16-bit ≈ 64 次；而"按素材自适应"判的是整帧可压缩性，不是某一条的形状
+    /// —— 逐条判定还会让同一张图的不同条落到不同后端，把 10-31 那批定下的单帧口径打散。</para>
+    /// <para>采样仍是同一条尺子（256 块 × 4 KiB、内置 level 1、阈值 <see cref="LibDeflateMinRatio"/>），
+    /// 只是把块 round-robin 摊到各条上，等价于跨整帧均匀取样。</para></summary>
+    internal static bool IsLibDeflateCandidate(byte[][] strips)
+    {
+        const int chunk = 4096, maxChunks = 256;
+        var sample = new byte[chunk * maxChunks];
+        long totalBytes = 0;
+        foreach (var s in strips) totalBytes += s.Length;
+        if (totalBytes <= sample.Length)
         {
-            sample = data;
-        }
-        else
-        {
-            sample = new byte[total];
-            int stride = data.Length / maxChunks;
-            for (int i = 0; i < maxChunks; i++)
-                Buffer.BlockCopy(data, i * stride, sample, i * chunk, chunk);
+            // 帧比采样窗口还小（小图 / 极少条）：整帧首尾相接喂进去，口径与单块版一致。
+            int at = 0;
+            foreach (var s in strips) { Buffer.BlockCopy(s, 0, sample, at, s.Length); at += s.Length; }
+            return ProbeSample(sample.AsSpan(0, at).ToArray());
         }
 
+        long stride = totalBytes / maxChunks;
+        int written = 0;
+        for (int i = 0; i < maxChunks; i++)
+        {
+            long offset = i * stride;
+            int s = 0;
+            while (offset >= strips[s].Length) { offset -= strips[s].Length; s++; }
+            // 靠近条尾时取不满 4 KiB ⇒ 从条首回绕，保证样本总长确定（比值口径不许随条数漂移）
+            int take = (int)Math.Min(chunk, strips[s].Length - offset);
+            if (take < chunk)
+            {
+                Buffer.BlockCopy(strips[s], (int)offset, sample, written, take);
+                written += take;
+                Buffer.BlockCopy(strips[s], 0, sample, written, chunk - take);
+                written += chunk - take;
+            }
+            else
+            {
+                Buffer.BlockCopy(strips[s], (int)offset, sample, written, chunk);
+                written += chunk;
+            }
+        }
+        return ProbeSample(sample);
+    }
+
+    /// <summary>唯一的判据式子：两版采样共用，免得"同一张图两条路判得不一样"。</summary>
+    private static bool ProbeSample(byte[] sample)
+    {
         var packed = CompressBuiltin(sample, 1);
         return (double)packed.Length / sample.Length >= LibDeflateMinRatio;
+    }
+
+    /// <summary>整帧的后端判定（单块形态）。</summary>
+    internal static bool SelectNativeBackend(byte[] frame, int level)
+    {
+        bool useNative = s_allowLibDeflate && level == 9 && IsAvailable && IsLibDeflateCandidate(frame);
+        LogRouting(level, useNative, frame.LongLength);
+        return useNative;
+    }
+
+    /// <summary>整帧的后端判定（分条形态）。</summary>
+    internal static bool SelectNativeBackend(byte[][] strips, int level)
+    {
+        bool useNative = s_allowLibDeflate && level == 9 && IsAvailable && IsLibDeflateCandidate(strips);
+        long raw = 0;
+        foreach (var s in strips) raw += s.LongLength;
+        LogRouting(level, useNative, raw);
+        return useNative;
+    }
+
+    /// <summary>
+    /// 把【这次保存走了哪个后端】写成一条可外查的留痕（2026-10-31 交付要求：分流必须是能被查到的
+    /// 产品决定，而不是只有代码里的一次 if）。
+    /// <para>档位：Debug = 诊断档。默认「简」档一行都不写（Brief 的运行照旧安静），用户把详细度调到
+    /// 「诊断」起就能在日志文件里逐次查到；写的是"这次选了什么、raw 多大"，不含任何图像内容字节
+    /// （<see cref="CoreLog"/> 的隐私地板只承诺刮参数值，不替调用方兜裸数据 —— 这里本来就没有）。</para>
+    /// <para>量：一次保存【一行】。这两个重载是每帧唯一的判定入口（PNG 每保存一次调一次；TIFF
+    /// 单条调一次、多条由整帧判一次再交给各条 —— 逐条各判是上一条交付已经判死过的形状），
+    /// 所以不必再加节流，加了反而多一处可变状态。</para>
+    /// <para>⚠ 只走 <see cref="CoreLog"/>：App 侧 <c>LogService</c> 的 StreamWriter 是
+    /// <c>AutoFlush = true</c>，那是"崩溃前的行已经到了 OS"的唯一保证；本方法不许另开任何带缓冲的落盘。</para>
+    /// </summary>
+    private static void LogRouting(int level, bool useNative, long rawBytes)
+    {
+        CoreLog.Debug("Deflate",
+            $"无损压缩后端选择: {(useNative ? BackendLibDeflate : BackendZlibNg)}" +
+            $"（请求 level={level}，raw={rawBytes} B；libdeflate 实跑档={LibDeflateLevel}）",
+            LogCategory.Encoding);
+    }
+
+    /// <summary>按已定好的结论压单块；native 侧失败仍回退内置（与 <see cref="Compress"/> 同一兜底）。</summary>
+    internal static byte[] CompressWithDecision(byte[] data, int level, bool useNative)
+    {
+        if (useNative && TryCompressNative(data, LibDeflateLevel, out var compressed)) return compressed;
+        return CompressBuiltin(data, level);
     }
 
     /// <summary>内置 zlib-ng 的实现（也是回退臂；测试直接用它做等价对撞）。</summary>
     public static byte[] CompressBuiltin(byte[] data, int level)
     {
         var options = new ZLibCompressionOptions { CompressionLevel = level };
-        using var ms = new MemoryStream();
+        // 无初值时 MemoryStream 从 256 B 倍增扩容，4K 规模 ≈ 18 次 realloc + ~2× 产物量的拷贝流量；
+        // 初值按【这一次调用的输入】外推（见 EstimatedCapacity），扩容链基本不再触发。
+        // 容量只是缓冲尺寸，不进 deflate 码流 ⇒ 产物字节与容量估计无关，估错最多退化成旧行为。
+        using var ms = new MemoryStream(EstimatedCapacity(data.Length));
         using (var zlib = new ZLibStream(ms, options, leaveOpen: true))
             zlib.Write(data);
-        return ms.ToArray();
+        // zlib.Dispose() 写完最终块 + Adler32 后 ms 不再有任何写入 —— 这之后就是一次性读取位置，
+        // GetBuffer() 暴露不缩容的原始缓冲；有效区仅 [0, Length)。返回类型是 byte[]，
+        // 尾部容量过剩必须裁一次（这趟拷贝在改成流式 API 前消不掉，见 IDAT/回填对长度的依赖）。
+        // 2026-10-31：PNG 的 IDAT 已经改走 CompressTo 流式路径，这里剩下的 byte[] 形态消费者
+        // 只有 TIFF 的分条（每条 ≈1 MiB，必须拿到确切长度才能回填 273/279）与探针样本。
+        int len = (int)ms.Length;
+        var buf = ms.GetBuffer();
+        if (buf.Length == len) return buf;    // 容量恰好命中：零拷贝直出
+        var result = new byte[len];
+        Buffer.BlockCopy(buf, 0, result, 0, len);
+        return result;
+    }
+
+    /// <summary>
+    /// 缓冲初值：只由【这次调用的输入长度】决定，不含任何跨调用状态。
+    /// <para><b>2026-10-31 去掉的是什么</b>：原先这里有一份 <c>static long s_ratioPermille</c> 的 EMA
+    /// （每次 level ≥ 6 的压缩观测一次、后续所有压缩读它）。三条理由判它出局：
+    /// ① 它是"随调用历史变化的值" ⇒ 同一份输入保存两次可以分配得不同，而本仓对无损产物的口径是
+    ///   确定性优先（产物字节不许依赖历史，分配尺寸同样不该依赖）；
+    /// ② 它是【跨格式共用】的一份值：AVIF/JXL/WebP 保底到 PNG 的那条腿（FormatEncoders.PngLastResort
+    ///   → ManagedPngEncoder.Encode，默认 Smallest）与用户真正要的 PNG 保存写的是同一个 static，
+    ///   于是一次保底帧的比例会决定后面正常保存的初值 —— 谁先跑、跑了几次，答案就变了；
+    /// ③ 它按"最近一帧"外推，而 UI（实测比例 0.0123）与照片（实测 0.226）差一个数量级，
+    ///   EMA 的 3/4 慢跟意味着交替保存时两边都长期拿到错的初值。</para>
+    /// <para><b>为什么 1/4 这个数</b>：上面 ③ 的两个实测读数（0.0123 / 0.226）与噪声上界 0.8369 一起
+    /// 把内容的产物比例摊在 1%~84% 这一整段，任何单一常数都会在一端错。取 1/4 是拿两端的
+    /// 【代价有界】换确定性：高估（UI 那端）多付的是 ≤ 输入 1/4 的一次清零，低估（噪声那端）
+    /// 只是退回旧行为 —— MemoryStream 倍增链的拷贝总量 ≈ 2× 产物，本来就是旧版的成本。
+    /// 2026-10-31 之后这条只剩 ≈1 MiB 级的缓冲（TIFF 分条 + 1 MiB 探针样本）要估，两端都在
+    /// 几百 KB 量级。<b>读数（2026-10-31 实测，<c>--bench-deflate-cap</c>：1 MiB/次、level 9、
+    /// 三档可压缩性夹具、读数按形状分列）</b>：① 初值<b>不进码流</b> —— 五种显式初值（含故意给的 8 B
+    /// 与硬膨胀上界）与三形状×六臂的产物全部逐字节相同；② 分配上"只看本次输入的 1/4"是<b>有端错的</b>
+    /// 一式：低熵内容（实测比例 0.012）比改动前的无初值形状<b>多</b>分配 238 KB/次，而 0.36 与 1.00
+    /// 两档分别<b>少</b>分配 251 KB / 2,344 KB/次，整段交替 12 次少 7.07 MB；③ 耗时<b>判不出</b>
+    /// （同一条代码路径两条臂的差就有 1.4 ms，小于它的一律读成打平）。⇒ 这一格是"高熵内容省掉倍增链、
+    /// 低熵内容多付一次一次性缓冲"的交换，<b>不是纯收益</b>。</para>
+    /// <para><b>EMA 那条由读数判死，不是由理由判死</b>：同台上加了 ema 臂（仪表自己持状态，产品没有），
+    /// 交替序列整段它比本式<b>多</b>分配 2.65 MB = 自身噪声下限的 328 倍；ui 那一档它的中位初值被
+    /// 后一帧的 noise 拖到 521 KB（=上面 ② 说的"串值"，现在有了数）。只在连续同内容的 ui 上它才赢
+    /// （165 KB vs 276 KB/次）。⇒ 本文件不恢复历史型初值；要恢复得先有新读数。</para>
+    /// <para>钳位两端保持原样：下限 64 KiB（免得小图也走一遍倍增链），上限是 deflate 的硬膨胀界
+    /// （输入 + 输入/8 + 512，含块头与 Adler 的宽裕），估错永不越界、也不会溢出成负数。</para>
+    /// </summary>
+    internal static int EstimatedCapacity(int inputLength)
+    {
+        if (inputLength <= 0) return 256;
+        long est = (long)inputLength / 4 + 1024;
+        long bound = inputLength + (inputLength >> 3) + 512;   // deflate 最坏膨胀 + 块头/Adler 的宽裕上界
+        long cap = Math.Min(Math.Max(est, 64 * 1024), bound);
+        return (int)Math.Min(cap, int.MaxValue);
     }
 
     private static bool TryCompressNative(byte[] data, int level, out byte[] compressed)

@@ -158,6 +158,14 @@ public sealed unsafe partial class MftEncoderNative : IDisposable
         // NativeAvifEncoder.CrfToQuality 那条线性关系折算目标码率；接通后同步删掉显示名里的限制。
         // ⚠ 2026-09-27：上面这段"质量滑块在这条路上不生效"说的是接线意图 —— 本文件头写明的那五个
         //   vtable 声明还没修好，调用根本走不到这里，所以它从来没有在产物上被证实过，别当实测结论引用。
+        // ═══ 2026-10-31：「压缩强度」在这条腿上【也没有落点】，而这件事有两个登记处 ═══
+        // 判据就是本类的形状：构造函数只有 (width, height, useAv1)、Encode 只收像素，
+        // 没有任何 effort/preset/quality 形参或档位类属性 ⇒ MftAvifEncode 收到 effort 也只能原样放过
+        // （它把档位交给真正有旋钮的 libaom 回退腿，并在硬件腿产出时留一条"档位未生效"的痕迹）。
+        // ⚠ 给本类加档位入口的那一批必须同步改 FormatEncoders.cs 的 MftEffortSupport：
+        //   HardwareLegAcceptsEffort 翻成 true、删掉 MftAvifEncode 里那条留痕 ——
+        //   否则"界面仍按旧事实禁用控件、下层其实已经能接"就成了第二处事实源，
+        //   而本仓反复出的正是这类"同一事实写两处、其中一处忘了改"的缺陷。
         MFSetUINT32(outType, MF_MT_AVG_BITRATE, 10_000_000);
 
         SetOutputType(0, outType, 0);

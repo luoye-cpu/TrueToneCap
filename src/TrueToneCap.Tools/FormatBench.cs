@@ -93,6 +93,22 @@ if (args.Length >= 1 && args[0] == "--perf-png")
     return;
 }
 
+// ═══ 离线性能仪表（批4）：结论走 ExitCode + 落盘 CSV；顶层入口 void ⇒ 判通过用 Environment.ExitCode ═══
+if (args.Length >= 1 && args[0] == "--bench-tiff") { Environment.ExitCode = SavePathBench.RunTiff(args); return; }
+if (args.Length >= 1 && args[0] == "--bench-color") { Environment.ExitCode = SavePathBench.RunColor(args); return; }
+if (args.Length >= 1 && args[0] == "--bench-savepath") { Environment.ExitCode = SavePathBench.RunSavePath(args); return; }
+if (args.Length >= 1 && args[0] == "--bench-pq-table") { Environment.ExitCode = SavePathBench.RunPqTable(args); return; }
+// 批1 的正控：三档产物必须互不相同，相同就是"档位没落到这条腿"那个形状
+if (args.Length >= 1 && args[0] == "--bench-avif-effort") { Environment.ExitCode = SavePathBench.RunAvifEffort(args); return; }
+// 无损编码形状批（2026-10-31）：IDAT 流式 vs 旧一整份再写 的字节/分配两臂；强高光 PQ 料的后端选路两臂
+if (args.Length >= 1 && args[0] == "--bench-png-idat") { Environment.ExitCode = SavePathBench.RunPngIdat(args); return; }
+if (args.Length >= 1 && args[0] == "--bench-hdr-routing") { Environment.ExitCode = SavePathBench.RunHdrRouting(args); return; }
+// 裁定 2：deflate 缓冲初值 A/B（固定 vs EMA vs 静态估算 vs 完美估计），只活在仪表里的历史状态
+if (args.Length >= 1 && args[0] == "--bench-deflate-cap") { Environment.ExitCode = SavePathBench.RunDeflateCapacity(args); return; }
+// 全仓性能审查 2026-10-31 的两个"未量"项：rec 张量宽度维 A/B、翻译逐行 vs 批量
+if (args.Length >= 1 && args[0] == "--bench-ocr-rec") { Environment.ExitCode = OcrRecWidthBench.Run(args); return; }
+if (args.Length >= 1 && args[0] == "--bench-translate") { Environment.ExitCode = TranslateBatchBench.Run(args); return; }
+
 // ═══ 产品路径上的 JXL 色彩声明生效性探针 (--jxl-color-product，交接 §44) ═══
 if (args.Length >= 1 && args[0] == "--jxl-color-product")
 {
