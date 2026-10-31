@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 正控（2026-10-31）：w1 那格量到"本会话『设置已保存』0 条 + 键还在"，
 # 这两个读数同样也能被"持久化整个断了"造出来 —— 而 _formatComboRebuilding 闩锁恰恰是
 # 一个"忘了放就会造成这种形态"的东西。所以这一格专门走真实用户那一条路：

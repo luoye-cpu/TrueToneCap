@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 """流式无损件的外部裁判（PNG 多条 IDAT / 分条 16-bit TIFF）。
 
 为什么必须存在：审查 §3 表里 ① 与 ③ 两条判据当时只有"产品自己的字节解释自己的字节"——
