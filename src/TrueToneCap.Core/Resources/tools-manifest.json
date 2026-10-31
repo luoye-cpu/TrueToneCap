@@ -85,6 +85,21 @@
       "license": "BSD-3-Clause AND LicenseRef-Google-WebM-Patent-Grant",
       "licenseDetail": "以 licenses/INDEX.json 为准（2 项 shippedIn=cwebp.exe 全列）。libwebp 1.5.0 本体 BSD-3-Clause。与 libjxl 同理: 专利授权是独立的『Additional IP Rights Grant (Patents)』一节（licenses/libwebp-LicenseRef-Google-WebM-Patent-Grant.txt），不在 BSD-3-Clause 正文内，故表达式两项并列。libsharpyuv 0.4.1 属 libwebp 同一仓库、同一许可，不单独列文件。",
       "licenseFiles": ["libwebp-BSD-3-Clause.txt", "libwebp-LicenseRef-Google-WebM-Patent-Grant.txt"]
+    },
+    {
+      "file": "deflate.dll",
+      "project": "libdeflate",
+      "version": "1.26",
+      "versionDetail": "上游 commit 2b7cdc5；CMake 输出名是 deflate.dll（不是 libdeflate.dll）",
+      "versionSource": "libdeflate.h 的 LIBDEFLATE_VERSION_STRING = \"1.26\"（2026-10-31 本地构建时读取）",
+      "upstream": "https://github.com/ebiggers/libdeflate（commit 2b7cdc5，depth=1 clone）",
+      "buildRecipe": "仓库外 C:\\PLAN\\libdeflate-bench：cmake -S . -B build -G \"Visual Studio 18 2026\" -A x64 -DLIBDEFLATE_BUILD_SHARED_LIB=ON -DLIBDEFLATE_BUILD_STATIC_LIB=OFF -DLIBDEFLATE_BUILD_PROGRAMS=OFF -DLIBDEFLATE_BUILD_TESTS=OFF",
+      "buildNotes": "MSVC 19.51 (VS 18 Community)，Release，x64，静态链入 libdeflate 本体、无第三方依赖；产物 183,808 B，导出 libdeflate_alloc_compressor/free_compressor/zlib_compress_bound/zlib_compress 已用 dumpbin 核对。用途：PNG/TIFF 的 Smallest 档在高熵内容上的可选 deflate 后端；缺失/自检失败时程序自动回退内置 zlib-ng（见 src/TrueToneCap.Core/Encoding/DeflateZlib.cs）。",
+      "sha256": "e859291feb8cea4e243ad29f253909b3cf828b8808965d158079956ec0f38dff",
+      "sizeBytes": 183808,
+      "license": "MIT",
+      "licenseDetail": "libdeflate 本体 MIT（Copyright 2016 Eric Biggers / 2024 Google LLC），无静态第三方依赖；二进制再分发须随包保留许可全文（licenses/libdeflate-MIT.txt）。",
+      "licenseFiles": ["libdeflate-MIT.txt"]
     }
   ]
 }

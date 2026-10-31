@@ -22,14 +22,17 @@ public static class ManagedPngEncoder
     /// <param name="bitDepth">输出位深 (8/10/12/16)。10/12-bit 写入真位深 + sBIT, 16-bit 存储为 16。</param>
     /// <param name="iccProfile">可选 ICC profile (写入 iCCP chunk)。</param>
     /// <param name="cicp">可选 CICP 4 字节 [primaries, transfer, matrix, range]。</param>
+    /// <param name="effort">压缩强度档（2026-10-29）。默认 Smallest = 本文件历史上硬编码的
+    /// level 9；2026-10-31 起压缩字节可能来自 libdeflate，承诺改"解压后逐字节相同"。</param>
     public static void Encode(byte[] bgra, int w, int h, string path,
-        int bitDepth = 8, byte[]? iccProfile = null, byte[]? cicp = null)
+        int bitDepth = 8, byte[]? iccProfile = null, byte[]? cicp = null,
+        CompressionEffort effort = CompressionEffort.Smallest)
     {
         // 2026-09-19：原为 File.Create(path) 直写 —— 中途任何异常都会在最终路径留下一份
         // 已写了签名/IHDR 却没有 IEND 的坏 PNG，而上层照样按 ResolveActualPath 回来的那个路径报告"已保存"
         // （见 CapturePipelineService 的 File.Exists/长度统计）。现走同目录临时文件 + 成功后替换，
         // 理由与失败语义见 AtomicFileWriter。
-        AtomicFileWriter.Write(path, fs => Encode(bgra, w, h, fs, bitDepth, iccProfile, cicp));
+        AtomicFileWriter.Write(path, fs => Encode(bgra, w, h, fs, bitDepth, iccProfile, cicp, effort));
     }
 
     /// <summary>快速编码 8-bit PNG（Filter=None + Fastest 压缩）。用于临时中间文件。</summary>
@@ -80,7 +83,8 @@ public static class ManagedPngEncoder
 
     /// <summary>编码 BGRA 像素为 PNG 流。</summary>
     public static void Encode(byte[] bgra, int w, int h, Stream output,
-        int bitDepth = 8, byte[]? iccProfile = null, byte[]? cicp = null)
+        int bitDepth = 8, byte[]? iccProfile = null, byte[]? cicp = null,
+        CompressionEffort effort = CompressionEffort.Smallest)
     {
         // PNG 3.0 (ISO/IEC 15948:2023) Table 11: Color type 6 (RGBA) 只允许 8 和 16
         // 10/12-bit 源数据使用 16-bit 容器 + sBIT 标记实际有效位
@@ -125,7 +129,7 @@ public static class ManagedPngEncoder
 
         // IDAT
         var rawData = BuildRawScanlines(bgra, w, h, outDepth);
-        var compressed = CompressDeflate(rawData);
+        var compressed = CompressDeflate(rawData, effort);
         WriteChunk(output, "IDAT"u8, compressed);
 
         WriteChunk(output, "IEND"u8, []);
@@ -137,13 +141,17 @@ public static class ManagedPngEncoder
     /// 支持 IHDR 10/12/16-bit depth（PNG 3.0）。
     /// </summary>
     /// <param name="fastest">true = 用最快压缩（用于临时中转文件；压缩率不影响最终产物）。</param>
-    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false)
+    /// <param name="effort">压缩强度档（2026-10-29）。只在 <paramref name="fastest"/> 为 false 时生效；
+    /// 默认 Smallest = 本文件历史上硬编码的 CompressionLevel.SmallestSize。</param>
+    public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false,
+        CompressionEffort effort = CompressionEffort.Smallest)
     {
-        AtomicFileWriter.Write(path, fs => Encode16(bgra16, w, h, fs, cicp, iccProfile, bitDepth, fastest));
+        AtomicFileWriter.Write(path, fs => Encode16(bgra16, w, h, fs, cicp, iccProfile, bitDepth, fastest, effort));
     }
 
     /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。</summary>
-    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false)
+    public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false,
+        CompressionEffort effort = CompressionEffort.Smallest)
     {
         // PNG 3.0 (ISO/IEC 15948:2023) Table 11: Color type 6 (RGBA) 只允许 8 和 16
         // 10/12-bit 源数据使用 16-bit 容器 + sBIT 标记实际有效位
@@ -189,7 +197,7 @@ public static class ManagedPngEncoder
         // 那种场景文件用完即删，压缩率毫无意义，而 SmallestSize 在 4K 上要多花数秒 ——
         // 实测这正是 4K HDR AVIF 前处理的主要耗时。故提供 fastest 开关。
         var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth);
-        var compressed = fastest ? CompressDeflateFast(rawData) : CompressDeflate(rawData);
+        var compressed = fastest ? CompressDeflateFast(rawData) : CompressDeflate(rawData, effort);
         WriteChunk(output, "IDAT"u8, compressed);
 
         // IEND
@@ -212,26 +220,23 @@ public static class ManagedPngEncoder
     /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放和 IHDR。</param>
     private static byte[] BuildRawScanlines16(byte[] bgra16, int w, int h, int actualBitDepth = 16)
     {
-        int bytesPerChannel = 2;
-        int channels = 4;
-        int bpp = channels * bytesPerChannel; // 8 BPP
+        const int bytesPerChannel = 2;
+        const int channels = 4;
+        const int bpp = channels * bytesPerChannel; // 8 BPP
         int rowBytes = w * bpp;
         var raw = new byte[h * (1 + rowBytes)];
+        if (h <= 0) return raw;
 
-        // 临时行缓冲：当前行 RGBA + 上一行 RGBA
-        var curRow = new byte[rowBytes];
-        var prevRow = new byte[rowBytes];
-        var filtered = new byte[rowBytes];
-
-        for (int y = 0; y < h; y++)
+        // ── 阶段 1：BGRA16 BE → RGBA16 BE，逐行并行 ──
+        // 转换只依赖本行，先写进 raw 的原始区（filter 字节之后），供阶段 2 读取。
+        System.Threading.Tasks.Parallel.For(0, h, y =>
         {
             int srcOff = y * rowBytes;
-
-            // BGRA16 BE → RGBA16 BE 转换到 curRow
+            int dstOff = y * (1 + rowBytes) + 1;
             for (int x = 0; x < w; x++)
             {
                 int si = srcOff + x * 8;
-                int di = x * 8;
+                int di = dstOff + x * 8;
                 // 读取 16-bit big-endian 值
                 ushort bVal = (ushort)((bgra16[si] << 8) | bgra16[si + 1]);
                 ushort gVal = (ushort)((bgra16[si + 2] << 8) | bgra16[si + 3]);
@@ -258,41 +263,73 @@ public static class ManagedPngEncoder
                 }
 
                 // 写入 big-endian 16-bit 容器 (RGBA 顺序)
-                Write16(curRow, di, rVal);
-                Write16(curRow, di + 2, gVal);
-                Write16(curRow, di + 4, bVal);
-                Write16(curRow, di + 6, aVal);
+                Write16(raw, di, rVal);
+                Write16(raw, di + 2, gVal);
+                Write16(raw, di + 4, bVal);
+                Write16(raw, di + 6, aVal);
             }
+        });
 
-            // 自适应滤波选择：尝试 5 种滤波器，选最小绝对值和（压缩率启发式）
-            byte bestFilter = 0;
-            long bestScore = long.MaxValue;
-
-            for (byte f = 0; f <= 4; f++)
-            {
-                ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
-                long score = 0;
-                for (int i = 0; i < rowBytes; i++)
-                {
-                    int v = filtered[i];
-                    score += v < 128 ? v : 256 - v;
-                }
-                if (score < bestScore)
-                {
-                    bestScore = score;
-                    bestFilter = f;
-                }
-            }
-
-            // 写入最佳滤波结果
-            int rawOff = y * (1 + rowBytes);
-            raw[rawOff] = bestFilter;
-            ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
-            Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
-
-            // 当前行变为上一行
-            (curRow, prevRow) = (prevRow, curRow);
+        // ── 阶段 2：分带并行滤波 ──
+        // 每行滤波只依赖「上一行的原始字节」（prevRow 是输入行，不是上一行的滤波结果），
+        // 带与带之间因此完全独立。带内保留上一行原始副本串行推进；带首行需要的边界原始行
+        // 在并行开始前先复制，避免被前一个带改写后读到。输出与逐行串行版本逐字节一致。
+        int bandCount = h < 32 ? 1 : Math.Min(h, Environment.ProcessorCount);
+        int bandRows = (h + bandCount - 1) / bandCount;
+        var bandPrev = new byte[bandCount][];
+        for (int b = 1; b < bandCount; b++)
+        {
+            int y0 = b * bandRows;
+            if (y0 >= h) break;
+            var prev = new byte[rowBytes];
+            Array.Copy(raw, (y0 - 1) * (1 + rowBytes) + 1, prev, 0, rowBytes);
+            bandPrev[b] = prev;
         }
+
+        System.Threading.Tasks.Parallel.For(0, bandCount, b =>
+        {
+            int y0 = b * bandRows;
+            int y1 = Math.Min(h, y0 + bandRows);
+            if (y0 >= y1) return;
+
+            var curRow = new byte[rowBytes];
+            var prevRow = bandPrev[b] ?? new byte[rowBytes]; // 带 0 的虚拟上一行 = 全零
+            var filtered = new byte[rowBytes];
+
+            for (int y = y0; y < y1; y++)
+            {
+                int rawOff = y * (1 + rowBytes);
+                Buffer.BlockCopy(raw, rawOff + 1, curRow, 0, rowBytes);
+
+                // 自适应滤波选择：尝试 5 种滤波器，选最小绝对值和（压缩率启发式）
+                byte bestFilter = 0;
+                long bestScore = long.MaxValue;
+
+                for (byte f = 0; f <= 4; f++)
+                {
+                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
+                    long score = 0;
+                    for (int i = 0; i < rowBytes; i++)
+                    {
+                        int v = filtered[i];
+                        score += v < 128 ? v : 256 - v;
+                    }
+                    if (score < bestScore)
+                    {
+                        bestScore = score;
+                        bestFilter = f;
+                    }
+                }
+
+                // 写入最佳滤波结果
+                raw[rawOff] = bestFilter;
+                ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
+                Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
+
+                // 当前行变为上一行
+                (curRow, prevRow) = (prevRow, curRow);
+            }
+        });
         return raw;
     }
 
@@ -306,29 +343,27 @@ public static class ManagedPngEncoder
         int rowBytes = w * bpp;
         var raw = new byte[h * (1 + rowBytes)];
 
-        // ═══ 2026-08-25 P2 性能优化: 行并行化 ═══
-        // 每行 BGRA→RGBA 转换 + 滤波选择 + 滤波应用独立, 行间无依赖。
-        // 4K PNG (3840×2160) 加速 ~2-3x (240 行并行 → 避免 2160 行串行扫描 5 滤波器)。
-        // 使用 Parallel.ForEach + 分区迭代器避免共享 prevRow 状态。
-        // 注意: 滤波器的 Up/Average/Paeth 需要上一行数据 → 不能完全独立。
-        // 改用两阶段: (1) 并行 BGRA→RGBA 转换; (2) 串行滤波选择+应用。
+        // ═══ 2026-08-25 P2：行并行化；2026-10-29：滤波也分带并行 ═══
+        // 历史：先是全串行；2026-08-25 把 BGRA→RGBA 拆成并行、滤波选择仍串行
+        // （Up/Average/Paeth 要上一行，看着不能并行）；2026-10-29 照 BuildRawScanlines16
+        // 的办法把滤波也拆开 —— 每行只依赖上一行的【原始字节】，带与带之间因此完全独立。
+        // 同时去掉「每行先分配 byte[rowBytes] 再整行拷进 raw」这一整帧多余拷贝与 h 次分配。
 
-        // 阶段1: 并行 BGRA→RGBA + 16-bit 扩展 (行间无依赖)
-        var rgbaRows = new byte[h][];
+        // 阶段1: 并行 BGRA→RGBA + 16-bit 扩展，直接写进 raw 的扫描线区（filter 字节之后）
         System.Threading.Tasks.Parallel.For(0, h, y =>
         {
             int srcOff = y * w * 4;
-            var row = new byte[rowBytes];
+            int dstOff = y * (1 + rowBytes) + 1;
             if (outDepth == 8)
             {
                 for (int x = 0; x < w; x++)
                 {
                     int si = srcOff + x * 4;
-                    int di = x * 4;
-                    row[di] = bgra[si + 2];     // R
-                    row[di + 1] = bgra[si + 1]; // G
-                    row[di + 2] = bgra[si];     // B
-                    row[di + 3] = bgra[si + 3]; // A
+                    int di = dstOff + x * 4;
+                    raw[di] = bgra[si + 2];     // R
+                    raw[di + 1] = bgra[si + 1]; // G
+                    raw[di + 2] = bgra[si];     // B
+                    raw[di + 3] = bgra[si + 3]; // A
                 }
             }
             else
@@ -336,55 +371,75 @@ public static class ManagedPngEncoder
                 for (int x = 0; x < w; x++)
                 {
                     int si = srcOff + x * 4;
-                    int di = x * 8;
-                    Write16(row, di, (ushort)(bgra[si + 2] * 257));
-                    Write16(row, di + 2, (ushort)(bgra[si + 1] * 257));
-                    Write16(row, di + 4, (ushort)(bgra[si] * 257));
-                    Write16(row, di + 6, (ushort)(bgra[si + 3] * 257));
+                    int di = dstOff + x * 8;
+                    Write16(raw, di, (ushort)(bgra[si + 2] * 257));
+                    Write16(raw, di + 2, (ushort)(bgra[si + 1] * 257));
+                    Write16(raw, di + 4, (ushort)(bgra[si] * 257));
+                    Write16(raw, di + 6, (ushort)(bgra[si + 3] * 257));
                 }
             }
-            rgbaRows[y] = row;
         });
 
-        // 阶段2: 串行滤波选择+应用 (依赖上一行)
-        // 优化: 5 滤波器打分改为只尝试 Sub/Up/Average/Paeth (4 种), 跳过 None.
-        // None 在平坦区域更好, 但 4 种滤波器配合压缩足够.
-        var prevRow = new byte[rowBytes]; // all zeros (虚拟行 0)
-        var filtered = new byte[rowBytes];
-
-        for (int y = 0; y < h; y++)
+        // 阶段2: 分带并行滤波（与 BuildRawScanlines16 同法）
+        // 带首行需要的边界原始行必须在并行开始前复制：带内会把自己的行改写为滤波结果，
+        // 后一个带若现读 raw[y0-1] 就会读到别人写过的字节。
+        // 仍只试 Sub/Up/Average/Paeth 四种（跳过 None），与改前逐字节一致。
+        int bandCount = h < 32 ? 1 : Math.Min(h, Environment.ProcessorCount);
+        int bandRows = (h + bandCount - 1) / bandCount;
+        var bandPrev = new byte[bandCount][];
+        for (int b = 1; b < bandCount; b++)
         {
-            var curRow = rgbaRows[y];
-
-            // 自适应滤波选择: 尝试 4 种滤波器 (跳过 None, 平坦区域压缩会处理)
-            byte bestFilter = 1; // Sub 默认
-            long bestScore = long.MaxValue;
-
-            for (byte f = 1; f <= 4; f++)
-            {
-                ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
-                long score = 0;
-                for (int i = 0; i < rowBytes; i++)
-                {
-                    int v = filtered[i];
-                    score += v < 128 ? v : 256 - v;
-                }
-                if (score < bestScore)
-                {
-                    bestScore = score;
-                    bestFilter = f;
-                }
-            }
-
-            // 写入最佳滤波结果
-            int rawOff = y * (1 + rowBytes);
-            raw[rawOff] = bestFilter;
-            ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
-            Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
-
-            // 当前行变为上一行
-            prevRow = curRow;
+            int y0 = b * bandRows;
+            if (y0 >= h) break;
+            var prev = new byte[rowBytes];
+            Array.Copy(raw, (y0 - 1) * (1 + rowBytes) + 1, prev, 0, rowBytes);
+            bandPrev[b] = prev;
         }
+
+        System.Threading.Tasks.Parallel.For(0, bandCount, b =>
+        {
+            int y0 = b * bandRows;
+            int y1 = Math.Min(h, y0 + bandRows);
+            if (y0 >= y1) return;
+
+            var curRow = new byte[rowBytes];
+            var prevRow = bandPrev[b] ?? new byte[rowBytes]; // 带 0 的虚拟上一行 = 全零
+            var filtered = new byte[rowBytes];
+
+            for (int y = y0; y < y1; y++)
+            {
+                int rawOff = y * (1 + rowBytes);
+                Buffer.BlockCopy(raw, rawOff + 1, curRow, 0, rowBytes);
+
+                // 自适应滤波选择: 尝试 4 种滤波器 (跳过 None, 平坦区域压缩会处理)
+                byte bestFilter = 1; // Sub 默认
+                long bestScore = long.MaxValue;
+
+                for (byte f = 1; f <= 4; f++)
+                {
+                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
+                    long score = 0;
+                    for (int i = 0; i < rowBytes; i++)
+                    {
+                        int v = filtered[i];
+                        score += v < 128 ? v : 256 - v;
+                    }
+                    if (score < bestScore)
+                    {
+                        bestScore = score;
+                        bestFilter = f;
+                    }
+                }
+
+                // 写入最佳滤波结果
+                raw[rawOff] = bestFilter;
+                ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
+                Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
+
+                // 当前行变为上一行（交换缓冲，避免每行分配）
+                (curRow, prevRow) = (prevRow, curRow);
+            }
+        });
         return raw;
     }
 
@@ -458,16 +513,14 @@ public static class ManagedPngEncoder
         return (ushort)(q * step);
     }
 
-    /// <summary>Deflate 压缩（最大压缩级别）。ZLibStream 已包含 zlib 头 + Adler32。</summary>
-    private static byte[] CompressDeflate(byte[] data)
-    {
-        using var ms = new MemoryStream();
-        using (var zlib = new ZLibStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
-        {
-            zlib.Write(data);
-        }
-        return ms.ToArray();
-    }
+    /// <summary>Deflate 压缩。档位由 <see cref="CompressionEffortMap.PngTiffDeflateLevel"/> 唯一决定；
+    /// 实际实现由 <see cref="DeflateZlib"/> 选：libdeflate 可用就用它，否则内置 zlib-ng。
+    /// <para>⚠ 必须走 9/8/6/1 这组 level，而不是 <c>CompressionLevel</c> 枚举：
+    /// 枚举只有 0/1/6/9 四个点，表达不了用户要的"稍微放宽"那一档（level 8）。</para>
+    /// <para>⚠ 产物口径从"逐字节不变"改成"zlib 解压后逐字节相同"：libdeflate 输出的压缩字节与
+    /// zlib-ng 不同（实测体积 +0.23%），但两者都能被标准 zlib 解回同一份扫描线。</para></summary>
+    private static byte[] CompressDeflate(byte[] data, CompressionEffort effort)
+        => DeflateZlib.Compress(data, CompressionEffortMap.PngTiffDeflateLevel(effort));
 
     private static uint ComputeAdler32(byte[] data)
     {

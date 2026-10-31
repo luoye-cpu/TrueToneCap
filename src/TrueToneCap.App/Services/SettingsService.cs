@@ -507,17 +507,22 @@ public sealed class SettingsService
         // ── 位深：按格式钳制（各格式实际支持的集合不同，详见 NormalizeBitDepth）──
         NormalizeBitDepth(s);
 
-        // ── 压缩强度三档（2026-10-07 用户口径）──
-        // 逐格式各一栏，只作用于 AVIF / JPEG XL / WebP 的 effort 旋钮。
+        // ── 压缩强度档位（2026-10-07 用户口径；2026-10-29 扩到 PNG / TIFF 并分成两组）──
+        // 逐格式各一栏：AVIF / JPEG XL / WebP / JPEG LI 的 effort/speed 旋钮 + PNG / TIFF 的无损 deflate 档。
+        // ⚠ 2026-10-29 用户把菜单分成两组：<b>AVIF / JPEG XL 三档</b>（默认均衡），
+        //   <b>PNG / TIFF / WebP / JPEG LI 两档</b>（显示名「均衡」= Tag Smallest = 拉满，默认；「快速」= Quick）。
+        //   两组的合法值集合不同，所以走两条不同的收口通道 —— 见 FitTwoTierEffort 的备注，
+        //   那里写的为什么两档格式【不能】继续用 FitTag。
         // 用 FitTag 而不是自己写 if：它是本文件既有的"合法值收口"通道，同时负责
         // 「大小写不符时改写成 Tag 拼法」—— 自己写比较会漏掉那一半（见 FitTag 的备注）。
-        // 三个字段的合法值相同但各自独立：用户可以对三者分别设不同档。
-        // ⚠ Core 侧 CompressionEffortMap.Parse 对未识别值也回落均衡档 ⇒ 编码器侧的兜底与这里
+        // ⚠ Core 侧 CompressionEffortMap.Parse 对未识别值回落均衡档 ⇒ 编码器侧的兜底与这里
         //   口径一致（设置被绕过时仍安全），是有意的双保险而非重复。
         FitTag(s.EffortAvif, v => s.EffortAvif = v, dft.EffortAvif, "Smallest", "Balanced", "Fastest");
         FitTag(s.EffortJpegXl, v => s.EffortJpegXl = v, dft.EffortJpegXl, "Smallest", "Balanced", "Fastest");
-        FitTag(s.EffortWebp, v => s.EffortWebp = v, dft.EffortWebp, "Smallest", "Balanced", "Fastest");
-        FitTag(s.EffortJpegLi, v => s.EffortJpegLi = v, dft.EffortJpegLi, "Smallest", "Balanced", "Fastest");
+        FitTwoTierEffort(s.EffortWebp, v => s.EffortWebp = v, dft.EffortWebp, "Smallest", "Quick");
+        FitTwoTierEffort(s.EffortJpegLi, v => s.EffortJpegLi = v, dft.EffortJpegLi, "Smallest", "Quick");
+        FitTwoTierEffort(s.EffortPng, v => s.EffortPng = v, dft.EffortPng, "Smallest", "Quick");
+        FitTwoTierEffort(s.EffortTiff, v => s.EffortTiff = v, dft.EffortTiff, "Smallest", "Quick");
     }
 
     /// <summary>
@@ -667,6 +672,40 @@ public sealed class SettingsService
         if (string.IsNullOrEmpty(current)) return;
         foreach (var t in tags)
             if (string.Equals(current, t, StringComparison.OrdinalIgnoreCase)) { set(t); return; }
+        set(def);
+    }
+
+    /// <summary>两档格式（PNG / TIFF / WebP / JPEG LI）的档位收口（2026-10-29 用户口径）。
+    /// <para>与 <see cref="FitTag"/> 只差一件事，而那件事是<b>迁移</b>不是回落：这四个格式
+    /// 在两档化之前是三档（Smallest / Balanced / Fastest），老用户盘上写的正是后两个词。
+    /// 用 FitTag 的话 <c>"Balanced"</c> 会作为"合法值"原样留下 ⇒ 界面侧
+    /// <c>SetComboByTag</c> 在只有两格的下拉里找不到它，下拉显示空白并留一条 Warn，
+    /// 而编码侧 <c>CompressionEffortMap.Parse</c> 照旧认它、照常跑一个界面上不存在的档
+    /// ⇒ "看到的"和"跑的"分家。这与 2026-09-15（"Windows"）、2026-09-16（"WindowsNotify"）
+    /// 两次缺陷同一个形状：合法值表比下拉宽，而不是窄。</para>
+    /// <para><b>映射口径：不是 Tag <c>Smallest</c>（界面那格叫「均衡」）⇒ 折到 Tag <c>Quick</c>（界面叫「快速」）。</b>
+    /// 之所以敢这样折，是因为"这个键在文件里"
+    /// 本身就说明它是用户选的：差集序列化（2026-09-24 起）不写等于默认的键，而
+    /// <c>EffortWebp</c> / <c>EffortJpegLi</c> 是 2026-10-07 才有的字段 —— 早于差集改造、
+    /// 因而可能被全量序列化钉死的那批文件里根本没有这两个键。于是盘上的 "Balanced"/"Fastest"
+    /// 只能来自"当年那三格里点了它"，而这三格表达的共性正是"我不要最慢那一档"；
+    /// 新菜单里承接这个意图的只有 Quick。把它折回默认档（Smallest）是反向的 ——
+    /// 会把用户的一次显式选择变成"每张多等 20 秒"，而那恰是他当初避开的事。</para>
+    /// <para>真正的坏值（不在旧词表也不在新词表里）仍回落该格式默认档，与 <see cref="FitTag"/>
+    /// 的纪律一致 —— 迁移只认旧词，不给未知值猜意图。空值不改写，交由下游按默认处理。</para>
+    /// <para><c>tags</c> 必须按<b>慢 → 快</b>写：旧词折向的是 <c>tags[^1]</c>（最快的那一格），
+    /// 顺序写反就等于把"我不要最慢"迁成了"我要最慢"。判据
+    /// <c>CorePipelineTests.Test_SettingsEffort_TwoTierMenuAndMigration</c> 逐字段钉这个顺序。</para></summary>
+    private static void FitTwoTierEffort(string current, Action<string> set, string def, params string[] tags)
+    {
+        if (string.IsNullOrEmpty(current)) return;
+        foreach (var t in tags)
+            if (string.Equals(current, t, StringComparison.OrdinalIgnoreCase)) { set(t); return; }
+        // 三档时代写过盘的旧词 ⇒ 折到新菜单里"不是最慢"那一格。
+        // 这里取 tags[^1] 而不是再写一遍字面量 "Quick"：调用点已经把这一组的菜单写全了，
+        // 这里抄第二次就是两个事实源 —— 改下拉时忘了改这里，迁出来的又是一个界面上不存在的值。
+        foreach (var legacy in new[] { "Balanced", "Fastest" })
+            if (string.Equals(current, legacy, StringComparison.OrdinalIgnoreCase)) { set(tags[^1]); return; }
         set(def);
     }
 

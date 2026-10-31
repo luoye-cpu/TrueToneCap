@@ -38,6 +38,7 @@ BUCKET_TITLES = [
     ("cjpegli.exe", "JPEG / Gain Map 工具 cjpegli.exe"),
     ("cjxl.exe", "JPEG XL 工具 cjxl.exe"),
     ("cwebp.exe", "WebP 工具 cwebp.exe"),
+    ("deflate.dll", "无损压缩库 deflate.dll（libdeflate）"),
     ("runtime", ".NET 运行时与微软组件"),
     ("models", "OCR 模型与词典"),
 ]

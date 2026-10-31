@@ -217,16 +217,18 @@ public sealed class CapturePipelineService
         // ⚠️ AVIF 的能力协商【不在这里】—— 必须等 settings.HdrOutput 最终确定之后再做，
         //    原因见下方「AVIF 能力协商」处（:264 起）。此处若提前协商会用错场景（HDR/SDR）。
 
-        // ── 压缩强度三档（2026-10-07 用户口径）──
-        // 只有 AVIF / JPEG XL / WebP 有独立于质量的 effort 旋钮，故只有它们读设置的对应字段；
-        // 其余格式（JPEG LI / PNG / TIFF / GainMap）恒为 Balanced —— 它们不读这个值
-        // （编码器里根本没接），给 Balanced 只是"不要传一个没意义的最慢档"。
-        // ⚠ 逐格式读、不是全局一栏：用户要的是"给这三个格式各提供一个条"。
+        // ── 压缩强度三档（2026-10-07 用户口径；2026-10-29 扩到 PNG / TIFF）──
+        // 逐格式读、不是全局一栏：用户要的是"给每个慢格式各提供一个条"。
+        // PNG / TIFF 读它是因为它们是全仓最慢的两条，而这一档是它俩唯一的旋钮（质量滑块锁死在 100）。
+        // 其余没列出的格式恒为 Balanced —— 编码器里根本没接这个值，给 Balanced 只是"不要传一个
+        // 没意义的最慢档"（PNG/TIFF 自 2026-10-29 起是真接了）。
         var effort = format switch
         {
             OutputFormat.AVIF => CompressionEffortMap.Parse(s.EffortAvif),
             OutputFormat.JPEG_XL => CompressionEffortMap.Parse(s.EffortJpegXl),
             OutputFormat.WebP => CompressionEffortMap.Parse(s.EffortWebp),
+            OutputFormat.PNG => CompressionEffortMap.Parse(s.EffortPng),
+            OutputFormat.TIFF => CompressionEffortMap.Parse(s.EffortTiff),
             // JPEG LI 与增益图（= JPEG LI 的另一个形态）共用同一栏：增益图开与不开是同一个
             // 格式下拉的两种形态，各设一个"压缩强度"就是刚被合并掉的那种分裂。
             OutputFormat.JPEG_LI or OutputFormat.JPEG_GAINMAP => CompressionEffortMap.Parse(s.EffortJpegLi),

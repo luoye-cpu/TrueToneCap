@@ -222,9 +222,8 @@
              CopyToOutputDirectory="PreserveNewest" Visible="false" Link="PRIVACY.md" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Content Include="..\..\build\vscap-runtime\**\*" Link="data\vscap\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-  </ItemGroup>
+  <!-- VS-Cap（Qt 侧车）已于 2026-10-27 归档：本包不再有 data\vscap\ 这条 glob，
+       也没有「VS-Cap 模式」开关（见 docs/vscap-mode.md）。 -->
 
   <!-- PreBuild: 自动编译 HLSL 着色器（仅在 .cso 缺失或过期时触发）。
        Inputs/Outputs 与 CompileShaders.ps1 实际产出对齐：
@@ -340,18 +339,31 @@
              Link="native\%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest"
              Visible="false" />
+    <!-- 2026-10-31：可选的 libdeflate（PNG/TIFF 无损压缩后端）。同样必须声明为 Content，
+         否则 MSIX 打包枚举不到；缺它时程序自动回退内置 zlib-ng，不影响启动。 -->
+    <Content Include="..\TrueToneCap.Core\Resources\*.dll"
+             Link="native\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             Visible="false" />
   </ItemGroup>
 
   <Target Name="CopyNativeToolsToDevOutput" AfterTargets="Build">
     <ItemGroup>
       <TtcNativeTools Include="..\TrueToneCap.Core\Resources\*.exe" />
+      <TtcNativeLibs Include="..\TrueToneCap.Core\Resources\*.dll" />
     </ItemGroup>
     <Error Text="Core/Resources/ 下应有 4 枚原生编码器 exe（实得 @(TtcNativeTools->Count())）⇒ 布局或检出坏了，native/ 不许静默少拷"
            Condition="'@(TtcNativeTools->Count())' != '4'" />
+    <Error Text="Core/Resources/ 下应有 deflate.dll（实得 @(TtcNativeLibs->Count())）⇒ 可选后端会静默退回内置，随包分发承诺失真"
+           Condition="'@(TtcNativeLibs->Count())' != '1'" />
     <Copy SourceFiles="@(TtcNativeTools)"
           DestinationFolder="$(OutDir)native"
           SkipUnchangedFiles="true"
           Condition="'@(TtcNativeTools)' != ''" />
+    <Copy SourceFiles="@(TtcNativeLibs)"
+          DestinationFolder="$(OutDir)native"
+          SkipUnchangedFiles="true"
+          Condition="'@(TtcNativeLibs)' != ''" />
   </Target>
 
 </Project>

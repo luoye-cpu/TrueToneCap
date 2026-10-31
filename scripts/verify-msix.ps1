@@ -94,6 +94,12 @@ foreach ($t in $nativeTools) {
     else { Fail "native\$t 缺失 ⇒ 对应编码格式在包内会静默走保底（AVIF/JXL/WebP/JPEG LI）" }
 }
 
+# 2026-10-31：可选无损压缩后端（libdeflate）。缺了程序会自动回退内置 zlib-ng、不会坏，
+# 但随包分发的承诺是"带它" ⇒ 在包内缺失仍判失败（否则 UI 型/高熵内容的 10× 改进会静默消失）。
+$deflate = Join-Path $tmp "native\deflate.dll"
+if (Test-Path $deflate) { Ok ("native\{0,-14} {1,8:N2} MB" -f "deflate.dll", ((Get-Item $deflate).Length / 1MB)) }
+else { Fail "native\deflate.dll 缺失 ⇒ 无损压缩只会走内置 zlib-ng（DeflateZlib 可回退，但随包承诺失真）" }
+
 # OCR 模型 + 字典：缺了 OCR 直接不可用
 $models = @(
     @{ Path = "data\Models\PP-OCRv6_medium_det.onnx"; Min = 10MB },
@@ -204,5 +210,5 @@ if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Host "   · $_" -ForegroundColor Red }
     exit 1
 }
-Write-Host "✅ MSIX 核对通过 — 4 枚原生工具 + 3 项 OCR 资产 + 清单身份均就位" -ForegroundColor Green
+Write-Host "✅ MSIX 核对通过 — 4 枚原生工具 + deflate.dll + 3 项 OCR 资产 + 清单身份均就位" -ForegroundColor Green
 exit 0

@@ -31,7 +31,7 @@ public sealed partial class MainWindow : Window
         OcrLangHintTxt.Visibility = isWindowsOcr ? Visibility.Collapsed : Visibility.Visible;
         OcrLangHintTxt.Text = isWindowsOcr
             ? ""
-            : LocaleManager.Tr("ℹ PP-OCRv6 是单模型统一字典（18708 字），不随语言切换。实测中文/英文最准，日文需字高 ≥24px，韩文不支持（会自动改走 Windows OCR 兜底，需系统装韩文语言包）。");
+            : LocaleManager.Tr("ℹ PP-OCRv6 是单模型、不随语言切换；中英文最准，日文需字高 ≥24px，韩文自动改走系统 OCR。");
     }
 
     private void UpdateOcrEngineStatus()
@@ -151,12 +151,19 @@ public sealed partial class MainWindow : Window
             if (tag == "LLM")
                 LlmModeHint.Text = "OCR 识别文字后，通过 LLM API 翻译为高质量译文";
             else if (tag == "Vision")
-                LlmModeHint.Text = "整张截图直传给支持图片输入的 LLM，一次完成识别+翻译" +
-                                   "（不经 OCR 文本；该模型不支持图片或返回行数与图中不符时会报错，不会错位覆盖）";
+                LlmModeHint.Text = "整张截图直传给支持图片的 LLM，一次完成识别+翻译。";
         }
 
         // 同步到设置
-        if (_settings is not null)
+        //
+        // ⚠ 必须带 _uiReady 守卫（与 OnOcrLangChanged / OnLogVerbosityChanged 同一道闸）：
+        // XAML 里「免费翻译」那一项写着 IsSelected="True"，这会在 InitializeComponent 期间
+        // 就触发一次 SelectionChanged —— 那时 _settings 已是读盘后的对象，_uiReady 还是 false。
+        // 少了这个守卫，实测（2026-10-29）：盘上 TranslationMode=Vision 启动后被改成 Free
+        // 并当场落盘（差量写盘把该键连同 UseCustomLlm 一起剪掉），用户选过的 LLM/视觉翻译
+        // 每次重启都退回免费翻译，界面上看不出任何报错。
+        // ApplySettingsToUI 里那次显式调用照旧执行：上面的显隐/提示同步不需要落盘，也必须在回显时跑。
+        if (_settings is not null && _uiReady)
         {
             _settings.TranslationMode = tag ?? "Free";
             _settings.UseCustomLlm = showLlm;

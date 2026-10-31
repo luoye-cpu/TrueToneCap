@@ -121,6 +121,21 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     private int _detTensorW, _detTensorH;
     private DenseTensor<float>? _recTensor;
 
+    // ═══ 2026-10-30 合批识别（补测：单框 rec 约 44ms，其中相当一部分是 Run 的固定开销）═══
+    // 模型输入签名是 -1x3x48x-1（batch 与宽度都动态）⇒ 可以把多个框塞进同一次 Run。
+    // 只合批、不改每个框各自的预处理与解码：同一份裁剪/缩放/CTC 解码，产物逐字仍由同一算法决定。
+    // TTC_OCR_BATCH=0 回到逐框串行（A/B 与回退用）。
+    private static readonly bool s_recBatchEnabled =
+        Environment.GetEnvironmentVariable("TTC_OCR_BATCH") != "0";
+    private const int RecBatchSize = 4;
+    private DenseTensor<float>? _recBatchTensor;
+
+    // ═══ 2026-10-30 Span 读取 A/B 开关（TTC_OCR_SPAN=0 回到原多维索引器）═══
+    // 检测概率图与识别 logits 都是连续的 [1,1,H,W] / [N,T,C]；原先每个元素走一次
+    // output[[..]] 多维索引 ⇒ 4K 概率图上百万次维度换算。默认走 Span，开关只用于对撞。
+    private static readonly bool s_spanDecodeEnabled =
+        Environment.GetEnvironmentVariable("TTC_OCR_SPAN") != "0";
+
     // ═══ 2026-09-13 P0 修复: 推理串行化信号量 ═══
     // OnnxRuntime InferenceSession 非线程安全, 同一 session 并发 Run() 会导致
     // 原生层崩溃 (进程闪退)。用户快速连续触发 OCR (选区识字+翻译连点) 时,
@@ -433,15 +448,23 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                 // 1. 检测文字区域
                 var boxes = RunDetection(bgra, w, h);
 
-                // 2. 逐区域识别
+                // 2. 逐区域识别（2026-10-30：>1 框时按 RecBatchSize 合批，同一份预处理/解码）
                 var lines = new List<OcrLine>();
                 var allText = new List<string>();
-                foreach (var box in boxes)
+                int batchSize = s_recBatchEnabled ? RecBatchSize : 1;
+                for (int i = 0; i < boxes.Count; i += batchSize)
                 {
                     token.ThrowIfCancellationRequested(); // 用带超时的 token
-                    string text = RunRecognition(bgra, w, h, box);
-                    if (!string.IsNullOrWhiteSpace(text))
+                    int count = Math.Min(batchSize, boxes.Count - i);
+                    string[] texts = count == 1
+                        ? [RunRecognition(bgra, w, h, boxes[i])]
+                        : RunRecognitionBatch(bgra, w, h, boxes, i, count);
+
+                    for (int j = 0; j < count; j++)
                     {
+                        string text = texts[j];
+                        if (string.IsNullOrWhiteSpace(text)) continue;
+                        var box = boxes[i + j];
                         // 回填行级边界框（原图坐标），供 OCR 预览窗口"点对点覆盖"定位。
                         // box 坐标已由 ExtractBoxes 映射回原图坐标系。
                         int bx = Math.Max(0, (int)box.X1);
@@ -676,17 +699,33 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
             ow = output.Dimensions[3];
 
             // 保存原始概率图（用于置信度过滤）—— 拷出到托管内存
+            // ⚠ 用扁平 Span 读，不要用 output[[0,0,y,x]]：多维索引器每次访问都要走一遍
+            //   维度换算与边界检查（老实现 4K 概率图上百万次），而 [1,1,H,W] 本来就是连续的。
             probMap = new float[oh * ow];
             bitmap = new byte[oh * ow];
             float lowThresh = threshold - 0.05f;      // 0.25 召回优先
-            for (int y2 = 0; y2 < oh; y2++)
-                for (int x2 = 0; x2 < ow; x2++)
+            if (s_spanDecodeEnabled && output is DenseTensor<float> denseOutput)
+            {
+                var detSpan = denseOutput.Buffer.Span;
+                for (int i = 0; i < probMap.Length; i++)
                 {
-                    float v = output[[0, 0, y2, x2]];
-                    probMap[y2 * ow + x2] = v;
+                    float v = detSpan[i];
+                    probMap[i] = v;
                     // 召回优先二值化 (低阈值)
-                    bitmap[y2 * ow + x2] = v > lowThresh ? (byte)255 : (byte)0;
+                    bitmap[i] = v > lowThresh ? (byte)255 : (byte)0;
                 }
+            }
+            else
+            {
+                // 非 DenseTensor 的罕见实现：退回多维索引器（慢，但保持语义）
+                for (int y2 = 0; y2 < oh; y2++)
+                    for (int x2 = 0; x2 < ow; x2++)
+                    {
+                        float v = output[[0, 0, y2, x2]];
+                        probMap[y2 * ow + x2] = v;
+                        bitmap[y2 * ow + x2] = v > lowThresh ? (byte)255 : (byte)0;
+                    }
+            }
         }
         // ⛔ 2026-09-15: 本分支在 .NET (Core/5+/11) 上【不可达】—— CSE 进程内不可捕获，
         //    真崩溃时进程直接终止（实测退出码 -1073741819，见 tests/manual/cse-probe）。
@@ -723,11 +762,103 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
     private string RunRecognition(byte[] bgra, int imgW, int imgH, Box box)
     {
+        int recH = _config.RecImgH;
+        int recMaxW = _config.RecImgMaxW;
+        DenseTensor<float> input;
+        lock (_tensorLock)
+        {
+            _recTensor ??= new DenseTensor<float>([1, 3, recH, recMaxW]);
+            input = _recTensor;
+            // 复用前清零：右侧 padding 与上一框残留都会污染推理
+            input.Buffer.Span.Clear();
+        }
+        if (!FillRecognitionInput(bgra, imgW, imgH, box, input, 0)) return "";
+
+        // 推理 - 添加 SEH 保护防止 DirectML 原生崩溃
+        // ⚠ 同 RunDetection 的 P0 use-after-free 修复：output 是零拷贝视图，
+        //   必须在 results 存活期间完成解码（CPU 下"碰巧能读"掩盖了多年）。
+        var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("x", input) };
+        try
+        {
+            using var results = _recSession!.Run(inputs);
+            return DecodeRecognitionRow(results.First().AsTensor<float>(), 0);
+        }
+        // ⛔ 2026-09-15: 同检测分支，CSE 在 .NET 上不可捕获，本分支不可达（保留仅作文档）。
+        catch (Exception ex) when (ex is AccessViolationException || ex.GetType().Name.Contains("SEH"))
+        {
+            CoreLog.Warn("OCR", $"识别推理 SEH 崩溃（{ex.GetType().Name}）→ 丢弃该区域", ex, LogCategory.OCR);
+            return "";
+        }
+        catch (Exception ex)
+        {
+            CoreLog.Warn("OCR", "识别推理异常 → 丢弃该区域", ex, LogCategory.OCR);
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// 合批识别：一次 Run 处理 [offset, offset+count) 这些框，逐框解码。
+    /// <para>⚠ 每个框的裁剪/缩放/归一化与串行路径【逐句相同】—— 合批只改 Run 的次数，
+    /// 不改任何一行像素算术；同一份张量行、同一份 CTC 解码。</para>
+    /// <para>Run 失败时整批退回串行：宁慢不丢行（批量推理抛异常时无法判断是哪一行坏）。</para>
+    /// </summary>
+    private string[] RunRecognitionBatch(byte[] bgra, int imgW, int imgH,
+        List<Box> boxes, int offset, int count)
+    {
+        var texts = new string[count];
+        int recH = _config.RecImgH;
+        int recMaxW = _config.RecImgMaxW;
+        DenseTensor<float> input;
+        lock (_tensorLock)
+        {
+            if (_recBatchTensor is null
+                || _recBatchTensor.Dimensions[0] != RecBatchSize
+                || _recBatchTensor.Dimensions[2] != recH
+                || _recBatchTensor.Dimensions[3] != recMaxW)
+                _recBatchTensor = new DenseTensor<float>([RecBatchSize, 3, recH, recMaxW]);
+            input = _recBatchTensor;
+            // 只清本批要用的行；块内上一批残留与右侧 padding 都在这里归零
+            int rowFloats = 3 * recH * recMaxW;
+            input.Buffer.Span[..(count * rowFloats)].Clear();
+        }
+        for (int b = 0; b < count; b++)
+            FillRecognitionInput(bgra, imgW, imgH, boxes[offset + b], input, b);
+
+        var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("x", input) };
+        try
+        {
+            using var results = _recSession!.Run(inputs);
+            var output = results.First().AsTensor<float>();
+            for (int b = 0; b < count; b++)
+                texts[b] = DecodeRecognitionRow(output, b);
+        }
+        catch (Exception ex) when (ex is AccessViolationException || ex.GetType().Name.Contains("SEH"))
+        {
+            CoreLog.Warn("OCR", $"合批识别 SEH 崩溃（{ex.GetType().Name}）→ 本批退回逐框", ex, LogCategory.OCR);
+            for (int b = 0; b < count; b++)
+                texts[b] = RunRecognition(bgra, imgW, imgH, boxes[offset + b]);
+        }
+        catch (Exception ex)
+        {
+            CoreLog.Warn("OCR", "合批识别异常 → 本批退回逐框", ex, LogCategory.OCR);
+            for (int b = 0; b < count; b++)
+                texts[b] = RunRecognition(bgra, imgW, imgH, boxes[offset + b]);
+        }
+        return texts;
+    }
+
+    /// <summary>
+    /// 把一个框的裁剪/缩放/归一化写进 <paramref name="input"/> 的第 <paramref name="batchIndex"/> 行。
+    /// <paramref name="input"/> 形状 [N,3,recH,recMaxW]，右侧不足 recW 的部分必须已清零。
+    /// </summary>
+    private bool FillRecognitionInput(byte[] bgra, int imgW, int imgH, Box box,
+        DenseTensor<float> input, int batchIndex)
+    {
         int x = Math.Max(0, (int)box.X1);
         int y = Math.Max(0, (int)box.Y1);
         int bw = Math.Min(imgW - x, (int)(box.X2 - box.X1));
         int bh = Math.Min(imgH - y, (int)(box.Y2 - box.Y1));
-        if (bw <= 0 || bh <= 0) return "";
+        if (bw <= 0 || bh <= 0) return false;
 
         // ═══ 裁剪边距 padding（防止文字边缘被截断）═══
         // ⚠ 长行拆分出的子框不能用「框宽的 10%」做水平边距：相邻子框各自外扩 10%
@@ -749,7 +880,7 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         int cropY = Math.Max(0, y - padY);
         int cropW = Math.Min(imgW - cropX, bw + padX * 2);
         int cropH = Math.Min(imgH - cropY, bh + padY * 2);
-        if (cropW <= 0 || cropH <= 0) return "";
+        if (cropW <= 0 || cropH <= 0) return false;
 
         // ── PP-OCRv6 识别预处理 ──
         // crop → resize to H×W (keep aspect) → pad to MaxW → normalize → NCHW
@@ -759,16 +890,6 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         int recW = Math.Min((int)Math.Ceiling(recH * aspect), recMaxW);
         recW = Math.Max(4, recW);
 
-        // 双线性缩放 crop 到 recW×recH
-        // 池化识别张量 (尺寸固定 recH×recMaxW, 创建一次复用) —— 锁保护
-        DenseTensor<float> input;
-        lock (_tensorLock)
-        {
-            _recTensor ??= new DenseTensor<float>([1, 3, recH, recMaxW]);
-            input = _recTensor;
-            // 复用前清零 padding 区 (右侧 dx>=recW 残留旧数据会污染推理)
-            input.Buffer.Span.Clear();
-        }
         float[] recMean = _config.RecMeanV;
         float[] recStd = _config.RecStdV;
         var lut = s_byteToFloat;
@@ -815,64 +936,69 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                     float v0 = v00 * (1 - wx) + v01 * wx;
                     float v1 = v10 * (1 - wx) + v11 * wx;
                     float val = v0 * (1 - wy) + v1 * wy;
-                    input[0, c, dy, dx] = (val - recMean[c]) / recStd[c];
+                    input[batchIndex, c, dy, dx] = (val - recMean[c]) / recStd[c];
                 }
             }
         }
-        // 右侧 padding 保持为 0 (已初始化)
+        // 右侧 padding 保持为 0（调用方保证本行已清零）
+        return true;
+    }
 
-        // 推理 - 添加 SEH 保护防止 DirectML 原生崩溃
-        // ⚠ 同 RunDetection 的 P0 use-after-free 修复：output 是零拷贝视图，
-        //   必须在 results 存活期间把 logits 拷进托管数组（CPU 下"碰巧能读"掩盖了多年）。
-        var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("x", input) };
-        List<int>? decoded = null;
-        try
+    /// <summary>
+    /// CTC 解码一行的 logits（跳过 blank/重复/低置信度），再按字典拼接。
+    /// <para>⚠ 必须在 <c>results</c> 存活期间调用：output 是零拷贝视图。</para>
+    /// <para>2026-10-30：原先用 <c>output[[0,t,c]]</c> 多维索引器，每个时间步都要走一遍
+    /// 维度换算；现在 rows 是连续的，直接按 Span 读，算术与判定顺序逐字不变。</para>
+    /// </summary>
+    private string DecodeRecognitionRow(Tensor<float> output, int batchIndex)
+    {
+        int timeSteps = output.Dimensions[^2];
+        int numClasses = output.Dimensions[^1];
+
+        // ═══ 2026-09-06 修复: CTC 置信度过滤 — maxVal < 0.5 视为噪声丢弃 (防乱码)
+        // ═══ 2026-09-06 验证结论: 模型输出 18710 类 = blank(0) + 18708 字典字符 + 1 尾随特殊类
+        //   映射 _dict[d-1]: d=1→`!`, d=2→`"`, ... (模型导出用无空格字典, 空格输出为 blank)
+        var decoded = new List<int>();
+        int lastChar = -1;
+        const float ctcConfidenceThreshold = 0.5f;
+
+        if (s_spanDecodeEnabled && output is DenseTensor<float> dense)
         {
-            using var results = _recSession!.Run(inputs);
-            var output = results.First().AsTensor<float>();
-
-            // ═══ 2026-09-06 修复: CTC 置信度过滤 — maxVal < 0.5 视为噪声丢弃 (防乱码)
-            // ═══ 2026-09-06 验证结论: 模型输出 18710 类 = blank(0) + 18708 字典字符 + 1 尾随特殊类
-            //   映射 _dict[d-1]: d=1→`!`, d=2→`"`, ... (模型导出用无空格字典, 空格输出为 blank)
-            //
-            // ⚠ 解码必须在此（results 存活期间）完成：output 是零拷贝视图，离开 using 后
-            //   内存即被 ORT 回收。这里【不】额外拷出 logits —— 每个框约
-            //   320×18710×4B ≈ 24 MB，多框截图下会造成显著的内存压力与 GC 抖动。
-            int timeSteps = output.Dimensions[1];
-            int numClasses = output.Dimensions[2];
-            var d2 = new List<int>();
-            int lastChar = -1;
-            const float ctcConfidenceThreshold = 0.5f;
-
+            var span = dense.Buffer.Span;
+            int rowBase = batchIndex * timeSteps * numClasses;
+            for (int t = 0; t < timeSteps; t++)
+            {
+                var row = span.Slice(rowBase + t * numClasses, numClasses);
+                int maxIdx = 0;
+                float maxVal = float.MinValue;
+                for (int c2 = 0; c2 < numClasses; c2++)
+                {
+                    float v = row[c2];
+                    if (v > maxVal) { maxVal = v; maxIdx = c2; }
+                }
+                // 跳过 blank(0) 和重复; 低置信度丢弃
+                if (maxIdx != lastChar && maxIdx > 0 && maxVal >= ctcConfidenceThreshold)
+                    decoded.Add(maxIdx);
+                lastChar = maxIdx;
+            }
+        }
+        else
+        {
+            // 非 DenseTensor 的罕见实现：退回多维索引器（慢，但保持语义）
             for (int t = 0; t < timeSteps; t++)
             {
                 int maxIdx = 0;
                 float maxVal = float.MinValue;
                 for (int c2 = 0; c2 < numClasses; c2++)
                 {
-                    float v = output[[0, t, c2]];
+                    float v = output[[batchIndex, t, c2]];
                     if (v > maxVal) { maxVal = v; maxIdx = c2; }
                 }
-                // 跳过 blank(0) 和重复; 低置信度丢弃
                 if (maxIdx != lastChar && maxIdx > 0 && maxVal >= ctcConfidenceThreshold)
-                    d2.Add(maxIdx);
+                    decoded.Add(maxIdx);
                 lastChar = maxIdx;
             }
-            decoded = d2;
         }
-        // ⛔ 2026-09-15: 同检测分支，CSE 在 .NET 上不可捕获，本分支不可达（保留仅作文档）。
-        catch (Exception ex) when (ex is AccessViolationException || ex.GetType().Name.Contains("SEH"))
-        {
-            CoreLog.Warn("OCR", $"识别推理 SEH 崩溃（{ex.GetType().Name}）→ 丢弃该区域", ex, LogCategory.OCR);
-            return "";
-        }
-        catch (Exception ex)
-        {
-            CoreLog.Warn("OCR", "识别推理异常 → 丢弃该区域", ex, LogCategory.OCR);
-            return "";
-        }
-
-        if (decoded is null) return "";
 
         // 字典映射: 模型输出索引 1..N 对应字典 0..N-1 (blank 占索引 0)
         if (_dict is null) return "";

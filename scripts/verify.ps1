@@ -828,8 +828,9 @@ if ($hostsToCheck.Count -gt 0 -and (Test-Path $srcRoot)) {
     $inputs = @(
         Get-ChildItem $srcRoot -Include $inputInclude -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -notmatch '\\(obj|bin)\\' }
-        # 随包原生编码器：换了它们等于换了被测对象本身，必须进新鲜度面
-        Get-ChildItem (Join-Path $srcRoot "TrueToneCap.Core\Resources") -Include '*.exe' -Recurse -File -ErrorAction SilentlyContinue
+        # 随包原生产物：换了它们等于换了被测对象本身，必须进新鲜度面。
+        # 2026-10-31 起含可选 deflate.dll（改了它同样是被测对象变了）。
+        Get-ChildItem (Join-Path $srcRoot "TrueToneCap.Core\Resources") -Include '*.exe','*.dll' -Recurse -File -ErrorAction SilentlyContinue
         Get-ChildItem (Join-Path $RepoRoot "tests\fixtures") -Include '*.icc', '*.icm', '*.png' -Recurse -File -ErrorAction SilentlyContinue
     )
     $newest = $inputs | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -1157,58 +1158,24 @@ Write-Host ""
 
 # ══════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════
-#  [1.98/2] VS-Cap 像素交接对撞（上游 PR #1）
+#  [1.98/2] VS-Cap 侧车已归档（2026-10-27）—— 反向哨兵
 # ══════════════════════════════════════════════════════════════
-# 这条抓的是"两种语言各自以为对方读对了"那一类：TTC1 帧由 C# 写 → Qt 读并回写 → C# 再逐字节验。
-# PR 原来只有 vscap-bridge-tests 一条，且因为没设 TTC_VSCAP_FIXTURES 恒 QSKIP，
-# 而 QtTest 的 SKIP 退出码是 0 ⇒ 表现成"桥接测试通过"而实际零跨语言判定。
-# C# 这半边不需要 Qt，所以它能常驻门禁；Qt 那半边缺件时记【未判】，不记绿。
-Write-Host "[1.98/2] VS-Cap 像素交接对撞..."
-$interopProj = Join-Path $RepoRoot "tests\VSCapInterop\VSCapInterop.csproj"
-if (-not (Test-Path $interopProj)) {
-    Write-Host "   ❌ 未找到 tests\VSCapInterop 工程 ⇒ 这一格【没判】，按失败处理（不许静默放行）" -ForegroundColor Red
-    $script:GateGaps += "[1.98/2] 缺 tests/VSCapInterop 工程 ⇒ 像素交接未判"
+# 归档不是"把那几行删掉就算"：侧车树/对撞工程一旦悄悄回来，说明有人把 Qt 依赖又接进产品，
+# 却没有同时恢复 BuildVSCap.ps1、打包声明与跨语言像素判据 —— 那时门禁会全绿而功能半死不活。
+# 反过来，这三样只要都在【或都不在】才算一致；这里只判"不在"这一侧（它们是本轮的归档目标）。
+Write-Host "[1.98/2] VS-Cap 侧车归档一致性..."
+$vscapLeftovers = @(
+    (Join-Path $RepoRoot 'src\TrueToneCap.VSCap'),
+    (Join-Path $RepoRoot 'tests\VSCapInterop'),
+    (Join-Path $RepoRoot 'scripts\BuildVSCap.ps1')
+) | Where-Object { Test-Path $_ }
+if ($vscapLeftovers.Count -gt 0) {
+    Write-Host "   ❌ VS-Cap 归档后仍有残留：$($vscapLeftovers -join '；')" -ForegroundColor Red
+    Write-Host "      要么彻底归档（连打包/门禁声明一起去掉），要么恢复它的像素交接判据 —— 不许半留。" -ForegroundColor Yellow
+    $script:GateGaps += "[1.98/2] VS-Cap 归档残留 $($vscapLeftovers.Count) 项"
     exit 1
 }
-$interopFixtures = Join-Path $RepoRoot "build\vscap-fixtures-gate"
-if (Test-Path $interopFixtures) { Remove-Item -LiteralPath $interopFixtures -Recurse -Force }
-$ioOut = & dotnet run --project $interopProj -c $Configuration -- $interopFixtures 2>&1 | Out-String
-$ioRc = $LASTEXITCODE
-$ioPass = ([regex]::Matches($ioOut, '(?m)^PASS ')).Count
-if ($ioRc -ne 0 -or $ioPass -lt 4) {
-    Write-Host "   ❌ C# 侧像素交接自检 rc=$ioRc，PASS=$ioPass（期望 ≥4）⇒ 按失败处理" -ForegroundColor Red
-    ($ioOut -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 3) | ForEach-Object { Write-Host "      $_" }
-    $script:GateGaps += "[1.98/2] C# 侧像素交接自检失败 rc=$ioRc PASS=$ioPass"
-    exit 1
-}
-Write-Host "   ✅ C# 侧 $ioPass 条通过（SDR/HDR 往返 + 拒绝截断帧 + 拒绝坏像素）"
-$bridgeExe = Join-Path $RepoRoot "build\vscap\vscap-bridge-tests.exe"
-if (Test-Path $bridgeExe) {
-    $env:TTC_VSCAP_FIXTURES = $interopFixtures
-    $bOut = & $bridgeExe 2>&1 | Out-String
-    $bRc = $LASTEXITCODE
-    Remove-Item Env:\TTC_VSCAP_FIXTURES -ErrorAction SilentlyContinue
-    if ($bOut -match 'SKIP.*crossLanguagePixels') {
-        Write-Host "   ❌ 跨语言那条被 SKIP ⇒ 这一格没判，按失败处理（SKIP 的退出码是 0，只看 rc 会被骗）" -ForegroundColor Red
-        $script:GateGaps += "[1.98/2] crossLanguagePixels 被 SKIP ⇒ Qt 半边未判"
-        exit 1
-    }
-    if ($bRc) {
-        Write-Host "   ❌ vscap-bridge-tests rc=$bRc" -ForegroundColor Red
-        $script:GateGaps += "[1.98/2] 桥接测试失败 rc=$bRc"
-        exit 1
-    }
-    & dotnet run --project $interopProj -c $Configuration -- --verify-qt $interopFixtures | Out-Null
-    if ($LASTEXITCODE) {
-        Write-Host "   ❌ Qt 回写的像素与 C# 原始值不一致（通道序 / alpha / 浮点位级任一处错都算）" -ForegroundColor Red
-        $script:GateGaps += "[1.98/2] Qt→C# 像素不一致"
-        exit 1
-    }
-    Write-Host "   ✅ Qt 半边三步闭合（C# 写 → Qt 读写 → C# 验回写）"
-} else {
-    Write-Host "   ⚠️ 未构建侧车（build\vscap\vscap-bridge-tests.exe 不在）⇒ Qt 那半边【没判】，不是通过" -ForegroundColor Yellow
-    $script:GateGaps += "[1.98/2] 无 vscap-bridge-tests ⇒ Qt 半边未判（本机无 Qt / CI 常态）"
-}
+Write-Host "   ✅ 侧车源码 / 对撞工程 / 构建脚本均不在树内（功能已并入主程序，见 docs/vscap-mode.md）"
 
 #  [2/2] 逐套件执行
 # ══════════════════════════════════════════════════════════════

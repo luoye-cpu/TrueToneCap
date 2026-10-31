@@ -122,29 +122,62 @@ public sealed class AppSettingsData
     // 取值依据（业界公认的视觉无损阈值）：
     //   · JPEG XL / JPEG LI：butteraugli 距离 d=1.0 即 cjxl 官方默认的 visually lossless
     //                        （0.8 比 1.0 更严格，体积明显变大而肉眼难辨，故放宽到 1.0）
-    //   · AVIF：CRF ≤ 20 属视觉无损区间；取 15（≈ q76）留一档余量
+    //   · AVIF：CRF ≤ 20 属视觉无损区间；2026-10-27 用户口径取 20（区间上沿即视觉无损档，
+    //           体积比 CRF 15 更小；CRF 15 是"多留一档余量"的旧口径，已由用户改回 20）
     //   · WebP：q ≥ 85 即视觉无损，取 90
     //   · PNG / TIFF：本身就是无损格式，固定 100
     public double QualityJpegXl { get; set; } = 1.0;       // butteraugli 距离 (0.1-4.0)
-    public double QualityAvif { get; set; } = 15;           // CRF (0-63)
+    public double QualityAvif { get; set; } = 20;           // CRF (0-63)；20 = 视觉无损档上沿
     public double QualityWebp { get; set; } = 90;           // 质量 (50-100)
     public double QualityTiff { get; set; } = 100;          // 无损 (0-100)
 
-    // ── 压缩强度三档（2026-10-07 用户口径）──
-    // 只作用于 AVIF / JPEG XL / WebP 的 effort/speed 旋钮，不动质量。
-    // 逐格式各一栏（用户要求"给这三个格式提供额外的一个条"），字面量取 "Smallest"/"Balanced"/"Fastest"：
+    // ── 压缩强度档位（2026-10-07 用户口径；2026-10-29 扩到 PNG / TIFF、改过一次默认、并分成两组）──
+    // 逐格式各一栏（用户要求"给每个格式提供一个条"），字面量取 "Smallest"/"Quick"/"Balanced"/"Fastest"：
     //   · 为什么不用 int 索引：索引会随枚举增删而静默改义（本仓 settings 的"裸索引静默指向别的格式"
     //     已经踩过一次，见 SettingsService 的 GainMap 并入记录）⇒ 用字符串，坏值由
     //     CompressionEffortMap.Parse 回落到均衡档，不会变成"最慢档"。
-    //   · 默认 "Balanced" 对 AVIF/WebP 恰好等于改动前的硬编码值（-s 6 / cwebp 默认 -m 4）⇒ 产物不变；
-    //     JPEG XL 则由 -e 9 变为 -e 5（实测 25.0s → 0.82s），这是用户明确要的提速。
+    //   · ⚠ 差集序列化不会把"等于默认"的键写进文件 ⇒ **改这里的默认值对老用户真的生效**
+    //     （见 SettingsService 的默认表版本记录）；用户手动选过的档存在文件里，不会被覆盖，
+    //     但会经 SettingsService.FitTwoTierEffort 把三档时代的旧词折成新菜单里对应的那格。
+    //
+    // ⚠ 两组格式的下拉【格数不同】（2026-10-29 用户口径原话："这4个格式是2档位，默认是最高参数
+    //   拉满，有一个相对快速参数；其他的几个是3个档位，默认是个均衡，然后一个最大质量一个快速"）：
+    //   · 两档：PNG / TIFF / WebP / JPEG LI → 合法值 {Smallest, Quick}，默认 Smallest。
+    //   · 三档：AVIF / JPEG XL → 合法值 {Smallest, Balanced, Fastest}，默认 Balanced。
+    //   白名单因此分两条通道下发，逐格式写死在 SettingsService.Normalize 里。
+    //
+    // 默认档的分布是 2026-10-29 用户逐条点的（"TIFF 默认回到最小体积，JPEG 和 PNG 等默认都是最小体积"，
+    // 并确认 AVIF / JPEG XL 不动）：
+    //   · PNG / TIFF / WebP / JPEG LI → Smallest。PNG/TIFF 的这一档 == 它们 2026-10-29 之前
+    //     硬编码的 CompressionLevel.SmallestSize ⇒ 产物逐字节回到改动前；WebP 的 -m 6 比默认 m4
+    //     小约 4%、慢约 0.2s；JPEG LI 的 Smallest 是 --xyb，2026-10-07 那批样本（两张真实截图 ×
+    //     整个质量区间 + GainMap Baseline 路）上一律更小 1.5%~4.7%，代价是编码时间 1.5~1.8 倍。
+    //     ⚠ 2026-10-29 换三张新截图复测出现反例（两张小 5.5%/10.4%、一张【大 3.0%】）⇒
+    //       "一律"这个词不再用，理由与数据见 CompressionEffortMap.JpegLiUseXyb。
+    //   · AVIF / JPEG XL → Balanced。AVIF 的 Smallest 是 -s 0（实测 4K 约 0.3s → 7.1s，慢 24 倍换
+    //     约 24% 体积），JPEG XL 的更高 effort 体积方向随内容正负不定（样张 A 省 5.4%、样张 B 涨 8.9%）
+    //     ⇒ 这两条不把不确定/不成比例的代价设成默认。
+    // ⚠ 界面下拉里 IsSelected 的那一项必须与这里的默认同源，判据
+    //   CorePipelineTests.Test_PerfWiring_PngTiffEffortTiers 逐下拉对撞，改一边不改另一边会红。
     public string EffortAvif { get; set; } = "Balanced";
     public string EffortJpegXl { get; set; } = "Balanced";
-    public string EffortWebp { get; set; } = "Balanced";
-    // JPEG LI 是 2026-10-07 后加的（用户据实测要求纳入）：它的 --xyb 在两张真实截图 × 整个质量区间
-    // 以及 GainMap 的 Baseline 路上**一律更小 1.5%~4.7%**，是唯一全正收益的小参。
-    // 默认 Balanced ⇒ 不加 --xyb，产物与从前逐字节一致（与 AVIF/WebP 同一条承诺）。
-    public string EffortJpegLi { get; set; } = "Balanced";
+    public string EffortWebp { get; set; } = "Smallest";
+    // JPEG LI 是 2026-10-07 后加的（用户据实测要求纳入）：它的 --xyb 在那批样本上一律更小，
+    // 但 2026-10-29 换三张新截图复测有一张反而大 3.0% ⇒ "唯一全正收益"的说法已收回，
+    // 完整数据与措辞见 CompressionEffortMap.JpegLiUseXyb。
+    public string EffortJpegLi { get; set; } = "Smallest";
+    // PNG / TIFF 是 2026-10-29 加进来的（用户点名"编码速度相对过慢的几个要给档位"）。
+    // 起初排除它们的理由是"无损压缩级别会与质量滑块打架"，但 PNG 的质量滑块恒锁在 100
+    // （GetQualityRange = (100,100,100, LosslessFixed100)）⇒ 打架的对象不存在，这一档就是
+    // 它俩【唯一】的旋钮。逐档落到哪个 zlib level 见 CompressionEffortMap.PngTiffDeflateLevel。
+    // 默认 Smallest = 它们改动前的硬编码档 ⇒ 产物与从前逐字节一致；要提速就切 Quick（level 9 → 8）。
+    // 复测（2026-10-29，artifacts/tier_bench_2026-10-29.log）：三张真截图上快 1.2~2.4 倍（PNG）/
+    // 1.2~1.8 倍（TIFF）、体积 +0.3%~+1.4%（PNG）/ +0.5%~+5.2%（TIFF）；4K HDR 合成帧上
+    // PNG 快 8.1 倍且体积【反而小 1.1%】、TIFF 快 4.8 倍体积 +1.4%。
+    // 编码器侧的默认参数同样是 Smallest，所以不传档位的调用点（保底 PNG、诊断件、测试夹具）
+    // 也逐字节不变。
+    public string EffortPng { get; set; } = "Smallest";
+    public string EffortTiff { get; set; } = "Smallest";
 
     // ── 输出路径 ──
     public string OutputPath { get; set; } = "";
@@ -155,6 +188,19 @@ public sealed class AppSettingsData
 
     // ── HDR / ICC ──
     public bool HdrEnabled { get; set; } = true;
+
+    /// <summary>用户是否<b>亲手</b>拨过 HDR 开关。
+    /// <para>2026-10-27 用户口径："HDR 下默认应该开启 HDR 输出"。原来"默认开"只写在首运行那一支
+    /// （<c>FirstRun ⇒ HdrEnabled = cap.SupportsHdr</c>）里，于是首运行落在 SDR 屏（或 EDID 没读出来）
+    /// 的用户换了 HDR 屏之后，盘上的 <c>false</c> 会永久保留 —— 本机就是这形态：日志里
+    /// "HDR当前启用=True, HDR硬件支持=True"，而 settings.json 是 <c>HdrEnabled:false</c>。</para>
+    /// <para>现在：支持 HDR 且本标记为假 ⇒ 按默认打开（并落盘）；用户拨过一次就置真，
+    /// 此后永不自动翻转（"状态粘住会永久翻转用户偏好"的反方向纪律，见增益图那个开关）。</para>
+    /// <para>缺键（老文件）读作 false ⇒ 老用户若从没拨过，升级后第一次在 HDR 屏上启动会被打开一次；
+    /// 拨过就尊重。默认值刻意取 false：它是"从没表达过意图"，不是"表达了不要"。</para>
+    /// </summary>
+    public bool HdrUserToggled { get; set; }
+
     // IccBakeEnabled 已删除（2026-09-22 用户拍板）：色彩管理不可关，默认把像素映射进标准色域。
     // 老 settings.json 里残留的 "IccBakeEnabled" 键在反序列化时被忽略，不需要迁移代码。
 
@@ -169,7 +215,6 @@ public sealed class AppSettingsData
     public bool AutoStart { get; set; }
     public bool ShowPreview { get; set; } = true;
     public bool MinimizeToTray { get; set; } = true;
-    public bool UseVSCap { get; set; }
 
     // ── PNG 后缀（提高兼容性） ──
     public bool AvifPngSuffix { get; set; }

@@ -65,6 +65,34 @@ if (args.Length >= 1 && args[0] == "--ocr-ebox")
     return;
 }
 
+// ═══ 管线补测：OCR 端到端 + det/rec 分段 (--perf-ocr [modelDir] [--w 1200 --h 800 --iterations 5]) ═══
+if (args.Length >= 1 && args[0] == "--perf-ocr")
+{
+    PerfMeasureBench.RunOcr(args);
+    return;
+}
+
+// ═══ 管线补测：AVIF 真 10-bit 的压缩强度是否下发 (--perf-avif10 [--w 1280 --h 720]) ═══
+if (args.Length >= 1 && args[0] == "--perf-avif10")
+{
+    PerfMeasureBench.RunAvif10(args);
+    return;
+}
+
+// ═══ 管线补测：OCR 路由（懒建 CPU + 合批）(--perf-ocr-route [modelDir]) ═══
+if (args.Length >= 1 && args[0] == "--perf-ocr-route")
+{
+    PerfMeasureBench.RunOcrRoute(args);
+    return;
+}
+
+// ═══ 管线补测：PNG 16-bit 保存拆分 (--perf-png [--w 2250 --h 1350]) ═══
+if (args.Length >= 1 && args[0] == "--perf-png")
+{
+    PerfMeasureBench.RunPng(args);
+    return;
+}
+
 // ═══ 产品路径上的 JXL 色彩声明生效性探针 (--jxl-color-product，交接 §44) ═══
 if (args.Length >= 1 && args[0] == "--jxl-color-product")
 {

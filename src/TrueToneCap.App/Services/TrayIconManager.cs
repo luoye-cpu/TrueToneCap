@@ -5,13 +5,14 @@
 
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
+using TrueToneCap.Core.Logging;
 using WinRT.Interop;
 
 namespace TrueToneCap.App.Services;
 
 public sealed partial class TrayIconManager : IDisposable
 {
-    private readonly Window _window;
+    private readonly Window? _window;
     private readonly nint _hwnd;
     private nint _hIcon;
     private bool _disposed;
@@ -35,7 +36,6 @@ public sealed partial class TrayIconManager : IDisposable
     private const uint NIF_MESSAGE = 1;
     private const uint NIF_ICON = 2;
     private const uint NIF_TIP = 4;
-    private const uint NIF_GUID = 0x20;
     private const uint NIF_SHOWTIP = 0x80;
     private const uint WM_LBUTTONDOWN = 0x0201;
     private const uint WM_RBUTTONUP = 0x0205;
@@ -69,10 +69,15 @@ public sealed partial class TrayIconManager : IDisposable
     public System.Action? OnCaptureHotkey { get; set; }
     public System.Action? OnExitApp { get; set; }
 
-    public TrayIconManager(Window window)
+    public TrayIconManager(Window window) : this(WindowNative.GetWindowHandle(window))
     {
         _window = window;
-        _hwnd = WindowNative.GetWindowHandle(window);
+    }
+
+    /// <summary>探针用：只凭一个真 HWND 注册（托盘身份就是 (hWnd,uID)，本来也不需要 XAML 窗口）。</summary>
+    internal TrayIconManager(nint hwnd)
+    {
+        _hwnd = hwnd;
         _taskbarRestartMsg = RegisterWindowMessageW("TaskbarCreated");
         _hIcon = GenerateAppIcon(32);
 
@@ -83,6 +88,19 @@ public sealed partial class TrayIconManager : IDisposable
     //  托盘图标操作
     // ═══════════════════════════════════════
 
+    /// <summary>托盘图标是否真的挂上了 —— 为 false 时调用方不得把窗口藏起来（会变成找不回的孤儿进程）。</summary>
+    public bool IconRegistered { get; private set; }
+
+    /// <summary>
+    /// 注册托盘图标。
+    /// <para>身份用 (hWnd, uID)，不用固定 GUID：进程被强杀/崩溃时那条 GUID 条目会留在 Explorer 里，
+    /// 下一次 <c>NIM_ADD</c> 直接失败且按 GUID 的 <c>NIM_DELETE</c> 也删不掉。
+    /// 代价只是图标在通知区里的位置不跨进程记忆。</para>
+    /// <para>⚠️ 2026-10-28 本机实测的第二个失败源：本进程完整性级别低于 Explorer 时，
+    /// <c>Shell_NotifyIcon</c> 恒返回 FALSE 且 <c>GetLastError()==5 (ACCESS_DENIED)</c> ——
+    /// 托盘注册靠向任务栏窗口发消息，UIPI 不允许低完整性往高完整性发。当时成因是仓库目录被
+    /// 打了 Medium 强制标签，构建出的 exe 继承该标签，进程被压到 Medium（Explorer 为 High）。</para>
+    /// </summary>
     private void AddTrayIcon()
     {
         var nid = new NOTIFYICONDATAW
@@ -90,43 +108,79 @@ public sealed partial class TrayIconManager : IDisposable
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
             hWnd = _hwnd,
             uID = 1,
-            uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID | NIF_SHOWTIP,
+            uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             uCallbackMessage = WM_TRAYICON,
             hIcon = _hIcon,
             szTip = "TrueToneCap",
-            guidItem = new Guid("8F7C5B3A-1D2E-4A6F-9C8B-7E3D5F1A2B4C"),
         };
-        Shell_NotifyIconW(NIM_ADD, ref nid);
+        bool ok = Shell_NotifyIconW(NIM_ADD, ref nid);
+        if (!ok)
+        {
+            // 先按同一身份删一次（Explorer 重启后 TaskbarCreated 会再走这里，重复 ADD 也会失败）
+            var del = nid;
+            del.uFlags = 0;
+            Shell_NotifyIconW(NIM_DELETE, ref del);
+            ok = Shell_NotifyIconW(NIM_ADD, ref nid);
+        }
+        IconRegistered = ok;
+        if (!ok)
+        {
+            int err = Marshal.GetLastWin32Error();
+            string hint = err == 5
+                ? "（ACCESS_DENIED：本进程完整性级别低于 Explorer，托盘消息被 UIPI 拦下；进程 IL 取「令牌与镜像标签较低者」，先查 exe 是否带了强制完整性标签）"
+                : "";
+            LogService.Error("TrayIcon",
+                $"托盘图标注册失败（Win32 错误 {err}）{hint} —— 关窗后将无法从托盘找回",
+                LogCategory.UI);
+            return;
+        }
 
         // 通知 Explorer 使用现代通知区域 (NOTIFYICON_VERSION_4 = Win7+)
         nid.uVersionOrTimeout = 4;
         Shell_NotifyIconW(NIM_SETVERSION, ref nid);
+        LogService.Info("TrayIcon", "托盘图标已注册（hWnd+uID 身份）", LogCategory.UI);
     }
 
     public void MinimizeToTray()
     {
-        _window.AppWindow.Hide();
+        _window?.AppWindow.Hide();
     }
 
     public void Restore()
     {
+        if (_window is null) return;
         _window.AppWindow.Show(true);
         _window.AppWindow.MoveInZOrderAtTop();
     }
 
+    /// <summary>探针：最近一次真正发出去的 NIM_DELETE 返回了什么（null = 还没删过）。</summary>
+    internal bool? ProbeRemoveResult { get; private set; }
+
+    /// <summary>探针：真正发出去的 NIM_DELETE 次数 —— 幂等闸生效与否只有这个数说得清。</summary>
+    internal int ProbeDeleteCalls { get; private set; }
+
     public void RemoveIcon()
     {
+        // 幂等：MainWindow 两处收尾都是 RemoveIcon(); Dispose(); 而 Dispose 又删一次 ——
+        // 不设这道闸，每次退出都会打一条并不存在的"删除失败"告警（2026-10-28 加告警时踩到）。
+        if (!IconRegistered) return;
+        IconRegistered = false;
+        // 身份必须与注册时一致：(hWnd, uID)，uFlags=0（见 AddTrayIcon 注释）。
         var nid = new NOTIFYICONDATAW
         {
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
             hWnd = _hwnd,
-            uID = 1
+            uID = 1,
         };
-        Shell_NotifyIconW(NIM_DELETE, ref nid);
+        ProbeDeleteCalls++;
+        ProbeRemoveResult = Shell_NotifyIconW(NIM_DELETE, ref nid);
+        if (ProbeRemoveResult != true)
+            LogService.Warn("TrayIcon", $"托盘图标删除失败（Win32 错误 {Marshal.GetLastWin32Error()}）");
     }
 
     public bool RegisterCaptureHotkey(string hotkey)
     {
+        if (_window is null) return false;
         return HotkeyManager.Register(_window, hotkey, () =>
             _window.DispatcherQueue.TryEnqueue(() => OnCaptureHotkey?.Invoke()));
     }
@@ -136,7 +190,7 @@ public sealed partial class TrayIconManager : IDisposable
         RemoveIcon();
         HotkeyManager.Unregister();
         OnExitApp?.Invoke();
-        _window.Close();
+        _window?.Close();
     }
 
     /// <summary>处理托盘消息（由 MainWindow 的 WndProc 调用）。</summary>

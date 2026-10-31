@@ -28,6 +28,7 @@ public sealed partial class OcrPreviewWindow : Window
     private readonly LlmConfig _translationConfig;
     private Func<byte[], int, int, Task>? _saveHandler; // 主窗口注入的保存逻辑（按主UI设置）
     private bool _translating;
+    private bool _savingTranslated;                     // 译文图合成/保存中（防连点重复出文件）
 
     /// <summary>
     /// 翻译结果快照 —— <b>一次性发布</b>，替代原先分两处写的
@@ -176,21 +177,43 @@ public sealed partial class OcrPreviewWindow : Window
         }
     }
 
-    // ── 防抖：拖拽/缩放时 SizeChanged 高频触发，合并为一次延迟渲染 ──
-    private bool _syncPending;
+    // ── 节流：拖拽/缩放时 SizeChanged 每帧触发，而覆盖层要按行重建 Border+TextBlock+Brush。
+    // 原实现只合并同一批事件（一个 enqueue），拖拽中仍是每帧全量重建。这里限制到每 100ms
+    // 最多一次，并补一次尾随刷新保证最终对齐。
+    private long _lastSyncTick;
+    private int _syncTrailingScheduled;
     private void DebouncedSyncOverlay()
     {
-        if (_syncPending) return;
-        _syncPending = true;
-        DispatcherQueue.TryEnqueue(() =>
+        long now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref _lastSyncTick) < 100)
         {
-            _syncPending = false;
-            try { SyncOverlayAndRender(); }
-            catch (Exception ex)
+            if (Interlocked.CompareExchange(ref _syncTrailingScheduled, 1, 0) == 0)
             {
-                LogService.Warn("OcrPreview", $"SyncOverlay 异常: {ex.Message}", LogCategory.UI);
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(120).ConfigureAwait(false);
+                    Interlocked.Exchange(ref _syncTrailingScheduled, 0);
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        Interlocked.Exchange(ref _lastSyncTick, Environment.TickCount64);
+                        TrySyncOverlay();
+                    });
+                });
             }
-        });
+            return;
+        }
+
+        Interlocked.Exchange(ref _lastSyncTick, now);
+        DispatcherQueue.TryEnqueue(TrySyncOverlay);
+    }
+
+    private void TrySyncOverlay()
+    {
+        try { SyncOverlayAndRender(); }
+        catch (Exception ex)
+        {
+            LogService.Warn("OcrPreview", $"SyncOverlay 异常: {ex.Message}", LogCategory.UI);
+        }
     }
 
     private void SyncOverlayAndRender()
@@ -281,16 +304,24 @@ public sealed partial class OcrPreviewWindow : Window
             Canvas.SetTop(overlay, cy);
 
             // ═══ 文字覆盖层 — 使用用户选择的字体，与OCR区域对齐 ═══
+            //
+            // 2026-10-29：译文普遍比原文长，原先 NoWrap + 省略号会把后半句吃掉。
+            // 改成"按框宽折行 + 自适应字号"，且字号由 OcrTextOverlay.FitFontSize 在【图像像素空间】
+            // 算好再乘回显示缩放 —— 导出的覆盖图调的是同一个函数，预览与产物不会两套排版。
+            float fitPx = OcrTextOverlay.FitFontSize(displayText, EffectiveFontFamily,
+                Math.Max(8, rect.Width - 8), Math.Max(8, rect.Height - 8), rect.Height * 0.65f);
             var textBlock = new TextBlock
             {
                 Text = displayText,
                 Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)),
                 FontWeight = Microsoft.UI.Text.FontWeights.Medium,
-                TextWrapping = TextWrapping.NoWrap,
-                TextTrimming = TextTrimming.CharacterEllipsis,
+                TextWrapping = TextWrapping.Wrap,
+                TextTrimming = TextTrimming.None,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(4, 0, 4, 0),
-                FontSize = Math.Clamp(ch * 0.65, 10.0, 48.0),
+                Margin = new Thickness(Math.Max(1, 4 * sx), 0, Math.Max(1, 4 * sx), 0),
+                // 只防 0/负值：这里若给个"最小 6 DIP"，小图缩放后预览的字就会比导出的字大一圈，
+                // 正好把"预览所见 = 产物"这条纪律破坏掉（导出按图像像素画，比例必须一致）
+                FontSize = Math.Max(1.0, fitPx * sy),
                 // ═══ 2026-08-25: 使用用户选择的字体覆盖 ═══
                 FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(EffectiveFontFamily),
             };
@@ -520,7 +551,8 @@ public sealed partial class OcrPreviewWindow : Window
                 // 行数对不上时 TranslateImageWithVisionAsync 自己抛 TranslationException，
                 // 由本方法的 catch 如实显示；绝不按顺序硬套，错位覆盖比失败更难被发现。
                 byte[] png;
-                try { png = EncodePngForVision(); }
+                // 4K PNG 编码是纯 CPU 活，别压在 UI 线程上（翻译窗口会整段无响应）
+                try { png = await Task.Run(EncodePngForVision); }
                 catch (Exception ex)
                 {
                     throw new TranslationException($"截图编码 PNG 失败，无法走视觉路：{ex.Message}");
@@ -580,6 +612,8 @@ public sealed partial class OcrPreviewWindow : Window
 DispatcherQueue.TryEnqueue(() =>
             {
                 _showTranslation = true;
+                // 译文就绪 ⇒ 「保存译文图」才有意义（之前点它只会得到一条"还没有译文"）
+                SaveTranslatedBtn.IsEnabled = true;
                 ModeToggle.IsChecked = true;
                 ModeToggle.Content = "显示原文";
                 RenderOverlay();
@@ -644,6 +678,67 @@ DispatcherQueue.TryEnqueue(() =>
         catch (Exception ex)
         {
             InfoTxt.Text = $"❌ 保存失败: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 保存"当前画面"：译文模式把译文画到截图像素上，原文模式就是原图。
+    /// <para>与「保存原图」的区别只有一个：喂给管线的像素可能多了一层译文文字。落盘、剪贴板、
+    /// 格式协商全部复用 <see cref="_saveHandler"/>，不在这个窗口里另写一套。</para>
+    /// <para>为什么跟随 <see cref="_showTranslation"/> 而不总是烘焙译文：按钮上写的是"当前"，
+    /// 用户切到原文视图后点它，得到的必须是他正看着的那一屏，否则这个标签就是假的。</para>
+    /// </summary>
+    private async void OnSaveCurrentClick(object sender, RoutedEventArgs e)
+    {
+        using var _op = CoreLog.ContinueOp(CaptureOpId);
+        var snap = _translation;
+        if (snap is null) { InfoTxt.Text = "⚠ 还没有译文可保存"; return; }
+        if (_saveHandler is null) { InfoTxt.Text = "⚠ 保存功能未配置"; return; }
+        if (_savingTranslated) return;
+
+        _savingTranslated = true;
+        SaveTranslatedBtn.IsEnabled = false;
+        bool bake = _showTranslation;     // 只有正在看译文时才烘焙文字
+        InfoTxt.Text = bake ? "💾 正在合成译文图..." : "💾 正在保存当前画面（原图）...";
+        try
+        {
+            byte[] composed;
+            if (bake)
+            {
+                var lines = _ocr.Lines;
+                if (lines is null || lines.Count == 0) { InfoTxt.Text = "⚠ 没有可覆盖的文字行"; return; }
+                var boxes = new (int X, int Y, int Width, int Height)[lines.Count];
+                for (int i = 0; i < lines.Count; i++) boxes[i] = LineRect(lines[i]);
+                if (boxes.Length != snap.Lines.Count)
+                    LogService.Warn("OcrPreview",
+                        $"译文行数({snap.Lines.Count})与识别行数({boxes.Length})不一致，只覆盖前 {Math.Min(boxes.Length, snap.Lines.Count)} 行",
+                        LogCategory.UI);
+
+                string font = EffectiveFontFamily;
+                // 合成（clone + Win2D 光栅化 + 混合）整段放后台：4K 一次 clone 33MB，压 UI 线程会整窗无响应
+                composed = await Task.Run(() =>
+                    OcrTextOverlay.Compose(_rawPixels, _imgW, _imgH, boxes, snap.Lines, font));
+                LogService.Info("OcrPreview", $"译文覆盖合成完成: {_imgW}x{_imgH} {boxes.Length} 行", LogCategory.UI);
+            }
+            else
+            {
+                composed = _rawPixels;    // 与原图保存同源（管线内部会自己拷贝，不改入参）
+            }
+
+            await _saveHandler(composed, _imgW, _imgH);
+            InfoTxt.Text = bake
+                ? "✅ 当前画面（含译文）已保存（格式跟随主窗口设置）"
+                : "✅ 当前画面（原图）已保存（格式跟随主窗口设置）";
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("OcrPreview", $"保存当前画面失败: {ex.Message}", ex, LogCategory.UI);
+            InfoTxt.Text = $"❌ 保存当前画面失败: {ex.Message}";
+        }
+        finally
+        {
+            _savingTranslated = false;
+            SaveTranslatedBtn.IsEnabled = HasTranslation;
         }
     }
 

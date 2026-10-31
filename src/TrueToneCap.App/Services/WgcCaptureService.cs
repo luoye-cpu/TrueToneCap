@@ -40,6 +40,18 @@ public sealed record WgcCaptureConfig
 
     /// <summary>捕获所有显示器（拼接）。</summary>
     public bool CaptureAllMonitors { get; init; }
+
+    /// <summary>顺便把这一帧冻结进共享槽、交给预览窗直接采样（路线 B，仅单屏 HDR 有意义）。
+    /// <para>必须在【捕获方法内部】取槽：取完像素到返回之间还有 ICC 读取、日志、线程池续体
+    /// （本机实测这段期间 WGC 仍在出新帧），在调用方那里取到的必然是更新的一帧 ——
+    /// 预览会和最终保存的像素差一帧。这个开关就是让取槽紧跟在取像素之后、同一段里完成。</para></summary>
+    public bool WantSharedFrame { get; init; }
+
+    /// <summary>是否顺带把最新帧复制成一块独立纹理交给 <c>CaptureResult.GpuTexture</c>（GPU 直通编码用）。
+    /// 选区预览路径不消费这张快照（拿到结果就 Dispose），开着它等于每张截图白付一次整屏 BGRA8
+    /// 分配 + CopyResource（4K 约 33MB 显存）。
+    /// 默认 true = 现有调用方行为不变：静默截图/立即捕获仍走 GPU 直通编码。</summary>
+    public bool WantGpuTexture { get; init; } = true;
 }
 
 /// <summary>
@@ -50,6 +62,16 @@ public sealed partial class WgcCaptureService : IDisposable
 {
     // ── 并发保护 ──
     private static readonly SemaphoreSlim s_captureLock = new(1, 1);
+
+    // 诊断开关：TTC_SDR_SHARED=0 关掉"SDR 也建共享槽"（真机 A/B 用；默认开）。
+    // 关掉即回到 2026-10-30 之前的行为：每次截图整屏回读 SDR（本机实测 21.6–37.1ms）。
+    private static readonly bool sSdrSlotEnabled =
+        Environment.GetEnvironmentVariable("TTC_SDR_SHARED") != "0";
+
+    // 诊断开关：TTC_NO_FLOAT16=1 把本机当"纯 SDR 屏"用（CanDeliverExtendedRange 恒 false）。
+    // 它验的是阶段 3 的"纯 SDR 分支一字不改"：那种屏上 SDR 槽从来不冻，选区像素照旧整帧裁。
+    private static readonly bool sNoFloat16 =
+        Environment.GetEnvironmentVariable("TTC_NO_FLOAT16") == "1";
 
     // ── 内部诊断日志（使用统一 LogService）──
     private static void Log(string msg) => LogService.Debug("WgcCapture", msg, LogCategory.Capture);
@@ -176,6 +198,28 @@ public sealed partial class WgcCaptureService : IDisposable
         private int _width, _height;
         private long _frameTimestamp; // 始终在 _frameLock 内访问，锁提供内存屏障
         private readonly object _frameLock = new();
+
+        // ═══ 2026-10-29（P0-5）：逐帧 CPU 回读改为"消费者活跃时才做" ═══
+        // 实测（本机 4K HDR 屏，静态桌面）：保活窗口内不截图也持续出帧（≈1.2 fps），
+        // 每帧整屏回读 54.5ms ⇒ 会话保活 15s 期间占 **43.4% 单核**（会话停掉后基线 0%）。
+        // 帧率高的时候（视频/游戏）代价按比例放大。
+        // 现在：帧回调只更新 GPU 快照（本来每帧也要拷给直通编码），CPU 回读仅在
+        //   ① 最近 ConsumerWindowMs 内有消费者（连续截图走快路径，零额外延迟），或
+        //   ② 消费者来取帧时按需从快照补读一次（冷启动晚 ~55ms，但只发生一次）。
+        // ⚠ 刻意不采用"请求位 + 等下一帧"：静态桌面实测只有 ~1 fps，等帧会退化成等超时；
+        //   按需回读读的是已缓存的快照，桌面不变时它就是当前画面。
+        private long _cpuSdrTick, _cpuHdrTick;   // 对应 CPU 帧来自哪一帧（_frameTimestamp），_frameLock 内访问
+        private long _consumerUntil;             // 消费者窗口截止时刻（TickCount64）
+        private const long ConsumerWindowMs = 2000;
+
+        // ═══ 2026-10-30 SDR(8-bit) 腿仪表 —— 只读数，不参与任何判定 ═══
+        // 为什么要它：下一步要决定「要不要给 SDR 也建共享槽 / 常驻一块 CPU 帧」，而这个决定取决于
+        // 消费者窗口内**逐帧回读到底发生了几次、一共吃掉多少 CPU 时间**。逐帧打日志不行（静态桌面
+        // 也有 1~2 fps，窗口内几十行会把判据淹掉），所以先原子累加、窗口到期后结算一行。
+        // 为什么是 Interlocked：WGC FreeThreaded 帧池的回调可能并发进入，普通 += 会丢计数。
+        // 两枚字段各自原子，交界处最多漏算一帧的毫秒 —— 对"要不要建槽"这个量级无影响。
+        private long _sdrWindowFrames;   // 本窗口内成功回读的帧数
+        private long _sdrWindowTicks;    // 对应回读工作（不含 GPU 锁等待）的 Stopwatch tick 累计
         private readonly ManualResetEventSlim _firstFrameEvent = new(false);
         private volatile bool _hasFrame;
         private volatile bool _disposed; // ═══ 防止 Dispose 后 FrameArrived 回调访问已释放资源 ═══
@@ -192,6 +236,30 @@ public sealed partial class WgcCaptureService : IDisposable
         private ID3D11Texture2D? _latestTexture;
         private int _latestTexW, _latestTexH;
         private bool _latestTexValid;
+
+        // ═══ 2026-10-30 路线 B：跨设备共享槽（给【另一个 D3D 设备】上的预览窗直接采样）═══
+        // 与 _latestTexture 分开的一块：_latestTexture 每帧被覆写（直通编码要最新帧），
+        // 而预览窗一拿就是几十秒（用户框选期间）⇒ 必须有一块"被取走就不再动"的。
+        // 冻结不是优化，是截图语义本身：用户按下热键要的是【那一刻】的画面，不是活的视频。
+        // 句柄在纹理创建时一次生成；预览侧 OpenSharedResource 之后自己持引用，
+        // 所以即使本会话被 Dispose，预览手里那块仍然有效（DXGI 共享资源的引用计数语义）。
+        private ID3D11Texture2D? _sharedTex;
+        private nint _sharedHandle;
+        private int _sharedW, _sharedH;
+        private bool _sharedValid;   // 槽里有与 _latestTexture 同帧的内容
+        private bool _sharedHeld;    // 已被取走：期间不覆写（否则预览画面会在用户眼前被换掉）
+        /// <summary>共享槽的失败只报一次，且报在 Info 档 —— 它是路线 B 的结构性故障，
+        /// 落在 Debug 档等于"探针只看到取不到槽、日志里什么都没有"（第一次跑就是这么哑的）。</summary>
+        private bool _sharedFaultLogged;
+        internal bool SharedHeld => _sharedHeld;
+        internal bool SharedValid => _sharedValid;
+
+        private void LogSharedFault(string msg)
+        {
+            if (_sharedFaultLogged) return;
+            _sharedFaultLogged = true;
+            LogInfo($"[Pool] {_hmonitor:X}: 共享槽故障（只报一次）: {msg}");
+        }
 
         /// <summary>本会话的捕获降级警告 (null = 正常)。设置于 Start() 时读取静态标记。</summary>
         private string? _degradationWarning;
@@ -296,53 +364,68 @@ public sealed partial class WgcCaptureService : IDisposable
                 }
 
                 int w = _width, h = _height;
+                long now = Environment.TickCount64;
 
-                if (IsHdr)
+                // GPU 快照每帧都更新（直通编码与"按需回读"都靠它，成本是一次显卡内拷贝）
+                CacheTextureGpuCopy(texture, w, h);
+                lock (_frameLock) { _frameTimestamp = now; }
+
+                // CPU 回读只在消费者活跃窗口内做；否则这一帧只留在 GPU 快照里
+                bool wantCpu = now < Volatile.Read(ref _consumerUntil);
+                if (wantCpu)
                 {
-                    var pixels = ReadFloatPixelsPooled(texture, w, h);
-                    // ═══ 2026-09-16 根因修复：取帧失败时**保留上一帧**，不要发布 null ═══
-                    // ReadFloatPixelsPooled 在 GPU 锁争用超时（500ms）时返回 null。
-                    // 原实现无条件 `_latestHdr = pixels` —— 把上一帧也清成 null，
-                    // 于是"一次瞬时争用"被放大成"这个会话没有帧"，
-                    // 上层（首帧等待 / GetLatestHdr）随即把它当成结构性失败。
-                    // 保留上一帧：宁可用稍旧的画面，也好过整块缺失。
-                    if (pixels is null)
+                    if (IsHdr)
                     {
-                        Log($"[Pool] {_hmonitor:X}: 本帧读取失败(GPU 锁争用)，保留上一帧");
-                        return;
+                        var pixels = ReadFloatPixelsPooled(texture, w, h);
+                        // ═══ 2026-09-16 根因修复：取帧失败时**保留上一帧**，不要发布 null ═══
+                        // ReadFloatPixelsPooled 在 GPU 锁争用超时（500ms）时返回 null。
+                        // 原实现无条件 `_latestHdr = pixels` —— 把上一帧也清成 null，
+                        // 于是"一次瞬时争用"被放大成"这个会话没有帧"，
+                        // 上层（首帧等待 / GetLatestHdr）随即把它当成结构性失败。
+                        // 保留上一帧：宁可用稍旧的画面，也好过整块缺失。
+                        if (pixels is null)
+                            Log($"[Pool] {_hmonitor:X}: 本帧读取失败(GPU 锁争用)，保留上一帧");
+                        else
+                        {
+                            lock (_frameLock)
+                            {
+                                // 双缓冲交换：旧发布缓冲变为下次写入缓冲，消除竞态
+                                _writeBufferHdr = _latestHdr;
+                                _latestHdr = pixels;
+                                _latestSdr = null;
+                                _cpuHdrTick = now;
+                            }
+                        }
                     }
-                    lock (_frameLock)
+                    else
                     {
-                        // 双缓冲交换：旧发布缓冲变为下次写入缓冲，消除竞态
-                        _writeBufferHdr = _latestHdr;
-                        _latestHdr = pixels;
-                        _latestSdr = null;
-                        CacheTextureGpuCopy(texture, w, h);
-                        _frameTimestamp = Environment.TickCount64;
-                    }
-                }
-                else
-                {
-                    var pixels = ReadBytePixelsPooled(texture, w, h);
-                    // 同理（见上方 HDR 分支）：取帧失败时保留上一帧，不把 null 发布出去
-                    if (pixels is null)
-                    {
-                        Log($"[Pool] {_hmonitor:X}: 本帧读取失败(GPU 锁争用)，保留上一帧");
-                        return;
-                    }
-                    lock (_frameLock)
-                    {
-                        // 双缓冲交换：旧发布缓冲变为下次写入缓冲，消除竞态
-                        _writeBufferSdr = _latestSdr;
-                        _latestSdr = pixels;
-                        _latestHdr = null;
-                        CacheTextureGpuCopy(texture, w, h);
-                        _frameTimestamp = Environment.TickCount64;
+                        var pixels = ReadBytePixelsPooled(texture, w, h, out long sdrWorkTicks);
+                        // 同理（见上方 HDR 分支）：取帧失败时保留上一帧，不把 null 发布出去
+                        if (pixels is null)
+                            Log($"[Pool] {_hmonitor:X}: 本帧读取失败(GPU 锁争用)，保留上一帧");
+                        else
+                        {
+                            // 只累计成功的那次：失败那帧的耗时主要是等锁（另有日志），
+                            // 混进来会把"每帧回读成本"抬成锁争用的数字，判据就失真了。
+                            Interlocked.Increment(ref _sdrWindowFrames);
+                            Interlocked.Add(ref _sdrWindowTicks, sdrWorkTicks);
+
+                            lock (_frameLock)
+                            {
+                                // 双缓冲交换：旧发布缓冲变为下次写入缓冲，消除竞态
+                                _writeBufferSdr = _latestSdr;
+                                _latestSdr = pixels;
+                                _latestHdr = null;
+                                _cpuSdrTick = now;
+                            }
+                        }
                     }
                 }
 
                 if (!_hasFrame)
                 {
+                    // 首帧判据从"CPU 回读成功"提前到"GPU 快照就绪"：回读已不再每帧发生，
+                    // 消费方拿到首帧事件后由 GetLatest* 按需补读。
                     _hasFrame = true;
                     _firstFrameEvent.Set();
                     Log($"[Pool] {_hmonitor:X}: 首帧就绪 {w}x{h}");
@@ -394,37 +477,331 @@ public sealed partial class WgcCaptureService : IDisposable
         //  ⚠ 传进来的 reuse 只用于 **SDR 与 HDR 各自的固定尺寸**（会话尺寸在一个会话内不变）。
         //    尺寸不符就**忽略它另分配**，绝不截断 —— 把一帧截短比多分配一次糟得多。
         //  ⚠ 调用方必须保证：拿到之后到下次调用本方法之前，不再读那份缓冲。
-        //    现有 6 个调用点都是"取到即消费"（拷进拼接画布 / 交给编码器），符合这条契约。
+        //    ═══ 2026-10-30 更正：这句话当时就是错的，别照它做设计 ═══
+        //    选区预览那条腿（MainWindow.StartSelectionCapture 把 HdrPixels 原样交给
+        //    HdrCaptureWindow.LoadFrame，后者把它存进 _frame，渲染线程每拍重读，一直读到用户
+        //    框选完成）就是【跨帧长期持有】这一份，远不是"取到即消费"。
+        //    它今天没出事，靠的不是这里的缓冲纪律，而是 MainWindow 那道防重入闸：
+        //    _isCapturing 在 StartSelectionCapture 开头的 Interlocked.CompareExchange 抢下，
+        //    在同一个方法末尾的 finally 里放（那里的注释自己写着"预览窗无论成功/取消/失败/提前返回，
+        //    都在这里释放"）⇒ 预览期间不会有第二次捕获，于是没有第二次的
+        //    GetLatestHdr(_reuseHdr) 来覆写用户正看着的那张。
+        //    ⚠ 这条跨模块不变量现在是【没人写下来、也没仪表守着】的：谁把那道闸改成"预览期间也允许
+        //    再按一次"，用户屏幕上的画面就会被下一帧静默换掉，而所有现有判据全绿。
+        //    （现有仪表各判各的：--capture-freshness-probe 判"截图落后现实多少"、--sdr-semantics-probe
+        //    判"两次读数是同一张画面"、--preview-ui-probe 判"像素呈现结果"、--selftest 判"源精度"
+        //    —— 没有一条能判"已经交出去的那一块事后有没有被后续帧改写"。）
         //  ⚠ 仍持锁拷贝（_frameLock）：复用只去掉了分配，**没有**去掉生产者/消费者之间的拷贝，
-        //    帧回调线程随时会改写 _latestSdr/_latestHdr。省的是分配与 LOH 压力，不是同步。
+        //    帧回调线程随时会改写 _latestSdr/_latestHdr（见 OnFrameArrived 里 _writeBuffer* = _latest* 那一换）。
+        //    省的是分配与 LOH 压力，不是同步。
 
         /// <summary>获取最新 SDR 帧。<paramref name="reuse"/> 尺寸匹配时复用它（省一次分配）。</summary>
+        /// <remarks>空闲期没有逐帧回读时，这里从最近一帧的 GPU 快照补读一次（见 _consumerUntil 注释）。</remarks>
         public byte[]? GetLatestSdr(byte[]? reuse)
         {
+            // ═══ 汇总必须结算在刷新 _consumerUntil 之前 ═══
+            // 下一行会把这个窗口的截止时刻改成 now+2000；之后再判"窗口到期"永远为假，
+            // 累计只增不清、那行汇总一次也打不出来。
+            FlushSdrWindowIfExpired();
+
+            Volatile.Write(ref _consumerUntil, Environment.TickCount64 + ConsumerWindowMs);   // 后续帧恢复逐帧回读
+
+            // 计时只包住 CopySdr 那一句；Log 挪到锁外，落盘/推 UI 的时间不该算进 _frameLock 的持锁时间。
+            byte[]? reusedCopy = null;
+            double reusedMs = 0;
             lock (_frameLock)
             {
-                if (_latestSdr is null) return null;
-                var copy = (reuse is not null && reuse.Length == _latestSdr.Length) ? reuse : new byte[_latestSdr.Length];
-                Buffer.BlockCopy(_latestSdr, 0, copy, 0, copy.Length);
-                return copy;
+                if (_latestSdr is not null && _cpuSdrTick == _frameTimestamp)
+                {
+                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    reusedCopy = CopySdr(_latestSdr, reuse);
+                    reusedMs = MsSince(t0);
+                }
             }
+            if (reusedCopy is not null)
+            {
+                Log($"[Pool] SDR 帧: 复用拷贝 {reusedMs:0.0}ms");
+                return reusedCopy;
+            }
+
+            // 回读耗时由 ReadbackLatestSdrFresh 在**拿到 GPU 锁之后**起计：500ms 的锁等待
+            // 是争用、不是回读成本，混进来会让"要不要建槽"的判断建立在一个假的单价上。
+            var fresh = ReadbackLatestSdrFresh(out double readbackMs);
+            if (fresh is not null)
+            {
+                byte[] copied;
+                lock (_frameLock)
+                {
+                    _latestSdr = fresh;
+                    _cpuSdrTick = _frameTimestamp;
+                    copied = CopySdr(fresh, reuse);
+                }
+                // 只在这条路**拿到像素**时打：回读失败（锁超时/无快照）会落到下面的兜底，
+                // 那里已经有自己的一行；给失败也打一条 0.0ms 的"按需回读"是假读数。
+                Log($"[Pool] SDR 帧: 按需回读 {readbackMs:0.0}ms");
+                return copied;
+            }
+
+            byte[]? fallback = null;
+            double fallbackMs = 0;
+            lock (_frameLock)
+            {
+                if (_latestSdr is not null)
+                {
+                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    fallback = CopySdr(_latestSdr, reuse);
+                    fallbackMs = MsSince(t0);
+                }
+            }
+            // 兜底单独一行：它说明"新鲜回读没拿到、交出去的是旧 CPU 帧"，
+            // 混进"复用拷贝"会被读成快路径命中。
+            if (fallback is not null) Log($"[Pool] SDR 帧: 兜底拷贝 {fallbackMs:0.0}ms");
+            return fallback;
         }
+
+        /// <summary>消费者窗口到期后的第一次取帧：结算该窗口内 SDR 逐帧回读的次数与总耗时。</summary>
+        /// <remarks>调用点必须在刷新 <c>_consumerUntil</c> 之前，否则旧截止时刻已被覆盖、永不触发。
+        /// 空闲窗口（这 2s 内没人取帧，回调也没回读）直接跳过，不打印 —— 否则每次冷取帧都多一行噪声。</remarks>
+        private void FlushSdrWindowIfExpired()
+        {
+            if (Environment.TickCount64 < Volatile.Read(ref _consumerUntil)) return;
+
+            // 两个计数器分别 exchange：并发回调在交界处最多漏算一帧的毫秒，对判据无影响。
+            long frames = Interlocked.Exchange(ref _sdrWindowFrames, 0);
+            long ticks = Interlocked.Exchange(ref _sdrWindowTicks, 0);
+            if (frames == 0) return;
+
+            double totalMs = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            Log($"[Pool] SDR 回读窗口: {frames} 帧 共 {totalMs:0.0}ms（窗口 {ConsumerWindowMs}ms）");
+        }
+
+        /// <summary>Stopwatch 时间戳差 → 毫秒（不分配）。</summary>
+        private static double MsSince(long startTimestamp)
+            => (System.Diagnostics.Stopwatch.GetTimestamp() - startTimestamp) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
         /// <summary>获取最新 HDR 帧。<paramref name="reuse"/> 尺寸匹配时复用它（省一次分配）。</summary>
+        /// <remarks>同 <see cref="GetLatestSdr"/>：空闲期按需从 GPU 快照补读。</remarks>
         public float[]? GetLatestHdr(float[]? reuse)
         {
+            Volatile.Write(ref _consumerUntil, Environment.TickCount64 + ConsumerWindowMs);
             lock (_frameLock)
             {
-                if (_latestHdr is null) return null;
-                var copy = (reuse is not null && reuse.Length == _latestHdr.Length) ? reuse : new float[_latestHdr.Length];
-                Buffer.BlockCopy(_latestHdr, 0, copy, 0, copy.Length * sizeof(float));
-                return copy;
+                if (_latestHdr is not null && _cpuHdrTick == _frameTimestamp)
+                    return CopyHdr(_latestHdr, reuse);
             }
+
+            var fresh = ReadbackLatestHdrFresh();
+            if (fresh is not null)
+            {
+                lock (_frameLock)
+                {
+                    _latestHdr = fresh;
+                    _cpuHdrTick = _frameTimestamp;
+                    return CopyHdr(fresh, reuse);
+                }
+            }
+
+            lock (_frameLock) return _latestHdr is null ? null : CopyHdr(_latestHdr, reuse);
         }
 
-        /// <summary>获取帧年龄（ms）。</summary>
+        private static byte[] CopySdr(byte[] src, byte[]? reuse)
+        {
+            var copy = (reuse is not null && reuse.Length == src.Length) ? reuse : new byte[src.Length];
+            Buffer.BlockCopy(src, 0, copy, 0, copy.Length);
+            return copy;
+        }
+
+        private static float[] CopyHdr(float[] src, float[]? reuse)
+        {
+            var copy = (reuse is not null && reuse.Length == src.Length) ? reuse : new float[src.Length];
+            Buffer.BlockCopy(src, 0, copy, 0, copy.Length * sizeof(float));
+            return copy;
+        }
+
+        /// <summary>按需从最近一帧的 GPU 快照回读 SDR 像素。空闲期未逐帧回读时由 GetLatestSdr 调用。</summary>
+        /// <param name="workMs">回读本身耗时（毫秒）：从拿到 GPU 锁起算，**不含**锁等待；失败为 0。</param>
+        private byte[]? ReadbackLatestSdrFresh(out double workMs)
+        {
+            workMs = 0;
+            byte[] px;
+            if (!Monitor.TryEnter(_gpuLock, 500))
+            {
+                Log($"[Pool] {_hmonitor:X}: 按需回读 GPU 锁超时 (500ms)");
+                return null;
+            }
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                if (!_latestTexValid || _latestTexture is null || _latestTexW <= 0 || _latestTexH <= 0) return null;
+                int w = _latestTexW, h = _latestTexH;
+                px = new byte[w * h * 4];
+                EnsureStaging(w, h, Vortice.DXGI.Format.B8G8R8A8_UNorm);
+                var staging = _stagingTex;
+                if (staging is null) return null;
+                var ctx = _d3dDevice.ImmediateContext;
+                ctx.CopyResource(staging, _latestTexture);
+                var mapped = ctx.Map(staging, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+                unsafe
+                {
+                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                    int srcRowPitch = (int)mapped.RowPitch;
+                    int dstStride = w * 4;
+                    fixed (byte* dst = px)
+                        for (int row = 0; row < h; row++)
+                            Buffer.MemoryCopy(srcBase + row * srcRowPitch, dst + row * dstStride, dstStride, dstStride);
+                }
+                ctx.Unmap(staging, 0);
+            }
+            catch (Exception ex)
+            {
+                Log($"[Pool] {_hmonitor:X}: 按需回读 SDR 失败: {ex.Message}");
+                return null;
+            }
+            finally { Monitor.Exit(_gpuLock); }
+
+            TrueToneCap.Core.PixelOps.FixAlphaChannel(px);
+            workMs = MsSince(t0);
+            return px;
+        }
+
+        /// <summary>按需从最近一帧的 GPU 快照回读 HDR 像素（RGBA16F → float）。</summary>
+        private float[]? ReadbackLatestHdrFresh()
+        {
+            if (!Monitor.TryEnter(_gpuLock, 500))
+            {
+                Log($"[Pool] {_hmonitor:X}: 按需回读 GPU 锁超时 (500ms)");
+                return null;
+            }
+            try
+            {
+                if (!_latestTexValid || _latestTexture is null || _latestTexW <= 0 || _latestTexH <= 0) return null;
+                return ReadFloatPixelsLocked(_latestTexture, 0, 0, _latestTexW, _latestTexH);
+            }
+            catch (Exception ex)
+            {
+                Log($"[Pool] {_hmonitor:X}: 按需回读 HDR 失败: {ex.Message}");
+                return null;
+            }
+            finally { Monitor.Exit(_gpuLock); }
+        }
+
+        /// <summary>把一块 Float16 纹理上的一个矩形读成 float[]（调用方须持 GPU 锁）。失败返回 null。</summary>
+        private float[]? ReadFloatPixelsLocked(ID3D11Texture2D src, int srcX, int srcY, int w, int h)
+        {
+            var px = new float[w * h * 4];
+            EnsureStaging(w, h, Vortice.DXGI.Format.R16G16B16A16_Float);
+            var staging = _stagingTex;
+            if (staging is null) return null;
+            var ctx = _d3dDevice.ImmediateContext;
+            var sd = src.Description;
+            // 整块就读整块（驱动可走整块搬），否则只拷选区那一块、也只转换那一块 ——
+            // 路线 B-3：选区截图不必把整屏 132MB 搬进 CPU。
+            if (srcX == 0 && srcY == 0 && w == (int)sd.Width && h == (int)sd.Height)
+                ctx.CopyResource(staging, src);
+            else
+                ctx.CopySubresourceRegion(staging, 0, 0, 0, 0, src, 0,
+                    new Vortice.Mathematics.Box(srcX, srcY, 0, srcX + w, srcY + h, 1));
+            var mapped = ctx.Map(staging, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            // 行间无依赖 ⇒ 整帧转换按行并行。本机 4K 孤立实测：串行逐行 31.4ms → 按行并行 6.0ms
+            // （读数 artifacts/readback_bench_2026-10-30.log；孤立单项，不许相加去解释端到端）。
+            // ⚠ Unmap 收进 finally：并行体里一旦抛异常（越界/取消），不 Unmap 的这个 subresource
+            //   之后再 Map 会永久失败 ⇒ 该会话从此静默交不出像素（HdrCaptureWindow.UploadFrame 里同款修复）。
+            try
+            {
+                unsafe
+                {
+                    long sBase = (long)mapped.DataPointer.ToPointer();   // fixed 指针不许被 lambda 捕获 ⇒ 走 long 基址
+                    int srcRowPitch = (int)mapped.RowPitch;
+                    fixed (float* dst = px)
+                    {
+                        long dBase = (long)dst;
+                        Parallel.For(0, h, row =>
+                            TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(
+                                (byte*)(sBase + row * (long)srcRowPitch),
+                                (float*)(dBase + row * (long)w * 16),
+                                w * 4));
+                    }
+                }
+            }
+            finally { ctx.Unmap(staging, 0); }
+            return px;
+        }
+
+        /// <summary>把一块 8-bit（B8G8R8A8_UNorm）纹理上的一个矩形读成 byte[]（调用方须持 GPU 锁）。失败返回 null。</summary>
+        /// <remarks>
+        /// 为什么每次新分配 <c>byte[w*h*4]</c>、刻意不复用 <c>_writeBufferSdr</c>：那块是整帧的
+        /// **发布缓冲** —— 帧回调把它当"上一帧"交给 GetLatestSdr / 录制器（见 OnFrameArrived 的
+        /// <c>_writeBufferSdr = _latestSdr</c> 交接）。把矩形像素写进去会按行覆盖掉整帧缓冲的前
+        /// <c>h</c> 行前 <c>w</c> 列，下一个消费者取"最新帧"拿到的就是被挖了一块碎图的帧。
+        /// 选区回读是一次性交付（选区定了才调一次），这里不值得为省一次分配去冒污染发布帧的风险。
+        /// </remarks>
+        private byte[]? ReadBytePixelsLocked(ID3D11Texture2D src, int srcX, int srcY, int w, int h)
+        {
+            var px = new byte[w * h * 4];
+            EnsureStaging(w, h, Vortice.DXGI.Format.B8G8R8A8_UNorm);
+            var staging = _stagingTex;
+            if (staging is null) return null;
+            var ctx = _d3dDevice.ImmediateContext;
+            var sd = src.Description;
+            // 与 ReadFloatPixelsLocked 同一形状：整块就读整块（驱动可走整块搬），
+            // 否则只拷选区那一块 —— 选区截图不必把整屏搬进 CPU。
+            if (srcX == 0 && srcY == 0 && w == (int)sd.Width && h == (int)sd.Height)
+                ctx.CopyResource(staging, src);
+            else
+                ctx.CopySubresourceRegion(staging, 0, 0, 0, 0, src, 0,
+                    new Vortice.Mathematics.Box(srcX, srcY, 0, srcX + w, srcY + h, 1));
+            var mapped = ctx.Map(staging, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            // Unmap 收进 finally 的理由同 ReadFloatPixelsLocked：漏掉一次 Unmap，该 subresource
+            // 之后 Map 恒失败 ⇒ 这个会话从此静默交不出像素（并行/异常退出都不许绕过这一步）。
+            try
+            {
+                unsafe
+                {
+                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
+                    int srcRowPitch = (int)mapped.RowPitch;
+                    int dstStride = w * 4;
+                    fixed (byte* dst = px)
+                        for (int row = 0; row < h; row++)
+                            Buffer.MemoryCopy(srcBase + row * srcRowPitch, dst + row * dstStride, dstStride, dstStride);
+                }
+            }
+            finally { ctx.Unmap(staging, 0); }
+
+            // 与整屏 SDR 回读同一条 alpha 纪律（ReadBytePixelsPooled 末尾那一句）：
+            // WGC 交出来的 alpha 可能是 0，不修的选区像素与今天整屏出来的不是同一套颜色，
+            // 下游一旦把 alpha 当不透明/预乘来解释，画面就会偏。纯 CPU 遍历，不碰 GPU。
+            TrueToneCap.Core.PixelOps.FixAlphaChannel(px);
+            return px;
+        }
+
+        /// <summary>确保 staging 纹理与给定尺寸/格式匹配（调用方须持 GPU 锁）。</summary>
+        private void EnsureStaging(int w, int h, Vortice.DXGI.Format format)
+        {
+            if (_stagingTex is not null && _stagingW == w && _stagingH == h) return;
+            _stagingTex?.Dispose();
+            _stagingTex = _d3dDevice.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1,
+                Format = format,
+                SampleDescription = new(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read,
+            });
+            _stagingW = w;
+            _stagingH = h;
+        }
+
+        /// <summary>获取帧年龄（ms）；会话还没拿到过任何帧时返回 -1。</summary>
+        /// <remarks>
+        /// ═══ 2026-10-30：没帧时不许回吐"开机以来的毫秒数" ═══
+        /// <c>_frameTimestamp</c> 只在帧回调里被赋值，初始值是 0 ⇒ 旧写法对没帧的会话算出
+        /// <c>TickCount64 - 0</c>，日志里长成 <c>HasFrame=False Age=67813432ms</c>。
+        /// 排障时"没有帧"和"帧很旧"是两条相反的处置路径，一个读数把两者混成了一个数量级的怪数。
+        /// </remarks>
         public long GetFrameAge()
         {
+            if (!_hasFrame) return -1;
             lock (_frameLock) { return Environment.TickCount64 - _frameTimestamp; }
         }
 
@@ -503,6 +880,7 @@ public sealed partial class WgcCaptureService : IDisposable
                 var ctx = _d3dDevice.ImmediateContext;
                 ctx.CopyResource(_latestTexture, wgcTexture);
                 _latestTexValid = true;
+                UpdateSharedSlotLocked();
                 }
             }
             catch (Exception ex)
@@ -512,10 +890,223 @@ public sealed partial class WgcCaptureService : IDisposable
             }
         }
 
+        // ═══ 2026-10-30 路线 B：跨设备共享槽的维护与交接 ═══
+        // 三个动作各有一条纪律，写在这里是因为它们在时序上互相牵制：
+        //   ① Update（每帧，持 _gpuLock）：被取走期间【必须什么都不做】—— 用户框选时画面要冻住；
+        //   ② Take（一次截图一次）：取走时若上一任还没交还，就【换一块新纹理】把它那帧留给它，
+        //      绝不去覆写一块别人正拿着的（这正是 2026-09-15 P0-C 那次画面撕裂的同型事故）；
+        //      换新的代价只有一块纹理，漏交还本身是调用方的 bug，不该让用户的画面来赔；
+        //   ③ Release（预览窗关闭时）：把冻结解开，下一帧继续更新这一块。
+        // 单消费者是前提：今天由 MainWindow 的 _isCapturing 防重入闸保证（预览期间不会有第二次截图），
+        // 与本文件 GetLatestHdr 那段"契约注释是错的"记的是同一条不变量。
+
+        /// <summary>建/更新共享槽（调用方须持 GPU 锁）。被取走时直接返回 —— 宁可少更新一帧，也不动别人拿着的那块。</summary>
+        private void UpdateSharedSlotLocked()
+        {
+            if (_sharedHeld || _latestTexture is null || !_latestTexValid) return;
+            string step = "?"; // 失败时点名到步：建纹理 / 建句柄 / 拷贝 三件都可能抛 E_INVALIDARG
+            try
+            {
+                var desc = _latestTexture.Description;
+                if (_sharedTex is null || _sharedW != (int)desc.Width || _sharedH != (int)desc.Height
+                    || _sharedTex.Description.Format != desc.Format)
+                {
+                    step = $"建纹理 {desc.Width}x{desc.Height} {desc.Format}";
+                    CreateSharedTextureLocked(desc.Width, desc.Height, desc.Format);
+                }
+                step = "拷贝";
+                _d3dDevice.ImmediateContext.CopyResource(_sharedTex!, _latestTexture);
+                _sharedValid = true;
+            }
+            catch (Exception ex)
+            {
+                LogSharedFault($"{step} ⇒ {ex.Message}");
+                _sharedValid = false;
+            }
+        }
+
+        /// <summary>建一块可跨设备打开的纹理并生成句柄（调用方须持 GPU 锁）。
+        /// 两步各自带名抛异常：E_INVALIDARG 既可能来自建纹理（desc 不合规），也可能来自建句柄
+        /// （访问权/属性），合在一起报就分不出是哪一步 —— 第一版就吃了这个亏。</summary>
+        private void CreateSharedTextureLocked(uint w, uint h, Vortice.DXGI.Format format)
+        {
+            ResetSharedSlotLocked();
+            ID3D11Texture2D tex;
+            try
+            {
+                tex = _d3dDevice.CreateTexture2D(new Texture2DDescription
+                {
+                    Width = w, Height = h, MipLevels = 1, ArraySize = 1,
+                    Format = format,
+                    SampleDescription = new(1, 0),
+                    Usage = ResourceUsage.Default,
+                    BindFlags = BindFlags.ShaderResource,     // 预览侧要 CreateShaderResourceView
+                    CPUAccessFlags = CpuAccessFlags.None,
+                    // ═══ 2026-10-30 实测：必须是 SharedNTHandle，不能是 Shared ═══
+                    // 普通 MISC_SHARED 走的是 DXGI 1.0 的 IDXGIResource::GetSharedHandle，
+                    // 而 IDXGIResource1::CreateSharedHandle 只认 MISC_SHARED_KEYEDMUTEX / MISC_SHARED_NTHANDLE
+                    // ⇒ 拿普通 Shared 去建句柄恒 E_INVALIDARG（本机把 desc 回读成 Misc=Shared 也照样红，
+                    //   连裸 vtable + attrs=null 都是同一个错，见 artifacts/frame_handoff_2026-10-30.log）。
+                    // 消费侧对应地必须用 ID3D11Device1::OpenSharedResource1，不能用 OpenSharedResource。
+                    MiscFlags = ResourceOptionFlags.Shared | ResourceOptionFlags.SharedNTHandle,
+                });
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"CreateTexture2D(Shared {w}x{h} {format}) 失败: {ex.Message}", ex);
+            }
+            try
+            {
+                using var res = tex.QueryInterface<Vortice.DXGI.IDXGIResource1>();
+                _sharedHandle = res.CreateSharedHandle(null,
+                    Vortice.DXGI.SharedResourceFlags.Read | Vortice.DXGI.SharedResourceFlags.Write, null);
+            }
+            catch (Exception ex)
+            {
+                // 把建出来的纹理自己回读的 desc 一起交出去：CreateSharedHandle 的 E_INVALIDARG
+                // 只有两种来路 —— 资源没带 MISC_SHARED，或属性/访问权不合规。
+                // 这一行让下一次读数直接分得开（Misc=Shared 还在 ⇒ 不是标志没落上）。
+                try
+                {
+                    var back = tex.Description;
+                    LogSharedFault($"CreateSharedHandle({ex.Message}) 回读 desc: Misc={back.MiscFlags} " +
+                                   $"Bind={back.BindFlags} Usage={back.Usage} Format={back.Format} {back.Width}x{back.Height}");
+                }
+                catch { }
+                tex.Dispose();
+                throw new InvalidOperationException($"CreateSharedHandle 失败: {ex.Message}", ex);
+            }
+            _sharedTex = tex;
+            _sharedW = (int)w; _sharedH = (int)h;
+            _sharedValid = false;
+        }
+
+        /// <summary>释放本侧对共享槽的引用（关句柄 + 弃纹理）。预览侧已打开的资源不受影响（DXGI 引用计数）。</summary>
+        private void ResetSharedSlotLocked()
+        {
+            if (_sharedHandle != 0)
+            {
+                CloseHandle(_sharedHandle);   // CreateSharedHandle 交出来的是调用方负责关的 HANDLE
+                _sharedHandle = 0;
+            }
+            _sharedTex?.Dispose();
+            _sharedTex = null;
+            _sharedW = _sharedH = 0;
+            _sharedValid = false;
+        }
+
+        /// <summary>交还共享槽（预览窗关闭时调）。之后下一帧继续覆写这一块。</summary>
+        internal void ReleaseSharedFrame()
+        {
+            lock (_gpuLock) { _sharedHeld = false; }
+        }
+
+        /// <summary>路线 B 的生产入口：把当前帧冻结进共享槽并交出句柄（不在这里读像素）。</summary>
+        /// <remarks>为什么不"先 GetLatestHdr 再取槽"：本机实测两者之间恒定隔着一次 WGC 交付
+        /// （捕获尾部还有 ICC 读取/日志；即使挪进捕获方法，帧回调也仍在跑），槽必然比像素新一帧。
+        /// 取槽紧跟取像素、且两者来自同一块冻结纹理；像素等到选区定了才按矩形回读
+        /// （<see cref="ReadSharedRegion"/>）—— 整屏 132MB 的 CPU 回读不在开窗前付。
+        /// 失败（槽没建好 / 格式不对）时返回 false，调用方退回常规取像素。</remarks>
+        internal bool TryFreezeShared(out nint handle, out int width, out int height)
+        {
+            handle = 0; width = 0; height = 0;
+            if (!Monitor.TryEnter(_gpuLock, 500)) { Log($"[Pool] {_hmonitor:X}: 取共享槽 GPU 锁超时 (500ms)"); return false; }
+            try
+            {
+                if (_sharedTex is null || _sharedHandle == 0 || !_sharedValid || _latestTexture is null) return false;
+                // 格式闸认"会话自己的格式"，不再硬编码 Float16：槽本来就是按 desc.Format 建的
+                // （UpdateSharedSlotLocked → CreateSharedTextureLocked(desc.Format)），这里只要求
+                // 槽与当前帧同格式 —— 槽是上一帧建的、帧是这一帧，格式不一致说明槽还没跟上。
+                // HDR 会话的纹理就是 R16G16B16A16_Float ⇒ 对既有行为等价；
+                // SDR 会话（B8G8R8A8_UNorm）从此也能冻结交槽。
+                if (_sharedTex.Description.Format != _latestTexture.Description.Format) return false;
+                if (_sharedHeld)
+                {
+                    // 上一任没交还：换一块新的给它留住，这一块照常交出（纪律②）
+                    Log($"[Pool] {_hmonitor:X}: 共享槽上一任未交还，换一块新纹理（旧那块留给持有者）");
+                    CreateSharedTextureLocked((uint)_latestTexW, (uint)_latestTexH, _latestTexture.Description.Format);
+                    _d3dDevice.ImmediateContext.CopyResource(_sharedTex!, _latestTexture);
+                    _sharedValid = true;
+                }
+                _sharedHeld = true;
+                handle = _sharedHandle; width = _sharedW; height = _sharedH;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"[Pool] {_hmonitor:X}: 取共享槽失败: {ex.Message}");
+                _sharedHeld = false;
+                return false;
+            }
+            finally { Monitor.Exit(_gpuLock); }
+        }
+
+        /// <summary>路线 B-3：从已被取走的那块冻结纹理上只回读一个矩形（选区定了才调）。
+        /// 坐标是纹理坐标（单屏 = 窗口坐标减显示器原点）。</summary>
+        /// <remarks>只认 <paramref name="expectedHandle"/> 那一块：若槽在此期间被轮换过，
+        /// 读新块等于把用户没框住的那一帧交出去 —— 宁可失败让上层留痕。</remarks>
+        internal float[]? ReadSharedRegion(nint expectedHandle, int x, int y, int w, int h)
+        {
+            if (!Monitor.TryEnter(_gpuLock, 500)) { Log($"[Pool] {_hmonitor:X}: 选区回读 GPU 锁超时 (500ms)"); return null; }
+            try
+            {
+                if (!_sharedHeld || !_sharedValid || _sharedTex is null) return null;
+                if (expectedHandle == 0 || _sharedHandle != expectedHandle)
+                {
+                    Log($"[Pool] {_hmonitor:X}: 选区回读拒绝：槽已轮换（持有 {expectedHandle:X} 当前 {_sharedHandle:X}）");
+                    return null;
+                }
+                if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > _sharedW || y + h > _sharedH)
+                {
+                    Log($"[Pool] {_hmonitor:X}: 选区回读越界 ({x},{y} {w}x{h} / 槽 {_sharedW}x{_sharedH})");
+                    return null;
+                }
+                return ReadFloatPixelsLocked(_sharedTex, x, y, w, h);
+            }
+            catch (Exception ex)
+            {
+                Log($"[Pool] {_hmonitor:X}: 选区回读失败: {ex.Message}");
+                return null;
+            }
+            finally { Monitor.Exit(_gpuLock); }
+        }
+
+        /// <summary>路线 B-3（SDR 腿）：从已被取走的那块冻结纹理上只回读一个矩形的 8-bit 像素。
+        /// 守卫与 <see cref="ReadSharedRegion"/> 逐条同构，只是像素类型是 byte[]（槽格式 B8G8R8A8_UNorm）。</summary>
+        /// <remarks>只认 <paramref name="expectedHandle"/> 那一块：槽若在此期间被轮换过，
+        /// 读新块等于把用户没框住的那一帧交出去 —— 宁可失败让上层留痕。
+        /// 日志刻意与 float 那条不同句（点名 SDR），否则排障时两条路径的留痕混在一起分不开。</remarks>
+        internal byte[]? ReadSharedRegionBytes(nint expectedHandle, int x, int y, int w, int h)
+        {
+            if (!Monitor.TryEnter(_gpuLock, 500)) { Log($"[Pool] {_hmonitor:X}: 选区 SDR 回读 GPU 锁超时 (500ms)"); return null; }
+            try
+            {
+                if (!_sharedHeld || !_sharedValid || _sharedTex is null) return null;
+                if (expectedHandle == 0 || _sharedHandle != expectedHandle)
+                {
+                    Log($"[Pool] {_hmonitor:X}: 选区 SDR 回读拒绝：槽已轮换（持有 {expectedHandle:X} 当前 {_sharedHandle:X}）");
+                    return null;
+                }
+                if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > _sharedW || y + h > _sharedH)
+                {
+                    Log($"[Pool] {_hmonitor:X}: 选区 SDR 回读越界 ({x},{y} {w}x{h} / 槽 {_sharedW}x{_sharedH})");
+                    return null;
+                }
+                return ReadBytePixelsLocked(_sharedTex, x, y, w, h);
+            }
+            catch (Exception ex)
+            {
+                Log($"[Pool] {_hmonitor:X}: 选区 SDR 回读失败: {ex.Message}");
+                return null;
+            }
+            finally { Monitor.Exit(_gpuLock); }
+        }
+
         // ── Staging 纹理复用 + 像素缓冲区复用的像素读取 ──
 
-        private byte[]? ReadBytePixelsPooled(ID3D11Texture2D texture, int w, int h)
+        private byte[]? ReadBytePixelsPooled(ID3D11Texture2D texture, int w, int h, out long workTicks)
         {
+            workTicks = 0;
             int len = w * h * 4;
             if (_writeBufferSdr is null || _writeBufferSdr.Length != len)
                 _writeBufferSdr = new byte[len];
@@ -530,6 +1121,9 @@ public sealed partial class WgcCaptureService : IDisposable
                 LogInfo($"GPU 锁超时 (500ms)，跳过 SDR 帧");
                 return null;
             }
+            // 锁之后起计：这里要的是"整屏回读的单价"（好拿去和建共享槽的收益比），
+            // 不含锁等待；FixAlphaChannel 是回读链路自己的一趟 CPU 遍历，算进去。
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 var ctx = _d3dDevice.ImmediateContext;
@@ -578,6 +1172,7 @@ public sealed partial class WgcCaptureService : IDisposable
 
             // Alpha 修复（WGC 输出 alpha 可能为 0）— 纯 CPU 操作，无需锁
             TrueToneCap.Core.PixelOps.FixAlphaChannel(pixels);
+            workTicks = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             return pixels;
         }
 
@@ -620,24 +1215,27 @@ public sealed partial class WgcCaptureService : IDisposable
 
                 ctx.CopyResource(_stagingTex, texture);
                 var mapped = ctx.Map(_stagingTex, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-
-                unsafe
+                // 与 ReadbackLatestHdrFresh 同一条纪律：按行并行 + Unmap 进 finally（两处必须同形，
+                // 否则"消费者窗口内"这条更常走的路径反而是串行那份）。
+                try
                 {
-                    byte* srcBase = (byte*)mapped.DataPointer.ToPointer();
-                    int srcRowPitch = (int)mapped.RowPitch;
-                    int halfsPerRow = w * 4;
-
-                    fixed (float* dst = pixels)
+                    unsafe
                     {
-                        for (int row = 0; row < h; row++)
+                        long sBase = (long)mapped.DataPointer.ToPointer();
+                        int srcRowPitch = (int)mapped.RowPitch;
+                        int halfsPerRow = w * 4;
+                        fixed (float* dst = pixels)
                         {
-                            byte* srcRow = srcBase + row * srcRowPitch;
-                            float* dstRow = dst + row * w * 4;
-                            TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(srcRow, dstRow, halfsPerRow);
+                            long dBase = (long)dst;
+                            Parallel.For(0, h, row =>
+                                TrueToneCap.Core.PixelOps.ConvertHalfToFloatRow(
+                                    (byte*)(sBase + row * (long)srcRowPitch),
+                                    (float*)(dBase + row * (long)halfsPerRow * 4),
+                                    halfsPerRow));
                         }
                     }
                 }
-                ctx.Unmap(_stagingTex, 0);
+                finally { ctx.Unmap(_stagingTex, 0); }
             }
             finally
             {
@@ -671,6 +1269,9 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 try { _stagingTex?.Dispose(); } catch { }
                 try { _latestTexture?.Dispose(); } catch { }
+                // 共享槽：先关句柄再弃纹理。已在预览侧打开的那份由 DXGI 引用计数保命，
+                // 所以这里释放不影响"用户还在框选"这种情形（预览窗自己持着引用）。
+                try { ResetSharedSlotLocked(); } catch { }
             }
             _firstFrameEvent.Dispose();
             _callbacksDrained.Dispose();
@@ -918,7 +1519,10 @@ public sealed partial class WgcCaptureService : IDisposable
     }
 
     private static bool CanDeliverExtendedRange(nint hmonitor) =>
-        ClassifyMonitorColor(hmonitor) != DisplayEnumerator.DisplayColorClass.NarrowSdr;
+        // 诊断开关（2026-10-30 阶段 3）：TTC_NO_FLOAT16=1 模拟"纯 SDR 屏"——扩展范围会话一律不给，
+        // 捕获栈自然退回只有 SDR 帧那条路（本机是 HDR 屏，没有这块硬件可测）。只此一处短路，
+        // 下游 GetOrCreateHdrSession/捕获分支靠既有判据自己走 SDR，不需要第二处改动。
+        !sNoFloat16 && ClassifyMonitorColor(hmonitor) != DisplayEnumerator.DisplayColorClass.NarrowSdr;
 
     /// <summary>该屏的完整判据输入（与 <see cref="ClassifyMonitorColor"/> 同源，只用于日志/探针）。</summary>
     private static string DescribeMonitorColor(nint hmonitor)
@@ -1131,6 +1735,20 @@ public sealed partial class WgcCaptureService : IDisposable
         Log("[WGC] 所有会话已失效");
     }
 
+    /// <summary>探针出口（--capture-freshness-probe）：读某块屏某条池"最新一帧已经存了多少毫秒"。
+    /// 没有会话、或有会话但从来没出过帧 ⇒ 返回 null，不许用 0 冒充"这帧很新"。
+    /// 走 internal 直访而不是反射：与 <see cref="HdrCaptureWindow.ProbeBakedDdRows"/> 同一口径，
+    /// 反射在打包形态下会静默失败（那类事故在本仓留过记录）。</summary>
+    internal long? ProbeFrameAgeMs(nint hmonitor, bool hdr)
+    {
+        lock (_poolLock)
+        {
+            if (!_sessionPool.TryGetValue((hmonitor, hdr), out var s) || !s.HasFrame)
+                return null;
+            return s.GetFrameAge();
+        }
+    }
+
     // ═══════════════════════════════════════
     //  单显示器捕获（池化快速路径）
     // ═══════════════════════════════════════
@@ -1153,16 +1771,56 @@ public sealed partial class WgcCaptureService : IDisposable
         finally { s_captureLock.Release(); }
     }
 
+    /// <summary>交还共享槽（预览窗关闭时调）。会话已被回收时无事可做。</summary>
+    internal void ReleaseSharedFrame(nint targetMonitor, bool hdr)
+    {
+        lock (_poolLock)
+        {
+            if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
+                session.ReleaseSharedFrame();
+        }
+    }
+
+    /// <summary>从冻结的共享槽里只回读一个矩形（路线 B-3：选区定了才调）。会话已被回收时返回 null。</summary>
+    internal float[]? ReadSharedRegion(nint targetMonitor, bool hdr, nint expectedHandle,
+        int x, int y, int w, int h)
+    {
+        lock (_poolLock)
+        {
+            if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
+                return session.ReadSharedRegion(expectedHandle, x, y, w, h);
+        }
+        return null;
+    }
+
+    /// <summary>从 SDR 会话冻结的共享槽里只回读一个矩形的 8-bit 像素（路线 B-3 的 SDR 腿）。
+    /// 会话已被回收时返回 null。</summary>
+    /// <remarks>SDR 会话的槽格式是 <c>B8G8R8A8_UNorm</c> ⇒ 出 <c>byte[]</c>；HDR 那条
+    /// （<see cref="ReadSharedRegion"/>，槽是 <c>R16G16B16A16_Float</c>）出 <c>float[]</c>。
+    /// 两条分开不是因为守卫不同，而是下游消费的像素类型不同 —— 合成一个入口就得让调用方
+    /// 按会话的 HDR 标志去猜返回类型。</remarks>
+    internal byte[]? ReadSharedRegionSdr(nint targetMonitor, nint expectedHandle, int x, int y, int w, int h)
+    {
+        lock (_poolLock)
+        {
+            if (_sessionPool.TryGetValue((targetMonitor, false), out var session))
+                return session.ReadSharedRegionBytes(expectedHandle, x, y, w, h);
+        }
+        return null;
+    }
+
     /// <summary>无锁读取最新帧（供录制器使用）。不获取 s_captureLock，不创建会话，
     /// 仅从已有池化会话中读取最新帧。如果会话不存在或无帧则返回 null。</summary>
-    public CaptureResult? TryGetLatestFrame(nint targetMonitor)
+    /// <param name="reuse">调用方持有的空闲缓冲：尺寸匹配时拷进它而不新分配。
+    /// 录制器用它接住"被判为未变化、随即丢弃"的帧 —— 静态画面下原先每 tick 都白分配一整帧。</param>
+    public CaptureResult? TryGetLatestFrame(nint targetMonitor, byte[]? reuse = null)
     {
         lock (_poolLock)
         {
             var key = (targetMonitor, false);
             if (!_sessionPool.TryGetValue(key, out var session) || !session.HasFrame)
                 return null;
-            var pixels = session.GetLatestSdr();
+            var pixels = session.GetLatestSdr(reuse);
             if (pixels is null) return null;
             return new CaptureResult
             {
@@ -1188,27 +1846,83 @@ public sealed partial class WgcCaptureService : IDisposable
         if (displayInfo is null)
             throw new InvalidOperationException("找不到目标显示器。");
 
-        // ═══ 1. 始终捕获 SDR（用于预览）═══
+        // ═══ 1. 两条线的池【先都建好】，再依次取帧（2026-10-30 重叠）═══
+        // 原顺序是「建 SDR 池 → 阻塞等 SDR 首帧 → 回读 → 才建 Float16 池 → 再阻塞等 Float16 首帧」。
+        // 于是第二条线在等第一条首帧的那段里【还不存在】：本机实测 SDR 等帧 p50=83ms、
+        // Float16 建池 p50=51ms + 等帧 p50=160ms，串行合计 479ms；两个池都是 CreateFreeThreaded、
+        // 投递各走自己的回调线程，所以只要先把池都建起来，那 83ms 就能被第二条线的建池+到货盖掉
+        // （合计下界 396ms）。只改顺序，一条判据都没动：
+        //   软冷却额度仍在【新建之前】被消费（GetOrCreateHdrSession 内部），
+        //   记账口径仍看 HasFrame，尺寸校验仍在取像素之后，复用槽更新仍排在尺寸校验之后。
         var sdrSession = GetOrCreateSdrSession(targetMonitor);
-        Log($"[WGC] SDR 池状态: HasFrame={sdrSession.HasFrame} Age={sdrSession.GetFrameAge()}ms");
+        PooledSession? hdrSession = null;
+        if (config.PreferHdr)
+        {
+            try
+            {
+                hdrSession = GetOrCreateHdrSession(targetMonitor);
+            }
+            catch (Exception ex)
+            {
+                LogInfo($"[WGC] Float16 会话建立失败: {ex.Message}（不影响 SDR 结果）");
+            }
+        }
+        // 没帧时 Age 段的读法见 GetFrameAge()：这一行不许把"没帧"印成"帧龄很大"。
+        long sdrAgeMs = sdrSession.GetFrameAge();
+        Log($"[WGC] SDR 池状态: HasFrame={sdrSession.HasFrame} " +
+            (sdrAgeMs < 0 ? "Age=无帧" : $"Age={sdrAgeMs}ms"));
 
         byte[]? sdrPixels = null;
-        if (sdrSession.HasFrame)
+        // ═══ 路线 B（SDR 半，2026-10-30）：扩展范围屏上 SDR 像素也等到选区定了才按矩形回读 ═══
+        // 条件里的 `hdrSession is not null` 是硬要求：没有 Float16 会话时，预览窗**只能**吃这张 SDR 整帧
+        // （预览的 GPU 采样源是 HDR 槽），这里跳过回读就等于整屏只剩遮罩。
+        // 两块槽成对取出、成对交还，但**不是同一帧**（两个会话各自到货、各自冻结，今天的 CPU 路径同此）。
+        (nint Handle, int W, int H) sharedPreviewSdr = default;
+        Action? sharedReleaseSdr = null;
+        if (config.WantSharedFrame && sSdrSlotEnabled && hdrSession is not null)
         {
-            sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
+            try
+            {
+                if (sdrSession.TryFreezeShared(out nint sdrHandle, out int slotW, out int slotH)
+                    && slotW == sdrSession.Width && slotH == sdrSession.Height)
+                {
+                    sharedPreviewSdr = (sdrHandle, slotW, slotH);
+                    sharedReleaseSdr = sdrSession.ReleaseSharedFrame;
+                    Log($"[WGC] SDR 共享槽已冻结 {slotW}x{slotH}（本次不整帧回读）");
+                }
+                else
+                {
+                    // 槽没建好/尺寸不符：交还（TryFreezeShared 可能已置 held）并走今天的整帧回读
+                    sdrSession.ReleaseSharedFrame();
+                    Log($"[WGC] SDR 槽不可用（未建好/尺寸不符）⇒ 本次照常整帧回读");
+                }
+            }
+            catch (Exception ex)
+            {
+                sdrSession.ReleaseSharedFrame();
+                LogInfo($"[WGC] SDR 取槽失败: {ex.Message}（本次照常整帧回读）");
+            }
         }
-        else
-        {
-            Log($"[WGC] SDR 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
-            if (sdrSession.WaitForFirstFrame(config.FrameTimeoutMs))
-                sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
-        }
-        // 记下这次实际用的缓冲：尺寸变了（切分辨率）时 GetLatestSdr 会另分配，
-        // 这里跟着更新，下一帧就能继续复用，不会卡在旧尺寸上反复重分配。
-        _reuseSdr = sdrPixels;
 
-        if (sdrPixels is null)
-            throw new TimeoutException($"SDR 捕获超时（{config.FrameTimeoutMs}ms）。");
+        if (sharedPreviewSdr.Handle == 0)
+        {
+            if (sdrSession.HasFrame)
+            {
+                sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
+            }
+            else
+            {
+                Log($"[WGC] SDR 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
+                if (sdrSession.WaitForFirstFrame(config.FrameTimeoutMs))
+                    sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
+            }
+            // 记下这次实际用的缓冲：尺寸变了（切分辨率）时 GetLatestSdr 会另分配，
+            // 这里跟着更新，下一帧就能继续复用，不会卡在旧尺寸上反复重分配。
+            _reuseSdr = sdrPixels;
+
+            if (sdrPixels is null)
+                throw new TimeoutException($"SDR 捕获超时（{config.FrameTimeoutMs}ms）。");
+        }
 
         int w = sdrSession.Width, h = sdrSession.Height;
 
@@ -1217,63 +1931,115 @@ public sealed partial class WgcCaptureService : IDisposable
         // 也是扩展范围的，Float16 会话可以获取完整广色域数据。
         // 该不该建这个会话由 CanDeliverExtendedRange（逐屏 DXGI + 逐屏 DISPLAYCONFIG 高级颜色）决定；
         // 能力不够、或该屏正处于「连续空帧」软冷却中时，GetOrCreateHdrSession 返回 null。
+        // 会话本身已在上面（与 SDR 建池同一批）建好，这里只负责到货与取像素。
         float[]? hdrPixels = null;
-        if (config.PreferHdr)
+        // 路线 B：本帧冻结进共享槽的那块（句柄/尺寸 + 交还动作）
+        (nint Handle, int W, int H) sharedPreview = default;
+        Action? sharedRelease = null;
+        if (hdrSession is not null)
         {
             try
             {
-                var hdrSession = GetOrCreateHdrSession(targetMonitor);
-                if (hdrSession is not null)
+                if (!hdrSession.HasFrame)
                 {
-                    if (!hdrSession.HasFrame)
-                    {
-                        Log($"[WGC] Float16 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
-                        hdrSession.WaitForFirstFrame(config.FrameTimeoutMs);
-                    }
-                    if (hdrSession.HasFrame)
-                        hdrPixels = hdrSession.GetLatestHdr(_reuseHdr);
-
-                    // ═══ 2026-09-15 P0-A 修复：HDR 会话与 SDR 会话尺寸校验 ═══
-                    // 两个会话各自独立创建（CreateItemForMonitor 时机不同，可能取到
-                    // 不同 DPI/分辨率快照），若尺寸不一致，下游用 SDR 宽高解释 HDR
-                    // 像素会得到错位/越界的画面。不一致时丢弃 HDR 像素，让下游自然走 SDR。
-                    if (hdrPixels is not null &&
-                        (hdrSession.Width != w || hdrSession.Height != h))
-                    {
-                        LogInfo($"HDR 会话尺寸不匹配 ({hdrSession.Width}x{hdrSession.Height} != {w}x{h})，已回退 SDR");
-                        hdrPixels = null;
-                    }
-
-                    // ⚠ 缓存更新必须排在尺寸校验【之后】：被丢弃的那份不该进复用槽。
-                    //   放前面也不会出错（GetLatestHdr 的 reuse 长度校验会挡住尺寸不符的复用），
-                    //   但那等于让复用槽长期停在一个"每次都要重新分配"的尺寸上，白付分配。
-                    //   只在"这份缓冲这次真被采用"时更新，槽才能一直跟住会话的真实尺寸。
-                    if (hdrPixels is not null) _reuseHdr = hdrPixels;
-
-                    // ═══ 2026-09-19：软冷却记账。口径是「这次到底成没成帧」，不是「最后像素留没留下」═══
-                    // 只有"没成帧"才会付满一次 FrameTimeoutMs，那正是冷却要治的东西；
-                    // 上面那种"出帧了但尺寸不合而被丢弃"的会话下一次走复用快路径（零等待），
-                    // 把它记成空帧就会让计数器永远清不掉 —— 判据选 HasFrame 而非 hdrPixels。
-                    NoteHdrAttemptOutcome(targetMonitor, hdrSession.HasFrame);
+                    Log($"[WGC] Float16 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
+                    hdrSession.WaitForFirstFrame(config.FrameTimeoutMs);
                 }
+                if (hdrSession.HasFrame)
+                {
+                    // 路线 B：取槽紧跟取像素（同一段、同一块冻结纹理）—— 预览画的与保存的是同一帧。
+                    // 像素不在这里读：选区定下来才按矩形回读（ReadSharedRegion），整屏 CPU 回读不提前付。
+                    bool frozen = false;
+                    if (config.WantSharedFrame)
+                    {
+                        if (hdrSession.TryFreezeShared(out nint shHandle, out int shW, out int shH))
+                        {
+                            if (shW == w && shH == h)
+                            {
+                                sharedPreview = (shHandle, shW, shH);
+                                sharedRelease = hdrSession.ReleaseSharedFrame;
+                                frozen = true;
+                            }
+                            else
+                            {
+                                // 尺寸不符：下游只有 SDR 宽高的解释，交还槽、走常规取像素
+                                hdrSession.ReleaseSharedFrame();
+                                Log($"[WGC] 共享槽尺寸 {shW}x{shH} 与 {w}x{h} 不符 ⇒ 本次不走共享预览");
+                            }
+                        }
+                    }
+                    if (!frozen)
+                        hdrPixels = hdrSession.GetLatestHdr(_reuseHdr);
+                }
+
+                // ═══ 2026-09-15 P0-A 修复：HDR 会话与 SDR 会话尺寸校验 ═══
+                // 两个会话各自独立创建（CreateItemForMonitor 时机不同，可能取到
+                // 不同 DPI/分辨率快照），若尺寸不一致，下游用 SDR 宽高解释 HDR
+                // 像素会得到错位/越界的画面。不一致时丢弃 HDR 像素，让下游自然走 SDR。
+                if (hdrPixels is not null &&
+                    (hdrSession.Width != w || hdrSession.Height != h))
+                {
+                    LogInfo($"HDR 会话尺寸不匹配 ({hdrSession.Width}x{hdrSession.Height} != {w}x{h})，已回退 SDR");
+                    hdrPixels = null;
+                }
+
+                // ⚠ 缓存更新必须排在尺寸校验【之后】：被丢弃的那份不该进复用槽。
+                //   放前面也不会出错（GetLatestHdr 的 reuse 长度校验会挡住尺寸不符的复用），
+                //   但那等于让复用槽长期停在一个"每次都要重新分配"的尺寸上，白付分配。
+                //   只在"这份缓冲这次真被采用"时更新，槽才能一直跟住会话的真实尺寸。
+                if (hdrPixels is not null) _reuseHdr = hdrPixels;
+
+                // ═══ 2026-09-19：软冷却记账。口径是「这次到底成没成帧」，不是「最后像素留没留下」═══
+                // 只有"没成帧"才会付满一次 FrameTimeoutMs，那正是冷却要治的东西；
+                // 上面那种"出帧了但尺寸不合而被丢弃"的会话下一次走复用快路径（零等待），
+                // 把它记成空帧就会让计数器永远清不掉 —— 判据选 HasFrame 而非 hdrPixels。
+                NoteHdrAttemptOutcome(targetMonitor, hdrSession.HasFrame);
+
+                // 共享槽与"这一帧"已在上面一步对齐（TryFreezeShared 紧跟取像素），没有第二处取槽 ——
+                // "先取像素、再晚几十毫秒取槽"就是差一帧的那条路，别再把它加回来。
             }
             catch (Exception ex)
             {
                 LogInfo($"[WGC] Float16 捕获失败: {ex.Message}（不影响 SDR 结果）");
             }
+
+            // ═══ 配对纪律（2026-10-30）═══
+            // SDR 槽已经冻上、HDR 却没冻成（没帧/尺寸不符/异常）⇒ 预览窗没有可采样的帧了
+            //（它只认 HDR 槽）。这时必须交还 SDR 槽并补一次整帧回读，宁可多付 20–30ms，也不能让预览无帧。
+            if (sharedPreviewSdr.Handle != 0 && sharedPreview.Handle == 0)
+            {
+                sdrSession.ReleaseSharedFrame();
+                sharedPreviewSdr = default;
+                sharedReleaseSdr = null;
+                sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
+                _reuseSdr = sdrPixels;
+                if (sdrPixels is null)
+                    throw new TimeoutException($"SDR 捕获超时（{config.FrameTimeoutMs}ms）。");
+                LogInfo("[WGC] HDR 槽没冻成 ⇒ 交还 SDR 槽并整帧回读（预览只能吃 SDR 帧）");
+            }
         }
 
         // ═══ 3. 获取 GPU 纹理（用于 GPU 直通编码路径）═══
-        // 优先使用 SDR 会话的纹理，因为 NVENC 输入格式为 BGRA8
+        // 优先使用 SDR 会话的纹理，因为 NVENC 输入格式为 BGRA8。
+        // 只在调用方真要时才取：选区预览拿到结果就 Dispose，这张快照没人读 ——
+        // 白取一次就是每张截图付满一次整屏分配 + CopyResource（4K BGRA8 约 33MB）。
         ID3D11Texture2D? gpuTexture = null;
-        try
+        if (config.WantGpuTexture)
         {
-            gpuTexture = sdrSession.GetLatestTexture();
-            Log($"[WGC] GPU 纹理获取: {(gpuTexture is not null ? "✓" : "✗")}");
+            try
+            {
+                gpuTexture = sdrSession.GetLatestTexture();
+                Log($"[WGC] GPU 纹理获取: {(gpuTexture is not null ? "✓" : "✗")}");
+            }
+            catch (Exception ex)
+            {
+                Log($"[WGC] GPU 纹理获取失败: {ex.Message}（不影响编码结果）");
+            }
         }
-        catch (Exception ex)
+        else
         {
-            Log($"[WGC] GPU 纹理获取失败: {ex.Message}（不影响编码结果）");
+            // 保持 null 而不是"空纹理"：下游判据是 GpuTexture is not null，null 才是"没有"。
+            Log("[WGC] GPU 纹理按需跳过: WantGpuTexture=false（调用方不消费，省略整屏快照拷贝）");
         }
 
         var result = new CaptureResult
@@ -1283,8 +2049,16 @@ public sealed partial class WgcCaptureService : IDisposable
             Width = w,
             Height = h,
             GpuTexture = gpuTexture,
+            SharedHandle = sharedPreview.Handle,
+            SharedWidth = sharedPreview.W,
+            SharedHeight = sharedPreview.H,
+            SdrSharedHandle = sharedPreviewSdr.Handle,
+            SdrSharedWidth = sharedPreviewSdr.W,
+            SdrSharedHeight = sharedPreviewSdr.H,
             DegradationWarning = sdrSession.DegradationWarning // 传播降级警告 (来自会话)
         };
+        result.SetSharedRelease(sharedRelease);   // 没被 TakeShared 认领时由 Dispose 交还
+        result.SetSdrSharedRelease(sharedReleaseSdr);   // 同上；两块槽各自登记，漏一块就冻死一块
 
         // 附加 ICC + 显示器信息
         try
@@ -1468,7 +2242,9 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 TargetMonitor = displays[0].MonitorHandle,
                 PreferHdr = true, // 同时获取 HDR 和 SDR 数据
-                FrameTimeoutMs = config.FrameTimeoutMs
+                FrameTimeoutMs = config.FrameTimeoutMs,
+                WantSharedFrame = config.WantSharedFrame,  // 路线 B：单屏才有意义（多屏拼接的帧是虚拟桌面尺寸）
+                WantGpuTexture = config.WantGpuTexture     // 原样下传：关掉后这里再取一份，前面省的就白省了
             });
             sw.Stop();
             single.CaptureTimeMs = sw.ElapsedMilliseconds;

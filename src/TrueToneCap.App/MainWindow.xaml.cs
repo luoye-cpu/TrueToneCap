@@ -90,6 +90,33 @@ public sealed partial class MainWindow : Window
         lock (_pendingLock) return _pendingEncodeTasks.Count > 0;
     }
 
+    /// <summary>
+    /// 回收堆段前的"真的空闲"判据。捕获/编码不忙还不够：用户可能正开着预览/标注/OCR 窗口，
+    /// 或刚移动过鼠标 —— 此时 <c>GC.Collect(blocking:true)</c> 会暂停整个进程，卡在用户手上。
+    /// </summary>
+    private bool IsUserIdleForHeapReturn()
+    {
+        if (_activeHdrWindow is not null || _activeAnnotationWindow is not null
+            || _activeOcrPreview is not null || _activeQrWindow is not null)
+            return false;
+
+        var li = new LastInputInfo { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<LastInputInfo>() };
+        if (!GetLastInputInfo(ref li)) return true; // 拿不到就读不到"有人操作"，不拦
+        uint idleMs = unchecked((uint)Environment.TickCount) - li.dwTime;
+        return idleMs >= 5000;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LastInputInfo
+    {
+        public uint cbSize;
+        public uint dwTime;
+    }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetLastInputInfo(ref LastInputInfo plii);
+
     private void ScheduleIdleHeapReturn()
     {
         if (Interlocked.CompareExchange(ref _heapReturnScheduled, 1, 0) != 0) return;
@@ -99,6 +126,7 @@ public sealed partial class MainWindow : Window
             {
                 await Task.Delay(TimeSpan.FromSeconds(8)).ConfigureAwait(false);
                 if (IsCaptureBusy()) return;
+                if (!IsUserIdleForHeapReturn()) return; // 用户正在操作：别做全进程阻塞式回收
 
                 const long MB = 1024 * 1024;
                 long before = GC.GetTotalMemory(forceFullCollection: false);
@@ -140,6 +168,23 @@ public sealed partial class MainWindow : Window
     // 多个编码/捕获路径连续 TryEnqueue 状态更新时合并为最后一次, 减少冗余 UI 调度。
     private int _statusDebounceTick;
     private System.Threading.Timer? _statusDebounceTimer;
+
+    // ═══ 2026-10-29 性能：滑块类设置的保存去抖 ═══
+    // 每次 ValueChanged 都走完整落盘（差集序列化 + DPAPI×2 + 写盘）⇒ 拖一次滑块打几十次同步 IO。
+    // 合并成"停止拖动 500ms 后一次"；退出路径的 SaveSettings() 仍会兜底最后一次。
+    private int _settingsSaveTick;
+    private System.Threading.Timer? _settingsSaveTimer;
+    private void ScheduleSettingsSave()
+    {
+        var tick = Interlocked.Increment(ref _settingsSaveTick);
+        _settingsSaveTimer?.Dispose();
+        _settingsSaveTimer = new System.Threading.Timer(_ =>
+        {
+            if (Interlocked.CompareExchange(ref _settingsSaveTick, tick, tick) != tick) return;
+            DispatcherQueue.TryEnqueue(() => AppServices.Settings.SaveQuiet());
+        }, null, 500, Timeout.Infinite);
+    }
+
     private void SetStatus(string text)
     {
         var tick = Interlocked.Increment(ref _statusDebounceTick);
@@ -174,10 +219,10 @@ public sealed partial class MainWindow : Window
             Hint: "✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。目标色域就是【底图】的色彩空间：Rec.709 或显式 Rec.2020（三件一起搬，底图本身仍是 SDR）。"),
         [OutputFormat.JPEG_LI] = new(OutputFormat.JPEG_LI,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
-            Hint: "✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709 —— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020。Rec.2020 目标靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"),
+            Hint: "✅ 8-bit，容器没有 HDR 通道；质量由 butteraugli 距离控制。默认目标 Rec.709，显式选 Rec.2020 才输出 Rec.2020。"),
         [OutputFormat.JPEG_XL] = new(OutputFormat.JPEG_XL,
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
-            Hint: "✅ 新一代格式，Modular 模式对截图极优。支持 HDR (Rec.2100 PQ) + 广色域。16-bit 走 16-bit PNG 中转（cjxl 无 -b 参数，sBIT=16 声明实际精度）。"),
+            Hint: "✅ Modular 模式对截图最优，支持 HDR 与广色域；16-bit 声明真实精度。"),
         [OutputFormat.AVIF] = new(OutputFormat.AVIF,
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
             // ═══ 2026-09-18 更新：位深与色度的实际能力取决于所选编码器，提示必须说清边界 ═══
@@ -186,10 +231,10 @@ public sealed partial class MainWindow : Window
             //   QSV 8-bit（NV12 输入）。HDR 恒 10-bit。
             // · 真精度：>8-bit 只在「源为 Float16 + 编码器支持真 10-bit 输入」时保留源精度，
             //   否则是容器级升位深（交接 §4.3）。
-            Hint: "✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"),
+            Hint: "✅ 支持 HDR（PQ）与广色域；NVENC 硬件加速仅 4:2:0，软件可 4:4:4 与 12-bit。位深与色度按所选编码器生效。"),
         [OutputFormat.WebP] = new(OutputFormat.WebP,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
-            Hint: "⚠ 仅 8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709（不写声明）—— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020（靠 ICC 声明）。适合简单分享场景。"),
+            Hint: "⚠ 仅 8-bit，容器没有 HDR 通道；默认目标 Rec.709，显式选 Rec.2020 才输出 Rec.2020。适合简单分享。"),
         [OutputFormat.TIFF] = new(OutputFormat.TIFF,
             SupportsHdr: true, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"),
@@ -204,7 +249,9 @@ public sealed partial class MainWindow : Window
 
     public MainWindow(bool isAutostart = false)
     {
+        var swXaml = System.Diagnostics.Stopwatch.StartNew();
         this.InitializeComponent();
+        swXaml.Stop();
 
         // XAML 写死中文的按表翻译要在【可视树真的建起来】之后再扫一次：ApplyLocale() 在构造期跑，
         // 那时页面还没实化，VisualTreeHelper 走不到 ⇒ 在根元素 Loaded 后补扫一次，
@@ -226,6 +273,22 @@ public sealed partial class MainWindow : Window
         appWindow.Closing += (_, e) =>
         {
             if (_isExiting) return; // 托盘"退出"→正常关闭，不拦截
+
+            // ── 托盘图标没挂上 → 不许隐身：否则进程还在、却没有入口能叫回来 ──
+            if (_trayIcon is not { IconRegistered: true })
+            {
+                e.Cancel = true;
+                _isExiting = true;
+                DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await Task.Delay(200);
+                    try { SaveSettings(); } catch { }
+                    _trayIcon?.Dispose();
+                    AppServices.Shutdown();
+                    Environment.Exit(0);
+                });
+                return;
+            }
 
             // ── 无论是否勾选"最小化到托盘"，都先隐藏窗口 ──
             e.Cancel = true;
@@ -273,12 +336,23 @@ public sealed partial class MainWindow : Window
         ];
 
         RebuildFormatCombo();
+        var swSettings = System.Diagnostics.Stopwatch.StartNew();
+        // 314ms 那一格里到底是谁贵，决定后面往哪打：反序列化还是控件回显。
+        // 两格之和必须等于外层那句的总时长（判据守恒），所以口径就是"夹在中间"。
+        var swLoad = System.Diagnostics.Stopwatch.StartNew();
         LoadSettings();             // 仅加载配置文件，不做检测
+        swLoad.Stop();
 
         // ═══ 关键修复: ApplySettingsToUI 期间禁止事件覆盖 _settings ═══
         _uiReady = false;
+        var swEcho = System.Diagnostics.Stopwatch.StartNew();
         ApplySettingsToUI();        // 将配置反映到 UI
+        swEcho.Stop();
         _uiReady = true;
+        swSettings.Stop();
+        // 构造尾巴（托盘/热键/OCR 注册/本地化）一直没单独计过时：它挂在"进程到主窗口"里，
+        // 与上面两格合起来解释那 1.07s。
+        var swTail = System.Diagnostics.Stopwatch.StartNew();
 
         // 同步窗口主题到 UI（启动时 ApplyTheme 已设置 Application.RequestedTheme，
         // 但窗口内容元素 fe.RequestedTheme 需要单独设置才能生效）
@@ -298,7 +372,6 @@ public sealed partial class MainWindow : Window
         _trayIcon.OnCaptureHotkey = () => DispatcherQueue.TryEnqueue(() => StartSelectionCapture());
         _trayIcon.OnExitApp = () => _isExiting = true;
         _trayIcon.RegisterCaptureHotkey(_settings.Hotkey);
-        ApplyVSCapGate();   // 「VS-Cap 模式」关着就不该抢注全局 Ctrl+Alt+T（见 MainWindow.VSCap.cs）
 
         // 注册无感截图热键
         HotkeyManager.RegisterNamed(this, "silent", _settings.SilentHotkey,
@@ -314,20 +387,11 @@ public sealed partial class MainWindow : Window
         //   · AutoStart=false 的任何一个 dev 构建起来一次，就把用户已注册的自启动【删掉】；
         //   · AutoStart=true 时则把它改指到那个构建的输出目录（10-02 实测就是这样被改的）。
         // 写这件事只该发生在用户真的动过那个开关之后 —— 那一条在 SyncStartupAndHotkey() 里，
-        // 由「保存设置」触发且失败会显式告知。启动路径改成只做一致性检查并报警。
-        try
-        {
-            bool registered = StartupManager.IsEnabled;
-            if (registered != _settings.AutoStart)
-                LogService.Warn("Startup",
-                    $"开机自启动的实际状态（{(registered ? "已注册" : "未注册")}）与设置里的 "
-                    + $"AutoStart={_settings.AutoStart} 不一致；本进程不自动改写注册表"
-                    + "（否则会随最后启动的那个构建漂移），请在设置页按一次「保存设置」以对齐");
-        }
-        catch (Exception ex) { LogService.Warn("Startup", $"读取开机自启动状态失败: {ex.Message}"); }
-
+        // 由「保存设置」触发且失败会显式告知。启动路径只做一致性检查并报警，
+        // 且那条报警不参与首帧 ⇒ 与 Toast 注册、日志页订阅一起排到首帧之后（见下）。
         // ── 开机静默启动：直接缩小到托盘，不显示窗口 ──
-        if (isAutostart)
+        // 托盘图标没挂上时必须留在前台，否则开机后就是一个没有任何入口的进程
+        if (isAutostart && _trayIcon.IconRegistered)
         {
             _trayIcon.MinimizeToTray();
             // 窗口已隐藏，但仍需运行能力检测（确保后续截图正常）
@@ -345,33 +409,50 @@ public sealed partial class MainWindow : Window
             DispatcherQueue.TryEnqueue(() => _wgcService.WarmupSessions());
 
         // ── 注册 Toast 通知 ──
-        ToastService.Register();
-        // 注入通知位置提供器：应用内浮层需要知道用户选的是四角中的哪一个
-        // （SettingsService.Current 是实例属性，静态的 ToastService 拿不到，故用委托解耦）
-        ToastService.PositionProvider = () => _settings.ToastPosition;
+        // 与「开机自启动一致性检查」「日志页订阅」一起推迟到首帧之后（2026-10-30 阶段 2）：
+        // 这三件都不参与首帧，也不被第一个用户动作依赖（通知要等用户真截图才发）。
+        // ═══ 2026-10-30：原先这里还有一次 `Task.Run(MultiOcrService.Initialize)` ——
+        //     App.xaml.cs 的启动段已经启动过同一次初始化（内部 _initialized 短路），
+        //     这里那次是纯重复投递，已删。模型目录的解析只保留 App 那一处。═══
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            try
+            {
+                bool registered = StartupManager.IsEnabled;
+                if (registered != _settings.AutoStart)
+                    LogService.Warn("Startup",
+                        $"开机自启动的实际状态（{(registered ? "已注册" : "未注册")}）与设置里的 "
+                        + $"AutoStart={_settings.AutoStart} 不一致；本进程不自动改写注册表"
+                        + "（否则会随最后启动的那个构建漂移），请在设置页按一次「保存设置」以对齐");
+            }
+            catch (Exception ex) { LogService.Warn("Startup", $"读取开机自启动状态失败: {ex.Message}"); }
 
-        // ── 初始化 OCR 引擎（后台加载 ONNX 模型，不阻塞窗口显示）──
-        // 模型目录自动解析: 应用内嵌 data/Models/ → 用户 %LOCALAPPDATA%
-        try
-        {
-            var modelDir = TrueToneCap.Core.Services.OnnxOcrEngine.ResolveModelDir();
-            _ = Task.Run(() => MultiOcrService.Initialize(modelDir));
-            LogService.Info("MainWindow", $"OCR 引擎初始化已后台启动, 模型目录: {modelDir}", LogCategory.OCR);
-        }
-        catch (Exception ex)
-        {
-            LogService.Warn("MainWindow", $"OCR 初始化失败: {ex.Message}", LogCategory.OCR);
-        }
+            try
+            {
+                ToastService.Register();
+                // 注入通知位置提供器：应用内浮层需要知道用户选的是四角中的哪一个
+                // （SettingsService.Current 是实例属性，静态的 ToastService 拿不到，故用委托解耦）
+                ToastService.PositionProvider = () => _settings.ToastPosition;
+            }
+            catch (Exception ex) { LogService.Warn("MainWindow", $"通知注册失败: {ex.Message}"); }
+
+            SubscribeLogEvents();
+        });
 
         // ═══ _uiReady 在 ApplySettingsToUI 之后已置为 true ═══
-
-        // ── 订阅实时日志事件 ──
-        SubscribeLogEvents();
 
         // ── 应用本地化文本 + 显示第一页 ──
         ApplyLocale();
         MainNav.SelectedItem = MainNav.MenuItems[0];
         PageOutput.Visibility = Visibility.Visible;
+
+        // 两条打点放在构造函数末尾：紧挨着 App 打的"主窗口已创建"，可逐行对上；
+        // 计时区间已在上面各自截断，不受这段尾巴（托盘、热键、OCR、本地化）影响。
+        LogService.Info("MainWindow", $"启动: XAML 初始化 {swXaml.ElapsedMilliseconds}ms");
+        LogService.Info("MainWindow", $"启动: 设置加载与回显 {swSettings.ElapsedMilliseconds}ms");
+        LogService.Info("MainWindow",
+            $"启动: 设置两段 = 反序列化 {swLoad.ElapsedMilliseconds} + 回显 {swEcho.ElapsedMilliseconds}ms");
+        LogService.Info("MainWindow", $"启动: 构造尾巴（托盘/热键/OCR/本地化） {swTail.ElapsedMilliseconds}ms");
     }
 
     private async Task RunCapabilityDetectionAsync()
@@ -408,14 +489,12 @@ public sealed partial class MainWindow : Window
         int targetSlider = (int)Math.Round((kIndustryStdNits - 80) / 4.0); // = 31
 
         string text = sdrWhiteNits > 0
-            ? $"当前系统 SDR 白点: {sdrWhiteNits} nits"
-            : "当前系统 SDR 白点: 未检测到 (使用设置值)";
-        text += $" | 行业标准: {kIndustryStdNits:0} nits (Android/影视, libultrahdr)";
-        text += $"\nWindows 'SDR 内容亮度' 滑块: 当前约 {currentSlider} | 目标 {kIndustryStdNits:0} nits ≈ 滑块 {targetSlider}";
-        text += " (实测线性: nits=80+4×滑块, 0-100→80-480)";
+            ? $"系统 SDR 白点 {sdrWhiteNits} nits（行业标准 {kIndustryStdNits:0} nits）"
+            : $"系统 SDR 白点未检测到（暂用设置值，行业标准 {kIndustryStdNits:0} nits）";
+        text += $"\nWindows「SDR 内容亮度」滑块约 {currentSlider}，对齐 {kIndustryStdNits:0} nits 需 {targetSlider}";
         if (sdrWhiteNits > 0 && Math.Abs(sdrWhiteNits - kIndustryStdNits) > 20)
         {
-            text += $"\n💡 与行业标准偏差较大: 建议将滑块调到 {targetSlider} (≈{kIndustryStdNits:0} nits), 调完重启应用生效";
+            text += $"\n💡 建议把滑块调到 {targetSlider}，重启应用生效";
         }
         GainMapHintTxt.Text = text;
     }
@@ -442,13 +521,26 @@ public sealed partial class MainWindow : Window
                 cap.SystemHdr, cap.SupportsHdr, cap.SystemAcm, cap.CustomIcc);
             AppServices.Settings.SaveQuiet();
         }
+        // ═══ 2026-10-27 用户口径："HDR 下默认应该开启 HDR 输出" ═══
+        // 上面那一支只在首运行生效。首运行落在 SDR 屏（或 EDID 没读出来）的用户换了 HDR 屏之后，
+        // 盘上的 false 会永久保留 —— 本机实机日志就是这形态：HDR当前启用=True、HDR硬件支持=True，
+        // 而 settings.json 里 HdrEnabled=false，"默认开"再也回不来。
+        // 只补"用户从没亲手拨过"的那一类：HdrUserToggled 一旦置真就永久尊重用户选择（含"关"）。
+        else if (HdrOutputDefault.ShouldAutoEnable(cap.SupportsHdr, _settings.HdrEnabled, _settings.HdrUserToggled))
+        {
+            _settings.HdrEnabled = true;
+            LogService.Info("Capability",
+                "检测到 HDR 显示器，且用户从未手动切换过 HDR 开关 ⇒ 按默认开启 HDR 输出"
+                + "（拨过一次之后本规则永久失效，关着就一直是关）");
+            AppServices.Settings.SaveQuiet();
+        }
 
         // 更新 UI
         DispatcherQueue.TryEnqueue(() =>
         {
             _hdrHardwareSupported = cap.SupportsHdr;
             // 无论 HDR 当前是否开启，只要硬件支持就允许用户切换 (格式联动在 UpdateQualityPanel)
-            HdrSwitch.IsOn = _settings.HdrEnabled;
+            SetHdrSwitchSilently(_settings.HdrEnabled);
 
             string hdrText;
             if (cap.SupportsHdr)
@@ -482,7 +574,7 @@ public sealed partial class MainWindow : Window
             else if (cap.CustomIcc)
                 IccHintTxt.Text = Trf("检测到校色 ICC → 映射到 {0}", ColorProfileProvider.GetColorSpaceDisplayName(GetSelectedColorSpaceTag()));
             else
-                IccHintTxt.Text = LocaleManager.Tr("未检测到校色 ICC；目标色域即像素被搬进、容器被声明成的那一套原色（逐格式的声明通道见下方「色域映射」）");
+                IccHintTxt.Text = LocaleManager.Tr("未检测到校色 ICC；目标色域即像素与容器声明所用的原色。");
 
             UpdateAvifEncoderLabels();
 
@@ -599,11 +691,11 @@ public sealed partial class MainWindow : Window
                 //   解析成广色域【不会】让它们输出 Rec.2020。所以这里必须把条件说全：
                 //   宽色域只在你亲手选 Rec.2020 时才生效。
                 fmtHdrWarn = _hdrHardwareSupported
-                    ? "\n🔒 当前格式没有 HDR 通道（容器写不了 PQ）— HDR 开关已禁用，产物是 8-bit SDR。"
+                    ? "\n🔒 此格式没有 HDR 通道 — HDR 开关不可用，产物是 8-bit SDR。"
                       + (cap.SupportsWideGamut
-                          ? " Rec.2020 目标仍然生效（这类格式只靠 ICC 声明）—— 但只有亲手选 Rec.2020 才会输出 Rec.2020，默认档「跟随显示器」一律按 Rec.709 输出。"
+                          ? " Rec.2020 目标仍需亲手选择才生效。"
                           : "")
-                      + " 要 HDR 请选 PNG / JPEG XL / AVIF / TIFF，或在 JPEG 下打开「附带增益图」。"
+                      + " 要 HDR 请改用 PNG / JPEG XL / AVIF / TIFF，或在 JPEG 下打开「附带增益图」。"
                     : "\n🔒 此显示器不支持 HDR — HDR 开关已禁用。";
             }
             else
@@ -658,20 +750,20 @@ public sealed partial class MainWindow : Window
         if (gainMapOn)
         {
             HdrSwitch.IsEnabled = false;
-            HdrSwitch.IsOn = true;
+            SetHdrSwitchSilently(true);
             if (ColorCbo is not null) ColorCbo.IsEnabled = true;
             if (HdrHintTxt is not null)
             {
                 HdrHintTxt.Text = _hdrSystemHint
-                    + "\n🔒 增益图为 Ultra HDR：HDR 输出锁定开启。上面「目标色域」决定底图与增益图共用哪套原色"
-                    + " —— 默认档 Rec.709（「跟随显示器」解析成广色域也一样）⇒ 两者同在 Rec.709 原色；"
-                    + "只有亲手选 Rec.2020，才是底图、增益比、声明三件同搬 Rec.2020。"
-                    + "底图本身恒为 SDR，HDR 由增益图还原，不写在底图的声明里。";
+                    + "\n🔒 增益图为 Ultra HDR：HDR 输出锁定开启；底图恒为 SDR，HDR 由增益图还原。";
             }
         }
         else
         {
             HdrSwitch.IsEnabled = _hdrHardwareSupported && cap.SupportsHdr;
+            // 离开增益图态 ⇒ 开关回到用户自己的设置。少了这一句，锁开那一次的 true 会一直留在界面上
+            // （界面上是开、编码时读的却是 settings 里的关，两边说的不是一件事）。
+            SetHdrSwitchSilently(_settings.HdrEnabled);
             if (ColorCbo is not null) ColorCbo.IsEnabled = true;
         }
 
@@ -705,8 +797,8 @@ public sealed partial class MainWindow : Window
         {
             var gmTag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
             GainMapHintTxt.Text = gmTag == "Gray"
-                ? "灰度增益：仅编码亮度差，体积最小。黑白文字/图标场景推荐。"
-                : "RGB 增益：三通道独立编码，色彩还原最准确。彩色截图推荐。";
+                ? LocaleManager.Tr("灰度增益：只编码亮度差，体积最小，适合文字与图标。")
+                : LocaleManager.Tr("RGB 增益：三通道独立编码，色彩更准，适合彩色截图。");
         }
 
         // AVIF + NVENC/QSV 不支持 CRF=0 无损
@@ -889,10 +981,8 @@ public sealed partial class MainWindow : Window
                 // 不支持 HDR 路径的只剩 QSV（NV12 8-bit 输入），已在下拉中隐藏。
                 bool nvencHdr = kind is AvifEncoderKind.Nvenc or AvifEncoderKind.Auto;
                 AvifCodecHintTxt.Text =
-                    $"🔒 HDR 至少 10-bit（PQ 的分层要求），该编码器 HDR 可用位深：{depths}；其余档位已隐藏。"
-                  + (nvencHdr ? " NVENC 可硬件直通（AV1 仅 4:2:0），失败自动回退 avifenc 软件路径。" : "")
-                  + " QSV 不支持 HDR 已隐藏。"
-                  + $" 可用色度 {chromas}。";
+                    $"🔒 HDR 需至少 10-bit；可用位深 {depths}、色度 {chromas}。"
+                  + (nvencHdr ? " NVENC 直通仅 4:2:0，失败回退软件编码。" : "");
             }
             else if (kind == AvifEncoderKind.Auto)
             {
@@ -900,34 +990,30 @@ public sealed partial class MainWindow : Window
                 // 否则用户看到的可用组合只是"所有编码器的并集"，并不知道实际会走哪一条。
                 var m = AvifEncoderProbe.Get(kind);
                 string pick = m.Measured && m.ResolvedKind is { } r
-                    ? $"本机实测会解析为 {AvifEncoderCapabilities.Caps(r).DisplayName}"
-                    : "按 NVENC → QSV → libaom → SVT-AV1 → avifenc 挑第一个可用的编码器（硬件优先；软件兜底取实测更通用且更快的 libaom，见能力表 PickAuto 注释）";
+                    ? $"本机实测：{AvifEncoderCapabilities.Caps(r).DisplayName}"
+                    : "按硬件优先挑第一个可用编码器";
                 AvifCodecHintTxt.Text =
-                    $"自动模式：{pick}；"
-                  + $"可用位深 {depths}，可用色度 {chromas}。挑中硬件时超出其能力的参数会在截图时降级并提示。"
-                  + " >8-bit 仅在「源为 Float16」且「挑中的编码器支持真 10-bit 输入」时保留源精度，"
-                  + "否则是容器级升位深；普通 8-bit 截图恒输出 8-bit（升位深不产生信息）。";
+                    $"自动：{pick}；可用位深 {depths}、色度 {chromas}，不足时自动降级。";
             }
             else
             {
                 var caps = AvifEncoderCapabilities.Caps(kind);
                 var m = AvifEncoderProbe.Get(kind);
                 string truth = (m.Measured ? m.True10BitInput : SupportsTrue10BitInput(kind))
-                    ? "支持真 10-bit 输入 ⇒ Float16 源可保留 >8-bit 精度。"
-                    : ">8-bit 为容器级升位深：文件按所选位深声明，源精度仍 8-bit。";
+                    ? "真 10-bit 输入，仅 Float16 源保留高位深。"
+                    : "高位深只写进容器，源精度不变。";
                 // ═══ 实测 vs 声明必须说清 ═══
                 // 可用组合来自实测（真编码 + 解析产物 av1C）时是"这台机器上确认过"；
                 // 后台还没跑完时来自静态能力表，必须显式告诉用户这是"按能力表"，不是实测。
                 string src = m.Measured
-                    ? "（以下为**本机实测**：请求该组合后解析产物确认真的产出）"
-                    : "（以下按静态能力表，后台实测完成后会自动收敛）";
+                    ? "（实测）"
+                    : "（按能力表）";
                 AvifCodecHintTxt.Text =
                     // 软件/硬件 与"只有该编码器才有的限制"（UiNote）原来都塞在下拉项文字里，
                     // 2026-09-25 起归到这条灰字行 —— 见 UpdateAvifEncoderLabels 的理由。
                     $"{caps.DisplayName}（{(caps.IsHardware ? "硬件加速" : "软件编码")}）："
                   + (caps.UiNote.Length > 0 ? caps.UiNote + " " : "")
-                  + $"可用色度 {chromas}，可用位深 {depths}。{truth}{src}"
-                  + " 普通 8-bit 截图恒输出 8-bit。"
+                  + $"可用色度 {chromas}、位深 {depths}。{truth}{src}"
                   // ═══ "不可用"必须给出可行动的原因 ═══
                   // SVT-AV1 尤其典型：本机内嵌 avifenc 未编译 svt 时，它既不可用、
                   // 也无法实测 —— 只写"不可用"用户会以为是自己配置错了。
@@ -938,7 +1024,7 @@ public sealed partial class MainWindow : Window
                              && NativeAvifEncoder.SvtUnavailableReason is { } why
                                 ? $"（{why}）"
                                 : "")
-                          + "，截图时将自动回退并提示。");
+                          + "，将自动回退。");
             }
         }
         finally { _avifOptionsUpdating = false; }
@@ -1081,8 +1167,8 @@ public sealed partial class MainWindow : Window
         if (!_uiReady) return;
         var tag = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
         GainMapHintTxt.Text = tag == "Gray"
-            ? "灰度增益：仅编码亮度差，体积最小。黑白文字/图标场景推荐。"
-            : "RGB 增益：三通道独立编码，色彩还原最准确。彩色截图推荐。";
+            ? LocaleManager.Tr("灰度增益：只编码亮度差，体积最小，适合文字与图标。")
+            : LocaleManager.Tr("RGB 增益：三通道独立编码，色彩更准，适合彩色截图。");
         _settings.GainMapMode = tag;
         AppServices.Settings.SaveQuiet();
     }
@@ -1099,7 +1185,7 @@ public sealed partial class MainWindow : Window
     {
         if (!_uiReady) return;
         _settings.RecordQuality = Math.Round(RecordQualitySld.Value, 1);
-        AppServices.Settings.SaveQuiet();
+        ScheduleSettingsSave();
     }
 
     private void OnTargetLangChanged(object sender, SelectionChangedEventArgs e)
@@ -1122,7 +1208,7 @@ public sealed partial class MainWindow : Window
         SetQualityDescription(encoder, val);
         // 保存到当前格式的独立质量字段（切换格式不互相覆盖）
         _settings.SetQuality(CurrentFormat(), val);
-        AppServices.Settings.SaveQuiet();
+        ScheduleSettingsSave();
     }
 
     /// <summary>
@@ -1288,9 +1374,24 @@ public sealed partial class MainWindow : Window
 
     // ── HDR + ACM + ICC ──
 
+    /// <summary>程序性置位 HDR 开关：必须挡住 Toggled 回写。
+    /// <para><c>ToggleSwitch.Toggled</c> 在<b>程序赋值</b>时也会触发（与 GainMap 复选框那条注释同源）。
+    /// 增益图的"HDR 锁开"和启动/换屏时的状态回填都是 <b>UI 约束</b>、不是用户意图：
+    /// 不挡的话，开一次增益图就把 <c>HdrEnabled</c> 写成 true 并落盘，关掉增益图后它还是 true ——
+    /// 用户的"不做 HDR"选择被静默永久改掉（2026-08-16 P2-7 的同一个坑）。
+    /// 回写处（<see cref="OnHdrToggled"/>）另外还要判 <c>_qualityPanelUpdating</c>：
+    /// UpdateQualityPanel 整段都会置位它，锁开与回填都发生在里面。</para></summary>
+    private void SetHdrSwitchSilently(bool on)
+    {
+        _hdrSwitchUpdating = true;
+        try { HdrSwitch.IsOn = on; } finally { _hdrSwitchUpdating = false; }
+    }
+
     private void OnHdrToggled(object sender, RoutedEventArgs e)
     {
-        if (!_uiReady) return;
+        if (!_uiReady || _qualityPanelUpdating || _hdrSwitchUpdating) return;
+        // 用户亲手拨过 ⇒ 记成显式选择，之后不再被"HDR 屏默认开"那条规则翻回来。
+        _settings.HdrUserToggled = true;
         _settings.HdrEnabled = HdrSwitch.IsOn;
 
         // 色彩页的卡片由 UpdateQualityPanel 内部统一刷新（它要先看 HDR 被格式联动改成什么状态）
@@ -1356,11 +1457,13 @@ public sealed partial class MainWindow : Window
 
     // ── 编码辅助（仅在最终保存/复制时触发）──
 
-    private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h)
+    private Task EncodeAndSaveAsync(byte[] bgra, int w, int h) => EncodeAndSaveAsync(bgra, w, h, null);
+
+    /// <param name="forceFormat">非 null = 不看当前格式下拉框，按指定格式落盘（贴图窗的「保存为 PNG / AVIF」走这条）。
+    /// 其余设置（质量/色域/HDR）仍取 UI 快照 —— 贴图只是"另存一份"，不该悄悄换掉用户的编码参数。</param>
+    private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h, OutputFormat? forceFormat)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        LogService.Info("MainWindow", $"开始截图流程: {w}x{h} 格式={CurrentFormat()}"
-            + (_settings.GainMapEnabled ? "（JPEG + 增益图）" : ""));
 
         // ═══ 2026-08-16 P2-6 修复: 等待旧操作完成 (替代 Cancel+Delay) ═══
         // 新 CTS: 取消旧令牌 (不再共用 token 互相干扰), 等待旧编码任务自然结束。
@@ -1375,6 +1478,9 @@ public sealed partial class MainWindow : Window
         // ⚠ 本方法运行在 UI 线程：在切入后台编码前采集 UI 状态快照，
         // 后台线程不得访问 WinUI 控件（详见 EncodingUiState 注释）。
         var ui = CaptureEncodingUiState();
+        if (forceFormat is { } forced) ui = ui with { Format = forced };
+        LogService.Info("MainWindow", $"开始截图流程: {w}x{h} 格式={ui.Format}"
+            + (_settings.GainMapEnabled ? "（JPEG + 增益图）" : ""));
         // 记录本次编码任务供后续等待 (自包含, 不引用外层闭包并发的字段)
         var task = ExecuteEncodeSaveAsync(bgra, w, h, sw, ct, ui);
         _captureTask = task;
@@ -1386,7 +1492,7 @@ public sealed partial class MainWindow : Window
         //   但插值表达式是在回调里求值的 —— 原先在后台线程读 FormatCbo.SelectedIndex（XAML 控件），
         //   属于跨线程访问，慢编码（JXL/libaom 4K ≥500ms，正是这个提示要出现的场景）时才走到这条路。
         string fmtLabel = LocaleManager.GetFormatLabel(
-            _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)]);
+            forceFormat ?? _formats[Math.Clamp(FormatCbo.SelectedIndex, 0, _formats.Count - 1)]);
         var progressTimer = new System.Threading.Timer(_ =>
         {
             SetStatus($"⏳ 正在编码 {fmtLabel} ...");
@@ -1854,14 +1960,19 @@ public sealed partial class MainWindow : Window
     /// HDR 窗口内联标注合成：有标注层时把标注光栅化到 SDR 区域像素
     /// （与 SDR 路径同用 AnnotationRasterizer，保证输出一致）。
     /// </summary>
-    private static byte[]? ComposeAnnotatedSdr(Services.HdrCaptureWindow hdrWnd, byte[]? sdrRegion, int rw, int rh)
+    private static Task<byte[]?> ComposeAnnotatedSdrAsync(Services.HdrCaptureWindow hdrWnd, byte[]? sdrRegion, int rw, int rh)
     {
-        if (hdrWnd.AnnoManager.LayerCount == 0 || sdrRegion is null) return sdrRegion;
-        var result = new byte[sdrRegion.Length];
-        Buffer.BlockCopy(sdrRegion, 0, result, 0, sdrRegion.Length);
-        foreach (var layer in hdrWnd.AnnoManager.Layers.Where(l => l.IsVisible))
-            Services.AnnotationRasterizer.RenderLayer(result, rw, rh, layer);
-        return result;
+        if (hdrWnd.AnnoManager.LayerCount == 0 || sdrRegion is null) return Task.FromResult(sdrRegion);
+        // 整区拷贝 + 逐层光栅化（马赛克内部还会 Parallel.For）不该占 UI 线程；
+        // 此时预览窗已完成动作并关闭，标注层不再被 UI 侧修改。
+        return Task.Run(() =>
+        {
+            var result = new byte[sdrRegion.Length];
+            Buffer.BlockCopy(sdrRegion, 0, result, 0, sdrRegion.Length);
+            foreach (var layer in hdrWnd.AnnoManager.Layers.Where(l => l.IsVisible))
+                Services.AnnotationRasterizer.RenderLayer(result, rw, rh, layer);
+            return (byte[]?)result;
+        });
     }
 
     /// <summary>
@@ -2079,6 +2190,13 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        // 路线 B：已认领但还没交接给预览窗的共享槽（0 = 没有）。声明在 try 之外 ——
+        // finally 里要用它交还，而 try 块里声明的变量在 finally 里不可见。
+        nint pendingShared = 0, pendingSharedMonitor = 0;
+        // 路线 B（SDR 腿）：SDR 槽不交给预览窗，只在本方法里按选区回读；回读完/取消/异常
+        // 一律在 finally 交还。同样声明在 try 之外，理由同上。
+        nint pendingSdrShared = 0, pendingSdrSharedMonitor = 0;
+
         try
         {
             // ── 这一拍的关联 ID ──
@@ -2090,18 +2208,20 @@ public sealed partial class MainWindow : Window
             SetStatus("📷 WGC 捕获桌面...");
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
+            // 工具条图集那趟排版 + 11.5MB 读回只用 Win2D 的进程级共享设备，不需要预览窗自己的 D3D 设备
+            // ⇒ 在捕获之前就按【目标屏】的缩放投出去，用后面 30–150ms 的捕获时间去盖（命中跨窗缓存时这里
+            // 什么都不做）。失败只留 Warn，绝不影响截图。
+            HdrCaptureWindow.PrewarmAtlasForMonitor(DisplayEnumerator.GetMonitorUnderCursor());
+
             // ── 使用 WGC 捕获所有显示器并拼接 ──
             if (_wgcService is null)
             {
                 SetStatus("❌ 捕获服务未初始化");
                 return;
             }
-
-            if (_settings.UseVSCap)
-            {
-                await StartVSCapCaptureAsync();
-                return;
-            }
+            // 判空已经做过；下面这些调用跨 await、还有两处进闭包（预览窗的交还/兜底回调），
+            // 属性每读一次都会丢流分析状态 ⇒ 收成一个本地非空别名，闭包里也照用。
+            var wgc = _wgcService;
 
             // 获取虚拟桌面坐标
             var displays = DisplayEnumerator.EnumerateDisplays();
@@ -2112,6 +2232,11 @@ public sealed partial class MainWindow : Window
 
             // WGC 多显示器拼接捕获（SDR 用于预览; 2026-08-16 P2-8 修复: 加 PreferHdr,
             // 使选区路径与 SilentCapture/OnCaptureNow 一致 — 单显示器时能获得 HDR/广色域帧)
+            //
+            // 诊断开关 TTC_FORCE_SDR=1 必须在这里就求值：它决定这一拍要不要冻共享槽。
+            // 置 true 时预览只吃 SDR 帧 ⇒ HDR 槽用不上；SDR 槽冻出来也没人按矩形回读
+            //（forceSdr 那档照常读整帧 SDR 像素），白冻一次还得再交还。
+            bool forceSdr = Environment.GetEnvironmentVariable("TTC_FORCE_SDR") == "1";
             CaptureResult captureResult;
             try
             {
@@ -2120,12 +2245,21 @@ public sealed partial class MainWindow : Window
                 // 但 CaptureAllMonitorsAsync 内部本就恒置 PreferHdr=true ⇒ 那两个局部变量是死输入
                 // （读代码时容易误以为"选区路径由开关决定"）。改为显式传 true，与实际行为一致；
                 // 是否真的建 Float16 会话由 WgcCaptureService.CanDeliverExtendedRange 按显示器能力决定。
-                captureResult = await _wgcService.CaptureAllMonitorsAsync(new WgcCaptureConfig
+                captureResult = await wgc.CaptureAllMonitorsAsync(new WgcCaptureConfig
                 {
                     FrameTimeoutMs = 3000,
                     PreferHdr = true,
+                    // 路线 B：让捕获方法在【取完像素的同一段里】把这一帧冻结进共享槽交给预览。
+                    // 放到这里（捕获返回之后）再取就晚了 20–100ms，槽里必然是更新的一帧。
+                    // TTC_PREVIEW_SHARED=0 = 诊断开关，强制走整帧上传，用来做首帧耗时 A/B。
+                    // forceSdr 那档连 SDR 槽也不冻（见上面 switch 求值处的注释）。
+                    WantSharedFrame = Environment.GetEnvironmentVariable("TTC_PREVIEW_SHARED") != "0" && !forceSdr,
+                    // 选区预览不消费这张 GPU 快照，每张要白建一块 4K 纹理并拷贝。
+                    WantGpuTexture = false,
                 });
-                LogService.Info("MainWindow", $"WGC 捕获完成: {captureResult.Width}x{captureResult.Height} HDR={captureResult.IsHdr}");
+                LogService.Info("MainWindow", $"WGC 捕获完成: {captureResult.Width}x{captureResult.Height} HDR={captureResult.HasHdr}" +
+                    (captureResult.HdrPixels is null && captureResult.SharedHandle != 0 ? "（HDR 槽内待选区）" : "") +
+                    (captureResult.SdrPixels is null && captureResult.SdrSharedHandle != 0 ? "（SDR 槽内待选区）" : ""));
 
                 // ═══ P0: 捕获降级给用户明确提示 ═══
                 if (!string.IsNullOrEmpty(captureResult.DegradationWarning))
@@ -2146,7 +2280,26 @@ public sealed partial class MainWindow : Window
             }
 
             var desktopPixels = captureResult.SdrPixels;
-            if (desktopPixels is null || desktopPixels.Length != vw * vh * 4)
+            nint sharedMonitor = captureResult.SourceDisplay?.MonitorHandle ?? 0;
+            // 路线 B（SDR 腿）：扩展范围屏上 SDR 像素可能只剩共享槽里那份（整帧不预先回读）。
+            // 先认领，尺寸对不上就当场交还 —— 下游只有"虚拟桌面宽高"这一套坐标能解释像素，
+            // 尺寸不符的槽留着只会把错位的图当整屏交出去。
+            nint sdrSharedHandle = captureResult.TakeSharedSdr(out int sdrSharedW, out int sdrSharedH);
+            bool sdrSlotUsable = sdrSharedHandle != 0 && sdrSharedW == vw && sdrSharedH == vh;
+            if (sdrSharedHandle != 0 && !sdrSlotUsable)
+            {
+                LogService.Warn("MainWindow",
+                    $"SDR 共享槽 {sdrSharedW}x{sdrSharedH} ≠ 虚拟桌面 {vw}x{vh} ⇒ 丢弃该槽", LogCategory.Capture);
+                try { _wgcService?.ReleaseSharedFrame(sharedMonitor, false); } catch { }
+                sdrSharedHandle = 0;
+            }
+            if (sdrSlotUsable)
+            {
+                pendingSdrShared = sdrSharedHandle;
+                pendingSdrSharedMonitor = sharedMonitor;
+            }
+            if ((desktopPixels is null && !sdrSlotUsable)
+                || (desktopPixels is not null && desktopPixels.Length != vw * vh * 4))
             {
                 DispatcherQueue.TryEnqueue(() =>
                 {
@@ -2161,12 +2314,22 @@ public sealed partial class MainWindow : Window
             float[]? hdrDesktopPixels = captureResult.HdrPixels;
             int hdrW = captureResult.Width, hdrH = captureResult.Height;
             LogService.Debug("诊断",
-                $"captureResult: HDR={(hdrDesktopPixels is not null ? $"len={hdrDesktopPixels.Length} {hdrW}x{hdrH}" : "null")} SDR={(desktopPixels is not null ? $"len={desktopPixels.Length}" : "null")}", LogCategory.Capture);
+                $"captureResult: HDR={(hdrDesktopPixels is not null ? $"len={hdrDesktopPixels.Length} {hdrW}x{hdrH}" : "null")} " +
+                $"SDR={(desktopPixels is not null ? $"len={desktopPixels.Length}" : sdrSlotUsable ? $"槽内 {sdrSharedW}x{sdrSharedH}" : "null")}",
+                LogCategory.Capture);
 
             // ═══ 2026-08-16 P1-1 修复: 释放 GPU 纹理引用 ═══
             // SdrPixels/HdrPixels/IccProfile 是托管数组, Dispose 不影响后续使用;
             // GpuTexture (COM 引用) 在该路径无消费方 (预览窗口用 LoadFrame 像素),
             // 且 P1-3 已禁止选区保存传桌面纹理 → 此处安全释放。
+            // 路线 B：共享槽在 Dispose 之前先认领（认领后交还责任在本方法，见下面的 finally），
+            // 不认领的话 Dispose 会直接把它交还掉，预览就拿不到那块纹理了。
+            nint sharedHandle = captureResult.TakeShared(out int sharedW, out int sharedH);
+            if (sharedHandle != 0)
+            {
+                pendingShared = sharedHandle;
+                pendingSharedMonitor = sharedMonitor;
+            }
             captureResult.Dispose();
 
             sw.Stop();
@@ -2177,11 +2340,18 @@ public sealed partial class MainWindow : Window
             // HdrCaptureWindow 换到 SelectionOverlay 那套），那正是"跑诊断时屏幕上跳出一张旧界面"
             // 的来源，也让工具条几何一类的判据在两套装束间不可比。现在选区界面只有一条，
             // 这个开关只决定像素源：置 null ⇒ 走 BGRA→scRGB 那条呈现帧。
-            bool forceSdr = Environment.GetEnvironmentVariable("TTC_FORCE_SDR") == "1";
+            // （开关值已在捕获之前求得，那一段还用它决定要不要冻槽。）
             if (forceSdr)
             {
                 LogService.Warn("MainWindow", "诊断开关 TTC_FORCE_SDR=1: 预览只用 SDR(BGRA) 帧", LogCategory.Capture);
                 hdrDesktopPixels = null;
+                // 共享槽是 HDR 帧的冻结副本：这次不预览它，就当场交还，别让它白冻到选区结束
+                if (pendingShared != 0)
+                {
+                    try { wgc.ReleaseSharedFrame(pendingSharedMonitor, true); } catch { }
+                    pendingShared = 0;
+                }
+                sharedHandle = 0;
             }
 
             // 阶段2: 截图预览窗口
@@ -2200,41 +2370,95 @@ public sealed partial class MainWindow : Window
             //     "everything outside of the [0, 1] numeric range is clipped"，乘了就把白削成一团白），
             //     且 A 一律写 1：这张窗的背景面是 R16G16B16A16_Float + RgbFullG10NoneP709 + AlphaMode.Ignore
             //     （契约唯一出处见 HdrCaptureWindow.CreateOverlayDesc），源帧的 A 由驱动决定，不参与呈现。
-            bool hdrFrame = hdrDesktopPixels is not null;
+            // 路线 B-3：HDR 帧可能只在共享槽里（HdrPixels 为 null，选区定了才按矩形回读）——
+            // "有没有 HDR 帧"看句柄，不看 CPU 数组。
+            bool hdrFrame = hdrDesktopPixels is not null || sharedHandle != 0;
             var (sysHdrNow, _, _) = CapabilityService.DetectDisplayState();
             int sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
-            float[]? presentFrame = hdrFrame
-                ? hdrDesktopPixels
-                : desktopPixels is not null
-                    ? TrueToneCap.Core.PixelOps.BgraToScrgbForDisplay(
-                          desktopPixels, hdrW, hdrH, hdrOutputActive: sysHdrNow, sdrWhiteNits: sdrWhiteNits)
-                    : null;
+            // 整屏 BGRA→scRGB 是 4K 上 132MB 分配 + 全像素转换，不能在 UI 线程做
+            float[]? presentFrame = hdrFrame ? hdrDesktopPixels : null;
+            if (!hdrFrame && desktopPixels is not null)
+                presentFrame = await Task.Run(() => TrueToneCap.Core.PixelOps.BgraToScrgbForDisplay(
+                    desktopPixels, hdrW, hdrH, hdrOutputActive: sysHdrNow, sdrWhiteNits: sdrWhiteNits));
             LogService.Info("MainWindow",
-                $"预览帧来源={(hdrFrame ? "HDR(Float16)" : "SDR(BGRA→scRGB)")} " +
+                $"预览帧来源={(hdrFrame ? (hdrDesktopPixels is not null ? "HDR(Float16)" : "HDR(Float16·共享槽内)") : "SDR(BGRA→scRGB)")} " +
                 $"HDR输出={sysHdrNow} SDR白点={sdrWhiteNits}nits " +
                 $"呈现缩放={(hdrFrame ? "n/a(OS 抬)"
                     : sysHdrNow && sdrWhiteNits > 0 ? $"{sdrWhiteNits / 80f:0.###}" : "1(不乘)")}",
                 LogCategory.Capture);
-            if (presentFrame is null)
+            if (presentFrame is null && pendingShared == 0)
             {
                 // 两档帧都没有 ⇒ 不只是"这次没截成"，必须留痕（老代码在这里只改一句状态串，日志一个字没有）
-                LogService.Warn("MainWindow", "预览无可用帧（HDR 与桌面像素均为空）⇒ 本次选区中止", LogCategory.Capture);
+                LogService.Warn("MainWindow", "预览无可用帧（HDR、共享槽与桌面像素均为空）⇒ 本次选区中止", LogCategory.Capture);
                 SetStatus("❌ 桌面像素数据为空");
                 return;
             }
 
             {
                 StatusTxt.Text = LocaleManager.SelectionPreview;
-                // 独立 D3D11 设备：渲染线程独占 context，不与 WGC 共享设备竞争
+                // 进程级共享 D3D11 设备（阶段 4）：与本进程其它预览窗共用一块设备，渲染段由窗口内的
+                // 串行锁保护；仍与 WGC 的捕获设备分开（跨设备只走共享纹理句柄）。
                 using var hdrWnd = new Services.HdrCaptureWindow();
                 _activeHdrWindow = hdrWnd; // 注册：应用退出时强制关闭
+
+                // ═══ 路线 B（2026-10-30）：预览直接采样 WGC 会话那块跨设备共享纹理 ═══
+                // 原来整帧要先 float[]→half→暂存纹理→CopyResource（4K 一张 132MB 过一次 CPU + 一次显存写）。
+                // 现在预览在自己的设备上 OpenSharedResource1 打开那块纹理直接当桌面 SRV 采样，
+                // 着色器与取样坐标一字未动。
+                // 槽是【捕获方法内部】冻的：它与上面交给保存链的 hdrDesktopPixels 是同一帧
+                // （取槽就紧跟在那次取像素之后，会话侧还核了帧号）。尺寸必须等于这扇窗，否则不接。
+                bool sharedAttached = false;
+                if (sharedHandle != 0 && hdrFrame && displays.Count == 1)
+                {
+                    if (sharedW == vw && sharedH == vh)
+                    {
+                        // 交还挂在窗口生命周期上：Dispose 时发一次（Cancel/保存/初始化失败/异常都覆盖）。
+                        // 兜底帧：路线 B-3 之后捕获侧不再预读整帧，共享纹理打不开时由渲染线程现取一份
+                        //（仍是冻着的同一帧，候选路径不付这笔钱）。
+                        hdrWnd.AttachSharedFrame(sharedHandle, sharedW, sharedH,
+                            () => wgc.ReleaseSharedFrame(pendingSharedMonitor, true),
+                            () => wgc.ReadSharedRegion(pendingSharedMonitor, true, sharedHandle,
+                                0, 0, sharedW, sharedH));
+                        pendingShared = 0;   // 所有权已交给窗口，finally 不再交还
+                        sharedAttached = true;
+                        LogService.Info("MainWindow",
+                            $"预览走 GPU 共享槽: {sharedW}x{sharedH}（整帧不过 CPU，选区定了只回读那一块）", LogCategory.Capture);
+                    }
+                    else
+                    {
+                        // 槽尺寸与窗口不符（单屏下本不可达，留着是为了别退化成黑屏）：
+                        // B-3 之后捕获侧不再预读整帧，这里只能用 SDR 帧铺桌面，本次保存也就走 SDR。
+                        // SDR 像素本身也可能只在槽里 —— 这时整帧回读一次（正常路径不走这里，
+                        // 只有"槽对不上窗口"这档才付这笔钱），读完当场交还。
+                        var sdrFull = desktopPixels;
+                        if (sdrFull is null && pendingSdrShared != 0)
+                        {
+                            sdrFull = wgc.ReadSharedRegionSdr(pendingSdrSharedMonitor, pendingSdrShared,
+                                0, 0, sdrSharedW, sdrSharedH);
+                            try { wgc.ReleaseSharedFrame(pendingSdrSharedMonitor, false); } catch { }
+                            pendingSdrShared = 0;
+                        }
+                        if (sdrFull is not null)
+                        {
+                            presentFrame = await Task.Run(() => TrueToneCap.Core.PixelOps.BgraToScrgbForDisplay(
+                                sdrFull, hdrW, hdrH, hdrOutputActive: sysHdrNow, sdrWhiteNits: sdrWhiteNits));
+                            LogService.Warn("MainWindow",
+                                $"预览未走共享槽（槽 {sharedW}x{sharedH} ≠ 窗口 {vw}x{vh}）⇒ 退回 SDR 帧预览", LogCategory.Capture);
+                        }
+                        else
+                            LogService.Warn("MainWindow",
+                                $"预览未走共享槽（槽 {sharedW}x{sharedH} ≠ 窗口 {vw}x{vh}）且 SDR 帧取不到 ⇒ 本次预览无桌面画面", LogCategory.Capture);
+                    }
+                }
+
                 LogService.Info("MainWindow", "预览窗口初始化...");
                 bool initOk = hdrWnd.Initialize(vx, vy, vw, vh);
                 LogService.Info("MainWindow", $"预览窗口初始化 {(initOk ? "成功" : $"失败: {hdrWnd.LastError}")}");
 
                 if (initOk)
                 {
-                    hdrWnd.LoadFrame(presentFrame, hdrW, hdrH);
+                    // 共享槽已挂上时没有 CPU 帧可喂（路线 B-3 不再预读整帧）；打不开时由窗口自己现取
+                    if (presentFrame is not null) hdrWnd.LoadFrame(presentFrame, hdrW, hdrH);
                     hdrWnd.Render();
 
                     // 等待用户操作
@@ -2251,15 +2475,44 @@ public sealed partial class MainWindow : Window
                         return;
                     }
 
-                    // 从 HDR 帧裁剪选区
-                    var hdrRegion = hdrDesktopPixels is not null
-                        ? ExtractHdrRegionFromDesktop(hdrDesktopPixels, hdrW, hdrH, vx, vy,
-                            new RectInt32(rx, ry, rw, rh))
-                        : null;
-                    var sdrRegion = desktopPixels is not null
-                        ? ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy,
-                            new RectInt32(rx, ry, rw, rh))
-                        : null;
+                    // 从 HDR 帧取选区：有 CPU 帧（非共享路）就裁；共享路只从冻结槽回读这一块（路线 B-3）。
+                    // 回读必须排在这里、窗口 Dispose 之前 —— 窗口一关就把槽交还，下一帧就会覆写它。
+                    float[]? hdrRegion;
+                    if (hdrDesktopPixels is not null)
+                        hdrRegion = ExtractHdrRegionFromDesktop(hdrDesktopPixels, hdrW, hdrH, vx, vy,
+                            new RectInt32(rx, ry, rw, rh));
+                    else if (sharedAttached)
+                    {
+                        var swR = System.Diagnostics.Stopwatch.StartNew();
+                        hdrRegion = wgc.ReadSharedRegion(pendingSharedMonitor, true, sharedHandle,
+                            rx - vx, ry - vy, rw, rh);
+                        if (hdrRegion is null)
+                            LogService.Warn("MainWindow",
+                                $"选区回读失败 ({rx - vx},{ry - vy} {rw}x{rh}) ⇒ 本次只能退回 SDR 像素", LogCategory.Capture);
+                        else
+                            LogService.Info("MainWindow",
+                                $"选区回读 {rw}x{rh}@{rx - vx},{ry - vy} {swR.ElapsedMilliseconds}ms", LogCategory.Capture);
+                    }
+                    else
+                        hdrRegion = null;
+                    // SDR 腿同理：整帧在 CPU 里就裁；否则从 SDR 槽按矩形回读（槽与虚拟桌面同尺寸，
+                    // 坐标减原点）。标注/复制/识字/翻译/贴图这些出口只吃这一份 —— 不许绕过它去拿别的像素。
+                    byte[]? sdrRegion = null;
+                    if (desktopPixels is not null)
+                        sdrRegion = ExtractRegionFromDesktop(desktopPixels, vw, vh, vx, vy,
+                            new RectInt32(rx, ry, rw, rh));
+                    else if (pendingSdrShared != 0)
+                    {
+                        var swS = System.Diagnostics.Stopwatch.StartNew();
+                        sdrRegion = wgc.ReadSharedRegionSdr(pendingSdrSharedMonitor, pendingSdrShared,
+                            rx - vx, ry - vy, rw, rh);
+                        if (sdrRegion is null)
+                            LogService.Warn("MainWindow",
+                                $"选区 SDR 回读失败 ({rx - vx},{ry - vy} {rw}x{rh}) ⇒ 标注/复制/识字这一路没有 SDR 源", LogCategory.Capture);
+                        else
+                            LogService.Info("MainWindow",
+                                $"选区 SDR 回读 {rw}x{rh}@{rx - vx},{ry - vy} {swS.ElapsedMilliseconds}ms", LogCategory.Capture);
+                    }
 
                     switch (action)
                     {
@@ -2269,7 +2522,7 @@ public sealed partial class MainWindow : Window
                             if (hdrWnd.AnnoManager.LayerCount == 0 && hdrRegion is not null)
                                 // ═══ 2026-08-16 P1-3: 选区像素不带桌面纹理 (区域≠纹理内容) ═══
                                 await EncodeAndSaveHdrAsync(hdrRegion, rw, rh, captureResult.IccProfile);
-                            else if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx1)
+                            else if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx1)
                                 await EncodeAndSaveAsync(outPx1, rw, rh);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
@@ -2282,20 +2535,20 @@ public sealed partial class MainWindow : Window
                             break;
                         case MainToolbarAction.Copy:
                             LogService.Info("MainWindow", "HDR 选区复制到剪贴板");
-                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx2)
+                            if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx2)
                                 await EncodeAndCopyAsync(outPx2, rw, rh);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Ocr:
                             LogService.Info("MainWindow", "HDR 选区 OCR 识别");
                             // 与保存/复制共用同一份合成结果：识字不许绕过标注去读原始桌面像素
-                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx3)
+                            if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx3)
                                 await CaptureAndOcrFromPixelsAsync(outPx3, rw, rh);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Translate:
                             LogService.Info("MainWindow", "HDR 选区翻译");
-                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx4)
+                            if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx4)
                                 await CaptureAndTranslateFromPixelsAsync(outPx4, rw, rh);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
@@ -2303,12 +2556,23 @@ public sealed partial class MainWindow : Window
                             // 与 SDR 选区的 Qr 分支同构：区域照常落盘+剪贴板，二维码窗口额外弹出；
                             // 解码/预览/落盘三个出口吃同一份合成像素，马赛克盖住的内容不漏。
                             LogService.Info("MainWindow", "HDR 选区二维码识别（区域照常落盘+剪贴板）");
-                            if (ComposeAnnotatedSdr(hdrWnd, sdrRegion, rw, rh) is { } outPx5)
+                            if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx5)
                             {
                                 var qrSaveTask = EncodeAndSaveAsync(outPx5, rw, rh);
                                 await CaptureAndQrFromPixelsAsync(outPx5, rw, rh);
                                 await qrSaveTask;
                             }
+                            else ReportEmptyRegion(hdrWnd, action, rw, rh);
+                            break;
+                        case MainToolbarAction.Pin:
+                            // 贴图窗吃的是同一份合成像素（标注/马赛克不会被绕过）；
+                            // 之后的保存/复制仍走主窗口的编码管线 ⇒ 格式/色域/质量与正常保存一致。
+                            LogService.Info("MainWindow", "HDR 选区贴图");
+                            if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx6)
+                                Services.PinWindow.Show(outPx6, rw, rh,
+                                    (px, pw, ph) => EncodeAndSaveAsync(px, pw, ph, OutputFormat.PNG),
+                                    (px, pw, ph) => EncodeAndSaveAsync(px, pw, ph, OutputFormat.AVIF),
+                                    (px, pw, ph) => EncodeAndCopyAsync(px, pw, ph));
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                     }
@@ -2340,6 +2604,19 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
+            // 路线 B：没交接出去的共享槽在这里交还（认领了却提前 return 的每条路都走这里）
+            if (pendingShared != 0)
+            {
+                try { _wgcService?.ReleaseSharedFrame(pendingSharedMonitor, true); } catch { }
+                pendingShared = 0;
+            }
+            // SDR 槽同理：它从不交接（只在本方法里回读），所以每一次走到这里都该是 "0 或已在上面交还"，
+            // 剩下这一笔兜的是"回读之前就 return/抛异常"的路 —— 槽不交还会一直冻着，下一帧都写不进去。
+            if (pendingSdrShared != 0)
+            {
+                try { _wgcService?.ReleaseSharedFrame(pendingSdrSharedMonitor, false); } catch { }
+                pendingSdrShared = 0;
+            }
             // 预览窗无论成功/取消/失败/提前返回，都在这里释放防重入锁
             Interlocked.Exchange(ref _isCapturing, 0);
         }
@@ -2870,6 +3147,8 @@ public sealed partial class MainWindow : Window
     /// <para>与 <c>_avifOptionsUpdating</c> 同一手法：只挡程序赋值，用户拖动时该标志恒为 false。</para>
     /// </summary>
     private bool _qualityPanelUpdating;
+    // 程序性置位 HDR 开关时置真：Toggled 在程序赋值时也会触发，不挡就会把 UI 约束写成用户偏好。
+    private bool _hdrSwitchUpdating;
 
     private void OnOcrEngineChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -2966,7 +3245,6 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(UiAnimationsChk)) _settings.EnableUiAnimations = cb.IsChecked == true;
             else if (cb.Name == nameof(PngFallbackChk)) _settings.PngFallbackEnabled = cb.IsChecked == true;
             else if (cb.Name == nameof(PreviewChk)) _settings.ShowPreview = cb.IsChecked == true;
-            else if (cb.Name == nameof(VSCapModeChk)) { _settings.UseVSCap = cb.IsChecked == true; ApplyVSCapGate(); }
         }
         try { SaveSettingsQuiet(); } catch { }
     }
@@ -2990,15 +3268,19 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(AvifChromaCbo)) _settings.ChromaAvif = tag;
             else if (cb.Name == nameof(ChromaJpegXlCbo)) _settings.ChromaJpegXl = tag;
             else if (cb.Name == nameof(ChromaJpegLiCbo)) _settings.ChromaJpegLi = tag;
-            // ═══ 2026-10-07：压缩强度三档（AVIF / JPEG XL / WebP）═══
-            // ⚠ 必须写管线真正读的那三个字段（EffortAvif / EffortJpegXl / EffortWebp）——
-            //   写个同义的别名字段就会重现上面 ChromaAvif 那次"改成功了但不生效"的失效。
+            // ═══ 2026-10-07：压缩强度三档（AVIF / JPEG XL / WebP / JPEG LI）
+            //     2026-10-29 扩到 PNG / TIFF ═══
+            // ⚠ 必须写管线真正读的那几个字段（EffortAvif / EffortJpegXl / EffortWebp / EffortJpegLi /
+            //   EffortPng / EffortTiff）—— 写个同义的别名字段就会重现上面 ChromaAvif 那次
+            //   "改成功了但不生效"的失效。
             //   写坏值不抛：CompressionEffortMap.Parse 回落到均衡档，不会变成最慢档。
             else if (cb.Name == nameof(EffortAvifCbo)) _settings.EffortAvif = tag;
             else if (cb.Name == nameof(EffortJpegXlCbo)) _settings.EffortJpegXl = tag;
             else if (cb.Name == nameof(EffortWebpCbo)) _settings.EffortWebp = tag;
             // JPEG LI 与增益图共用这一栏（管线对 JPEG_GAINMAP 也读 EffortJpegLi）
             else if (cb.Name == nameof(EffortJpegLiCbo)) _settings.EffortJpegLi = tag;
+            else if (cb.Name == nameof(EffortPngCbo)) _settings.EffortPng = tag;
+            else if (cb.Name == nameof(EffortTiffCbo)) _settings.EffortTiff = tag;
             // 2026-09-26：原 GainMapChromaCbo 分支已删除 —— 增益图并入 JPEG LI 后，
             //   色度就是上面 ChromaJpegLiCbo 那一条（管线对 JPEG_GAINMAP 也改读 ChromaJpegLi）。
             //   两个下拉写同一个字段 = 刚被合并掉的那种分裂。
@@ -3441,8 +3723,9 @@ public sealed partial class MainWindow : Window
         }
         try
         {
-            // 清除旧的 ICC 缓存和 WGC 会话
+            // 清除旧的 ICC 缓存、显示器枚举缓存和 WGC 会话
             ColorProfileProvider.InvalidateCache();
+            Core.Capture.DisplayEnumerator.InvalidateCache();
             _wgcService?.InvalidateSessions();
 
             // 重新检测
@@ -3469,6 +3752,34 @@ public sealed partial class MainWindow : Window
     private string _logCategoryFilter = "All";
     private string _logSearch = "";
     private readonly List<LogEntry> _logEntries = [];
+    private const int MaxUiLogEntries = 2000; // 与 LogService 的 UI 环形缓冲同量级
+    private int _logRefreshScheduled;
+
+    /// <summary>日志到达时合并刷新：150ms 内多条只重建一次列表（每条都重建会把 UI 拖死）。</summary>
+    private void ScheduleLogRefresh()
+    {
+        if (Interlocked.CompareExchange(ref _logRefreshScheduled, 1, 0) != 0) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(150).ConfigureAwait(false);
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    Interlocked.Exchange(ref _logRefreshScheduled, 0);
+                    if (PageLog.Visibility == Visibility.Visible)
+                    {
+                        ApplyLogFilter();
+                        UpdateLogStatus();
+                    }
+                });
+            }
+            catch
+            {
+                Interlocked.Exchange(ref _logRefreshScheduled, 0);
+            }
+        });
+    }
     // 2026-08-11: 显示顺序 + 自动滚动开关
     private bool _logNewestFirst = true;   // 最新在前 (默认)
     private bool _logAutoScroll = true;    // 自动滚动到最新 (默认)
@@ -3633,12 +3944,12 @@ public sealed partial class MainWindow : Window
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     _logEntries.Add(entry);
-                    // 仅在日志页可见时刷新显示
+                    // 长会话里日志只增不减会一直吃内存；以环形缓冲上限截断
+                    if (_logEntries.Count > MaxUiLogEntries)
+                        _logEntries.RemoveRange(0, _logEntries.Count - MaxUiLogEntries);
+                    // 仅在日志页可见时刷新显示（150ms 合并，避免每条日志重建一次 ItemsSource）
                     if (PageLog.Visibility == Visibility.Visible)
-                    {
-                        ApplyLogFilter();
-                        UpdateLogStatus();
-                    }
+                        ScheduleLogRefresh();
                 });
             }
             catch { }

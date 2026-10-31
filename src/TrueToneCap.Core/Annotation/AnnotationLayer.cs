@@ -34,13 +34,17 @@ public enum ShapeType
     Text,
     Mosaic,
     Highlight,
-    SequenceNumber
+    SequenceNumber,
+    /// <summary>马赛克（画笔涂抹）：沿笔迹的若干矩形块，而不是一个矩形区域。</summary>
+    MosaicBrush
 }
 
 /// <summary>标注图层基类。</summary>
 public abstract class AnnotationLayer
 {
-    public Guid Id { get; } = Guid.NewGuid();
+    /// <summary>图层身份。Clone() 必须保留它 —— 撤销/重做与按 Id 更新的命令都靠这份身份，
+    /// 每次 Clone 发新 Guid 会让 UpdateLayer 之后再也找不到"那一层"（见 AnnotationManager.UpdateLayer）。</summary>
+    public Guid Id { get; protected set; } = Guid.NewGuid();
     public ShapeType Type { get; protected init; }
     public bool IsVisible { get; set; } = true;
     public float Opacity { get; set; } = 1.0f;
@@ -55,6 +59,7 @@ public abstract class AnnotationLayer
         ShapeType.Freehand => "画笔",
         ShapeType.Text => "文字",
         ShapeType.Mosaic => "马赛克",
+        ShapeType.MosaicBrush => "马赛克（涂抹）",
         ShapeType.Highlight => "高亮",
         ShapeType.SequenceNumber => "序号",
         _ => "未知"
@@ -62,6 +67,21 @@ public abstract class AnnotationLayer
 
     public abstract AnnotationLayer Clone();
     public abstract RectF GetBounds();
+
+    /// <summary>把基类状态（身份/可见性/不透明度/层序）抄到副本上，供各子类 Clone() 收尾。</summary>
+    protected T CopyBaseState<T>(T clone) where T : AnnotationLayer
+    {
+        clone.Id = Id;
+        clone.IsVisible = IsVisible;
+        clone.Opacity = Opacity;
+        clone.ZOrder = ZOrder;
+        return clone;
+    }
+
+    /// <summary>把 <paramref name="source"/> 的图层身份抄到本实例上。</summary>
+    /// <remarks>给"同一图层的新状态"用：调用方要构造一个新实例喂给 <c>AnnotationManager.UpdateLayer</c>，
+    /// 只有身份对得上，撤销/重做与后续按 Id 的更新才找得到它。</remarks>
+    public void TakeIdentityFrom(AnnotationLayer source) => Id = source.Id;
 
     // ────────────── 工厂方法 ──────────────
 
@@ -175,13 +195,12 @@ public sealed class RectangleLayer : AnnotationLayer
     public float CornerRadius { get; set; }
     public BrushStyle Style { get; set; } = new();
 
-    public override AnnotationLayer Clone() => new RectangleLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new RectangleLayer
     {
         X = X, Y = Y, Width = Width, Height = Height,
         CornerRadius = CornerRadius,
         Style = Style.Clone(),
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+    });
 
     public override RectF GetBounds() => new(X, Y, X + Width, Y + Height);
 }
@@ -196,13 +215,12 @@ public sealed class EllipseLayer : AnnotationLayer
     public float RadiusY { get; set; }
     public BrushStyle Style { get; set; } = new();
 
-    public override AnnotationLayer Clone() => new EllipseLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new EllipseLayer
     {
         CenterX = CenterX, CenterY = CenterY,
         RadiusX = RadiusX, RadiusY = RadiusY,
         Style = Style.Clone(),
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+    });
 
     public override RectF GetBounds() => new(
         CenterX - RadiusX, CenterY - RadiusY,
@@ -220,13 +238,12 @@ public sealed class ArrowLayer : AnnotationLayer
     public float ArrowHeadSize { get; set; } = 12f;
     public BrushStyle Style { get; set; } = new();
 
-    public override AnnotationLayer Clone() => new ArrowLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new ArrowLayer
     {
         StartX = StartX, StartY = StartY, EndX = EndX, EndY = EndY,
         ArrowHeadSize = ArrowHeadSize,
         Style = Style.Clone(),
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+    });
 
     public override RectF GetBounds()
     {
@@ -245,12 +262,11 @@ public sealed class FreehandLayer : AnnotationLayer
     public List<Vector2> Points { get; set; } = [];
     public BrushStyle Style { get; set; } = new();
 
-    public override AnnotationLayer Clone() => new FreehandLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new FreehandLayer
     {
         Points = [.. Points],
         Style = Style.Clone(),
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+    });
 
     public override RectF GetBounds()
     {
@@ -267,34 +283,47 @@ public sealed class FreehandLayer : AnnotationLayer
 }
 
 /// <summary>文字图层。</summary>
+/// <remarks>
+/// ═══ 2026-10-27：文字尺寸只有一把尺 ═══
+/// <para><see cref="CachedWidth"/>/<see cref="CachedHeight"/> 是**光栅化位图的实测尺寸**，
+/// 由 <c>AnnotationRasterizer.RasterizeText</c>（Win2D CanvasTextLayout）量出后写回。
+/// GPU 预览把这块位图原样贴到 <see cref="GetBounds"/> 的内框上，CPU 输出用同一函数重画同样的位图 ⇒
+/// 预览与文件里的字号/折行/字宽只可能一致。旧实现预览用固定 256×64 槽位拉伸、输出用
+/// <c>字数×字号×1.05</c> 估宽，两边从来不是同一张图。</para>
+/// </remarks>
 public sealed class TextLayer : AnnotationLayer
 {
     public TextLayer() => Type = ShapeType.Text;
     public string Text { get; set; } = "";
     public float X { get; set; }
     public float Y { get; set; }
-    public float FontSize { get; set; } = 16f;
-    public string FontFamily { get; set; } = "Microsoft YaHei";
+    /// <summary>字号（物理像素，等于选区图像坐标系的单位）。</summary>
+    public float FontSize { get; set; } = 24f;
+    public string FontFamily { get; set; } = "Microsoft YaHei UI";
+    public bool Bold { get; set; }
+    public bool Italic { get; set; }
+    /// <summary>自动换行宽度（物理像素，0 = 不换行）。编辑时按选区宽度写入，两端量法相同。</summary>
+    public float MaxWidth { get; set; }
     public Color4 TextColor { get; set; } = new(1, 1, 1, 1);
     public Color4 BackgroundColor { get; set; } = new(0, 0, 0, 0.6f);
     public float Padding { get; set; } = 6f;
 
-    // 编辑后缓存的文本边界
+    // 光栅化位图实测尺寸（见类型注释）
     public float CachedWidth { get; set; }
     public float CachedHeight { get; set; }
 
-    public override AnnotationLayer Clone() => new TextLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new TextLayer
     {
         Text = Text, X = X, Y = Y, FontSize = FontSize,
-        FontFamily = FontFamily, TextColor = TextColor,
-        BackgroundColor = BackgroundColor, Padding = Padding,
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+        FontFamily = FontFamily, Bold = Bold, Italic = Italic, MaxWidth = MaxWidth,
+        TextColor = TextColor, BackgroundColor = BackgroundColor, Padding = Padding,
+        CachedWidth = CachedWidth, CachedHeight = CachedHeight,
+    });
 
     public override RectF GetBounds()
     {
-        float w = CachedWidth > 0 ? CachedWidth : 100f;
-        float h = CachedHeight > 0 ? CachedHeight : FontSize + Padding * 2;
+        float w = CachedWidth > 0 ? CachedWidth : Math.Max(1f, Text.Length * FontSize * 1.05f);
+        float h = CachedHeight > 0 ? CachedHeight : FontSize * 1.4f;
         return new RectF(X, Y, X + w + Padding * 2, Y + h + Padding * 2);
     }
 }
@@ -310,14 +339,45 @@ public sealed class MosaicLayer : AnnotationLayer
     public float BlockSize { get; set; } = 10f;
     public float BlurAmount { get; set; } = 0.3f;
 
-    public override AnnotationLayer Clone() => new MosaicLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new MosaicLayer
     {
         X = X, Y = Y, Width = Width, Height = Height,
         BlockSize = BlockSize, BlurAmount = BlurAmount,
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+    });
 
     public override RectF GetBounds() => new(X, Y, X + Width, Y + Height);
+}
+
+/// <summary>
+/// 马赛克（画笔涂抹）图层：只把笔迹经过的方块打码，而不是整片矩形。
+/// <para>与 <see cref="MosaicLayer"/> 分开，是因为两者在预览（GPU 常量缓冲）与 CPU 合成里
+/// 落的是不同分支：矩形按 bounds 判断，涂抹要按"点到折线的距离"判断。</para>
+/// </summary>
+public sealed class MosaicBrushLayer : AnnotationLayer
+{
+    public MosaicBrushLayer() => Type = ShapeType.MosaicBrush;
+    public List<Vector2> Points { get; set; } = [];
+    public float BlockSize { get; set; } = 10f;
+    /// <summary>涂抹直径（像素）。</summary>
+    public float BrushWidth { get; set; } = 28f;
+
+    public override AnnotationLayer Clone() => CopyBaseState(new MosaicBrushLayer
+    {
+        Points = [.. Points], BlockSize = BlockSize, BrushWidth = BrushWidth,
+    });
+
+    public override RectF GetBounds()
+    {
+        if (Points.Count == 0) return new RectF(0, 0, 0, 0);
+        float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+        foreach (var p in Points)
+        {
+            minX = Math.Min(minX, p.X); minY = Math.Min(minY, p.Y);
+            maxX = Math.Max(maxX, p.X); maxY = Math.Max(maxY, p.Y);
+        }
+        float r = BrushWidth / 2f + 2f;
+        return new RectF(minX - r, minY - r, maxX + r, maxY + r);
+    }
 }
 
 /// <summary>高亮图层（半透明黄色覆盖）。</summary>
@@ -330,12 +390,11 @@ public sealed class HighlightLayer : AnnotationLayer
     public float Height { get; set; }
     public Color4 HighlightColor { get; set; } = new(1, 1, 0, 0.4f);
 
-    public override AnnotationLayer Clone() => new HighlightLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new HighlightLayer
     {
         X = X, Y = Y, Width = Width, Height = Height,
         HighlightColor = HighlightColor,
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+    });
 
     public override RectF GetBounds() => new(X, Y, X + Width, Y + Height);
 }
@@ -351,12 +410,11 @@ public sealed class SequenceNumberLayer : AnnotationLayer
     public Color4 CircleColor { get; set; } = new(1, 0, 0, 1);
     public Color4 TextColor { get; set; } = new(1, 1, 1, 1);
 
-    public override AnnotationLayer Clone() => new SequenceNumberLayer
+    public override AnnotationLayer Clone() => CopyBaseState(new SequenceNumberLayer
     {
         Number = Number, X = X, Y = Y, Radius = Radius,
         CircleColor = CircleColor, TextColor = TextColor,
-        IsVisible = IsVisible, Opacity = Opacity, ZOrder = ZOrder
-    };
+    });
 
     public override RectF GetBounds() => new(
         X - Radius, Y - Radius, X + Radius, Y + Radius);

@@ -12,6 +12,7 @@ using TrueToneCap.Core.Annotation;
 using TrueToneCap.Core.Encoding;
 using TrueToneCap.Core.Logging;   // CoreLog 档位模型（Test_LogDetailLevelIsReachable）
 using TrueToneCap.Core.Services;
+using TrueToneCap.Core.Settings;   // HdrOutputDefault / FormatOrder
 using DEnum = TrueToneCap.Core.Capture.DisplayEnumerator;   // 三档判据的别名（方法体内不能用 var 给类型起别名）
 using Patch = TrueToneCap.Core.Capture.PatchReading;        // 8-bit 会话语义探针的一枚读数
 using Sem = TrueToneCap.Core.Capture.SdrSessionSemantics;   // 同一把尺子：探针与下面这些合成臂共用
@@ -170,6 +171,8 @@ public static class CorePipelineTests
 
         // 兜底层过曝的归因尺子（真机探针 --sdr-semantics-probe 用的就是它）：合成两臂必须先证明它会红
         Test_SdrSessionSemantics_JudgeControlArmsDiverge();
+        // 富文本文字 + 撤销 + 贴图窗（2026-10-27 合并上游 PR #1）
+        Test_TextAnnotation_RichTextContract();
 
         // MFT（QSV 选项的实际实现路径）真实编码验证
         Test_MftAv1EncodeIfAvailable();
@@ -212,6 +215,7 @@ public static class CorePipelineTests
         Test_OcrPreviewWindow_ConstructionGuarded();
         Test_ColorDecision_SingleSourceOfTruth();
         Test_HdrDelivery_FiveShapesAndPerFormatChannel();
+        Test_Selection_DragContract();
         Test_Xaml_HardcodedChineseIsLocalized();
         Test_FormatLabels_AreUserFacingNames();
         Test_VisibleToastAndHintStrings_UseCurrentNames();
@@ -232,6 +236,31 @@ public static class CorePipelineTests
         Test_FreeEndpointsDefaultMigrationIsWired();
         Test_LlmFailureReasonIsClassified();
         Test_VisionTranslationIsWired();
+        Test_TranslatedImageSaveIsWired();              // 2026-10-29：译文覆盖导出 + 预览与输出同源的字号
+        Test_DisplayEnumCacheIsBounded();               // 2026-10-29 A3：枚举缓存的失效接线（缺它=静默错色）
+        Test_PerfWiring_A1A2A4A5();                     // 2026-10-29 A1/A2/A4/A5：四处省时的接线与纪律
+        Test_GainMap_NormalizeFusion_ByteIdentical();   // 2026-10-29 B3：归一化并进增益遍历，产物必须逐字节不变
+        Test_PerfWiring_PngTiffEffortTiers();           // 2026-10-29：PNG/TIFF 纳入压缩强度档位的接线
+        Test_PerfWiring_DeflateOptionsEqualsEnum();     // 2026-10-29：档位改传 int 后，默认档产物必须与旧枚举逐字节相同
+        Test_PerfWiring_AtlasSingleRenderTarget();     // 2026-10-29：文字图集整张一次排版（一格一张渲染目标 = 首帧多 ~230ms）
+        Test_PerfWiring_WgcSessionsBuiltBeforeFirstFrameWait(); // 2026-10-30：两条 WGC 线的池先都建好再等首帧（串行写回去=多付 83ms）
+        Test_PerfWiring_HdrReadbackRowsAreParallel();           // 2026-10-30：整帧 half→float 按行并行 + Unmap 进 finally
+        Test_PerfWiring_AnnoTextCacheEvictsInsteadOfStopsWriting(); // 2026-10-30：标注文字缓存满了要逐出，不是停止入库
+        Test_PerfWiring_FrameAgeGuardedByHasFrame();                   // 2026-10-30：无帧会话不许读出"开机以来的毫秒数"
+        Test_PerfWiring_AtlasLayoutPrewarmedBeforeRenderThread();      // 2026-10-30：图集排版提前到开窗时，且 CPU 腿不碰 D3D
+        Test_PerfWiring_SharedFrameSlotContract();                     // 2026-10-30：跨设备共享槽（路线 B）的标志/冻结/交还契约
+        Test_PerfWiring_PreviewSamplesSharedFrame();                   // 2026-10-30：预览直接采样共享槽（帧号闸/打开方式/优先级/交还一次）
+        Test_PerfWiring_AtlasCrossWindowCache();                       // 2026-10-30：图集跨窗缓存（键含全部输入/脏则不入/读数一起搬回）
+        Test_PerfWiring_SharedPreviewSkipsPlaceholderTextures();       // 2026-10-30：共享路不再预建 132MB 占位纹理与 staging
+        Test_PerfWiring_AtlasPrewarmAtSelectionStart();                // 2026-10-30：选区起点用无设备壳预烘图集（壳不建设备/两道门/排在捕获之前）
+        Test_PerfWiring_StartupBreakdown();                            // 2026-10-30：启动拆成 反序列化+回显+构造尾巴 三格
+        Test_PerfWiring_SdrLegInstrumentation();                       // 2026-10-30：SDR 腿三条路各一行 + 窗口汇总（只读数不改行为）
+        Test_PerfWiring_SdrSharedSlot();                               // 2026-10-30：SDR 也走共享槽（阶段 3 / #31+#32 收口）
+        Test_PerfWiring_SharedPreviewDevice();                         // 2026-10-30：预览窗复用进程级 D3D11 设备（阶段 4）
+        Test_PerfWiring_AvifNvencEffort10Bit();                        // 2026-10-30：AVIF 压缩强度接到真 10-bit NVENC（候选 A）
+        Test_PerfWiring_OcrBatchAndSpan();                             // 2026-10-30：OCR rec 合批 + Span 读取（候选 E）
+        Test_PerfWiring_LazyCpuOcr();                                  // 2026-10-30：CPU OCR 会话按需构建（候选 D）
+        Test_DeflateZlib_BackendProbeAndFallback();                    // 2026-10-31：无损 deflate 可选 libdeflate + 自动回退
         Test_BingWebEndpointShapeAndOptIn();            // 必应网页端点：同一条闸门 + 三个"看着像成功"的坑
         Test_OpIdScopeSemanticsAndWiring();             // 每拍关联 ID：语义 + "App 侧真的开了作用域"的接线判据
         Test_NoRawDebugWritesOutsideTheWhitelistedSinks(); // 防回潮：白名单外不许有裸 Debug.WriteLine
@@ -3075,6 +3104,2019 @@ public static class CorePipelineTests
     }
 
     /// <summary>
+    /// 2026-10-29：译文覆盖导出（「保存译文图」）与框上文字的接线判据。
+    /// <para>三条各自咬一种退化：① 新按钮缺 Click/缺禁用初值 ⇒ 无译文时可点、点了没反应；
+    /// ② 处理器自己落盘而不走 <c>_saveHandler</c> ⇒ 导出绕过主窗口的格式/质量/ICC/剪贴板；
+    /// ③ 预览与导出各算一套字号 ⇒ 今天的"预览放得下、导出被裁掉"必然复发。</para>
+    /// </summary>
+    static void Test_TranslatedImageSaveIsWired()
+    {
+        var winXaml = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml"));
+        var winCs = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml.cs"));
+        var overlay = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "OcrTextOverlay.cs"));
+        if (winXaml is null || winCs is null || overlay is null)
+        {
+            Skip("译文覆盖导出接线", "未找到 OcrPreviewWindow.xaml/.xaml.cs 或 OcrTextOverlay.cs");
+            return;
+        }
+
+        const string LF = "\n";
+        const string Q = "\"";
+        string CodeOf(string path) => string.Join(LF,
+            File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("//") && !l.TrimStart().StartsWith("*")));
+        var xaml = File.ReadAllText(winXaml);
+        var win = CodeOf(winCs);
+        var comp = CodeOf(overlay);
+
+        Assert("工具栏存在「保存当前」按钮且接到处理器",
+            xaml.Contains("x:Name=" + Q + "SaveTranslatedBtn" + Q) && xaml.Contains("OnSaveCurrentClick"));
+        Assert("两枚保存按钮的标签写明原图 / 当前",
+            xaml.Contains("Text=" + Q + "保存原图" + Q) && xaml.Contains("Text=" + Q + "保存当前" + Q),
+            "「保存」这种孤立标签分不清存的是原图还是当前画面");
+        Assert("无译文时新按钮不可点（初值 False，译文就绪后置 True）",
+            System.Text.RegularExpressions.Regex.IsMatch(xaml,
+                @"x:Name=""SaveTranslatedBtn""[\s\S]{0,200}?IsEnabled=""False""")
+            && win.Contains("SaveTranslatedBtn.IsEnabled = true"),
+            "缺初值 False ⇒ 翻译没完成就能点；缺置 True ⇒ 永远点不了");
+        Assert("导出走主窗口保存链（不自己落盘）",
+            win.Contains("OcrTextOverlay.Compose(") && win.Contains("_saveHandler(composed"),
+            "自己写文件会绕过格式/质量/ICC/剪贴板");
+        Assert("预览与导出共用同一套字号（FitFontSize）",
+            win.Contains("OcrTextOverlay.FitFontSize(") && comp.Contains("FitFontSize("),
+            "两处各算一套 ⇒ 预览与产物排版不一致");
+        Assert("框上文字改为折行（不再用省略号截断译文）",
+            win.Contains("TextWrapping.Wrap") && !win.Contains("TextTrimming.CharacterEllipsis"));
+        Assert("覆盖只画文字、不画底块",
+            comp.Contains("BlendBitmap(") && !comp.Contains("Background"),
+            "加底块会让截图像被贴了标签，与用户选定的样式不符");
+    }
+
+    /// <summary>
+    /// A3（2026-10-29）：显示器枚举加了 500ms 缓存 ⇒ 必须同时钉住【失效接线】。
+    /// <para>为什么这条判据比"缓存本身"重要：缓存的失效点与 ICC 缓存、WGC 会话是同一处
+    /// （<c>MainWindow.HandleDisplayChangeAsync</c>）。三档色彩判据、源色域、HDR/ACM 开关
+    /// 全都读这份枚举结果 —— 失效接线一旦被删或被挪走，症状是"用户关了 HDR，下一张还按 HDR
+    /// 声明"这种静默错色，而不是任何异常。所以这里逐项点名到方法，不许用"代码里出现过"充数。</para>
+    /// <para>另一侧：诊断/自检常在【刚刚改过显示状态】之后读枚举结果，必须走未缓存入口，
+    /// 否则量到的是 500ms 前的旧世界 —— 那是"仪器腐蚀被测物"的又一个形态。</para>
+    /// </summary>
+    static void Test_DisplayEnumCacheIsBounded()
+    {
+        var disp = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Capture", "DisplayInfo.cs"));
+        var main = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var probe = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "PreviewUiProbe.cs"));
+        var sem = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SdrSemanticsProbe.cs"));
+        if (disp is null || main is null || probe is null || sem is null)
+        {
+            Skip("显示器枚举缓存失效接线", "未找到 DisplayInfo.cs / MainWindow.xaml.cs / 探针源文件");
+            return;
+        }
+
+        string CodeOf(string path) => string.Join("\n",
+            File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("//") && !l.TrimStart().StartsWith("*")));
+        var d = CodeOf(disp);
+        var m = CodeOf(main);
+
+        Assert("枚举确实有缓存，且缓存被 TTL 兜住（不是无限期常驻）",
+            d.Contains("private static IReadOnlyList<DisplayInfo>? s_cache")
+            && Regex.IsMatch(d, @"CacheTtlMs\s*=\s*\d+") && d.Contains("Environment.TickCount64 - s_cacheTick"),
+            "没有 TTL 就等于：任何没发消息的变更都永久陈旧");
+        Assert("未缓存入口存在且真的直连原始枚举（不是又转回缓存）",
+            d.Contains("EnumerateDisplaysUncached() => EnumerateDisplaysCore()"));
+        Assert("失效方法同时清掉表与时间戳（只清一个会留下旧时间戳把 TTL 判成未过期）",
+            d.Contains("s_cache = null; s_cacheTick = 0"));
+
+        // 失效接线：必须与 ICC 缓存、WGC 会话同处，且在 HandleDisplayChangeAsync 之内
+        var handler = Regex.Match(m, @"private async Task HandleDisplayChangeAsync\(\)[\s\S]{0,1200}?\n    \}");
+        Assert("换屏/改设置的处理里，枚举缓存与 ICC 缓存、WGC 会话一起失效",
+            handler.Success
+            && handler.Value.Contains("ColorProfileProvider.InvalidateCache()")
+            && handler.Value.Contains("DisplayEnumerator.InvalidateCache()")
+            && handler.Value.Contains("InvalidateSessions()"),
+            handler.Success ? "三者缺一即口径分叉" : "没匹配到 HandleDisplayChangeAsync 方法体");
+        Assert("枚举缓存不靠别处隐式过期（只有这一处失效点，别再加第二份口径）",
+            Regex.Matches(m, @"DisplayEnumerator\.InvalidateCache\(\)").Count == 1);
+
+        Assert("诊断/自检走未缓存入口（刚改过显示状态，读缓存等于测旧世界）",
+            !CodeOf(probe).Contains("DisplayEnumerator.EnumerateDisplays()")
+            && CodeOf(probe).Contains("EnumerateDisplaysUncached()")
+            && !CodeOf(sem).Contains("DisplayEnumerator.EnumerateDisplays()")
+            && CodeOf(sem).Contains("EnumerateDisplaysUncached()"));
+
+        // 运行侧：接线在文本里对上还不够，缓存真命中/真失效要用同一把尺子量一次。
+        var e1 = DEnum.EnumerateDisplays();
+        var e2 = DEnum.EnumerateDisplays();
+        Assert($"连续两次枚举命中同一份缓存（否则同拍内仍是 {e1.Count} 次真枚举）", ReferenceEquals(e1, e2));
+        DEnum.InvalidateCache();
+        var e3 = DEnum.EnumerateDisplays();
+        Assert("InvalidateCache 后重新枚举（失效不是空话）", !ReferenceEquals(e1, e3));
+    }
+
+    /// <summary>
+    /// 2026-10-29 A 批四处省时的接线判据（每条各咬一种"改回去还是绿的"退化）。
+    /// <para>这些点都在 App 侧或纯吞吐路径上，产物字节不变 ⇒ 功能测试对它们天然无感：
+    /// 有人把中转帧改回全量编码、或把分带并行改回串行，套件照样全绿而耗时翻倍。
+    /// 所以这里只钉"接线形态 + 关键纪律"，运行侧的耗时与逐字节一致性由
+    /// UsabilityTests / ColorPipelineTests 的产物判据负责。</para>
+    /// </summary>
+    static void Test_PerfWiring_A1A2A4A5()
+    {
+        var anim = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "AnimationRecorder.cs"));
+        var png = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ManagedPngEncoder.cs"));
+        var sec = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SecretStore.cs"));
+        if (anim is null || png is null || sec is null)
+        {
+            Skip("A 批省时接线", "未找到 AnimationRecorder / ManagedPngEncoder / SecretStore");
+            return;
+        }
+
+        string CodeOf(string path) => string.Join("\n",
+            File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("//") && !l.TrimStart().StartsWith("*")));
+        var a = CodeOf(anim);
+        var p = CodeOf(png);
+        var s = CodeOf(sec);
+
+        // ── A1：动图中间帧只是 ffmpeg 的入口，压缩率毫无意义；单帧回退是交付物，不许一起改掉 ──
+        var frameLoop = Regex.Match(a, @"for \(int i = 0; i < _encodedFrames\.Count; i\+\+\)[\s\S]{0,700}");
+        Assert("动图中间帧走 EncodeFast（Filter=None+Fastest）",
+            frameLoop.Success && frameLoop.Value.Contains("ManagedPngEncoder.EncodeFast("),
+            frameLoop.Success ? "循环里没找到 EncodeFast" : "没匹配到中间帧循环（改形的话本判据就瞎了）");
+        Assert("ffmpeg 不可用时的单帧回退仍是全量 Encode（那是产物，不是中转）",
+            a.Contains("ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 8)"),
+            "4K 单帧实测 448~536ms vs 55~63ms；把回退也改成 Fastest 会白丢压缩率");
+
+        // ── A2：8-bit 扫描线必须与 16-bit 一样分带并行，且不许留 h 次行分配 ──
+        // 判据先把【8-bit 那一个方法体】切出来再判，不用"签名往后找 2600 字符"那种窗口：
+        // 窗口法一旦有人往方法体里加几十行就静默失效（找不着 = 判据瞎）。
+        // 切片身份用体内独有的 `outDepth == 8` 分支来验 —— 16-bit 那个方法没有这条分支。
+        var m8 = Regex.Match(p,
+            @"private static byte\[\] BuildRawScanlines\(byte\[\] bgra, int w, int h, int outDepth\)([\s\S]*?)\n    \}\n");
+        Assert("切得出 8-bit BuildRawScanlines 方法体（切不出=判据自己瞎了，不许当通过）",
+            m8.Success, "8-bit 方法签名或缩进被改动，本判据无法定位方法体");
+        var b8 = m8.Success ? m8.Groups[1].Value : "";
+        // 切片身份：这块体必须是【8-bit 那一个】。`BuildRawScanlines` 是 `BuildRawScanlines16`
+        // 的前缀，只按名字切会切到 16-bit 头上（它本来就并行 ⇒ 判据恒绿）。
+        Assert("切到的确实是 8-bit 方法（体内有 outDepth==8 那条分支，16-bit 没有）",
+            b8.Contains("outDepth == 8"));
+        Assert("8-bit BuildRawScanlines 内部是分带并行（滤波只依赖上一行原始字节，带间独立）",
+            b8.Contains("Parallel.For(0, bandCount") && b8.Contains("bandPrev[b] ?? new byte[rowBytes]"));
+        Assert("8-bit 方法体内没有串行整帧滤波循环，也不再为每行分配 byte[rowBytes]",
+            !Regex.IsMatch(b8, @"for \(int y = 0; y < h; y\+\+\)") && !b8.Contains("rgbaRows"));
+
+        // ── A4：录制取帧复用缓冲，但所有权纪律必须写全 ──
+        Assert("录制取帧把复用缓冲交给 WGC（静态画面不再每 tick 新分配一整帧）",
+            a.Contains("TryGetLatestFrame(displayInfo.MonitorHandle, scratch)"));
+        Assert("变化帧（入队或丢弃）后 scratch 归 null —— 那块已被 last/编码端引用，复用=last 与自己比",
+            Regex.IsMatch(a, @"last = pixels;\s*[\s\S]{0,240}?scratch = null;"));
+        Assert("反向钉：变化分支里不许出现 scratch = pixels（那会让 last 与 scratch 同块，后续帧恒判无变化）",
+            !Regex.IsMatch(a, @"scratch = pixels;[\s\S]{0,200}?last = pixels;"));
+
+        // ── A5：凭据值未变不重加密、不重写盘 ──
+        Assert("SecretStore.Set 在值未变时短路（每次存设置原本会白做两次 DPAPI + 两次写盘）",
+            Regex.IsMatch(s, @"public static void Set\(string key, string value\)[\s\S]{0,320}?"
+                + @"if \(dict\.TryGetValue\(key, out var current\) && current == value\) return;"));
+    }
+
+    /// <summary>
+    /// PNG / TIFF 纳入「压缩强度」档位的接线判据（2026-10-29，用户点名"编码速度相对过慢的几个给档位"，
+    /// 同日把菜单定成两组：PNG / TIFF / WebP / JPEG LI 两档，AVIF / JPEG XL 三档）。
+    /// <para>这一批改动的产物副作用面很大（默认档一改，所有没动过设置的人的 PNG/TIFF 字节都变），
+    /// 所以判据重点在**接线形态**：档位必须真的走到 deflate，而"不该受档位影响"的那些出口
+    /// （中转文件、保底 PNG、诊断件、测试夹具）必须一个都没被牵连。</para>
+    /// <para>各条各咬一种退化：漏传一个产物站点 = 那个格式的档位静默无效；
+    /// 编码器默认参数写成 Balanced = 所有不传档位的调用点（含测试夹具）产物一起变；
+    /// Localization 少加一个下拉 = 英文界面里那几项还是中文（可视树扫不到 Collapsed 卡片）；
+    /// 两档下拉里漏改成一格 = 该格式有一个档位选了没地方显示、或一个界面里没有的值能进配置。</para>
+    /// </summary>
+    static void Test_PerfWiring_PngTiffEffortTiers()
+    {
+        var enc = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"));
+        var png = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ManagedPngEncoder.cs"));
+        var tiff = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ManagedTiffEncoder.cs"));
+        var pipe = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
+        var model = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "AppSettingsData.cs"));
+        var mw = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var st = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Settings.cs"));
+        var loc = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Localization.cs"));
+        if (enc is null || png is null || tiff is null || pipe is null || model is null
+            || mw is null || st is null || loc is null)
+        { Skip("PNG/TIFF 档位接线", "未找到编码管线或设置侧源文件"); return; }
+
+        string CodeOf(string path) => string.Join("\n",
+            File.ReadAllLines(path).Where(l => !l.TrimStart().StartsWith("//") && !l.TrimStart().StartsWith("*")));
+        var e = CodeOf(enc); var p = CodeOf(png); var t = CodeOf(tiff);
+
+        // ── ① 六个产物站点必须把档位交给编码器 ──
+        // 按"行"切而不是数子串：`effort: s.Effort` 这个字样在 JXL/AVIF 那几条上本来就有，
+        // 只数它就成了恒绿（首版就数到 9 还"通过"）。这里只收 PNG/TIFF 的调用行，
+        // 并显式排掉两类不该带档位的：中转（fastest: true）与保底 PNG（pngPath，见 ①b）。
+        var prodLines = e.Split('\n').Where(l =>
+                (l.Contains("ManagedPngEncoder.Encode(") || l.Contains("ManagedPngEncoder.Encode16(")
+                 || l.Contains("ManagedTiffEncoder.Encode("))
+                && !l.Contains("fastest: true") && !l.Contains("pngPath"))
+            .ToList();
+        int withEffort = prodLines.Count(l => l.Contains("effort: s.Effort"));
+        Assert("PNG/TIFF 的每一个产物站点都把 s.Effort 交给编码器（应是 6 条：PNG 3 + TIFF 3）",
+            prodLines.Count == 6 && withEffort == 6,
+            $"{withEffort}/{prodLines.Count} 条带档位；没带的："
+            + string.Join(" | ", prodLines.Where(l => !l.Contains("effort: s.Effort")).Select(l => l.Trim()).Take(3)));
+
+        // ── ①b 保底 PNG 刻意【不】跟档位 ──
+        // 走到这里说明用户选的是别的格式（AVIF/JXL/…）而它这次编码失败，那张 PNG 是救急件，
+        // 此刻不存在"用户的 PNG 档位"；把当前格式的档位挪到 PNG 的 deflate 上是一次跨格式借用，
+        // 语义没人承诺过。⇒ 恒走编码器默认（Smallest = 改动前的字节），保底产物不变。
+        var lastResort = e.Split('\n').Where(l => l.Contains("ManagedPngEncoder.Encode(") && l.Contains("pngPath")).ToList();
+        Assert("保底 PNG 仍不接档位（正向对照：那一条确实存在）",
+            lastResort.Count == 1 && !lastResort[0].Contains("effort:"),
+            $"数到 {lastResort.Count} 条保底 PNG 出口");
+
+        // ── ② 中转出口不许被档位牵连：它们要的是"最快"，与用户档位无关 ──
+        var fastestLines = e.Split('\n').Where(l => l.Contains("fastest: true")).ToList();
+        Assert("中转用的 Encode16(fastest: true) 站点存在（找不到 = 本判据瞎了）",
+            fastestLines.Count >= 2, $"只数到 {fastestLines.Count} 处");
+        Assert("中转站点一律不带用户档位（那是用完即删的入口，压缩率毫无意义）",
+            fastestLines.All(l => !l.Contains("effort:")),
+            "有中转站点被顺手接上了档位：" + fastestLines.FirstOrDefault(l => l.Contains("effort:"))?
+                .Trim());
+
+        // ── ③ 编码器入口：默认必须是 Smallest（= 改动前硬编码值），且不再有第二处硬编码档位 ──
+        // 缺席断言（硬编码没了）的正向活体证明 = 同一份文件里能找到映射函数调用。
+        Assert("PNG 编码器的 4 个入口默认 Smallest（不传档位的调用点产物逐字节不变）",
+            CountOf(p, "CompressionEffort effort = CompressionEffort.Smallest") == 4,
+            $"数到 {CountOf(p, "CompressionEffort effort = CompressionEffort.Smallest")} 处");
+        Assert("TIFF 编码器的 2 个入口默认 Smallest",
+            CountOf(t, "CompressionEffort effort = CompressionEffort.Smallest") == 2,
+            $"数到 {CountOf(t, "CompressionEffort effort = CompressionEffort.Smallest")} 处");
+        Assert("两个编码器都不再硬写 SmallestSize（正向对照：档位唯一取自映射函数）",
+            !p.Contains("CompressionLevel.SmallestSize") && p.Contains("PngTiffDeflateLevel(effort)")
+            && !t.Contains("CompressionLevel.SmallestSize") && t.Contains("PngTiffDeflateLevel(effort)"),
+            "仍残留硬编码档位，或映射函数没被调用");
+
+        // ── ④ 设置侧：字段默认、下拉格数、管线按格式读、界面接线，以及"两处默认值事实源必须同源" ──
+        // 默认档与格数的分布是 2026-10-29 用户逐条点定的（PNG/TIFF/WebP/JPEG LI = 两档、默认那格显示
+        // 「均衡」但 Tag 仍是 Smallest=拉满；
+        // AVIF/JXL = 三档、默认均衡）。
+        // 差集序列化不会把"等于默认"的键写进文件 ⇒ 这里的默认值对老用户真的生效，
+        // 所以"字段默认 == 下拉 IsSelected"这条对撞不是形式：不一致时界面显示一档、实际跑另一档。
+        // nTiers 那一列同样不是形式：两档下拉多出/少掉一格，白名单与配置文件的值域就与界面不一致，
+        // 而那在运行期的表现是"下拉空白"或"选了没用的档"，不会报错。
+        var m = CodeOf(model);
+        var xm = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"))!);
+        var wantDefault = new (string Cbo, string Field, string Tier, int NTiers)[]
+        {
+            ("EffortPngCbo",     "EffortPng",     "Smallest", 2),
+            ("EffortTiffCbo",    "EffortTiff",    "Smallest", 2),
+            ("EffortWebpCbo",    "EffortWebp",    "Smallest", 2),
+            ("EffortJpegLiCbo",  "EffortJpegLi",  "Smallest", 2),
+            ("EffortAvifCbo",    "EffortAvif",    "Balanced", 3),
+            ("EffortJpegXlCbo",  "EffortJpegXl",  "Balanced", 3),
+        };
+        foreach (var (cbo, field, tier, nTiers) in wantDefault)
+        {
+            int at = xm.IndexOf($@"x:Name=""{cbo}""", StringComparison.Ordinal);
+            string blk = at < 0 ? "" : xm[at..xm.IndexOf("</ComboBox>", at, StringComparison.Ordinal)];
+            var sel = Regex.Match(blk, @"Tag=""(\w+)""[^>]*IsSelected=""True""");
+            var fld = Regex.Match(m, $@"public string {field} \{{ get; set; \}} = ""(\w+)""");
+            int items = Regex.Matches(blk, @"<ComboBoxItem ").Count;
+            Assert($"{field}: 下拉有 {nTiers} 格（用户点定的菜单形状）", items == nTiers, $"实得 {items}");
+            Assert($"{field}: 字段默认与下拉 IsSelected 同源，且落在用户点的 {tier} 档",
+                sel.Success && fld.Success && sel.Groups[1].Value == fld.Groups[1].Value
+                && fld.Groups[1].Value == tier,
+                $"IsSelected={(sel.Success ? sel.Groups[1].Value : "无")} / 字段默认={(fld.Success ? fld.Groups[1].Value : "解析不到")}");
+        }
+        // ── ④b 逐档点名：每个下拉的【每一格】都必须被 Localization 按 Tag 改写 ──
+        // 为什么不能只像以前那样"确认这个下拉出现在某个清单里"：两档与三档两组用的是不同的 Tag 集合
+        // （Smallest+Quick vs Smallest+Balanced+Fastest），而卡片默认 Collapsed ⇒ 项不在可视树里、
+        // 扫描器扫不到。漏掉任何一格的表现都是"英文界面里那一项还是中文"，安静且不影响功能。
+        // 于是这里把"下拉里的 Tag 集合"与"Localization 那一段里 SetComboItemText 的 Tag 集合"
+        // 直接对撞，两组都不许有差集。
+        var lcc = CodeOf(loc);
+        var locLoops = Regex.Matches(lcc, @"foreach \(var effortCbo in new\[\] \{([^}]*)\}\)\s*\{([\s\S]*?)\n        \}");
+        Assert($"压缩强度下拉的逐 Tag 点名循环解析到 2 组（实得 {locLoops.Count}：两档组 + 三档组）",
+            locLoops.Count == 2,
+            "组数变了说明本轮的两档/三档拆分没落地 ⇒ 下面的对撞会退化成什么都查不到，必须让它红");
+        var localizedByCbo = new Dictionary<string, HashSet<string>>();
+        foreach (Match lp in locLoops)
+        {
+            var cbos = lp.Groups[1].Value.Split(',')
+                .Select(x => x.Trim())
+                .Where(x => x.StartsWith("Effort", StringComparison.Ordinal) && x.EndsWith("Cbo", StringComparison.Ordinal))
+                .ToList();
+            var tagSet = Regex.Matches(lp.Groups[2].Value, @"SetComboItemText\(effortCbo,\s*""(\w+)""")
+                             .Select(x => x.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+            Assert($"点名循环里那 {cbos.Count} 个下拉各有一组 Tag（Tag 集合 = [{string.Join(",", tagSet)}]）",
+                cbos.Count > 0 && tagSet.Count > 0, "循环体里没解析到 SetComboItemText ⇒ 本判据已瞎");
+            foreach (var c in cbos)
+            {
+                // 不能用 localizedByCbo[c] ??= …：索引器对【缺失的键】直接抛 KeyNotFoundException，
+                // ??= 只处理"值为 null"，不处理"键不存在"。首次运行就是被这一条撞停在半路。
+                if (!localizedByCbo.TryGetValue(c, out var acc))
+                    localizedByCbo[c] = acc = new HashSet<string>(StringComparer.Ordinal);
+                acc.UnionWith(tagSet);
+            }
+        }
+        foreach (var (cbo, _, _, nTiers) in wantDefault)
+        {
+            int at = xm.IndexOf($@"x:Name=""{cbo}""", StringComparison.Ordinal);
+            string blk = at < 0 ? "" : xm[at..xm.IndexOf("</ComboBox>", at, StringComparison.Ordinal)];
+            var xamlTags = Regex.Matches(blk, @"<ComboBoxItem Tag=""(\w+)""").Select(x => x.Groups[1].Value)
+                                .ToHashSet(StringComparer.Ordinal);
+            var locTags = localizedByCbo.TryGetValue(cbo, out var s) ? s : new HashSet<string>(StringComparer.Ordinal);
+            Assert($"{cbo}: Localization 点名的 Tag [{string.Join(",", locTags.OrderBy(x => x))}] "
+                   + $"== 下拉里的 Tag [{string.Join(",", xamlTags.OrderBy(x => x))}]",
+                xamlTags.Count == nTiers && locTags.SetEquals(xamlTags),
+                locTags.Count == 0 ? "这个下拉根本不在任何点名循环里（英文界面会留中文）"
+                                   : $"差集：只在 XAML {string.Join(",", xamlTags.Except(locTags))} / 只在 Localization {string.Join(",", locTags.Except(xamlTags))}");
+        }
+        var pp = CodeOf(pipe);
+        Assert("编码管线按格式读这两个字段（写成别的字段=界面改了不生效）",
+            pp.Contains("OutputFormat.PNG => CompressionEffortMap.Parse(s.EffortPng)")
+            && pp.Contains("OutputFormat.TIFF => CompressionEffortMap.Parse(s.EffortTiff)"));
+        var mwc = CodeOf(mw);
+        Assert("界面写回这两个字段",
+            mwc.Contains("_settings.EffortPng = tag") && mwc.Contains("_settings.EffortTiff = tag"));
+        var stc = CodeOf(st);
+        Assert("载入时回填这两个下拉（缺一个=重启后界面落回 XAML 的默认，而不是用户的档）",
+            stc.Contains("SetComboByTag(EffortPngCbo, _settings.EffortPng)")
+            && stc.Contains("SetComboByTag(EffortTiffCbo, _settings.EffortTiff)"));
+
+        // ── ⑤ 行为级：四个档位解出来的扫描线必须逐字节相同 ──
+        // 上面四条钉的是"接线在不在"，这条钉的是承诺本身：档位只改 deflate 的搜索强度，
+        // 不改像素、不改行滤波的选择 ⇒ 滤波后的 raw（解压 IDAT 得到）在各档之间必须一模一样。
+        // 若哪天有人把档位与滤波器选择绑在一起（"最快档就只试 Sub"），这条会立刻红。
+        // ⚠ 走【全枚举】而不是写死三个名字：Quick 是 2026-10-29 加的，写死的清单会漏掉它，
+        //   而"界面有那一格、判据从没编码过那一格"正是这类判据最安静的一种坏法。
+        var dir = Path.Combine(Path.GetTempPath(), "ttc_png_tier_judge");
+        Directory.CreateDirectory(dir);
+        int tw = 256, th = 257;                     // 不整除的行列 + ~263KB raw：小到毫秒级，
+        // 又大到各档的产物体积一定分得开（几十像素的平图各档可能字节数完全相同 ⇒ 下面那条"分得开"会恒红或恒绿得没意义）
+        var src = new byte[tw * th * 4];
+        var rr = new Random(20261029);
+        for (int i = 0; i < src.Length; i += 4)
+        {
+            src[i] = (byte)rr.Next(256); src[i + 1] = (byte)(i / 4 % 256);
+            src[i + 2] = (byte)(i / 4 / tw); src[i + 3] = 255;
+        }
+        byte[]? RawOf(string f)
+        {
+            var bytes = File.ReadAllBytes(f);
+            using var ms = new MemoryStream();
+            for (int i = 8; i + 12 <= bytes.Length;)
+            {
+                int len = (bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3];
+                string type = System.Text.Encoding.ASCII.GetString(bytes, i + 4, 4);
+                if (type == "IDAT") ms.Write(bytes, i + 8, len);
+                if (type == "IEND") break;
+                i += 12 + len;
+            }
+            using var zin = new System.IO.Compression.ZLibStream(new MemoryStream(ms.ToArray()),
+                System.IO.Compression.CompressionMode.Decompress);
+            using var raw = new MemoryStream();
+            zin.CopyTo(raw);
+            return raw.ToArray();
+        }
+        var eff = System.Enum.GetValues<CompressionEffort>();
+        var raws = eff.Select(tier =>
+        {
+            var f = Path.Combine(dir, $"raw_{tier}.png");
+            ManagedPngEncoder.Encode(src, tw, th, f, 8, null, null, tier);
+            return new { File = f, Tier = tier, Len = new FileInfo(f).Length, Raw = RawOf(f) };
+        }).ToList();
+        Assert($"PNG 的四档（{string.Join("/", eff)}）都能被读回并解出 IDAT（解不出 = 产物坏，不是判据宽松）",
+            raws.Count == 4 && raws.All(r => r.Raw!.Length == th * (1 + tw * 4) && r.Len > 100),
+            string.Join(" | ", raws.Select(r => $"{r.Tier}:{r.Raw?.Length}B")));
+        Assert("四档解出的扫描线逐字节相同（档位只改压缩，不改像素与行滤波选择）",
+            raws.All(r => r.Raw!.SequenceEqual(raws[0].Raw!)));
+        // 上一条的活体证明：各档产物【体积】必须真的分得开 —— 否则"逐字节相同"可能只是因为
+        // 档位根本没落地、几个文件一模一样。把 effort 摘掉再跑，这条会红。
+        // 分两组说，因为它们的分量不同：
+        //   · Smallest vs Quick 是 PNG/TIFF 下拉里【仅有的两格】，它们相等 = 这个格式的档位整条是装饰；
+        //   · 四档全互不相同是更强的版本，防的是"某一格塌进另一格"（Quick 与 Balanced 撞车之类）。
+        var lenOf = raws.ToDictionary(r => r.Tier, r => r.Len);
+        Assert("Smallest 与 Quick 的产物体积不同（这两格就是 PNG/TIFF 界面的全部菜单；相同=档位整条无效）",
+            lenOf[CompressionEffort.Smallest] != lenOf[CompressionEffort.Quick],
+            $"两档同为 {lenOf[CompressionEffort.Quick]}B");
+        Assert("四档产物体积互不相同（档位确实逐格落到 deflate 上了）",
+            lenOf.Values.Distinct().Count() == 4,
+            string.Join(" / ", raws.Select(r => $"{r.Tier}:{r.Len}B")));
+        foreach (var r in raws) try { File.Delete(r.File); } catch { }
+        try { Directory.Delete(dir); } catch { }
+    }
+
+    /// <summary>
+    /// zlib <c>ZLibCompressionOptions{CompressionLevel=int}</c> 与旧 <c>CompressionLevel</c> 枚举
+    /// 在同一份输入上必须产出【逐字节相同】的流（2026-10-29）。
+    /// <para>为什么单独立一条：<c>PngTiffDeflateLevel</c> 的返回类型从枚举改成了 int（枚举表达不了
+    /// level 8），于是"Smallest 档 = 改动前那两个格式硬编码的 <c>CompressionLevel.SmallestSize</c>"
+    /// 这条承诺不再由类型系统保证 —— 它变成一个需要证据的断言：<c>options.CompressionLevel = 9</c>
+    /// 与 <c>CompressionLevel.SmallestSize</c> 必须产出同样的字节。</para>
+    /// <para>为什么在 deflate 原语上测而不只在 PNG 产物上测：PNG 那条路上还叠了滤波器选择与 IDAT
+    /// 分块，两处若同时改变会互相掩盖；原语这一层是"唯一变量 = level"的最干净切面。</para>
+    /// <para>⚠ 本运行时把 level <b>分桶</b>：实测 7 与 8 产物逐字节相同、5 与 6 相同。
+    /// 所以这里只钉可用的四个点 9/8/6/1，不去断言"9≠8≠7"那种不成立的关系。</para>
+    /// </summary>
+    static void Test_PerfWiring_DeflateOptionsEqualsEnum()
+    {
+        // 夹具比"一张真截图"更苛刻：混合"大面积平直 + 高频噪声 + 长游程"三种可压缩性，
+        // 因为 level 之间只差 deflate 的搜索强度（max_chain/max_lazy/good_length），
+        // 单一性质的内容可能搜到什么结果都一样 ⇒ 各档全等，判据就成了自证。
+        var buf = new byte[1 << 18];
+        var r = new Random(20261029);
+        for (int i = 0; i < buf.Length; i++)
+            buf[i] = (i % 997 < 900) ? (byte)(i >> 3) : (byte)r.Next(256);
+
+        byte[] ByOptions(int level)
+        {
+            using var ms = new MemoryStream();
+            var options = new System.IO.Compression.ZLibCompressionOptions { CompressionLevel = level };
+            using (var zs = new System.IO.Compression.ZLibStream(ms, options)) zs.Write(buf, 0, buf.Length);
+            return ms.ToArray();
+        }
+        byte[] ByEnum(System.IO.Compression.CompressionLevel e)
+        {
+            using var ms = new MemoryStream();
+            using (var zs = new System.IO.Compression.ZLibStream(ms, e)) zs.Write(buf, 0, buf.Length);
+            return ms.ToArray();
+        }
+
+        var pairs = new (string Name, int Level, System.IO.Compression.CompressionLevel EnumCase)[]
+        {
+            ("Smallest", CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Smallest),
+             System.IO.Compression.CompressionLevel.SmallestSize),
+            ("Balanced", CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Balanced),
+             System.IO.Compression.CompressionLevel.Optimal),
+            ("Fastest",  CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Fastest),
+             System.IO.Compression.CompressionLevel.Fastest),
+        };
+        foreach (var (name, level, enumCase) in pairs)
+        {
+            var a = ByOptions(level); var b = ByEnum(enumCase);
+            Assert($"deflate/options({level}) == 旧的枚举档 {enumCase} 逐字节相同（{name}：换 API 不改产物）",
+                a.SequenceEqual(b), $"options {a.Length}B vs enum {b.Length}B");
+        }
+
+        // 正控：Quick(level 8) 必须与 Smallest(9) 真的不同 —— 否则上面那三条"相同"
+        // 可能只是因为这条路上 level 根本不起作用，那整组断言就是空的。
+        var l9 = ByOptions(CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Smallest));
+        var l8 = ByOptions(CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Quick));
+        Assert("level 9 与 level 8 在本夹具上产出不同（证明'逐字节相同'那三条不是因为 level 无效）",
+            !l9.SequenceEqual(l8), $"9={l9.Length}B, 8={l8.Length}B 完全相同");
+    }
+
+    /// <summary>
+    /// 选区预览的文字图集必须【整张一次排版、一次读回】（2026-10-29 首帧延迟分解的落点锁）。
+    /// <para>为什么锁结构而不是锁耗时：真机 --preview-ui-probe 九扇窗读到 首建文字图集 排版 223–313ms／
+    /// 上传 5–25ms，而把每格 DrawText 整段跳过的变异跑仍读到 176–225ms ⇒ 贵的不是 DirectWrite 排版，
+    /// 是"每个格子一张 CanvasRenderTarget + 每格子一次 GetPixelBytes"这几十次 GPU 往返。
+    /// 改法只落在图集的 CPU 腿内部（2026-10-30 起那一段叫 BuildAtlasLayout）；谁把某一格退回单独渲染目标，
+    /// 首帧就退回 ~250ms，而界面看起来一模一样 ⇒ 只能用结构判据钉住。</para>
+    /// <para>三条判据互相咬合：①② 目标与读回各恰好一次（多了就是又开了一路）；
+    /// ③ 图集内不许再出现 RenderTextBitmap（那正是"一格一目标"的入口）；
+    /// ④ DrawSlot 的定义加调用共 8 处 —— 这一条同时是防"锚点没框住方法体"让 ①②③ 数到 0 而假绿；
+    /// ⑤⑥ 顺序：读回必须排在最后一次 DrawSlot 之后、文字图层预览并入之前（画完才读，读完才并）。</para>
+    /// </summary>
+    static void Test_PerfWiring_AtlasSingleRenderTarget()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        Assert("找到 HdrCaptureWindow.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        // 剥掉行注释再数：注释里点名了 CanvasRenderTarget / GetPixelBytes 这些符号本身，
+        // 不剥就会把"说明"数成"调用"（实测 1→2），判据红得莫名其妙。
+        var src = StripLineComments(ReadSourceNormalized(path));
+
+        int at = src.IndexOf("private AtlasLayout BuildAtlasLayout()", StringComparison.Ordinal);
+        int again = at < 0 ? -1 : src.IndexOf("private AtlasLayout BuildAtlasLayout()", at + 1, StringComparison.Ordinal);
+        Assert("图集 CPU 腿的实现唯一（第一处 " + at + "，第二处 " + again + "）", at >= 0 && again < 0,
+            "长出第二个排版实现 ⇒ 下面数的都是其中一张，另一张可以随便退回一格一目标");
+        if (at < 0 || again >= 0) return;
+        int bodyEnd = src.IndexOf("\n    }", at, StringComparison.Ordinal);
+        Assert("取到 BuildAtlasLayout 的方法体", bodyEnd > at);
+        if (bodyEnd <= at) return;
+        var body = src.Substring(at, bodyEnd - at);
+
+        int targets = CountOf(body, "new Microsoft.Graphics.Canvas.CanvasRenderTarget");
+        int readback = CountOf(body, "GetPixelBytes");
+        int perSlotRaster = CountOf(body, "RenderTextBitmap(");
+        int drawSlots = CountOf(body, "DrawSlot(");
+        Assert("整张图集只建一张渲染目标、只读回一次",
+            targets == 1 && readback == 1, $"CanvasRenderTarget={targets} 次、GetPixelBytes={readback} 次（都应为 1）");
+        Assert("图集排版里不再出现逐格 RenderTextBitmap（一格一目标就是首帧那 ~230ms）",
+            perSlotRaster == 0, $"命中 {perSlotRaster} 处");
+        Assert("DrawSlot 定义 + 调用共 8 处（锚点框住了方法体，上面的 0/1 不是空窗数出来的）",
+            drawSlots == 8, $"实得 {drawSlots} 处（1 定义 + 7 调用：主栏/标注栏/悬停标题/逐钮提示/静置提示/马赛克标签/下拉格）");
+        Assert("读回排在最后一次 DrawSlot 之后（先画完再读，否则读回的是空图）",
+            body.IndexOf("GetPixelBytes", StringComparison.Ordinal) > body.LastIndexOf("DrawSlot(", StringComparison.Ordinal));
+        Assert("文字图层预览在读回之后并入 CPU 缓冲（它要写进读回来的那张数组）",
+            body.LastIndexOf("pendingPreviews", StringComparison.Ordinal) > body.IndexOf("GetPixelBytes", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// 两条 WGC 线的池必须【先都建好、再等首帧】（2026-10-30 那条重叠改动的结构锁）。
+    /// <para>为什么只能锁顺序：本机冷路径实测 建SDR池 185 + 等SDR首帧 83 + 建HDR池 51 + 等HDR首帧 160
+    /// = 479ms。两个池都是 CreateFreeThreaded、投递各走自己的回调线程，所以只要 Float16 池在
+    /// 「等 SDR 首帧」之前就已建好，它那 51+160ms 就能盖进那 83ms 的等待里（下界 396ms）。
+    /// 收益 100% 长在"谁先谁后"上 —— 而顺序在产物里是【看不见】的：把它改回串行，
+    /// 截图照样对、探针照样绿、日志照样齐，只有真机每次多付 83ms ⇒ 必须锁位置。</para>
+    /// <para>三条锚点都要在场才允许比位置（缺任一条就判失败，不许在空索引 -1 上"比较大小"而假绿）；
+    /// 第二段再钉一次：尺寸校验与软冷却记账的先后不许被顺手挪走（那是 2026-09-15 / 09-19 两条修复的落点）。</para>
+    /// </summary>
+    static void Test_PerfWiring_WgcSessionsBuiltBeforeFirstFrameWait()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        Assert("找到 WgcCaptureService.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var src = StripLineComments(ReadSourceNormalized(path));
+
+        int at = src.IndexOf("private CaptureResult CaptureMonitorInternal", StringComparison.Ordinal);
+        Assert("取到单屏捕获主体 CaptureMonitorInternal", at >= 0);
+        if (at < 0) return;
+        int bodyEnd = src.IndexOf("\n    }", at, StringComparison.Ordinal);
+        Assert("取到主体方法体", bodyEnd > at);
+        if (bodyEnd <= at) return;
+        var body = src.Substring(at, bodyEnd - at);
+
+        int buildSdr = body.IndexOf("GetOrCreateSdrSession(", StringComparison.Ordinal);
+        int buildHdr = body.IndexOf("GetOrCreateHdrSession(", StringComparison.Ordinal);
+        int waitAny = body.IndexOf("WaitForFirstFrame(", StringComparison.Ordinal);
+        Assert($"三个锚点都在场（建SDR={buildSdr} 建HDR={buildHdr} 等首帧={waitAny}）",
+            buildSdr >= 0 && buildHdr >= 0 && waitAny >= 0,
+            "缺任一条 ⇒ 下面的顺序比较没有对象，不许在这种情况下判绿");
+        Assert("Float16 池的建立在【任何】等首帧之前（改回串行=每条冷路径多付 83ms，而产物/探针/日志三处都看不出来）",
+            buildSdr >= 0 && buildHdr >= 0 && waitAny >= 0
+                && buildSdr < buildHdr && buildHdr < waitAny,
+            $"实得顺序：建SDR@{buildSdr}、建HDR@{buildHdr}、等首帧@{waitAny} —— 要求严格递增");
+
+        int noteOutcome = body.IndexOf("NoteHdrAttemptOutcome(", StringComparison.Ordinal);
+        int sizeCheck = body.IndexOf("HDR 会话尺寸不匹配", StringComparison.Ordinal);
+        Assert("尺寸校验仍排在软冷却记账之前（重叠只许动建池/等帧的顺序，不许顺手挪走 09-15/09-19 那两条修复的位置）",
+            sizeCheck >= 0 && noteOutcome >= 0 && sizeCheck < noteOutcome,
+            $"尺寸不匹配={sizeCheck}、NoteHdrAttemptOutcome={noteOutcome}");
+    }
+
+    /// <summary>
+    /// 整帧 half→float 的两处读回都必须【按行并行】，且 Unmap 必须在 finally 里（2026-10-30）。
+    /// <para>依据的读数：本机 4K 孤立实测串行逐行 <b>31.4ms</b> → 按行并行 <b>6.0ms</b>
+    /// （<c>artifacts/readback_bench_2026-10-30.log</c>，预热 2 轮 + 5 轮取中位）。两处在
+    /// <c>WgcCaptureService</c>：一处是空闲期按需补读（截图路径每次走），一处是消费者窗口内的逐帧回读
+    /// （连拍时每秒十几次）—— 后一处更常走，两处必须同形，否则"更热的那条"反而是串行那份。</para>
+    /// <para>为什么顺带锁 finally：Map 与 Unmap 之间现在放的是一个能抛异常（越界/取消）的并行体，
+    /// 漏掉 Unmap 的那个 subresource 之后再 Map 会永久失败 ⇒ 该会话从此静默交不出像素。
+    /// 这类形状在本仓修过一次（<c>HdrCaptureWindow.UploadFrame</c> 里那句"异常路径也必须 Unmap"）。</para>
+    /// </summary>
+    static void Test_PerfWiring_HdrReadbackRowsAreParallel()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        Assert("找到 WgcCaptureService.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var src = StripLineComments(ReadSourceNormalized(path));
+
+        int hits = CountOf(src, "ConvertHalfToFloatRow(");
+        Assert($"整帧 half→float 的转换点仍是 2 处（实得 {hits}）", hits == 2,
+            "多了/少了转换点 ⇒ 下面那两个窗口的锚点已经不代表全部，先改这条锁再改代码");
+        if (hits != 2) return;
+
+        for (int i = src.IndexOf("ConvertHalfToFloatRow(", StringComparison.Ordinal);
+             i >= 0;
+             i = src.IndexOf("ConvertHalfToFloatRow(", i + 1, StringComparison.Ordinal))
+        {
+            // 往前看这一行是在谁的体内：并行体 = 最近的 Parallel.For(0, h, row =>
+            int par = src.LastIndexOf("Parallel.For(0, h, row =>", i, StringComparison.Ordinal);
+            int serial = src.LastIndexOf("for (int row = 0; row < h; row++)", i, StringComparison.Ordinal);
+            Assert($"转换点 @{i} 走在按行并行里（Parallel.For 命中 {par}，串行残留 {serial}）",
+                par >= 0 && (serial < 0 || serial < par),
+                "这一处又变回逐行串行 ⇒ 每次截图/每帧白付 ~25ms");
+
+            // 往后看 Unmap 是否被 finally 兜住（并行体能抛，Map/Unmap 配对断了就是会话静默交不出像素）
+            int window = Math.Min(src.Length, i + 1200);
+            int unmap = src.IndexOf("ctx.Unmap(", i, StringComparison.Ordinal);
+            int fin = unmap < 0 ? -1 : src.LastIndexOf("finally", unmap, StringComparison.Ordinal);
+            Assert($"转换点 @{i} 之后的 Unmap 在 finally 里（Unmap={unmap}、它前面最近的 finally={fin}）",
+                unmap >= 0 && unmap < window && fin > i,
+                "Map 与 Unmap 之间放着能抛异常的并行体，却没有 finally ⇒ 该 subresource 之后永久 Map 失败");
+        }
+    }
+
+    /// <summary>
+    /// 标注文字位图缓存必须是"有界 + 会逐出"，不是"满了就不写"（2026-10-30 那条缺陷的形状锁）。
+    /// <para>旧写法 <c>if (s_textCache.Count &lt; 256) s_textCache[key] = result;</c> 看着像防无界增长，
+    /// 实际是：到 256 条后这一句永远不成立 ⇒ 既不逐出也不入库，而读侧那句 TryGetValue 于是恒 miss
+    /// ⇒ 之后每一次文字光栅化都重画。它坏在"缓存静默失效"这一侧，产物完全正确、界面看不出任何异常，
+    /// 所以只能在源码形状上钉。</para>
+    /// <para>四条各管一件事：① 上限常量只有一处定义（防"把 256 抄第二遍然后各改各的"）；
+    /// ② 写入这一句不再被"没满"挡着；③ 满了要有真的逐出动作；④ 读侧仍在这一个方法里查缓存
+    /// —— ②③ 单独成立都可能被绕过（只清空不写回 = 永远空表），所以咬在一起判。</para>
+    /// </summary>
+    static void Test_PerfWiring_AnnoTextCacheEvictsInsteadOfStopsWriting()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "AnnotationRasterizer.cs"));
+        Assert("找到 AnnotationRasterizer.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var src = StripLineComments(ReadSourceNormalized(path));
+
+        int capDefs = CountOf(src, "private const int TextCacheCap");
+        Assert($"缓存上限只有一处定义（实得 {capDefs}）", capDefs == 1,
+            "两处以上的 256 ⇒ 判据与上限迟早分家");
+
+        int at = src.IndexOf("public static (byte[] Bgra, int W, int H)? RasterizeText(", StringComparison.Ordinal);
+        Assert("取到文字光栅化主体 RasterizeText", at >= 0);
+        if (at < 0) return;
+        int bodyEnd = src.IndexOf("\n    }", at, StringComparison.Ordinal);
+        Assert("取到 RasterizeText 的方法体", bodyEnd > at);
+        if (bodyEnd <= at) return;
+        var body = src.Substring(at, bodyEnd - at);
+
+        Assert("读侧仍在同一方法里查缓存（否则写入再怎么改也不构成缓存）",
+            CountOf(body, "s_textCache.TryGetValue(key, out var cached)") == 1);
+        Assert("写入不再被\"没满\"挡着（旧形状 = 到 256 条后永久恒 miss）",
+            CountOf(body, "s_textCache[key] = result;") == 1
+            && body.IndexOf("if (s_textCache.Count <") < 0,
+            $"命中 if (s_textCache.Count < …：{CountOf(body, "if (s_textCache.Count <")} 处");
+        Assert("满了有真逐出（整张清空），且上限取自那唯一一处常量",
+            CountOf(body, "s_textCache.Clear()") == 1
+            && CountOf(body, "s_textCache.Count >= TextCacheCap") == 1);
+        Assert("清账排在写回之前（先逐出、后入库，反过来的话这一条永远进不了表）",
+            body.IndexOf("s_textCache.Clear()", StringComparison.Ordinal)
+            < body.IndexOf("s_textCache[key] = result;", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// 没拿到过帧的 WGC 会话不许把"帧龄"算成开机以来的毫秒数（2026-10-30 那条读数的形状锁）。
+    /// <para><c>_frameTimestamp</c> 初始值 0、只在帧回调里赋值 ⇒ 旧的无条件
+    /// <c>TickCount64 - _frameTimestamp</c> 在无帧会话上回吐 67813432ms 这种数，而日志同时写着
+    /// <c>HasFrame=False</c>。排障时"没有帧"与"帧很旧"是两条相反的处置路径 ⇒ 判据锁三处：
+    /// ① GetFrameAge 体内先看 _hasFrame；② 池状态那一行不再无条件拼 <c>}ms</c>，无帧要写"无帧"；
+    /// ③ 探针那条路（ProbeFrameAgeMs）仍自己挡无帧 —— 它把返回值当真实毫秒数用，收到 -1 会当成"帧龄 -1ms"。</para>
+    /// </summary>
+    static void Test_PerfWiring_FrameAgeGuardedByHasFrame()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        Assert("找到 WgcCaptureService.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var src = StripLineComments(ReadSourceNormalized(path));
+
+        int at = src.IndexOf("public long GetFrameAge()", StringComparison.Ordinal);
+        Assert("取到帧龄读数 GetFrameAge", at >= 0);
+        if (at < 0) return;
+        int bodyEnd = src.IndexOf("\n        }", at, StringComparison.Ordinal);
+        Assert("取到 GetFrameAge 的方法体", bodyEnd > at);
+        if (bodyEnd <= at) return;
+        var body = src.Substring(at, bodyEnd - at);
+
+        int guard = body.IndexOf("if (!_hasFrame)", StringComparison.Ordinal);
+        int calc = body.IndexOf("Environment.TickCount64 - _frameTimestamp", StringComparison.Ordinal);
+        Assert($"无帧先返回哨兵，再做减法（哨兵 @{guard}、减法 @{calc}）",
+            guard >= 0 && calc >= 0 && guard < calc,
+            "减法跑在 _hasFrame 判定之前 ⇒ 无帧会话读出的是开机毫秒数");
+        Assert("哨兵是负数而不是 0（0 会被读成\"帧很新\"，与\"没有帧\"同样误导）",
+            body.IndexOf("return -1;", StringComparison.Ordinal) >= 0);
+
+        int naked = CountOf(src, "GetFrameAge()}ms");
+        Assert($"日志里不再无条件把帧龄拼成毫秒数（实得 {naked} 处）", naked == 0,
+            "HasFrame=False 与 Age=<开机毫秒数> 同出一行就是这次那条读数");
+        Assert("池状态那一行对无帧有明确写法", src.Contains("Age=无帧", StringComparison.Ordinal));
+
+        int probe = src.IndexOf("internal long? ProbeFrameAgeMs", StringComparison.Ordinal);
+        Assert("探针读数入口仍在场", probe >= 0);
+        if (probe >= 0)
+        {
+            string probeWindow = src.Substring(probe, Math.Min(420, src.Length - probe));
+            Assert("探针自己挡无帧（它把返回的值当真实毫秒数用，不能让 -1 混进去）",
+                probeWindow.Contains("!s.HasFrame", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// 跨设备共享槽（路线 B 的交接物）的五条契约（2026-10-30，`--frame-handoff-probe` 实测通过后的落锁）。
+    /// <para>背景：预览窗要用自己的 D3D 设备直接采样捕获侧的 GPU 快照，前提是交给它的那块纹理
+    /// 【在用户框选期间不被后续帧改写】。本机实测的形状是：取走 ⇒ 连截 3 次同一块纹理内容不变（冻结），
+    /// 交还 ⇒ 下一帧恢复更新。这四条都"编译得过、界面也正常"，错了只在用户眼前换画面，
+    /// 所以必须锁源码形状而不是只靠探针跑一遍。</para>
+    /// <para>① <c>MiscFlags</c> 必须 <c>Shared | SharedNTHandle</c>：普通 <c>Shared</c> 走的是 DXGI 1.0 的
+    /// <c>IDXGIResource::GetSharedHandle</c>，拿它去 <c>IDXGIResource1::CreateSharedHandle</c> 恒 E_INVALIDARG。
+    /// 这条是本轮唯一一次"三次实测才定位"的坑（desc 回读 Misc=Shared 照样红、裸 vtable + attrs=null 也红），
+    /// 所以单独钉死 —— 谁把它改回 <c>Shared</c>，运行期就是"共享槽取不到"，而编译与界面都不报。</para>
+    /// <para>② 消费侧必须 <c>OpenSharedResource1</c>（NTHANDLE 不认旧的 <c>OpenSharedResource</c>）。
+    /// ③ 冻结：更新函数第一句必须"被取走就返回"。
+    /// ④ 上一任没交还时必须换一块新纹理，不许覆写别人手里那块（P0-C 撕裂的同型事故）。
+    /// ⑤ 会话 Dispose 时要连句柄一起收（CloseHandle + 弃纹理），否则每次重建设备都漏一个内核句柄。</para>
+    /// </summary>
+    static void Test_PerfWiring_SharedFrameSlotContract()
+    {
+        var svc = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        var probe = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "FrameHandoffProbe.cs"));
+        Assert("找到 WgcCaptureService.cs 与 FrameHandoffProbe.cs（缺一=本条失明）", svc is not null && probe is not null);
+        if (svc is null || probe is null) return;
+        var src = StripLineComments(ReadSourceNormalized(svc));
+        var prb = StripLineComments(ReadSourceNormalized(probe));
+
+        Assert($"① 共享槽纹理只用 Shared|SharedNTHandle（实得 {CountOf(src, "MiscFlags = ResourceOptionFlags.Shared | ResourceOptionFlags.SharedNTHandle")} 处）",
+            CountOf(src, "MiscFlags = ResourceOptionFlags.Shared | ResourceOptionFlags.SharedNTHandle") == 1
+            && CountOf(src, "MiscFlags = ResourceOptionFlags.Shared,") == 0,
+            "改回普通 Shared ⇒ CreateSharedHandle 恒 E_INVALIDARG，运行期表现只是\"共享槽取不到\"，编译与界面都不报");
+        Assert("① 探针也按同一条形状自检（两处都改才对得上；只改产品=自检变成另一件事）",
+            CountOf(prb, "MiscFlags = ResourceOptionFlags.Shared | ResourceOptionFlags.SharedNTHandle") == 1);
+        Assert("建句柄走 IDXGIResource1::CreateSharedHandle（不是 DXGI1.0 的 GetSharedHandle）",
+            src.Contains("QueryInterface<Vortice.DXGI.IDXGIResource1>()", StringComparison.Ordinal)
+            && src.Contains("CreateSharedHandle(", StringComparison.Ordinal));
+        Assert("② 消费侧用 OpenSharedResource1 打开",
+            prb.Contains("OpenSharedResource1<ID3D11Texture2D>(", StringComparison.Ordinal)
+            && !prb.Contains(".OpenSharedResource<ID3D11Texture2D>(", StringComparison.Ordinal),
+            "NTHANDLE 只能用 OpenSharedResource1；用旧的 OpenSharedResource 会拿到 null 或抛");
+
+        // ③ 冻结：更新函数体内，第一句判据必须是"被取走就返回"
+        int upd = src.IndexOf("private void UpdateSharedSlotLocked()", StringComparison.Ordinal);
+        Assert("③ 取到共享槽更新函数", upd >= 0);
+        if (upd < 0) return;
+        int updEnd = src.IndexOf("\n        }", upd, StringComparison.Ordinal);
+        Assert("③ 取到更新函数体", updEnd > upd);
+        if (updEnd <= upd) return;
+        var update = src.Substring(upd, updEnd - upd);
+        int guard = update.IndexOf("if (_sharedHeld", StringComparison.Ordinal);
+        int copy = update.IndexOf("CopyResource(", StringComparison.Ordinal);
+        Assert($"③ 被取走时的早退排在拷贝之前（guard={guard} copy={copy}）",
+            guard >= 0 && copy > guard,
+            "少了这道闸 ⇒ 用户框选期间画面被后续帧换掉（探针臂④-3 会红，但那要真机跑才知道）");
+
+        // ④ 取走时若已 held 必须换新
+        int take = src.IndexOf("internal bool TryFreezeShared(", StringComparison.Ordinal);
+        Assert("④ 取到 TryFreezeShared（路线 B 的生产入口）", take >= 0);
+        if (take < 0) return;
+        int takeEnd = src.IndexOf("\n        }", take, StringComparison.Ordinal);
+        var takeBody = src.Substring(take, takeEnd - take);
+        Assert("④ 上一任未交还时换一块新纹理，而不是覆写它手里那块",
+            takeBody.Contains("if (_sharedHeld)", StringComparison.Ordinal)
+            && takeBody.Contains("CreateSharedTextureLocked(", StringComparison.Ordinal),
+            "覆写别人正拿着的纹理 = P0-C 那次画面撕裂的同型事故");
+
+        // ⑤ Dispose 收句柄
+        int reset = src.IndexOf("private void ResetSharedSlotLocked()", StringComparison.Ordinal);
+        Assert("⑤ 有 ResetSharedSlotLocked", reset >= 0);
+        if (reset < 0) return;
+        var resetBody = src.Substring(reset, src.IndexOf("\n        }", reset, StringComparison.Ordinal) - reset);
+        Assert("⑤ 释放时关句柄再弃纹理（CreateSharedHandle 交出的 HANDLE 归调用方关）",
+            resetBody.Contains("CloseHandle(_sharedHandle)", StringComparison.Ordinal)
+            && resetBody.Contains("_sharedTex?.Dispose()", StringComparison.Ordinal));
+        Assert("⑤ 会话 Dispose 里调了它（不调=每次重建设备漏一个内核句柄）",
+            CountOf(src, "try { ResetSharedSlotLocked(); } catch { }") == 1);
+    }
+
+    /// <summary>
+    /// 路线 B-2：预览窗直接采样那块共享纹理（2026-10-30）。五条判据各挡一种"编译过、界面也像对的"坏法。
+    /// <para>① <b>取槽与取像素一步完成</b>：预览画的是槽，最终裁切/保存用的是同一次捕获的 float 数组。
+    ///   本机实测"先取像素、再晚一步取槽"两步之间恒定夹着一次 WGC 交付（38–63ms），
+    ///   于是预览比保存新一帧，界面上完全看不出来。所以取槽必须紧跟取像素、且两者来自同一块冻结纹理；
+    ///   像素等到选区定了才从这块纹理上按矩形回读（B-3），整帧回读只留在常规取像素的兜底里。</para>
+    /// <para>② <b>打开方式</b>：NTHANDLE 只能 <c>OpenSharedResource1</c>；且必须校验格式是 Float16、尺寸等于窗口 ——
+    ///   着色器把 t0 当 scRGB 线性 Float16 且 UV 按窗口尺寸展开，接错了是整屏错色/错位，不是"看起来差点"。
+    ///   另外"是否已经打开"不能用 <c>_desktopTex is not null</c> 判：Initialize 会预建一块占位纹理，
+    ///   那样判会把空纹理当桌面画出来 —— 整屏纯黑，界面上像"没画"，两头日志也都没有。</para>
+    /// <para>③ <b>优先级</b>：RenderCore 里共享路径要排在 <c>UploadFrame</c> 之前，且上传条件是
+    ///   <c>!sharedReady &amp;&amp; !_hasFrame</c>。反过来就是"槽接上了但每帧还在整帧上传"—— 界面完全正常，
+    ///   省下的那笔一分没省，而这正是本批的全部目的。</para>
+    /// <para>④ <b>交还一次</b>：交还回调挂在窗口 Dispose 上、用 <c>Interlocked.Exchange</c> 只发一次；
+    ///   句柄不许在设备重建时被清掉（重建后要按新设备重开同一块纹理）。</para>
+    /// </summary>
+    static void Test_PerfWiring_PreviewSamplesSharedFrame()
+    {
+        var winPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var svcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        Assert("找到 HdrCaptureWindow.cs / MainWindow.xaml.cs / WgcCaptureService.cs", winPath is not null && mwPath is not null && svcPath is not null);
+        if (winPath is null || mwPath is null || svcPath is null) return;
+        string win = StripLineComments(ReadSourceNormalized(winPath));
+        string mw = StripLineComments(ReadSourceNormalized(mwPath));
+        string svc = StripLineComments(ReadSourceNormalized(svcPath));
+
+        // ── ① 冻结紧跟取像素；整帧像素不在开窗前回读（路线 B-3），选区定了只读那一块 ──
+        int take2 = svc.IndexOf("internal bool TryFreezeShared(", StringComparison.Ordinal);
+        Assert("① 取到 TryFreezeShared", take2 >= 0);
+        if (take2 < 0) return;
+        var takeBody2 = svc.Substring(take2, svc.IndexOf("\n        }", take2, StringComparison.Ordinal) - take2);
+        Assert("① 冻结在交出句柄之前（held 先置位）",
+            takeBody2.IndexOf("_sharedHeld = true;", StringComparison.Ordinal) >= 0);
+        Assert("① 冻结时不读像素（整屏 132MB 不在开窗前读 —— 选区定了才按矩形回读）",
+            !takeBody2.Contains("ReadFloatPixelsLocked(", StringComparison.Ordinal),
+            "把整帧回读塞回这里 ⇒ 开窗前白付一次整屏搬运，路线 B-3 的收益全部落空");
+
+        int rr = svc.IndexOf("internal float[]? ReadSharedRegion(", StringComparison.Ordinal);
+        Assert("① 有选区回读入口 ReadSharedRegion", rr >= 0);
+        if (rr < 0) return;
+        var rrBody = svc.Substring(rr, svc.IndexOf("\n        }", rr, StringComparison.Ordinal) - rr);
+        Assert("① 选区回读只认持有者那一块（槽被轮换就拒绝）",
+            rrBody.Contains("_sharedHandle != expectedHandle", StringComparison.Ordinal)
+            && rrBody.Contains("!_sharedHeld", StringComparison.Ordinal),
+            "读轮换后的新槽 = 把用户没框住的那一帧交出去（界面上看不出来）");
+        Assert("① 选区回读越界直接拒绝（不 clamp：clamp 出来的图与选区对不上）",
+            rrBody.Contains("x + w > _sharedW", StringComparison.Ordinal)
+            && rrBody.Contains("y + h > _sharedH", StringComparison.Ordinal));
+        Assert("① 选区回读读的就是那块冻结纹理",
+            rrBody.Contains("ReadFloatPixelsLocked(_sharedTex,", StringComparison.Ordinal));
+
+        int rfp = svc.IndexOf("private float[]? ReadFloatPixelsLocked(", StringComparison.Ordinal);
+        Assert("① 有按矩形回读的实现", rfp >= 0);
+        if (rfp < 0) return;
+        var rfpBody = svc.Substring(rfp, svc.IndexOf("\n        }", rfp + 20, StringComparison.Ordinal) - rfp);
+        Assert("① 矩形回读用 CopySubresourceRegion 只搬那一块（整块才走 CopyResource）",
+            rfpBody.Contains("CopySubresourceRegion(staging, 0, 0, 0, 0, src, 0,", StringComparison.Ordinal)
+            && rfpBody.Contains("new Vortice.Mathematics.Box(srcX, srcY, 0, srcX + w, srcY + h, 1)", StringComparison.Ordinal)
+            && rfpBody.Contains("ctx.CopyResource(staging, src);", StringComparison.Ordinal),
+            "少任一分支 ⇒ 要么整块搬（白付），要么矩形搬不到（错图）");
+
+        int cap = svc.IndexOf("private CaptureResult CaptureMonitorInternal(", StringComparison.Ordinal);
+        Assert("① 取到 CaptureMonitorInternal", cap >= 0);
+        if (cap < 0) return;
+        var capBody = svc.Substring(cap, svc.IndexOf("private CaptureResult? OneShotCapture(", cap, StringComparison.Ordinal) - cap);
+        int callTake = capBody.IndexOf("TryFreezeShared(", StringComparison.Ordinal);
+        int callLatest = capBody.IndexOf("GetLatestHdr(_reuseHdr)", StringComparison.Ordinal);
+        Assert($"① 先冻结、只有它没成时才走常规取像素（take={callTake} latest={callLatest}）",
+            callTake >= 0 && callLatest > callTake,
+            "顺序反了 ⇒ 像素先定、槽后取，两者之间必然夹着新帧（本机实测 38–63ms 一次）");
+        Assert("① 冻结成功就不再回读整帧（`if (!frozen)` 守卫）",
+            capBody.Contains("if (!frozen)", StringComparison.Ordinal),
+            "少了它 ⇒ 共享路每张仍白读一次整屏，等于路线 B-3 没做");
+        // 2026-10-30 阶段 3：SDR 腿也冻一块槽 ⇒ 这里从 1 处变 2 处（HDR + SDR），
+        // 两处都必须嵌在 if 条件里（扫描/录制路径 WantSharedFrame=false，一处都不许进去）。
+        Assert($"① 只有 WantSharedFrame 才动共享槽（扫描/录制路径不白冻一块纹理；实得 {CountOf(capBody, "config.WantSharedFrame")} 处）",
+            CountOf(capBody, "config.WantSharedFrame") == 2
+            && CountOf(capBody, "if (config.WantSharedFrame)") == 1
+            && CountOf(capBody, "if (config.WantSharedFrame && sSdrSlotEnabled && hdrSession is not null)") == 1);
+
+        // ── ② 打开方式与格式/尺寸校验 ──
+        int ens = win.IndexOf("private bool EnsureSharedDesktop()", StringComparison.Ordinal);
+        Assert("② 取到 EnsureSharedDesktop", ens >= 0);
+        if (ens < 0) return;
+        var ensBody = win.Substring(ens, win.IndexOf("\n    }", ens, StringComparison.Ordinal) - ens);
+        Assert("② 用 OpenSharedResource1 打开（NTHANDLE 不认旧的 OpenSharedResource）",
+            ensBody.Contains("OpenSharedResource1<ID3D11Texture2D>(_sharedHandle)", StringComparison.Ordinal)
+            && !win.Contains(".OpenSharedResource<ID3D11Texture2D>(", StringComparison.Ordinal),
+            "用 OpenSharedResource 打开 NTHANDLE 会拿到空/抛异常 ⇒ 只能静默退回整帧上传");
+        Assert("② 校验格式 Float16 与尺寸等于窗口",
+            ensBody.Contains("Format.R16G16B16A16_Float", StringComparison.Ordinal)
+            && ensBody.Contains("_winW", StringComparison.Ordinal) && ensBody.Contains("_winH", StringComparison.Ordinal),
+            "着色器把 t0 当 scRGB 线性 Float16、UV 按窗口尺寸展开；接错格式/尺寸是整屏错色错位");
+        Assert("② \"已经打开\"用 _sharedTexOpen 判，不用 _desktopTex 判（后者有 Initialize 预建的占位纹理）",
+            ensBody.Contains("if (_sharedTexOpen is not null) return true;", StringComparison.Ordinal)
+            && !ensBody.Contains("_desktopTex is not null && _desktopSrv is not null", StringComparison.Ordinal),
+            "拿 _desktopTex 判 ⇒ 把预建的空纹理当桌面画出来：整屏纯黑、两头无日志（真机就是这么黑了一次）");
+
+        // ── ③ 优先级：共享在前，上传条件是"没共享且没传过" ──
+        int rc = win.IndexOf("bool sharedReady = _useGpuCompositor && EnsureSharedDesktop();", StringComparison.Ordinal);
+        int up = win.IndexOf("if (!sharedReady && !_hasFrame)", StringComparison.Ordinal);
+        Assert($"③ 共享路径在渲染主循环里先试、整帧上传是它的兜底（sharedReady={rc} upload={up}）",
+            rc >= 0 && up > rc,
+            "顺序反过来 ⇒ 每帧照样整帧上传，界面完全正常、省下的一分没省（本批的全部目的落空）");
+        Assert("③ 上传只在\"没有共享且还没传过\"时发生（不是无条件）",
+            CountOf(win, "if (!sharedReady && !_hasFrame)") == 1);
+
+        // ── ④ 交还一次 + 句柄跨设备重建保留 ──
+        int rel = win.IndexOf("private void ReleaseSharedSource()", StringComparison.Ordinal);
+        Assert("④ 取到 ReleaseSharedSource", rel >= 0);
+        if (rel < 0) return;
+        var relBody = win.Substring(rel, win.IndexOf("\n    }", rel, StringComparison.Ordinal) - rel);
+        Assert("④ 交还回调只发一次（Interlocked.Exchange 置空）",
+            relBody.Contains("Interlocked.Exchange(ref _sharedRelease, null)", StringComparison.Ordinal),
+            "重复交还本身无害，但\"发没发过\"就不可知了 —— 下一次取槽会白轮换一块纹理");
+        int disp = win.IndexOf("public void Dispose()", StringComparison.Ordinal);
+        Assert("④ Dispose 里交还共享槽（Cancel/保存/初始化失败/异常都走这条）", disp >= 0);
+        if (disp < 0) return;
+        var dispBody = win.Substring(disp, win.IndexOf("\n    }", disp, StringComparison.Ordinal) - disp);
+        int cleanupCall = dispBody.IndexOf("Cleanup();", StringComparison.Ordinal);
+        int relCall = dispBody.IndexOf("ReleaseSharedSource();", StringComparison.Ordinal);
+        Assert($"④ 交还排在 Cleanup（=渲染线程已停）之后（cleanup={cleanupCall} release={relCall}）",
+            cleanupCall >= 0 && relCall > cleanupCall,
+            "早交还 ⇒ 下一帧就会覆写用户正看着的画面");
+
+        int rdr = win.IndexOf("private void ReleaseDeviceResources()", StringComparison.Ordinal);
+        Assert("④ 取到 ReleaseDeviceResources", rdr >= 0);
+        if (rdr < 0) return;
+        var rdrBody = win.Substring(rdr, win.IndexOf("\n    }", rdr, StringComparison.Ordinal) - rdr);
+        int handleInRdr = rdrBody.IndexOf("_sharedHandle = 0", StringComparison.Ordinal);
+        Assert($"④ 设备重建时不清共享句柄（实得 {handleInRdr}，应为 -1）",
+            handleInRdr < 0,
+            "清掉它 ⇒ 设备丢失重建后再也打不开那块纹理，预览只能退回整帧上传（且没有任何报错）");
+
+        // ── ⑤ 主窗口的接法：交还挂在窗口生命周期上 + 提前返回要由 finally 兜底 ──
+        Assert("⑤ MainWindow 传入交还回调（ReleaseSharedFrame 挂在窗口 Dispose 上）",
+            mw.Contains("hdrWnd.AttachSharedFrame(sharedHandle, sharedW, sharedH,", StringComparison.Ordinal)
+            && mw.Contains("() => wgc.ReleaseSharedFrame(pendingSharedMonitor, true)", StringComparison.Ordinal),
+            "没有交还回调 ⇒ 槽永远冻着，第二张截图要靠轮换救，等于每张白造一块纹理");
+        Assert("⑤ 认领没交接出去时由 finally 交还（取到槽后、建窗前提前 return 的每条路）",
+            mw.Contains("pendingShared = 0;   // 所有权已交给窗口", StringComparison.Ordinal)
+            && mw.Contains("if (pendingShared != 0)", StringComparison.Ordinal)
+            && mw.Contains("_wgcService?.ReleaseSharedFrame(pendingSharedMonitor, true)", StringComparison.Ordinal),
+            "少了这条路 ⇒ 预览初始化失败/无帧提前返回时槽一直冻着，下一张只能靠取槽轮换救");
+        Assert("⑤ 只在单屏 + HDR 帧 + 尺寸相符时才接槽",
+            mw.Contains("sharedHandle != 0 && hdrFrame && displays.Count == 1", StringComparison.Ordinal)
+            && mw.Contains("sharedW == vw && sharedH == vh", StringComparison.Ordinal),
+            "多屏拼接的帧是虚拟桌面尺寸、槽是单块屏的纹理；接了就是整屏错位");
+        Assert("⑤ 诊断开关在场（真机 A/B 用，默认走共享）",
+            mw.Contains("TTC_PREVIEW_SHARED", StringComparison.Ordinal));
+
+        // ── ⑥ 选区定了只回读那一块（路线 B-3：保存链的像素来源）──
+        int tcsDone = mw.IndexOf("var (action, rx, ry, rw, rh) = await tcs.Task;", StringComparison.Ordinal);
+        int regionRead = mw.IndexOf("hdrRegion = wgc.ReadSharedRegion(", StringComparison.Ordinal);
+        int saveCase = mw.IndexOf("case MainToolbarAction.Save:", StringComparison.Ordinal);
+        Assert($"⑥ 选区回读排在用户动作之后、保存分支之前（tcs={tcsDone} read={regionRead} save={saveCase}）",
+            tcsDone >= 0 && regionRead > tcsDone && saveCase > regionRead,
+            "排在开窗前 = 又变成预读；排在保存后 = 槽已交还，读到的是下一帧甚至读不到");
+        Assert("⑥ 回读用纹理坐标（选框减显示器原点），矩形就是选框",
+            mw.Contains("rx - vx, ry - vy, rw, rh", StringComparison.Ordinal));
+        Assert("⑥ 共享路没有 CPU 帧可裁：只有非共享路才整帧裁剪（调用点 1 处）",
+            CountOf(mw, "= ExtractHdrRegionFromDesktop(") == 1);
+        Assert("⑥ 共享纹理打不开时有整帧兜底（B-3 之后没有预读的 CPU 帧可退）",
+            win.Contains("_sharedFallback", StringComparison.Ordinal)
+            && mw.Contains("() => wgc.ReadSharedRegion(pendingSharedMonitor, true, sharedHandle,", StringComparison.Ordinal),
+            "少了兜底 ⇒ 打开失败时画面只有遮罩（整屏黑），日志却仍写着\"退回整帧上传\"");
+    }
+
+    /// <summary>
+    /// 图集的 CPU 腿必须在【开窗那一刻】就投出去，而且全程不碰本窗口的 D3D（2026-10-30 那 86ms 的落点锁）。
+    /// <para>真机读数（4K + 150% 缩放，app_2026-10-30.log 08:23:24.891）：首帧合成 111ms，其中文字图集 98ms
+    /// = 排版 86 + 上传 12。排版只用 Win2D 的进程级共享设备 ⇒ 能搬；搬进"窗口初始化 + 区域检测 + 首帧上传"
+    /// 那约 350ms 之后，首帧读到的是 排版 0（预热那 86ms 已在别处付掉）。产物像素与搬之前同源 ⇒
+    /// 界面看不出退化，所以四条各钉一处：</para>
+    /// <para>① 投递排在 <c>StartRenderThread()</c> 之前、且排在 <c>_uiScale</c> 发布之后 —— 顺序反过来
+    ///   就是"渲染线程先到、预热永远没人投"，首帧照旧付 86ms，而编译/探针/日志三处都看不出来。
+    /// ② CPU 腿里 <c>_device</c>/<c>_ctx</c> 必须一个都不许出现 —— ImmediateContext 非线程安全，谁把上传
+    ///   或某个 D3D 调用顺手挪进排版函数，就是让后台线程与渲染线程并发用同一上下文（偶发花屏/设备丢失，
+    ///   正是本仓反复修的那一族：Map/Unmap 配对、共享设备不许 Dispose、_gpuLock）。
+    /// ③ 取用侧两条失效判据（脏标记、缩放）都要在场，任务必须置空 —— 少一条就可能拿一份过期图集画首帧
+    ///   （文字变了仍显示旧字），不置空则是每次重建都重等一遍旧任务。
+    /// ④ 上传仍走渲染线程那条路，且 Map/Unmap 的 finally 配对跟着搬过去了。</para>
+    /// </summary>
+    static void Test_PerfWiring_AtlasLayoutPrewarmedBeforeRenderThread()
+    {        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        Assert("找到 HdrCaptureWindow.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var src = StripLineComments(ReadSourceNormalized(path));
+
+        // ── ① 投递时机 ──
+        int init = src.IndexOf("public bool Initialize(int x, int y, int w, int h)", StringComparison.Ordinal);
+        int initEnd = src.IndexOf("private void StartRenderThread()", StringComparison.Ordinal);
+        Assert($"取到开窗主体 Initialize（起点 {init}，终点 {initEnd}）", init >= 0 && initEnd > init);
+        if (init < 0 || initEnd <= init) return;
+        var initBody = src.Substring(init, initEnd - init);
+
+        int scaleSet = initBody.IndexOf("_uiScale = dpi", StringComparison.Ordinal);
+        int kick = initBody.IndexOf("_pendingAtlasLayout = System.Threading.Tasks.Task.Run(BuildAtlasLayout)",
+            StringComparison.Ordinal);
+        int renderStart = initBody.IndexOf("StartRenderThread();", StringComparison.Ordinal);
+        Assert($"三处锚点都在场（缩放 {scaleSet}、投递 {kick}、起渲染线程 {renderStart}）",
+            scaleSet >= 0 && kick >= 0 && renderStart >= 0,
+            "缺任一锚点就说明这段被改写或搬走，下面的顺序比较没有对象");
+        Assert("排版在缩放发布之后投递（先用后投=按 1.0 缩放烘一张，DPI 不是 100% 的屏上整张图集尺寸全错）",
+            scaleSet >= 0 && kick >= 0 && kick > scaleSet);
+        Assert("排版在渲染线程起来之前投递（反过来写=首帧永远吃不到预热，白付 86ms）",
+            scaleSet >= 0 && kick >= 0 && renderStart >= 0 && kick < renderStart);
+        Assert("投递点唯一（多处=预热被复制成两趟，或旧的那处没删干净）",
+            CountOf(initBody, "_pendingAtlasLayout = System.Threading.Tasks.Task.Run") == 1);
+
+        // ── ② CPU 腿不许碰 D3D ──
+        int lay = src.IndexOf("private AtlasLayout BuildAtlasLayout()", StringComparison.Ordinal);
+        Assert("取到图集 CPU 腿 BuildAtlasLayout", lay >= 0);
+        if (lay < 0) return;
+        int layEnd = src.IndexOf("\n    }", lay, StringComparison.Ordinal);
+        Assert("取到 CPU 腿方法体", layEnd > lay);
+        if (layEnd <= lay) return;
+        var layout = src.Substring(lay, layEnd - lay);
+        int devHits = CountOf(layout, "_device.") + CountOf(layout, "_ctx.");
+        Assert($"CPU 腿里不碰本窗口的 D3D（_device./_ctx. 合计命中 {devHits}）", devHits == 0,
+            "后台线程与渲染线程并发用同一个 ImmediateContext ⇒ 偶发花屏/设备丢失，且十有八九复现不出来");
+        Assert("CPU 腿仍然只做排版+读回（CanvasRenderTarget 与 GetPixelBytes 各一次）",
+            CountOf(layout, "new Microsoft.Graphics.Canvas.CanvasRenderTarget") == 1
+            && CountOf(layout, "GetPixelBytes") == 1);
+
+        // ── ③ 取用侧的失效判据 ──
+        int ens = src.IndexOf("private void EnsureTextAtlas()", StringComparison.Ordinal);
+        Assert("取到图集入口 EnsureTextAtlas", ens >= 0);
+        if (ens < 0) return;
+        int ensEnd = src.IndexOf("\n    }", ens, StringComparison.Ordinal);
+        Assert("取到图集入口方法体", ensEnd > ens);
+        if (ensEnd <= ens) return;
+        var take = src.Substring(ens, ensEnd - ens);
+        Assert("预热任务被取走且当场置空（不置空=每次重建都重等一遍旧任务）",
+            CountOf(take, "var pending = _pendingAtlasLayout;") == 1
+            && CountOf(take, "_pendingAtlasLayout = null;") == 1);
+        Assert("脏标记与缩放两条失效判据都在场（少一条=可能拿过期图集画首帧）",
+            take.Contains("!_annoTextSlotsDirty && !_uiTextDirty", StringComparison.Ordinal)
+            && take.Contains("Math.Abs(_pendingAtlasScale - _uiScale)", StringComparison.Ordinal));
+        Assert("命中预热就等它跑完，而不是另起一遍（另起=同一趟 CPU 付两遍，还两个排版并发写共享读数）",
+            take.Contains("pending!.Wait()", StringComparison.Ordinal)
+            && CountOf(take, "BuildAtlasLayout()") == 1);
+
+        // ── ④ 上传那条腿完整搬过去了 ──
+        int up = src.IndexOf("private void UploadTextAtlas(byte[] atlasBytes)", StringComparison.Ordinal);
+        Assert("取到 GPU 腿 UploadTextAtlas", up >= 0);
+        if (up < 0) return;
+        int upEnd = src.IndexOf("\n    }", up, StringComparison.Ordinal);
+        Assert("取到 GPU 腿方法体", upEnd > up);
+        if (upEnd <= up) return;
+        var upload = src.Substring(up, upEnd - up);
+        Assert("上传腿仍按 Map→写→Unmap(finally)→CopyResource 这一套（配对断了该资源永久写不进去）",
+            upload.Contains("_ctx.Map(staging, 0, MapMode.Write", StringComparison.Ordinal)
+            && upload.Contains("finally { _ctx.Unmap(staging, 0); }", StringComparison.Ordinal)
+            && upload.Contains("_ctx.CopyResource(_textAtlas, staging)", StringComparison.Ordinal));
+        Assert("采样表 _atlasSubs 在上传之后发布（与搬动前同序：先有纹理，再交出它的子矩形）",
+            take.IndexOf("UploadTextAtlas(layout.Bytes);", StringComparison.Ordinal) >= 0
+            && take.IndexOf("_atlasSubs = layout.Subs;", StringComparison.Ordinal)
+               > take.IndexOf("UploadTextAtlas(layout.Bytes);", StringComparison.Ordinal));
+
+        // ── ⑤ 两个 tick：把"排队排晚了"和"上传本身变慢"分开的那把尺 ──
+        // 真机修后读到的 43ms 只有"图集整腿"一个数（修前上传单独 12ms），两种因头的修法相反
+        // （前者要挪投递，后者要查上传），所以先钉住这三处采样的相对位置。
+        int queueTick = initBody.IndexOf("_atlasPrewarmQueuedAtMs = Environment.TickCount64", StringComparison.Ordinal);
+        Assert($"投递时刻的 tick 在投递之前且唯一（锚点 {queueTick}）",
+            queueTick >= 0 && kick > queueTick
+            && CountOf(initBody, "_atlasPrewarmQueuedAtMs = Environment.TickCount64") == 1,
+            "tick 晚于投递=相减得到负数（下面 Math.Max 会把它压成 0，读数假绿成\"没排队\"）");
+        Assert("开跑时刻的 tick 是 CPU 腿第一句（排在后面=把排版自己的时间也算进排队）",
+            CountOf(layout, "_atlasPrewarmStartedAtMs = Environment.TickCount64") == 1
+            && layout.IndexOf("_atlasPrewarmStartedAtMs = Environment.TickCount64", StringComparison.Ordinal)
+               < layout.IndexOf("var swLayout = System.Diagnostics.Stopwatch.StartNew()", StringComparison.Ordinal));
+        Assert("两个减法各用对的两端：排队=开跑−投递、上传=整腿−(问它→拿到)",
+            take.Contains("_atlasPrewarmStartedAtMs - _atlasPrewarmQueuedAtMs", StringComparison.Ordinal)
+            && take.Contains("_atlasTotalMsAtlas - askToHaveMs", StringComparison.Ordinal));
+        // 采样点在源文件里唯一（同一条串还写在本判据的说明文字里，所以只能对源码计数）
+        int askLog = src.IndexOf("long askToHaveMs = swAtlas?.ElapsedMilliseconds ?? 0;", StringComparison.Ordinal);
+        Assert("采样点进了日志且只有一处（实得 " + askLog + "）",
+            askLog >= 0 && CountOf(src, "long askToHaveMs = swAtlas?.ElapsedMilliseconds ?? 0;") == 1,
+            "锚点没框住这行=下面三处顺序比较全在拿 -1 比大小（假绿）");
+        int askTake = take.IndexOf("long askToHaveMs = swAtlas?.ElapsedMilliseconds ?? 0;", StringComparison.Ordinal);
+        Assert("采样点排在上传之前（排在后面=把上传那段也算进等待，等于没拆）",
+            askTake >= 0 && askTake < take.IndexOf("UploadTextAtlas(layout.Bytes);", StringComparison.Ordinal));
+        // 排版那一趟再拆三条：读回贵 ⇒ 让图集生在 GPU 里；画贵 ⇒ 整张跨窗缓存。两条修法互斥，先要有尺。
+        int iRead = layout.IndexOf("atlasTarget.GetPixelBytes()", StringComparison.Ordinal);
+        Assert("读回这条子腿两头都有采样（tAtlasRead 在前、tAtlasMerge 紧随其后）",
+            layout.IndexOf("long tAtlasRead = ", StringComparison.Ordinal) >= 0
+            && layout.IndexOf("long tAtlasRead = ", StringComparison.Ordinal) < iRead
+            && iRead >= 0 && iRead < layout.IndexOf("long tAtlasMerge = ", StringComparison.Ordinal));
+        Assert("并入这条子腿的终点接在 pendingPreviews 遍历之后、AtlasLayout 构造之前",
+            layout.IndexOf("foreach (var p in pendingPreviews)", StringComparison.Ordinal) >= 0
+            && layout.IndexOf("long atlasMergeMs = ElapsedMsSince(tAtlasMerge);", StringComparison.Ordinal)
+               > layout.IndexOf("foreach (var p in pendingPreviews)", StringComparison.Ordinal)
+            && layout.IndexOf("long atlasMergeMs = ElapsedMsSince(tAtlasMerge);", StringComparison.Ordinal)
+               < layout.IndexOf("new AtlasLayout(", StringComparison.Ordinal));
+        Assert("三段都进了 AtlasLayout 也进了首帧那行日志（拆了不交出来=下次还得重做这轮仪表）",
+            CountOf(src, "ElapsedMsSince(tAtlasRead), atlasMergeMs, _idleHintW, _idleHintH, _ddBakedRows);") == 1
+            && take.Contains("_atlasPrewarmDrawMs = prewarmed ? layout.Ms - layout.ReadMs - layout.MergeMs : 0", StringComparison.Ordinal)
+            && src.Contains("读回 {_atlasPrewarmReadMs} + 并入 {_atlasPrewarmMergeMs}", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// 图集跨窗缓存（2026-10-30）：第二扇预览窗起只付上传。四条各挡一种"界面看着正常"的坏法：
+    /// ① 键必须并进烘焙读到的全部输入（DPI/字体/下拉状态/悬停标题/工具条文案/文字层签名）——
+    ///    漏一项就是显示旧字；
+    /// ② 取用侧先查缓存、否则才现烘；命中时关键路径上的排版必须记 0；
+    /// ③ 只有这一趟没被中途改脏时才入缓存（混合产物存进去会污染下一扇窗）；
+    /// ④ 缓存命中时要把排版写出来的三个读数（静置提示尺寸、下拉已烘行数）一起搬回。
+    /// </summary>
+    static void Test_PerfWiring_AtlasCrossWindowCache()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        Assert("找到 HdrCaptureWindow.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var src = StripLineComments(ReadSourceNormalized(path));
+
+        int keyM = src.IndexOf("private string BuildAtlasCacheKey()", StringComparison.Ordinal);
+        Assert("① 有缓存键函数", keyM >= 0);
+        if (keyM < 0) return;
+        var key = src.Substring(keyM, src.IndexOf("\n    }", keyM, StringComparison.Ordinal) - keyM);
+        Assert("① 键含 DPI 与文字字体/字号",
+            key.Contains("_uiScale", StringComparison.Ordinal)
+            && key.Contains("_textFontFamily", StringComparison.Ordinal)
+            && key.Contains("_textFontSizeDip", StringComparison.Ordinal));
+        Assert("① 键含下拉状态与悬停标题（这两样也烘进图集）",
+            key.Contains("_ddOpen", StringComparison.Ordinal) && key.Contains("_ddTop", StringComparison.Ordinal)
+            && key.Contains("_hoverTitle", StringComparison.Ordinal));
+        Assert("① 键含工具条文案（契约三条 + 马赛克两个标签）",
+            key.Contains("ToolbarContract.Main", StringComparison.Ordinal)
+            && key.Contains("ToolbarContract.Anno", StringComparison.Ordinal)
+            && key.Contains("ToolbarContract.AnnoHint", StringComparison.Ordinal)
+            && key.Contains("ToolbarContract.IdleHint", StringComparison.Ordinal)
+            && key.Contains("MosaicModeRectText", StringComparison.Ordinal));
+        Assert("① 键含文字层签名（否则新窗口会拿到上一扇窗里刚打的字）",
+            key.Contains("_annoManager.GetLayersSnapshot()", StringComparison.Ordinal)
+            && key.Contains("is not TextLayer", StringComparison.Ordinal));
+
+        int ens = src.IndexOf("private void EnsureTextAtlas()", StringComparison.Ordinal);
+        Assert("② 取到 EnsureTextAtlas", ens >= 0);
+        if (ens < 0) return;
+        var take = src.Substring(ens, src.IndexOf("\n    }", ens, StringComparison.Ordinal) - ens);
+        int cacheTry = take.IndexOf("TryTakeCachedAtlas(out var hit)", StringComparison.Ordinal);
+        int rebuild = take.IndexOf("layout = BuildAtlasLayout();", StringComparison.Ordinal);
+        Assert($"② 先查缓存、否则才现烘（cache={cacheTry} rebuild={rebuild}）",
+            cacheTry >= 0 && rebuild > cacheTry,
+            "顺序反了 ⇒ 每扇窗都先重排一遍，缓存白存");
+        Assert("② 命中缓存时关键路径上的排版记 0（否则日志把缓存命中读成 73ms 排版）",
+            take.Contains("prewarmed || fromCache ? 0 : layout.Ms", StringComparison.Ordinal));
+
+        int lay = src.IndexOf("private AtlasLayout BuildAtlasLayout()", StringComparison.Ordinal);
+        Assert("③ 取到 CPU 腿", lay >= 0);
+        if (lay < 0) return;
+        var layout = src.Substring(lay, src.IndexOf("\n    }", lay, StringComparison.Ordinal) - lay);
+        int store = layout.IndexOf("StoreAtlasCache(cacheKey, built);", StringComparison.Ordinal);
+        int dirty = layout.IndexOf("if (s_atlasCacheEnabled && pristine && !_uiTextDirty && !_annoTextSlotsDirty)", StringComparison.Ordinal);
+        int pristine = layout.IndexOf("bool pristine = _ddOpen == 0 && string.IsNullOrEmpty(_hoverTitle)", StringComparison.Ordinal);
+        Assert($"③ 入缓存被「干净且没被改脏」门住（store={store} guard={dirty} pristine={pristine}）",
+            store >= 0 && dirty >= 0 && dirty < store && pristine >= 0 && pristine < dirty,
+            "不门住 ⇒ 打字/下拉时那张瞬态图被存进缓存，把常驻那张挤掉，下一扇窗直接画出来");
+        Assert("③ 瞬态判据把文字层也算进去（带文字层的图不能占缓存槽）",
+            layout.Contains("is TextLayer t && t.IsVisible", StringComparison.Ordinal));
+        Assert("③ 键在开跑时取一次、与这一趟读到的东西同批",
+            layout.IndexOf("string cacheKey = BuildAtlasCacheKey();", StringComparison.Ordinal) >= 0);
+
+        Assert("④ 缓存命中时把排版写出的三个读数搬回来（静置提示尺寸 / 下拉已烘行数）",
+            take.Contains("_idleHintW = layout.IdleW; _idleHintH = layout.IdleH;", StringComparison.Ordinal)
+            && take.Contains("_ddBakedRows = layout.DdBakedRows;", StringComparison.Ordinal),
+            "不搬 ⇒ 静置提示按 1×1 贴、滚轮按 0 行夹 —— 探针的静置提示相会红");
+        Assert("④ 开窗时命中缓存就不再排后台那一趟",
+            src.Contains("if (!AtlasCacheHot())", StringComparison.Ordinal));
+        Assert("⑤ 诊断阀 TTC_ATLAS_CACHE=0 三处都认（查/取/存），默认开",
+            src.Contains("Environment.GetEnvironmentVariable(\"TTC_ATLAS_CACHE\") != \"0\"", StringComparison.Ordinal)
+            // 2026-10-30 增第三处：探针口 AtlasCacheWarmForMonitor 也要认这个阀（否则探针那一相"判了"却判的是别的）
+            && CountOf(src, "if (!s_atlasCacheEnabled) return false;") == 3
+            && layout.Contains("if (s_atlasCacheEnabled && pristine", StringComparison.Ordinal),
+            "只关一处 ⇒ 要么关不掉、要么关一半（半关时缓存键被写、下一轮又命中）");
+    }
+
+    /// <summary>
+    /// 共享路不再预建 132MB 的占位纹理与 staging（2026-10-30）：路线 B-3 之后共享帧已挂上时
+    /// 桌面就是那块共享纹理，Initialize 里那两块建了也会被 EnsureSharedDesktop 立刻换掉。
+    /// 两条：① 预建整段被 `!_sharedAttached` 门住；② 整帧兜底路仍能按需建（UploadFrame 里那两处还在）。
+    /// </summary>
+    static void Test_PerfWiring_SharedPreviewSkipsPlaceholderTextures()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        Assert("找到 HdrCaptureWindow.cs（缺文件=本卡失明）", path is not null);
+        if (path is null) return;
+        var src = StripLineComments(ReadSourceNormalized(path));
+        int init = src.IndexOf("public bool Initialize(int x, int y, int w, int h)", StringComparison.Ordinal);
+        Assert("取到 Initialize", init >= 0);
+        if (init < 0) return;
+        var initBody = src.Substring(init, src.IndexOf("private void StartRenderThread()", init, StringComparison.Ordinal) - init);
+        int guard = initBody.IndexOf("if (!_sharedAttached)", StringComparison.Ordinal);
+        int pre = initBody.IndexOf("if (_desktopTex is null || _desktopTex.Description.Width != w", StringComparison.Ordinal);
+        Assert($"预建段被共享路门住（guard={guard} pre={pre}）", guard >= 0 && pre >= 0 && guard < pre,
+            "不门住 ⇒ 共享路每张白建 132MB 纹理，紧接着又被 EnsureSharedDesktop 换掉");
+        Assert("整帧兜底路的按需创建还在（Initialize + UploadFrame 各一处）",
+            CountOf(src, "_desktopTex = _device.CreateTexture2D(") == 2
+            && CountOf(src, "_pooledStaging = _device.CreateTexture2D(") == 2,
+            "少了兜底那处 ⇒ 共享纹理打不开时没有桌面可画（整屏只剩遮罩）");
+    }
+
+    static int CountOf(string text, string needle)
+    {
+        int n = 0;
+        for (int i = text.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = text.IndexOf(needle, i + 1, StringComparison.Ordinal))
+            n++;
+        return n;
+    }
+
+    /// <summary>
+    /// 选区起点预烘图集（2026-10-30，阶段 1）：图集那趟排版 + 11.5MB 读回只用 Win2D 进程级共享设备，
+    /// 不需要预览窗自己的 D3D 设备 ⇒ 在按下热键、WGC 捕获之前就用一个"无设备壳"提前烘，真窗口建好后
+    /// 直接吃跨窗缓存。三件事各挡一种"看着正常"的坏法：
+    /// ① 壳必须真的不建设备 —— 建了就等于每张截图先付 33–57ms，比要省的 19–35ms 还贵；
+    /// ② 投递必须被 TTC_ATLAS_CACHE=0 与"同键已热"两道门挡住 —— 否则每按一次键白烘一张；
+    /// ③ 调用点必须排在 WGC 捕获之前（排在后面就没东西可重叠，等于没改）。
+    /// 壳烘出来的图集是否**真的对**由 `--preview-ui-probe` 判：它开跑前调同一条投递点，
+    /// 之后 14 相全在壳烘的图上跑像素判据（① 静置提示 / ⑨ 文字带 / ⑫ 滑条）。
+    /// </summary>
+    static void Test_PerfWiring_AtlasPrewarmAtSelectionStart()
+    {
+        var hp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        var mp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 HdrCaptureWindow.cs 与 MainWindow.xaml.cs（缺一个=本卡失明）", hp is not null && mp is not null);
+        if (hp is null || mp is null) return;
+        var hsrc = StripLineComments(ReadSourceNormalized(hp));
+        var msrc = StripLineComments(ReadSourceNormalized(mp));
+
+        int shell = hsrc.IndexOf("private HdrCaptureWindow(float uiScale)", StringComparison.Ordinal);
+        Assert($"① 有'只带缩放'的预热壳（实得 {shell}）", shell >= 0);
+        if (shell >= 0)
+        {
+            int shellEnd = hsrc.IndexOf("\n    }", shell, StringComparison.Ordinal);
+            var shellBody = shellEnd > shell ? hsrc.Substring(shell, shellEnd - shell) : "";
+            Assert("① 壳不建 D3D11 设备（建了 ⇒ 每张截图先付 33–57ms，比要省的还贵）",
+                shellBody.Length > 0
+                && !shellBody.Contains("D3D11CreateDevice", StringComparison.Ordinal)
+                && shellBody.Contains("_uiScale = uiScale", StringComparison.Ordinal));
+        }
+
+        int pre = hsrc.IndexOf("internal static void PrewarmAtlasForMonitor(nint hmonitor)", StringComparison.Ordinal);
+        Assert($"② 有选区起点预热入口（实得 {pre}）", pre >= 0);
+        if (pre >= 0)
+        {
+            int preEnd = hsrc.IndexOf("\n    }", pre, StringComparison.Ordinal);
+            var body = preEnd > pre ? hsrc.Substring(pre, preEnd - pre) : "";
+            int hot = body.IndexOf("s_atlasCacheKey == key", StringComparison.Ordinal);
+            int run = body.IndexOf("Task.Run", StringComparison.Ordinal);
+            Assert("② 先查'同键已热'再烘（顺序反了 ⇒ 每按一次截图键白烘一张）",
+                body.Contains("if (!s_atlasCacheEnabled) return;", StringComparison.Ordinal)
+                && hot >= 0 && run > hot);
+            Assert("② 连按不烘两遍：在途标记必须走原子比较交换",
+                body.Contains("Interlocked.CompareExchange(ref s_atlasPrewarmInFlight, 1, 0)", StringComparison.Ordinal));
+            Assert("② 预热失败只留 Warn、绝不打断截图",
+                body.Contains("catch (Exception ex)", StringComparison.Ordinal)
+                && body.Contains("LogService.Warn(", StringComparison.Ordinal));
+        }
+
+        Assert("① 缩放按显示器查（窗口还没建，GetDpiForWindow 拿不到），且失败回落 100% 不抛",
+            hsrc.Contains("GetDpiForMonitor(hmonitor, 0", StringComparison.Ordinal)
+            && hsrc.Contains("LibraryImport(\"shcore.dll\")", StringComparison.Ordinal)
+            && hsrc.Contains("catch { scale = 1.0; }", StringComparison.Ordinal));
+
+        int startLog = msrc.IndexOf("\"选区截图启动\"", StringComparison.Ordinal);
+        int call = msrc.IndexOf("HdrCaptureWindow.PrewarmAtlasForMonitor(", StringComparison.Ordinal);
+        int capture = startLog >= 0
+            ? msrc.IndexOf("CaptureAllMonitorsAsync(", startLog, StringComparison.Ordinal)
+            : -1;
+        Assert($"③ 调用点排在'WGC 捕获启动'之后、捕获调用之前（start={startLog} call={call} capture={capture}）",
+            startLog >= 0 && call > startLog && capture > call,
+            "排在捕获之后 ⇒ 没有可重叠的时间，这一改动等于没做");
+        Assert("③ 只投递一处（多了就是在别的地方又烘一遍）",
+            CountOf(msrc, "HdrCaptureWindow.PrewarmAtlasForMonitor(") == 1);
+    }
+
+    /// <summary>
+    /// 启动三格打点（2026-10-30，阶段 0.1）：314–337ms 的那一格必须能回答"反序列化还是控件回显贵"，
+    /// 构造尾巴（托盘/热键/OCR/本地化）也必须单独计 —— 三格加上 XAML 才能解释"进程到主窗口 1.07s"。
+    /// 顺序锁防的是"计时区间包错了对象"：Stop 必须紧跟被测段，中间的语句顺序就是区间本身。
+    /// </summary>
+    static void Test_PerfWiring_StartupBreakdown()
+    {
+        var mp = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 MainWindow.xaml.cs（缺文件=本卡失明）", mp is not null);
+        if (mp is null) return;
+        var src = StripLineComments(ReadSourceNormalized(mp));
+
+        int outer = src.IndexOf("var swSettings = System.Diagnostics.Stopwatch.StartNew();", StringComparison.Ordinal);
+        int load = src.IndexOf("var swLoad = System.Diagnostics.Stopwatch.StartNew();", StringComparison.Ordinal);
+        int loadCall = src.IndexOf("LoadSettings();", StringComparison.Ordinal);
+        int loadStop = src.IndexOf("swLoad.Stop();", StringComparison.Ordinal);
+        int echo = src.IndexOf("var swEcho = System.Diagnostics.Stopwatch.StartNew();", StringComparison.Ordinal);
+        int echoCall = src.IndexOf("ApplySettingsToUI();", StringComparison.Ordinal);
+        int echoStop = src.IndexOf("swEcho.Stop();", StringComparison.Ordinal);
+        int tail = src.IndexOf("var swTail = System.Diagnostics.Stopwatch.StartNew();", StringComparison.Ordinal);
+        Assert($"反序列化这一格两头夹对（outer={outer} load={load} call={loadCall} stop={loadStop}）",
+            outer >= 0 && load > outer && loadCall > load && loadStop > loadCall,
+            "计时器没夹住 LoadSettings ⇒ 那一格量的是别的东西");
+        Assert($"回显这一格两头夹对（echo={echo} call={echoCall} stop={echoStop}）",
+            echo > loadStop && echoCall > echo && echoStop > echoCall);
+        Assert($"构造尾巴在设置两格之后起表（tail={tail}）", tail > echoStop);
+
+        Assert("三格都进了日志（拆了不交出来=下次还得重做这轮仪表）",
+            src.Contains("\"启动: 设置两段 = 反序列化 ", StringComparison.Ordinal)
+            && src.Contains("\"启动: 构造尾巴（托盘/热键/OCR/本地化） ", StringComparison.Ordinal)
+            && src.Contains("\"启动: 设置加载与回显 ", StringComparison.Ordinal));
+
+        // ── 尾巴里"不参与首帧"的三件必须排到首帧之后（2026-10-30 阶段 2 第二步）──
+        // 判据防的是"把 defer 写回同步"：那三件加起来几十毫秒，退回同步时界面与日志都看不出，
+        // 只有启动读数变慢 —— 所以锁源码形状，不靠人眼。
+        int low = src.IndexOf("Microsoft.UI.Dispatching.DispatcherQueuePriority.Low", StringComparison.Ordinal);
+        int locale = src.IndexOf("ApplyLocale();", StringComparison.Ordinal);
+        Assert($"低优先级队列只有一处、且排在本地化之前投递（low={low} locale={locale}）",
+            low >= 0 && locale > low
+            && CountOf(src, "Microsoft.UI.Dispatching.DispatcherQueuePriority.Low") == 1);
+        if (low >= 0 && locale > low)
+        {
+            var deferBody = src.Substring(low, locale - low);
+            Assert("推迟的三件都在同一个 Low 回调里（自启动一致性检查 / Toast 注册 / 日志页订阅）",
+                deferBody.Contains("StartupManager.IsEnabled", StringComparison.Ordinal)
+                && deferBody.Contains("ToastService.Register();", StringComparison.Ordinal)
+                && deferBody.Contains("SubscribeLogEvents();", StringComparison.Ordinal));
+            Assert("日志订阅只此一处（留在外面再调一次=订阅两遍，日志页每行画两次）",
+                CountOf(src, "SubscribeLogEvents();") == 1);
+        }
+        Assert("重复的 OCR 初始化投递已删（App.xaml.cs 已启动同一次，内部有 _initialized 短路）",
+            !src.Contains("MultiOcrService.Initialize(modelDir)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// SDR 腿仪表（2026-10-30，阶段 0.2）：只加读数、不改行为。三条路各一行（复用拷贝 / 按需回读 /
+    /// 兜底拷贝）+ 消费者窗口到期时一行汇总。四件事各挡一种"读数骗人"的坏法：
+    /// ① 三条路必须各打各的 —— 把"回读失败交旧帧"混进"复用拷贝"会读成快路径命中；
+    /// ② 汇总必须结算在刷新 <c>_consumerUntil</c> 之前，否则窗口永不到期、一行都不会打；
+    /// ③ 逐帧计数必须原子加（WGC FreeThreaded 回调可并发）；
+    /// ④ <c>wantCpu</c> 条件一字不改（这是仪表，不是行为改动）。
+    /// </summary>
+    static void Test_PerfWiring_SdrLegInstrumentation()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        Assert("找到 WgcCaptureService.cs（缺文件=本卡失明）", p is not null);
+        if (p is null) return;
+        var src = StripLineComments(ReadSourceNormalized(p));
+
+        Assert("① 三条路各一行（复用 / 按需回读 / 兜底）",
+            CountOf(src, "\"[Pool] SDR 帧: 复用拷贝 {reusedMs:0.0}ms\"") == 1
+            && CountOf(src, "\"[Pool] SDR 帧: 按需回读 {readbackMs:0.0}ms\"") == 1
+            && CountOf(src, "\"[Pool] SDR 帧: 兜底拷贝 {fallbackMs:0.0}ms\"") == 1);
+
+        int get = src.IndexOf("public byte[]? GetLatestSdr(byte[]? reuse)", StringComparison.Ordinal);
+        Assert($"② 取到 GetLatestSdr（实得 {get}）", get >= 0);
+        if (get >= 0)
+        {
+            int getEnd = src.IndexOf("\n        }", get, StringComparison.Ordinal);
+            var body = getEnd > get ? src.Substring(get, getEnd - get) : "";
+            int flush = body.IndexOf("FlushSdrWindowIfExpired();", StringComparison.Ordinal);
+            int refresh = body.IndexOf("Volatile.Write(ref _consumerUntil,", StringComparison.Ordinal);
+            Assert($"② 汇总结算排在刷新 _consumerUntil 之前（flush={flush} refresh={refresh}）",
+                flush >= 0 && refresh > flush,
+                "排在后面 ⇒ 旧截止时刻已被覆盖，汇总行一次都打不出来");
+        }
+
+        Assert("③ 逐帧计数走原子加",
+            src.Contains("Interlocked.Increment(ref _sdrWindowFrames);", StringComparison.Ordinal)
+            && src.Contains("Interlocked.Add(ref _sdrWindowTicks, sdrWorkTicks);", StringComparison.Ordinal));
+        Assert("④ 仪表不许改行为：wantCpu 条件仍只有一处且原样",
+            CountOf(src, "bool wantCpu = now < Volatile.Read(ref _consumerUntil);") == 1);
+        Assert("④ 汇总行的四个量都印出来（帧数/总毫秒/窗口），否则对不了账",
+            src.Contains("\"[Pool] SDR 回读窗口: {frames} 帧 共 {totalMs:0.0}ms（窗口 {ConsumerWindowMs}ms）\"", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// SDR 共享槽（2026-10-30，阶段 3 / #31+#32 收口）：扩展范围屏上 SDR 像素也等到选区定了才按矩形回读。
+    /// <para>背景：HDR 槽只服务预览（GPU 采样），标注/复制/识字这些出口要的是 8-bit SDR 整帧，
+    /// 每张截图先付一次整屏回读（本机实测 21.6–37.1ms）。现在与 HDR 同法冻结一块 SDR 槽，
+    /// 选区定了只读那一块。六条判据各挡一种"编译过、截图也能保存"的坏法：</para>
+    /// <para>① <b>冻结的三条件</b>：WantSharedFrame + 开关 + <c>hdrSession is not null</c>。少了最后一条，
+    ///   没有 Float16 会话时预览只能吃 SDR 整帧，跳过回读 = 整屏只剩遮罩（界面黑着，日志一句不报）。</para>
+    /// <para>② <b>尺寸核不过要交还</b>：槽比桌面小 ⇒ 下游按虚拟桌面坐标解释会越界/错位，比"没有槽"更坏。</para>
+    /// <para>③ <b>配对纪律</b>：SDR 冻上而 HDR 没冻成 ⇒ 交还 SDR 槽并整帧回读。预览只认 HDR 槽，
+    ///   不补这一手，用户会看到一张没有桌面、只剩遮罩的界面。</para>
+    /// <para>④ <b>所有权成对</b>：TakeSharedSdr 置空交还动作；没被认领的那块由 Dispose 交还（否则槽一直冻着）。</para>
+    /// <para>⑤ <b>回读不走错口</b>：SDR 与 HDR 是两个会话（池键 false/true）、两种像素（byte/float），
+    ///   回读必须只认 <c>expectedHandle</c> 那一块，槽被轮换就拒绝。</para>
+    /// <para>⑥ <b>MainWindow 接线</b>：forceSdr 先求值（否则白冻一块用不上的槽）、认领在 Dispose 之前、
+    ///   有效性判据接受槽、每个出口都在 finally 交还。</para>
+    /// </summary>
+    static void Test_PerfWiring_SdrSharedSlot()
+    {
+        var svcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var resPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "CaptureResult.cs"));
+        Assert("找到 WgcCaptureService.cs / MainWindow.xaml.cs / CaptureResult.cs（缺一=本条失明）",
+            svcPath is not null && mwPath is not null && resPath is not null);
+        if (svcPath is null || mwPath is null || resPath is null) return;
+        string src = StripLineComments(ReadSourceNormalized(svcPath));
+        string mw = StripLineComments(ReadSourceNormalized(mwPath));
+        string res = StripLineComments(ReadSourceNormalized(resPath));
+
+        // ── ① 开关与冻结的三条件 ──
+        Assert("① 诊断开关只认 TTC_SDR_SHARED=0 一个入口",
+            CountOf(src, "Environment.GetEnvironmentVariable(\"TTC_SDR_SHARED\") != \"0\"") == 1);
+        Assert("① TTC_NO_FLOAT16 在能力判定处短路（纯 SDR 屏模拟；删掉 ⇒ 那张矩阵只剩纸面）",
+            src.Contains("Environment.GetEnvironmentVariable(\"TTC_NO_FLOAT16\") == \"1\"", StringComparison.Ordinal)
+            && src.Contains("!sNoFloat16 && ClassifyMonitorColor(hmonitor)", StringComparison.Ordinal));
+        int freeze = src.IndexOf("if (config.WantSharedFrame && sSdrSlotEnabled && hdrSession is not null)", StringComparison.Ordinal);
+        Assert($"① 冻结要求 开关+HDR会话 同时成立（实得 {freeze}）", freeze >= 0,
+            "少了 hdrSession is not null ⇒ 无 HDR 槽时预览无帧可采（整屏遮罩、日志不报）");
+        if (freeze < 0) return;
+
+        // ── ② 尺寸核不过要交还 ──
+        int freezeEnd = src.IndexOf("if (sharedPreviewSdr.Handle == 0)", freeze, StringComparison.Ordinal);
+        Assert($"② 取到冻结块（end={freezeEnd}）", freezeEnd > freeze);
+        if (freezeEnd <= freeze) return;
+        var freezeBlock = src.Substring(freeze, freezeEnd - freeze);
+        Assert("② 槽尺寸必须等于 SDR 会话（与 HDR 同构）",
+            freezeBlock.Contains("slotW == sdrSession.Width && slotH == sdrSession.Height", StringComparison.Ordinal));
+        Assert($"② 尺寸不符与异常两条路都交还（实得 {CountOf(freezeBlock, "sdrSession.ReleaseSharedFrame();")} 处）",
+            CountOf(freezeBlock, "sdrSession.ReleaseSharedFrame();") == 2,
+            "少交还一处 ⇒ 槽一直冻着，下一帧起再也不更新");
+
+        // ── ③ 配对纪律：SDR 冻上而 HDR 没冻成 ⇒ 交还 + 整帧回读 ──
+        int paired = src.IndexOf("if (sharedPreviewSdr.Handle != 0 && sharedPreview.Handle == 0)", StringComparison.Ordinal);
+        int note = src.IndexOf("NoteHdrAttemptOutcome(targetMonitor, hdrSession.HasFrame);", StringComparison.Ordinal);
+        int gpu = src.IndexOf("ID3D11Texture2D? gpuTexture = null;", StringComparison.Ordinal);
+        Assert($"③ 配对检查排在 HDR 尝试之后、GPU 纹理之前（paired={paired} note={note} gpu={gpu}）",
+            paired > note && gpu > paired,
+            "排错位置 ⇒ HDR 失败那一拍 SDR 槽冻着不还，预览拿到无源帧");
+        if (paired > 0 && gpu > paired)
+        {
+            var pairBlock = src.Substring(paired, Math.Min(gpu - paired, 1200));
+            Assert("③ 配对块：交还 SDR 槽 + 整帧回读 + 取不到就抛（不回退成静默黑屏）",
+                pairBlock.Contains("sdrSession.ReleaseSharedFrame();", StringComparison.Ordinal)
+                && pairBlock.Contains("sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);", StringComparison.Ordinal)
+                && pairBlock.Contains("throw new TimeoutException(", StringComparison.Ordinal));
+        }
+
+        // ── ④ 结果接线 + 所有权 ──
+        Assert("④ 结果带 SDR 槽的三个字段",
+            CountOf(src, "SdrSharedHandle = sharedPreviewSdr.Handle,") == 1
+            && CountOf(src, "SdrSharedWidth = sharedPreviewSdr.W,") == 1
+            && CountOf(src, "SdrSharedHeight = sharedPreviewSdr.H,") == 1);
+        Assert("④ 交还动作登记给结果（没认领时 Dispose 兜底）",
+            CountOf(src, "result.SetSdrSharedRelease(sharedReleaseSdr);") == 1);
+        int takeSdr = res.IndexOf("public nint TakeSharedSdr(out int width, out int height)", StringComparison.Ordinal);
+        Assert($"④ 有认领入口（实得 {takeSdr}）", takeSdr >= 0);
+        if (takeSdr >= 0)
+        {
+            var body = res.Substring(takeSdr, Math.Min(400, res.Length - takeSdr));
+            Assert("④ 认领即置空交还动作（不置空 ⇒ 预览侧用了之后 Dispose 再交还一次）",
+                body.Contains("_sdrSharedRelease = null;", StringComparison.Ordinal));
+        }
+        Assert("④ Dispose 交还没被认领的 SDR 槽（漏了 ⇒ 槽一直冻着）",
+            res.Contains("var relSdr = _sdrSharedRelease; _sdrSharedRelease = null;", StringComparison.Ordinal)
+            && res.Contains("try { relSdr?.Invoke(); } catch { }", StringComparison.Ordinal));
+
+        // ── ⑤ 回读只走 SDR 会话、只认 expectedHandle ──
+        int rs = src.IndexOf("internal byte[]? ReadSharedRegionSdr(nint targetMonitor", StringComparison.Ordinal);
+        Assert($"⑤ 有 SDR 专用回读入口（实得 {rs}）", rs >= 0);
+        if (rs >= 0)
+        {
+            var body = src.Substring(rs, Math.Min(900, src.Length - rs));
+            Assert("⑤ SDR 回读打 SDR 会话（池键 false）且出 byte[]（不能借 HDR 那条 float 口）",
+                body.Contains("_sessionPool.TryGetValue((targetMonitor, false), out var session)", StringComparison.Ordinal)
+                && body.Contains("session.ReadSharedRegionBytes(expectedHandle, x, y, w, h)", StringComparison.Ordinal));
+        }
+        int rb = src.IndexOf("internal byte[]? ReadSharedRegionBytes(nint expectedHandle", StringComparison.Ordinal);
+        Assert($"⑤ 有 8-bit 槽回读（实得 {rb}）", rb >= 0);
+        if (rb >= 0)
+        {
+            var body = src.Substring(rb, Math.Min(1600, src.Length - rb));
+            Assert("⑤ 槽被轮换就拒绝（读新块 = 交出用户没框住的那一帧）",
+                body.Contains("if (expectedHandle == 0 || _sharedHandle != expectedHandle)", StringComparison.Ordinal));
+            Assert("⑤ 越界拒绝与 HDR 那条同构",
+                body.Contains("x + w > _sharedW || y + h > _sharedH", StringComparison.Ordinal));
+        }
+        Assert("⑤ 槽格式闸不硬编码 Float16（SDR 槽是 B8G8R8A8，硬编码就永远冻不上）",
+            !src.Contains("_sharedTex.Description.Format != Format.R16G16B16A16_Float", StringComparison.Ordinal)
+            && src.Contains("_sharedTex.Description.Format != _latestTexture.Description.Format", StringComparison.Ordinal));
+
+        // ── ⑥ MainWindow 接线 ──
+        int force = mw.IndexOf("bool forceSdr = Environment.GetEnvironmentVariable(\"TTC_FORCE_SDR\") == \"1\";", StringComparison.Ordinal);
+        int want = mw.IndexOf("WantSharedFrame = Environment.GetEnvironmentVariable(\"TTC_PREVIEW_SHARED\") != \"0\" && !forceSdr", StringComparison.Ordinal);
+        Assert($"⑥ forceSdr 先于捕获配置求值，且关掉共享槽（force={force} want={want}）",
+            force >= 0 && want > force,
+            "在捕获之后才求值 ⇒ 白冻一块 UINT 码流不认的槽（还多一次交还）");
+        int claim = mw.IndexOf("captureResult.TakeSharedSdr(out int sdrSharedW, out int sdrSharedH)", StringComparison.Ordinal);
+        int dispose = claim >= 0 ? mw.IndexOf("captureResult.Dispose();", claim, StringComparison.Ordinal) : -1;
+        Assert($"⑥ 认领在 Dispose 之前（claim={claim} dispose={dispose}）",
+            claim >= 0 && dispose > claim,
+            "Dispose 在前 ⇒ 槽已被捕获结果交还，认领拿到的是 0（静默退回整帧回读，读数看不出）");
+        Assert($"⑥ 认领一处（多了=两个出口抢同一块槽）", CountOf(mw, "TakeSharedSdr(") == 1);
+        if (claim >= 0)
+        {
+            var between = mw.Substring(claim, Math.Min(1200, mw.Length - claim));
+            Assert("⑥ 尺寸不符当场交还，且不许把错尺寸槽记成待交还",
+                between.Contains("ReleaseSharedFrame(sharedMonitor, false)", StringComparison.Ordinal)
+                && between.Contains("sdrSharedHandle = 0;", StringComparison.Ordinal));
+        }
+        Assert("⑥ 桌面像素有效性判据接受'只在槽里'那一档，同时不放过长度校验",
+            mw.Contains("if ((desktopPixels is null && !sdrSlotUsable)", StringComparison.Ordinal)
+            && mw.Contains("desktopPixels.Length != vw * vh * 4", StringComparison.Ordinal));
+        int read = mw.IndexOf("sdrRegion = wgc.ReadSharedRegionSdr(pendingSdrSharedMonitor, pendingSdrShared,", StringComparison.Ordinal);
+        int save = mw.IndexOf("case MainToolbarAction.Save:", StringComparison.Ordinal);
+        Assert($"⑥ 选区 SDR 回读排在动作分派之前（read={read} save={save}）",
+            read > 0 && read < save,
+            "排在分派之后 ⇒ 标注/复制拿到的还是 null，回退到'空区域'路径");
+        Assert("⑥ 坐标减显示器原点（槽是单屏纹理，窗口坐标是虚拟桌面坐标）",
+            mw.Contains("rx - vx, ry - vy, rw, rh);", StringComparison.Ordinal));
+        int sdrRel = mw.IndexOf("_wgcService?.ReleaseSharedFrame(pendingSdrSharedMonitor, false)", StringComparison.Ordinal);
+        int lockFree = sdrRel >= 0 ? mw.IndexOf("Interlocked.Exchange(ref _isCapturing, 0);", sdrRel, StringComparison.Ordinal) : -1;
+        Assert($"⑥ finally 里交还 SDR 槽，且紧挨释放防重入锁（rel={sdrRel} lockFree={lockFree}）",
+            sdrRel > 0 && lockFree > sdrRel && lockFree - sdrRel < 400,
+            "少这一笔 ⇒ 用户每取消一次，SDR 槽就冻到进程结束；不在 finally 尾段 ⇒ 有出口绕过去了");
+        Assert("⑥ 交还只写一处（不许在别处再交还同一块）",
+            CountOf(mw, "_wgcService?.ReleaseSharedFrame(pendingSdrSharedMonitor, false)") == 1);
+    }
+
+    /// <summary>
+    /// 预览窗复用进程级 D3D11 设备（2026-10-30，阶段 4）：每张截图一扇窗，原先每扇都 D3D11CreateDevice
+    /// （本机实测 33–65ms）。设备收成进程级惰性单例后，第 2 扇起不再付这笔钱；首扇那笔改由选区起点预热
+    /// 与捕获时间重叠。六条判据各挡一种"能跑但省不到 / 会互相打死"的坏法：
+    /// <para>① <b>构造走取设备而不是建设备</b>：留一句 D3D11CreateDevice 在构造里，读数上看着生效、
+    ///   实际每窗照付；日志还必须分得开"自建/复用"，否则拿不到 A/B。</para>
+    /// <para>② <b>共享设备不许任何一扇窗 Dispose</b>：Dispose 与 ReleaseDeviceResources 两处都要按
+    ///   <c>_ownsDevice</c> 分支 —— 少一处，下一扇窗复用到的就是已释放的 COM 对象（立刻 use-after-free，
+    ///   崩溃点不在这一扇窗上，排障时最容易误判）。</para>
+    /// <para>③ <b>设备丢失只换一次</b>：换新必须锁内再判一次"缓存那块是不是真丢了"，否则两个窗口前后脚
+    ///   报丢失时，第二个会把第一个刚建好的设备再收掉。</para>
+    /// <para>④ <b>ImmediateContext 串行</b>：RenderCore 入口拿全局锁，且渲染入口只有这一处。</para>
+    /// <para>⑤ <b>开关与兜底</b>：<c>TTC_PREVIEW_SHARED_DEVICE=0</c> 回到自建；共享设备建不出来时
+    ///   也必须退回自建（不能因为优化把截图弄没）。</para>
+    /// <para>⑥ <b>首扇也挪走</b>：选区起点预热必须在图集缓存开关的早退之前调用，否则缓存热时设备迟迟不建。</para>
+    /// </summary>
+    static void Test_PerfWiring_SharedPreviewDevice()
+    {
+        var winPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        Assert("找到 HdrCaptureWindow.cs / MainWindow.xaml.cs（缺一=本条失明）", winPath is not null && mwPath is not null);
+        if (winPath is null || mwPath is null) return;
+        var src = StripLineComments(ReadSourceNormalized(winPath));
+        var mw = StripLineComments(ReadSourceNormalized(mwPath));
+
+        // ── ① 构造只取不算 ──
+        int ctor = src.IndexOf("public HdrCaptureWindow()", StringComparison.Ordinal);
+        Assert($"① 取到公开构造（实得 {ctor}）", ctor >= 0);
+        if (ctor < 0) return;
+        int ctorEnd = src.IndexOf("\n    }", ctor, StringComparison.Ordinal);
+        var ctorBody = src.Substring(ctor, ctorEnd - ctor);
+        Assert("① 构造走 AcquireDevice，不再自己 D3D11CreateDevice（留一句=每窗照付 33–65ms）",
+            ctorBody.Contains("AcquireDevice();", StringComparison.Ordinal)
+            && !ctorBody.Contains("D3D11CreateDevice", StringComparison.Ordinal));
+        Assert("① 日志分得开自建/复用（拿不到 A/B 就没法证明这笔钱省了）",
+            ctorBody.Contains("复用进程级共享设备", StringComparison.Ordinal));
+
+        // ── ② 共享设备不被窗 Dispose ──
+        int disp = src.IndexOf("public void Dispose()", StringComparison.Ordinal);
+        Assert($"② 取到 Dispose（实得 {disp}）", disp >= 0);
+        if (disp >= 0)
+        {
+            var dispBody = src.Substring(disp, Math.Min(2200, src.Length - disp));
+            int guard = dispBody.IndexOf("if (!_ownsDevice)", StringComparison.Ordinal);
+            int rel = dispBody.IndexOf("_ctx?.Dispose();", StringComparison.Ordinal);
+            Assert($"② Dispose 里共享设备只放手不释放（guard={guard} release={rel}）",
+                guard >= 0 && rel > guard,
+                "少了这道闸 ⇒ 第二扇窗复用到的是一块已释放的设备，崩溃点还不在这一扇窗上");
+        }
+        int relDev = src.IndexOf("private void ReleaseDeviceResources()", StringComparison.Ordinal);
+        Assert($"② 取到 ReleaseDeviceResources（实得 {relDev}）", relDev >= 0);
+        if (relDev >= 0)
+        {
+            var relBody = src.Substring(relDev, Math.Min(1800, src.Length - relDev));
+            Assert("② 重建前释放同样按 _ownsDevice 分支（漏了 ⇒ 一次 TDR 把整进程的预览设备全打死）",
+                relBody.Contains("if (_ownsDevice) { Safe(_ctx); Safe(_device); }", StringComparison.Ordinal));
+        }
+
+        // ── ③ 设备丢失只换一次 ──
+        int repl = src.IndexOf("private static (ID3D11Device Device, ID3D11DeviceContext Ctx) ReplaceCachedDevice()", StringComparison.Ordinal);
+        Assert($"③ 有共享设备换新入口（实得 {repl}）", repl >= 0);
+        if (repl >= 0)
+        {
+            var replBody = src.Substring(repl, Math.Min(1600, src.Length - repl));
+            Assert("③ 换新前在缓存锁内再判一次'真丢了'（不判 ⇒ 后到的窗口把刚建好的设备再收一次）",
+                replBody.Contains("lock (s_deviceCacheLock)", StringComparison.Ordinal)
+                && replBody.Contains("D3DDeviceLost.IsDeviceRemoved(s_cachedDevice)", StringComparison.Ordinal));
+        }
+        int rebuild = src.IndexOf("private bool TryRebuildDeviceResources()", StringComparison.Ordinal);
+        Assert("③ 重建路径按所有权分叉（共享换缓存、自建新建）",
+            rebuild >= 0 && src.IndexOf("_ownsDevice ? NewDevice() : ReplaceCachedDevice()", rebuild, StringComparison.Ordinal) > rebuild);
+
+        // ── ④ ImmediateContext 串行 ──
+        Assert("④ 渲染段在全局锁内（ImmediateContext 非线程安全，同设备多窗只靠这把锁）",
+            CountOf(src, "lock (s_ctxLock) { RenderCore(); }") == 1);
+        Assert("④ 渲染入口只有一处（多一处=漏进锁外）",
+            CountOf(src, "RenderCore();") == 1);
+
+        // ── ⑤ 开关与兜底 ──
+        Assert("⑤ 诊断开关只认 TTC_PREVIEW_SHARED_DEVICE=0 一个入口",
+            CountOf(src, "Environment.GetEnvironmentVariable(\"TTC_PREVIEW_SHARED_DEVICE\") != \"0\"") == 1);
+        int acq = src.IndexOf("private (ID3D11Device Device, ID3D11DeviceContext Ctx) AcquireDevice()", StringComparison.Ordinal);
+        Assert($"⑤ 取到 AcquireDevice（实得 {acq}）", acq >= 0);
+        if (acq >= 0)
+        {
+            var acqBody = src.Substring(acq, Math.Min(1200, src.Length - acq));
+            int fb = acqBody.IndexOf("if (pair.Device is null)", StringComparison.Ordinal);
+            var fbBody = fb >= 0 ? acqBody.Substring(fb, Math.Min(300, acqBody.Length - fb)) : "";
+            Assert("⑤ 共享设备建不出来时退回自建（优化不许把截图弄没）",
+                fb >= 0
+                && fbBody.Contains("_ownsDevice = true;", StringComparison.Ordinal)
+                && fbBody.Contains("return NewDevice();", StringComparison.Ordinal),
+                "兜底分支少了'标成自建'⇒ Dispose 时按共享放手不释放，这块设备从此没人收");
+        }
+
+        // ── ⑥ 选区起点预热（首扇也挪走） ──
+        int pre = src.IndexOf("internal static void PrewarmAtlasForMonitor(nint hmonitor)", StringComparison.Ordinal);
+        Assert($"⑥ 取到选区起点预热入口（实得 {pre}）", pre >= 0);
+        if (pre >= 0)
+        {
+            var preBody = src.Substring(pre, Math.Min(700, src.Length - pre));
+            int warm = preBody.IndexOf("WarmSharedDevice();", StringComparison.Ordinal);
+            int early = preBody.IndexOf("if (!s_atlasCacheEnabled) return;", StringComparison.Ordinal);
+            Assert($"⑥ 设备预热排在缓存开关早退之前（warm={warm} early={early}）",
+                warm >= 0 && early > warm,
+                "排在后面 ⇒ 图集缓存热的时候设备迟迟不建，首扇窗照付 33–65ms");
+        }
+
+        // ── ⑦ 产品路径只从这一处建窗（别处再 new 一扇 = 又绕开共享设备） ──
+        Assert("⑦ 产品建窗只有一处（多一处 ⇒ 那条路仍在按窗建设备）",
+            CountOf(mw, "new Services.HdrCaptureWindow()") == 1);
+    }
+
+    /// <summary>
+    /// 2026-10-30 性能审查候选 A：AVIF「压缩强度」必须真正落到真 10-bit NVENC 两条路上。
+    /// <para>缺陷形状（修前）：界面与 8-bit 路都认这一档，但 10-bit 三处调用仍是 4 参重载
+    /// （<c>EncodeAv1Argb10(..., crf)</c>）⇒ 用户选「快速」对 10-bit AVIF 无效，恒 Balanced(P4)。
+    /// 这条锁的是"三处都带 effort + 两个入口都把它传下去"，不测 GPU 产物。</para>
+    /// </summary>
+    static void Test_PerfWiring_AvifNvencEffort10Bit()
+    {
+        var fmtPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"));
+        var ifacePath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ImageEncoder.cs"));
+        Assert("找到 FormatEncoders.cs / ImageEncoder.cs（缺一=本条失明）", fmtPath is not null && ifacePath is not null);
+        if (fmtPath is null || ifacePath is null) return;
+        var fmt = StripLineComments(ReadSourceNormalized(fmtPath));
+        var iface = StripLineComments(ReadSourceNormalized(ifacePath));
+
+        Assert("① 接口的 EncodeArgb10Async 带 effort 形参（不带 ⇒ 后端拿不到用户档位）",
+            iface.Contains("EncodeArgb10Async(byte[] argb10, int w, int h, int crf, string path, CancellationToken ct, string chroma = \"420\", int displayBitDepth = 10, string? colorSpaceTag = null, byte[]? iccProfile = null, CompressionEffort effort = CompressionEffort.Balanced)", StringComparison.Ordinal));
+
+        Assert("② 真 10-bit SDR 调用点把 s.Effort 传下去",
+            CountOf(fmt, "s.IccProfile, s.Effort);") >= 1);
+
+        Assert("③ HDR 硬解入口收 effort 并传进静态方法",
+            CountOf(fmt, "float peakNits,\n        CompressionEffort effort = CompressionEffort.Balanced)") == 1
+            && CountOf(fmt, "hwPeakNits, s.Effort);") == 1);
+
+        Assert("④ 三处 EncodeAv1Argb10 全部走 5 参重载（4 参=该路恒 Balanced）",
+            CountOf(fmt, "EncodeAv1Argb10(pq10, w, h, crf, effort)") == 1
+            && CountOf(fmt, "EncodeAv1Argb10(argb10, w, h, crf, effort)") == 2
+            && CountOf(fmt, "EncodeAv1Argb10(") == 3);
+    }
+
+    /// <summary>
+    /// 2026-10-30 性能审查候选 E + 仪表：OCR rec 的合批与 Span 读取。
+    /// <para>实测（1200×800 / 14 框 / DirectML，交替换臂 10 次）：原多维索引器 total 730ms、
+    /// Span 586ms、Span+合批 503–538ms；三臂 OCR 文本 SHA 全同（5C4B82FD）⇒ 只动"怎么读/跑几次"。
+    /// 锁的是：① 单框与合批共用同一份预处理（不许两份算术）；② Span 默认开、可用开关回退；
+    /// ③ 合批失败整批退回串行（宁慢不丢行）。</para>
+    /// </summary>
+    static void Test_PerfWiring_OcrBatchAndSpan()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "OnnxOcrEngine.cs"));
+        Assert("找到 OnnxOcrEngine.cs（缺=本条失明）", p is not null);
+        if (p is null) return;
+        var src = StripLineComments(ReadSourceNormalized(p));
+
+        // ── ① 单框/合批共用一份预处理 ──
+        Assert("① 预处理只有一个实现（两份=同一套裁剪/缩放算术被抄两遍，迟早漂移）",
+            CountOf(src, "private bool FillRecognitionInput(") == 1);
+        Assert("① 串行与合批都调它（串行=1 处、合批循环=1 处）",
+            CountOf(src, "FillRecognitionInput(bgra, imgW, imgH, box, input, 0)") == 1
+            && CountOf(src, "FillRecognitionInput(bgra, imgW, imgH, boxes[offset + b], input, b)") == 1);
+
+        // ── ② 合批契约 ──
+        Assert("② 合批张量是 [RecBatchSize,3,recH,recMaxW]（只改 batch 维，不改每个样本形状）",
+            CountOf(src, "new DenseTensor<float>([RecBatchSize, 3, recH, recMaxW])") == 1);
+        Assert("② 合批入口存在且逐框解码",
+            CountOf(src, "private string[] RunRecognitionBatch(") == 1
+            && CountOf(src, "texts[b] = DecodeRecognitionRow(output, b);") == 1);
+        Assert("② 合批失败整批退回串行（两处 catch 各一遍；少一处=一条异常吞掉整批文本）",
+            CountOf(src, "texts[b] = RunRecognition(bgra, imgW, imgH, boxes[offset + b]);") == 2);
+        Assert("② 开关 TTC_OCR_BATCH=0 能回到逐框",
+            CountOf(src, "Environment.GetEnvironmentVariable(\"TTC_OCR_BATCH\") != \"0\"") == 1);
+
+        // ── ③ Span 读取（默认开、可回退） ──
+        Assert("③ Span 开关默认开、TTC_OCR_SPAN=0 回退",
+            CountOf(src, "Environment.GetEnvironmentVariable(\"TTC_OCR_SPAN\") != \"0\"") == 1);
+        Assert("③ 检测概率图与 rec logits 都按连续 Span 读（4K 上百万次多维索引=白付）",
+            CountOf(src, "denseOutput.Buffer.Span") == 1
+            && CountOf(src, "dense.Buffer.Span") == 1);
+        Assert("③ 旧的多维索引只剩非 DenseTensor 兜底那一处（多一处=热路径又回去了）",
+            CountOf(src, "output[[batchIndex, t, c2]]") == 1
+            && CountOf(src, "output[[0, t, c2]]") == 0
+            && CountOf(src, "output[[0, 0, y2, x2]]") == 1);
+    }
+
+    /// <summary>
+    /// 2026-10-30 性能审查候选 D：CPU OCR 会话按需构建。
+    /// <para>修前：启动即建 DirectML + CPU 两份会话，而 CPU 只在「用户显式选 CPU」或
+    /// 「DirectML 不可用」时才被调用。实测启动 +8s 相对 +0s 多 138–144MB Private（不含归因）。
+    /// 锁的是：① GPU 可用时启动不建 CPU；② 选到 CPU 时能补建并保持 GPU→CPU→Windows 顺序；
+    /// ③ 建失败不写负缓存（下次仍可重试）；④ 回退开关。</para>
+    /// </summary>
+    static void Test_PerfWiring_LazyCpuOcr()
+    {
+        var p = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "MultiOcrService.cs"));
+        Assert("找到 MultiOcrService.cs（缺=本条失明）", p is not null);
+        if (p is null) return;
+        var src = StripLineComments(ReadSourceNormalized(p));
+
+        Assert("① 启动期只在 GPU 不可用（或显式 eager）时才建 CPU",
+            CountOf(src, "if (!gpuReady || eagerCpu)") == 1
+            && CountOf(src, "BuildCpuEngineLocked();") == 1);
+        Assert("① 开关 TTC_OCR_EAGER_CPU=1 回到旧行为（启动即建）",
+            CountOf(src, "Environment.GetEnvironmentVariable(\"TTC_OCR_EAGER_CPU\") == \"1\"") == 1);
+
+        Assert("② SelectedEngine 取不到时对 OnnxCpu 走 EnsureCpuEngine（只回退不改选择）",
+            CountOf(src, "return type == OcrEngineType.OnnxCpu ? EnsureCpuEngine() : null;") == 1);
+        Assert("② 补建后仍排在 Windows OCR 之前（GPU→CPU→Windows 的降级顺序不变）",
+            CountOf(src, "int winIdx = _engines.FindIndex(e => e.Info.EngineType == OcrEngineType.WindowsOcr);") == 1
+            && src.Contains("if (winIdx >= 0) _engines.Insert(winIdx, cpuEngine);", StringComparison.Ordinal));
+
+        Assert("③ 建失败不写负缓存（下一次仍可重试；写死=一次瞬时失败永久没 CPU）",
+            !src.Contains("_cpuFailed", StringComparison.Ordinal)
+            && CountOf(src, "return null;") >= 2);
+        Assert("③ CPU 会话只在两处被 new（启动兜底 + 按需），不许有第三处",
+            CountOf(src, "new OnnxOcrEngine(OnnxExecutionProvider.Cpu") == 2);
+    }
+
+    /// <summary>
+    /// 2026-10-31：无损 deflate 的可选后端（libdeflate）与自动回退。
+    /// <para>承诺不是"更快"，而是"快不了也不能坏"：DLL 缺失、架构不对、导出缺失、自检回读不等、
+    /// 运行中抛错，五条路都必须退回内置 zlib-ng，且 PNG/TIFF 的解压结果逐字节不变。</para>
+    /// <para>本机门禁环境默认没有 deflate.dll ⇒ 行为臂只验内置实现与档位正控；
+    /// libdeflate 正臂在检测到 DLL 时才跑，否则显式 Skip（不静默通过）。</para>
+    /// </summary>
+    static void Test_DeflateZlib_BackendProbeAndFallback()
+    {
+        var dzPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "DeflateZlib.cs"));
+        var pngPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ManagedPngEncoder.cs"));
+        var tifPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "ManagedTiffEncoder.cs"));
+        var appPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "App.xaml.cs"));
+        Assert("找到 DeflateZlib / PNG / TIFF / App（缺一=本条失明）",
+            dzPath is not null && pngPath is not null && tifPath is not null && appPath is not null);
+        if (dzPath is null || pngPath is null || tifPath is null || appPath is null) return;
+
+        var dz = StripLineComments(ReadSourceNormalized(dzPath));
+        var png = StripLineComments(ReadSourceNormalized(pngPath));
+        var tif = StripLineComments(ReadSourceNormalized(tifPath));
+        var app = StripLineComments(ReadSourceNormalized(appPath));
+
+        Assert("① 默认允许 libdeflate，TTC_DEFLATE=0 强制内置（全仓只读一次）",
+            CountOf(dz, "Environment.GetEnvironmentVariable(\"TTC_DEFLATE\") != \"0\"") == 1);
+        Assert("① 路径覆盖开关 TTC_DEFLATE_DLL 只读一次",
+            CountOf(dz, "Environment.GetEnvironmentVariable(\"TTC_DEFLATE_DLL\")") == 1);
+
+        Assert("② PNG 与 TIFF 都只经 DeflateZlib.Compress，不再各写一份 ZLibStream",
+            CountOf(png, "DeflateZlib.Compress(data, CompressionEffortMap.PngTiffDeflateLevel(effort))") == 1
+            && CountOf(tif, "DeflateZlib.Compress(raw, CompressionEffortMap.PngTiffDeflateLevel(effort))") == 1);
+
+        Assert("③ 原生失败必须回到内置实现（两条 return 是空输入与失败回退）",
+            dz.Contains("if (s_allowLibDeflate && level == 9 && IsAvailable && IsLibDeflateCandidate(data)", StringComparison.Ordinal)
+            && CountOf(dz, "return CompressBuiltin(data, level);") == 2);
+
+        Assert("③ libdeflate 用 level 10（真实 HDR 截图实测它同时更快且小 6%）；入口仍只接管 Smallest(9)",
+            CountOf(dz, "private const int LibDeflateLevel = 10;") == 1
+            && CountOf(dz, "TryCompressNative(data, LibDeflateLevel, out var compressed)") == 1);
+
+        Assert("③ 只有非纯色/文字内容才外包：阈值由 1 MiB level-1 压缩比判定（UI 外包会变大 7.7%）",
+            CountOf(dz, "private const double LibDeflateMinRatio = ") == 1
+            && CountOf(dz, "internal static bool IsLibDeflateCandidate(byte[] data)") == 1
+            && CountOf(dz, "var packed = CompressBuiltin(sample, 1);") == 1);
+
+        Assert("③ 运行中失败要一次停用（否则每次保存都付异常与日志）",
+            dz.Contains("Disable($\"压缩失败:", StringComparison.Ordinal)
+            && CountOf(dz, "lock (s_lock)") == 2);
+
+        Assert("④ 探测先自检：压一段样本再用 .NET 解回来必须全等",
+            dz.Contains("自检压缩回读不一致", StringComparison.Ordinal)
+            && CountOf(dz, "NativeLibrary.GetExport(s_dll, \"libdeflate_") == 4);
+
+        Assert("⑤ 启动后台探测一次（缺失只记 Info，不是每次保存再探）",
+            CountOf(app, "DeflateZlib.Initialize();") == 1);
+
+        // ── ⑥ 分发契约：DLL 必须真进包，哈希/许可/清单三边一致 ──
+        var csprojPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "TrueToneCap.App.csproj"));
+        var pubPath = FindRepoFile("Publish.ps1");
+        var vpPath = FindRepoFile(Path.Combine("scripts", "verify-package.ps1"));
+        var vmPath = FindRepoFile(Path.Combine("scripts", "verify-msix.ps1"));
+        var manPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Resources", "tools-manifest.json"));
+        var idxPath = FindRepoFile(Path.Combine("licenses", "INDEX.json"));
+        var genPath = FindRepoFile(Path.Combine("scripts", "gen-third-party-notices.py"));
+        Assert("⑥ 找到 csproj / Publish / 两个包校验 / manifest / INDEX / notices 生成器（缺一=分发契约失明）",
+            csprojPath is not null && pubPath is not null && vpPath is not null && vmPath is not null
+            && manPath is not null && idxPath is not null && genPath is not null);
+        if (csprojPath is not null && pubPath is not null && vpPath is not null && vmPath is not null
+            && manPath is not null && idxPath is not null && genPath is not null)
+        {
+            var csproj = ReadSourceNormalized(csprojPath);
+            var pub = ReadSourceNormalized(pubPath);
+            var vp = ReadSourceNormalized(vpPath);
+            var vm = ReadSourceNormalized(vmPath);
+            var man = ReadSourceNormalized(manPath);
+            var idx = ReadSourceNormalized(idxPath);
+            var gen = ReadSourceNormalized(genPath);
+
+            Assert("⑥ MSIX/开发输出都声明了 Resources\\*.dll 并拷进 native/",
+                csproj.Contains("Resources\\*.dll", StringComparison.Ordinal)
+                && csproj.Contains("<TtcNativeLibs Include=\"..\\TrueToneCap.Core\\Resources\\*.dll\" />", StringComparison.Ordinal));
+
+            Assert("⑥ 发布脚本把 deflate.dll 当必需件复制并校验（缺件不许出包）",
+                pub.Contains("\"deflate.dll\" = \"无损压缩（libdeflate）\"", StringComparison.Ordinal));
+
+            Assert("⑥ 包校验列了 deflate.dll 尺寸，且不对 DLL 硬启进程",
+                vp.Contains("@{ File = \"deflate.dll\"; Min = 128KB }", StringComparison.Ordinal)
+                && vp.Contains("$probeArgs.ContainsKey($name)", StringComparison.Ordinal));
+
+            Assert("⑥ MSIX 包内校验也点名 deflate.dll（绿色包绿了不等于 MSIX 里有它）",
+                vm.Contains("$deflate = Join-Path $tmp \"native\\deflate.dll\"", StringComparison.Ordinal)
+                && vm.Contains("native\\deflate.dll 缺失", StringComparison.Ordinal));
+
+            Assert("⑥ notices 生成器认识 deflate.dll 这个产物桶（否则许可全文不会内联）",
+                gen.Contains("(\"deflate.dll\", \"无损压缩库 deflate.dll（libdeflate）\")", StringComparison.Ordinal));
+
+            // 清单 ↔ 实存二进制：哈希与体积必须一致（升级 DLL 忘了回填哈希 ⇒ 这里红）
+            var dllPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Resources", "deflate.dll"));
+            Assert("⑥ 找到实际 deflate.dll（缺它=清单在描述一个不存在的产物）", dllPath is not null);
+            if (dllPath is not null)
+            {
+                int at = man.IndexOf("\"file\": \"deflate.dll\"", StringComparison.Ordinal);
+                Assert("⑥ tools-manifest 有 deflate.dll 条目", at >= 0);
+                if (at >= 0)
+                {
+                    int hashAt = man.IndexOf("\"sha256\": \"", at, StringComparison.Ordinal);
+                    string wantHash = hashAt >= 0
+                        ? man.Substring(hashAt + 11, man.IndexOf('"', hashAt + 11) - (hashAt + 11))
+                        : "";
+                    var actualHash = Convert.ToHexString(
+                        System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(dllPath)));
+                    Assert("⑥ 清单 SHA256 == 实际文件（不相等 ⇒ 单边升级留下了不可追溯的二进制）",
+                        string.Equals(wantHash, actualHash, StringComparison.OrdinalIgnoreCase),
+                        $"manifest={wantHash} actual={actualHash}");
+
+                    int sizeAt = man.IndexOf("\"sizeBytes\": ", at, StringComparison.Ordinal);
+                    long wantSize = sizeAt >= 0
+                        ? long.Parse(new string(man.Skip(sizeAt + 13).TakeWhile(char.IsDigit).ToArray()))
+                        : -1;
+                    Assert("⑥ 清单 sizeBytes == 实际文件长度",
+                        wantSize == new FileInfo(dllPath).Length, $"manifest={wantSize} actual={new FileInfo(dllPath).Length}");
+                }
+            }
+
+            // 许可：INDEX 有一条、随包、指向的落盘文件存在且哈希一致
+            int licAt = idx.IndexOf("\"file\": \"libdeflate-MIT.txt\"", StringComparison.Ordinal);
+            Assert("⑥ licenses/INDEX.json 登记 libdeflate-MIT.txt 且 shippedIn=deflate.dll",
+                licAt >= 0 && idx.IndexOf("\"shippedIn\": [\"deflate.dll\"]", licAt, StringComparison.Ordinal) > licAt);
+            var licPath = FindRepoFile(Path.Combine("licenses", "libdeflate-MIT.txt"));
+            Assert("⑥ 许可全文落盘（MIT 再分发的硬条件）", licPath is not null);
+            if (licAt >= 0 && licPath is not null)
+            {
+                int shaAt = idx.IndexOf("\"sha256\": \"", licAt, StringComparison.Ordinal);
+                string want = shaAt >= 0
+                    ? idx.Substring(shaAt + 11, idx.IndexOf('"', shaAt + 11) - (shaAt + 11))
+                    : "";
+                var actual = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(licPath)));
+                Assert("⑥ 许可清单 SHA256 == 落盘许可文件",
+                    string.Equals(want, actual, StringComparison.OrdinalIgnoreCase), $"manifest={want} actual={actual}");
+            }
+        }
+
+        // ── 行为臂：内置实现 + 档位正控 ──
+        var buf = new byte[1 << 18];
+        var r = new Random(20261031);
+        for (int i = 0; i < buf.Length; i++)
+            buf[i] = (i % 997 < 900) ? (byte)(i >> 3) : (byte)r.Next(256);
+
+        static byte[] Inflate(byte[] zlibData)
+        {
+            using var ms = new MemoryStream(zlibData);
+            using var zs = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionMode.Decompress);
+            using var outMs = new MemoryStream();
+            zs.CopyTo(outMs);
+            return outMs.ToArray();
+        }
+
+        byte[]? builtin9 = null, builtin8 = null;
+        foreach (var level in new[] { 9, 8, 6, 1 })
+        {
+            var packed = DeflateZlib.CompressBuiltin(buf, level);
+            Assert($"内置臂 level {level}: zlib 封装解压后与输入逐字节相同",
+                packed.Length > 6 && packed[0] == 0x78 && Inflate(packed).AsSpan().SequenceEqual(buf),
+                $"{packed.Length}B");
+            if (level == 9) builtin9 = packed;
+            if (level == 8) builtin8 = packed;
+        }
+        Assert("正控：level 9 与 level 8 在本夹具上产物不同（证明档位真的生效）",
+            builtin9 is not null && builtin8 is not null && !builtin9.AsSpan().SequenceEqual(builtin8));
+
+        // ── 自适应分流：纯色/文字 UI 留给内置；Quick(8) 永远不外包 ──
+        var quickViaEntry = DeflateZlib.Compress(buf, 8);
+        Assert("Quick(8) 永远走内置实现（逐字节等于内置 level 8；两档不许产同一份文件）",
+            builtin8 is not null && quickViaEntry.AsSpan().SequenceEqual(builtin8),
+            $"entry {quickViaEntry.Length}B vs builtin {builtin8?.Length}B");
+
+        var flat = new byte[1 << 18];
+        for (int i = 0; i < flat.Length; i++) flat[i] = (byte)(i % 16);
+        bool flatCandidate = DeflateZlib.IsLibDeflateCandidate(flat);
+        bool randomCandidate = DeflateZlib.IsLibDeflateCandidate(RandomBytes(20261031));
+        Assert("探针：纯色/重复内容判为低压缩比；随机字节判为可外包（阈值两侧各有一个正控）",
+            !flatCandidate && randomCandidate, $"flat={flatCandidate} random={randomCandidate}");
+
+        var flat9 = DeflateZlib.CompressBuiltin(flat, 9);
+        var compressibleViaEntry = DeflateZlib.Compress(flat, 9);
+        Assert("纯色/文字内容即使 libdeflate 在位也走内置（否则「极高」档产物变大 7.7%）",
+            compressibleViaEntry.AsSpan().SequenceEqual(flat9));
+
+        // ── libdeflate 正臂（用随机夹具）：没有 DLL 就显式跳过 ──
+        // ⚠ 内置 zlib-ng 的 level 上限是 9（ZLibCompressionOptions 只到 9），
+        // 所以"与内置不同"只能拿 9 做对照；level 10 的真值由 --perf-png --raw 的外部读数守。
+        var noisy = RandomBytes(20261031);
+        var builtinNoisy9 = DeflateZlib.CompressBuiltin(noisy, 9);
+        if (!DeflateZlib.IsAvailable)
+        {
+            Skip("libdeflate 正臂（可外包内容产物不同且解压等价）",
+                "本进程未找到可用 deflate.dll ⇒ 只验了回退臂");
+            var fallback = DeflateZlib.Compress(noisy, 9);
+            Assert("回退臂：无 libdeflate 时产品入口 == 内置 level 9（逐字节）",
+                fallback.AsSpan().SequenceEqual(builtinNoisy9));
+            return;
+        }
+
+        var native = DeflateZlib.Compress(noisy, 9);
+        Assert("libdeflate 正臂：解压后与输入逐字节相同",
+            Inflate(native).AsSpan().SequenceEqual(noisy), $"{native.Length}B");
+        Assert("libdeflate 正臂：产物与内置实现不同（证明真的换了实现，不是空跑）",
+            !native.AsSpan().SequenceEqual(builtinNoisy9),
+            $"libdeflate {native.Length}B vs zlib-ng {builtinNoisy9.Length}B");
+
+        static byte[] RandomBytes(int seed)
+        {
+            var data = new byte[1 << 18];
+            new Random(seed).NextBytes(data);
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// B3（2026-10-29）：增益比的"归一化到 SDR 白点"不再整帧预乘成第二张 float[]，
+    /// 而是把 <c>invSdrWhite</c> 当参数传进 <c>ComputeGainMap</c>，在它那次并行遍历里就地乘。
+    /// <para>省的是 4K 上一张 13.1 MB 的整帧缓冲 + 一趟 3317 万次乘法。三臂实测（本机 4K）：
+    /// 旧形状且每次新建缓冲（= 生产形状）65.3ms、旧形状但复用缓冲 55.8ms、融合后 28.5ms
+    /// ⇒ 省 <b>36.7ms</b>，两臂区间不重叠。⚠ 先前那句"占 GainMap 整条 16.8%"是"孤立形状 ÷ 端到端中位"
+    /// 造出来的假精度 —— 端到端 5 遍是 298~898ms，±200ms 全在 cjpegli 子进程上，量不出这一条。
+    /// 这条改动的承诺是<b>产物逐字节不变</b>，所以判据不测时间、只测等价。</para>
+    /// <para><b>参照臂怎么构造才不算自证</b>：不改写一份公式（那只会把同一个 bug 抄两遍），
+    /// 而是保留改动前的<b>形状</b> —— 先把整帧乘进 normHdr，再以 <c>k = 1.0</c> 调用同一个生产函数。
+    /// 于是"参照"与"被测"只差在乘法发生在遍历之前还是遍历之内；两者必须逐字节相等。
+    /// 第三臂"k = 1.0 直接吃未归一化的 hdr"必须与参照<b>不同</b> —— 它证明这批数据里
+    /// 那次乘法真的在起作用，漏乘不会恰好被其它环节掩盖（空比对拦掉）。</para>
+    /// <para><b>判据的边界，如实写在这里</b>：它抓不到"把 k 提进亮度权重"这种代数改写。
+    /// 2026-10-29 对它做过变异验证 —— 真把那行改成 <c>k·(0.2126r+…)</c>，下面两条等式断言<b>照绿</b>：
+    /// 增益最后量化成 8-bit（本批 697 个灰度字节），1 ULP 的末位差几乎从不跨量化边界。
+    /// 那条纪律只由 <c>ComputeGainMap</c> 的 remarks 守着，不由本判据守着。别把这两件事混着讲。</para>
+    /// </summary>
+    static void Test_GainMap_NormalizeFusion_ByteIdentical()
+    {
+        var gmPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "JpegGainMapEncoder.cs"));
+        if (gmPath is null) { Skip("GainMap 归一化融合等价", "未找到 JpegGainMapEncoder.cs"); return; }
+        var gmSrc = File.ReadAllText(gmPath);
+
+        const int w = 41, h = 17;           // 故意取不能整除的行列，覆盖两个 mode 的索引边界
+        int n = w * h;
+        var rng = new Random(20261029);
+        var hdr = new float[n * 4];
+        var sdr = new float[n * 4];
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * 4;
+            for (int c = 0; c < 3; c++)
+                hdr[o + c] = (float)(rng.NextDouble() * 4.0);   // 跨 SDR 白点 2.5 ⇒ 直通与超白点像素都有
+            hdr[o + 3] = 1f;
+            // sdrLinear 在生产里是 Reinhard 的输出（恒 ≤ 1 且 ≤ 归一化后的 HDR）。
+            // 本判据只要求"同一输入喂两侧"，所以这里直接构造一份合法范围内的值。
+            for (int c = 0; c < 3; c++)
+                sdr[o + c] = Math.Min(hdr[o + c] * 0.4f, 0.999f) * 0.97f + 0.001f;
+            sdr[o + 3] = 1f;
+        }
+
+        float sdrWhiteScrgb = 2.5f;
+        float k = 1.0f / Math.Max(sdrWhiteScrgb, 1.0f);   // 与生产同一行算法
+        const float maxLog2Gain = 2.0f;
+
+        // 参照形状 = 改动前那一版：整帧预乘到 normHdr 后，函数内部不再乘（k 传 1.0）
+        var normHdr = new float[hdr.Length];
+        for (int pi = 0; pi < n; pi++)
+        {
+            int o = pi * 4;
+            normHdr[o] = hdr[o] * k;
+            normHdr[o + 1] = hdr[o + 1] * k;
+            normHdr[o + 2] = hdr[o + 2] * k;
+            normHdr[o + 3] = hdr[o + 3];
+        }
+
+        foreach (var (mode, ch) in new[] { (GainMapMode.Gray, 1), (GainMapMode.Rgb, 3) })
+        {
+            var name = mode == GainMapMode.Gray ? "Gray" : "Rgb";
+            byte[] reference = JpegGainMapEncoder.ComputeGainMap(normHdr, sdr, w, h, mode, maxLog2Gain, 1.0f);
+            byte[] fused = JpegGainMapEncoder.ComputeGainMap(hdr, sdr, w, h, mode, maxLog2Gain, k);
+
+            Assert($"{name}：就地归一化与整帧预乘的增益图逐字节相同",
+                reference.SequenceEqual(fused),
+                $"首个不同字节在第 {FirstDiff(reference, fused)} 个（共 {reference.Length}）");
+            Assert($"{name}：增益图非全零（数据有信号，比对不是空转）",
+                fused.Any(b => b > 0));
+
+            // 第三臂：漏乘（未归一化直接吃 hdr）必须与参照不同 —— 否则上面两条恒绿
+            byte[] noMul = JpegGainMapEncoder.ComputeGainMap(hdr, sdr, w, h, mode, maxLog2Gain, 1.0f);
+            int diff = 0;
+            for (int i = 0; i < reference.Length; i++) if (reference[i] != noMul[i]) diff++;
+            Assert($"{name}：那次乘法在数据上真的起作用（漏乘会产生 {diff} 个不同字节，判据抓得住）",
+                diff > reference.Length / 10, $"仅 {diff}/{reference.Length} 个字节不同");
+            Assert($"{name}：融合后每个通道仍是 ch 字节（通道数没被顺手动过）",
+                fused.Length == n * ch);
+        }
+
+        // 接线：整帧第二张缓冲确实没了（ReinhardToSdr 里那张是它自己的输出，不在本判据范围）。
+        // ⚠ 这是一条"缺席断言"，下面那条正向断言就是它的活体证明：两边读的是同一份 gmSrc，
+        //    若 gmSrc 是空的/读错了文件，正向那条立刻红。
+        Assert("主流程不再分配 normHdr 整帧缓冲", !gmSrc.Contains("float[] normHdr"));
+        Assert("ComputeGainMap 收归一化系数（乘在遍历里）",
+            Regex.IsMatch(gmSrc,
+                @"ComputeGainMap\(float\[\] hdrPixels, float\[\] sdrLinear, int w, int h,[\s\S]{0,80}float invSdrWhite\)"),
+            "没匹配到带 invSdrWhite 形参的签名 ⇒ 本判据定位方式已过期，别当通过");
+    }
+
+    static int FirstDiff(byte[] a, byte[] b)
+    {
+        int m = Math.Min(a.Length, b.Length);
+        for (int i = 0; i < m; i++) if (a[i] != b[i]) return i;
+        return a.Length != b.Length ? m : -1;
+    }
+
+    /// <summary>
     /// 预览窗翻译扇出的两处加固（2026-10-07 全仓审查发现并修复）。
     /// <para><b>① 取消</b>：<c>TranslateAsync</c> 的签名接受 <c>CancellationToken</c>，但调用点
     /// 从来没传过，窗口内也没有任何 CTS，<c>OnClosed</c> 还是空的 ⇒ 关掉预览窗后，
@@ -3234,15 +5276,13 @@ public static class CorePipelineTests
 
         // 反向哨兵：豁免必须是真的豁免（那个文件确实存在且确实没被我们的章污染），
         // 否则"upstream/ 不盖章"只是一句可以随时被扩大成"什么都不查"的空话。
-        var upstreamFile = Path.Combine(repoRoot, "src", "TrueToneCap.VSCap", "upstream",
-            "src", "cap", "DesktopCapture.h");
-        if (File.Exists(upstreamFile))
-            Assert("上游逐字副本保持自己的许可（我们的章不许出现在 upstream/ 里）",
-                !HasHeader(File.ReadAllText(upstreamFile)),
-                "DesktopCapture.h 里出现了 SPDX 声明 ⇒ 已误署版权方");
-        else
-            Assert("上游逐字副本仍在仓库里（豁免对象消失要点名，不能静默少一块）",
-                false, $"未找到 {upstreamFile}");
+        // 2026-10-27：VS-Cap 上游副本已归档（功能并入主程序，见 docs/vscap-mode.md）⇒
+        // 豁免对象消失。这里改判"归档状态一致"：跟踪清单里不许再有 upstream/ 文件；
+        // 一旦它们回来，就必须连同许可判据（不盖章 + INDEX.json 逐字副本声明）一起恢复。
+        bool vendoredBack = tracked.Any(p => p.StartsWith(vendored, StringComparison.Ordinal));
+        Assert("VS-Cap 上游副本已归档：跟踪清单里不再有 upstream/ 文件（回来了就得恢复它的许可判据）",
+            !vendoredBack,
+            "上游文件回来了，但上面那条豁免只剩一句空话：" + string.Join(", ", tracked.Where(p => p.StartsWith(vendored, StringComparison.Ordinal)).Take(5)));
     }
 
     /// <summary>
@@ -3965,56 +6005,120 @@ public static class CorePipelineTests
         CheckWhitelistEqualsTags(xaml, srv, "ArchiveModeCbo", "s.ArchiveMode", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "ToastPositionCbo", "s.ToastPosition", expectTags: 5);
 
-        // ═══ 2026-10-07：压缩强度三档（AVIF / JPEG XL / WebP）═══
-        // 三个下拉共用同一组 Tag（Smallest/Balanced/Fastest），但各写各的字段 ⇒ 逐个对撞。
-        // 这条判据在这里格外值钱：三个下拉长得一样，若某个分支漏写或写错字段名，
+        // ═══ 压缩强度档位（2026-10-07 起；2026-10-29 分成两组，格数不同）═══
+        // 三档：AVIF / JPEG XL（显示 极高/均衡/快速，默认均衡）；
+        // 两档：WebP / JPEG LI / PNG / TIFF（显示 均衡/快速，默认那格的 Tag 仍是 Smallest = 参数拉满）。
+        // 六个下拉各有各的字段但同组共享同一组 Tag ⇒ 逐个对撞。
+        // 这条判据在这里格外值钱：同一组里的下拉长得一样，若某个分支漏写或写错字段名，
         // 界面看起来"改成功了"而管线读的是另一个字段（本仓 ChromaAvif 那次就是这形状）。
+        // ⚠ expectTags 现在分两种：写错的那一格会表现为"下拉 2 格 / 白名单 3 值"或反过来，
+        //   两个方向都拦（多的一格 = 界面上没有的值能进配置，回填落空、下拉显示空白）。
         CheckWhitelistEqualsTags(xaml, srv, "EffortAvifCbo", "s.EffortAvif", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "EffortJpegXlCbo", "s.EffortJpegXl", expectTags: 3);
-        CheckWhitelistEqualsTags(xaml, srv, "EffortWebpCbo", "s.EffortWebp", expectTags: 3);
+        CheckWhitelistEqualsTags(xaml, srv, "EffortWebpCbo", "s.EffortWebp", expectTags: 2);
         // JPEG LI 是后来纳入的（用户据 --xyb 实测要求）——增益图与它共用同一栏。
-        CheckWhitelistEqualsTags(xaml, srv, "EffortJpegLiCbo", "s.EffortJpegLi", expectTags: 3);
+        CheckWhitelistEqualsTags(xaml, srv, "EffortJpegLiCbo", "s.EffortJpegLi", expectTags: 2);
+        // PNG / TIFF 于 2026-10-29 纳入（用户点名"编码速度相对过慢的几个要给档位"）。
+        CheckWhitelistEqualsTags(xaml, srv, "EffortPngCbo", "s.EffortPng", expectTags: 2);
+        CheckWhitelistEqualsTags(xaml, srv, "EffortTiffCbo", "s.EffortTiff", expectTags: 2);
+        Test_SettingsEffort_TwoTierMenuAndMigration(srv);
 
-        // ── 档位 → 底层参数的映射（2026-10-07，用户口径「最小体积」= 极限参数拉满）──
-        // 值本身由真机实测定（见 docs/reviews/compression/encoder-params-and-smallest-tier-2026-10-07.md），
-        // 这里钉的是"落地的值不许被随手改动"，因为每个数字背后都有一次实测。
-        Assert("压缩强度/JXL 三档 = 7/5/3",
+        // ── 档位 → 底层参数的映射（2026-10-07 起；每个数字背后都有一次实测）──
+        // 值本身见 docs/reviews/compression/encoder-params-and-smallest-tier-2026-10-07.md。
+        // 这里钉的是"落地的值不许被随手改动"。
+        // ⚠ Quick 这一格（2026-10-29 新增）在两档格式上【可达】、在 AVIF / JPEG XL / NVENC 上
+        //   【不可达】（那两个下拉只有三格，用户口径如此）。但"不可达"不等于"不钉值"：
+        //   落到 switch 的默认分支就等于"设置里写了 Quick、跑的却是均衡"，而那不会报错。
+        //   ⇒ 四张表都逐格钉住，Quick 一格不许缺席。
+        Assert("压缩强度/JXL = 7/6/5/3（Smallest/Quick/Balanced/Fastest；Quick 在 JXL 界面不可达但有定义）",
             CompressionEffortMap.JxlEffort(CompressionEffort.Smallest) == 7
+            && CompressionEffortMap.JxlEffort(CompressionEffort.Quick) == 6
             && CompressionEffortMap.JxlEffort(CompressionEffort.Balanced) == 5
             && CompressionEffortMap.JxlEffort(CompressionEffort.Fastest) == 3);
-        Assert("压缩强度/AVIF 三档 = 0/6/10（最小体积已改为 0 = 极限）",
+        Assert("压缩强度/AVIF = 0/3/6/10（最小体积 = 0 = 极限；Quick 不可达但有定义）",
             CompressionEffortMap.AvifencSpeed(CompressionEffort.Smallest) == 0
+            && CompressionEffortMap.AvifencSpeed(CompressionEffort.Quick) == 3
             && CompressionEffortMap.AvifencSpeed(CompressionEffort.Balanced) == 6
             && CompressionEffortMap.AvifencSpeed(CompressionEffort.Fastest) == 10);
-        Assert("压缩强度/WebP 三档 = 6/4/2",
+        Assert("压缩强度/WebP = 6/5/4/2（可达的两格是 Smallest/Quick；Balanced/Fastest 保留定义）",
             CompressionEffortMap.WebPMethod(CompressionEffort.Smallest) == 6
+            && CompressionEffortMap.WebPMethod(CompressionEffort.Quick) == 5
             && CompressionEffortMap.WebPMethod(CompressionEffort.Balanced) == 4
             && CompressionEffortMap.WebPMethod(CompressionEffort.Fastest) == 2);
-        Assert("压缩强度/NVENC 三档 = P7/P4/P1",
+        Assert("压缩强度/NVENC = P7/P5/P4/P1（Quick 不可达但有定义）",
             CompressionEffortMap.NvencPresetNumber(CompressionEffort.Smallest) == 7
+            && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Quick) == 5
             && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Balanced) == 4
             && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Fastest) == 1);
+        // 每一张表都必须"档位不同 ⇒ 参数不同"：塌成同一个值就是界面还能选、实际毫无效果。
+        foreach (var (mapName, fn) in new (string, System.Func<CompressionEffort, int>)[]
+        {
+            ("JXL", CompressionEffortMap.JxlEffort),
+            ("AVIF", CompressionEffortMap.AvifencSpeed),
+            ("WebP", CompressionEffortMap.WebPMethod),
+            ("NVENC", CompressionEffortMap.NvencPresetNumber),
+            ("PNG-TIFF", CompressionEffortMap.PngTiffDeflateLevel),
+        })
+        {
+            var all = System.Enum.GetValues<CompressionEffort>();
+            var vals = all.Select(fn).ToList();
+            // 打印 name=value 成对，不打印"档位名列表 + 值列表"两串：后者要求读者自己对齐顺序，
+            // 而 Enum.GetValues 的顺序是 0,1,2,3 = Smallest/Balanced/Fastest/Quick —— 与本功能的
+            // 阅读顺序（慢→快）不同，写死标签就会让"7/5/3/6"被读成"Smallest/Quick/Balanced/Fastest"。
+            var shown = string.Join(" ", all.Zip(vals, (t, v) => $"{t}={v}"));
+            Assert($"压缩强度/{mapName}：四个档位的参数值互不相同（{shown}）",
+                vals.Distinct().Count() == all.Length,
+                "有档位塌成同一个值 ⇒ 那一格选了等于没选；"
+                + "若某个格式确实没有对应的旋钮，正确做法是【不给它那一格】，而不是两格填同一个值");
+        }
 
-        // ── 「均衡档必须等于改动前的行为」──
-        // 这是本功能最重要的一条承诺：默认档在 AVIF/WebP 上恰好是它们原来的硬编码值
+        // ── PNG / TIFF 的无损 deflate 档（2026-10-29 纳入，同日定为两档）──
+        // 实测依据（本机，同一份 raw 只换 level 重压，两轮复现）：
+        //   4K HDR 10-bit 噪声  9 = 20.60s/39046KB → 8 = 1.99s/38317KB(−1.9%) → 6 = 1.53s/39409KB → 1 = 0.62s/53300KB
+        //   真截图 2.4MB        9 = 0.41s/334KB    → 8 = 0.21s/335KB(+0.3%)   → 6 = 0.04s/346KB
+        //   真截图 11.3MB       9 = 0.25s/254KB    → 8 = 0.07s/249KB(−1.8%)   → 6 = 0.02s/251KB
+        // ⇒ Quick 落在 8：快 2~10 倍、体积 −1.9% ~ +0.3%，是用户要的"稍微放宽一点"；
+        //   6 那一格（+0.9% ~ +163%）在两档菜单里不可达，但映射表仍要有值。
+        // ⚠ 返回类型是 int 而不是 CompressionLevel 枚举：反射实测该枚举只有 0/1/6/9 四值，
+        //   表达不了 8。这条判据因此从"与枚举比"改成"与整数比"。
+        Assert("压缩强度/PNG-TIFF = zlib level 9/8/6/1（Smallest/Quick/Balanced/Fastest）",
+            CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Smallest) == 9
+            && CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Quick) == 8
+            && CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Balanced) == 6
+            && CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Fastest) == 1);
+        // Smallest = 9 就是"纳入档位之前那两个格式硬编码的 CompressionLevel.SmallestSize"——
+        // ⚠ 这句话【不能】写成 `(int)CompressionLevel.SmallestSize == 9`：那个枚举的数字是 0/1/2/3
+        //   （序号，不是 zlib level），拿它和 level 比恒不相等。首版就是这么写的，被自己判红了。
+        //   两者等价只能靠产物对撞 ⇒ 证据在 Test_PerfWiring_DeflateOptionsEqualsEnum
+        //   那条"deflate/options(9) == SmallestSize 逐字节相同"上，本条只钉映射值。
+        Assert("压缩强度/PNG-TIFF 的 Smallest = 9（= 改动前 SmallestSize 那一档；等价性由产物对撞那条钉）",
+            CompressionEffortMap.PngTiffDeflateLevel(CompressionEffort.Smallest) == 9);
+
+        // ── 「默认档 == 改动前的行为」──
+        // AVIF / JPEG XL 的默认档是 Balanced，它恰好等于这两个格式纳入档位之前的硬编码值
         // ⇒ 不选档位的用户产物逐字节不变。改这两个数字就等于静默改变所有老用户的输出。
-        Assert("压缩强度/AVIF 均衡档 == 改动前的硬编码 '-s 6'（老用户产物不变）",
+        // ⚠ WebP 不再属于这一组：2026-10-29 用户把它的默认改成了 Smallest（-m 6），
+        //   所以它【有意】破了这条承诺（实测小约 4%、慢约 0.2 s）。这里仍钉 Balanced == 4，
+        //   但含义变了：不是"老用户产物不变"，而是"那一格如果被绕过收口直接写进配置，
+        //   落到的仍是 cwebp 的原生默认"。
+        Assert("压缩强度/AVIF 均衡档 == 改动前的硬编码 '-s 6'（AVIF 默认档，老用户产物不变）",
             CompressionEffortMap.AvifencSpeed(CompressionEffort.Balanced) == 6);
-        Assert("压缩强度/WebP 均衡档 == cwebp 默认 '-m 4'（老用户产物不变）",
+        Assert("压缩强度/WebP 均衡档 == cwebp 默认 '-m 4'（WebP 的默认已改走 Smallest，这一格只作兜底）",
             CompressionEffortMap.WebPMethod(CompressionEffort.Balanced) == 4);
 
         // ── libaom 高级选项只在「最小体积」档下发 ──
         // 实测量化（真机 4K）：tune=ssim 把 110.2 KB 降到 93.7 KB（−15%）且不额外变慢；
         // 其余小参（aq-mode / sharpness / enable-chroma-deltaq）在该内容上零效果。
-        // ⚠ 若把它下发放到所有档位，就会连"均衡档 == 改动前"一起破坏 ⇒ 必须只在 Smallest 有。
+        // ⚠ 若把它下放到所有档位，就会连"均衡档 == 改动前"一起破坏 ⇒ 必须只在 Smallest 有。
+        //   Quick 也一样要空：AVIF 的下拉没有那一格，一旦将来改成两档，"极限档专属的小参"
+        //   跟着过去就等于悄悄改了那一档的体积。
         var advSmallest = CompressionEffortMap.AvifencAdvancedArgs(CompressionEffort.Smallest);
         Assert("压缩强度/最小体积档带 libaom tune=ssim",
             advSmallest.Count == 2 && advSmallest[0] == "-a" && advSmallest[1] == "tune=ssim",
             string.Join(",", advSmallest));
-        Assert("压缩强度/均衡档不带任何 libaom 高级选项（否则会改掉老用户产物）",
-            CompressionEffortMap.AvifencAdvancedArgs(CompressionEffort.Balanced).Count == 0);
-        Assert("压缩强度/最快档不带任何 libaom 高级选项",
-            CompressionEffortMap.AvifencAdvancedArgs(CompressionEffort.Fastest).Count == 0);
+        foreach (var other in new[] { CompressionEffort.Quick, CompressionEffort.Balanced, CompressionEffort.Fastest })
+            Assert($"压缩强度/{other} 档不带任何 libaom 高级选项（极限档专属，否则会改掉别的档位的产物）",
+                CompressionEffortMap.AvifencAdvancedArgs(other).Count == 0);
 
         // ── 坏值回落「均衡」而不是「最小体积」──
         // 回落成最慢档会让一次配置损坏变成"每张图都跑极限参数"（AVIF 上从 0.9 s 变 7.2 s）。
@@ -4023,21 +6127,39 @@ public static class CorePipelineTests
             && CompressionEffortMap.Parse("") == CompressionEffort.Balanced
             && CompressionEffortMap.Parse("wat") == CompressionEffort.Balanced);
 
-        // ── JPEG LI 的 --xyb（2026-10-07 用户据实测要求纳入）──
-        // 实测（两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）**一律更小 1.5%~4.7%**，
-        // 是本仓所有编码器小参里唯一"在所有测过的内容与质量上都为正"的开关。
+        // ── JPEG LI 的 --xyb（2026-10-07 用户据实测要求纳入；2026-10-29 该格式定为两档）──
+        // 2026-10-07 实测（两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）在那批内容上
+        // 小 1.5%~4.7%；2026-10-29 换三张新截图复测（-d 1.0）两张小 5.5%/10.4%、一张【大 3.0%】
+        // ⇒ "唯一在所有测过的内容与质量上都为正"这句全称断言已收回，措辞见 JpegLiUseXyb 的备注。
+        // 本判据钉的是【档位 → 开关】的映射，不是体积收益：Smallest 开、其余关。
+        // 它只有布尔开关 ⇒ 两档菜单就是开/关：Smallest 开、Quick 关。
         Assert("压缩强度/JPEG LI 最小体积档带 --xyb",
             CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Smallest)
             && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Smallest) == " --xyb");
-        Assert("压缩强度/JPEG LI 均衡档不带 --xyb（否则老用户产物会变）",
+        Assert("压缩强度/JPEG LI「快速」档（Tag Quick）不带 --xyb（这就是两档里'放宽'的全部内容）",
+            !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Quick)
+            && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Quick) == "");
+        Assert("压缩强度/JPEG LI 均衡/最快档不带 --xyb（这两格在该格式的界面里不可达）",
             !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Balanced)
+            && !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Fastest)
             && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Balanced) == "");
-        Assert("压缩强度/JPEG LI 最快档不带 --xyb",
-            !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Fastest));
-        Assert("压缩强度/Tag 往返一致",
-            CompressionEffortMap.Parse(CompressionEffortMap.ToTag(CompressionEffort.Smallest)) == CompressionEffort.Smallest
-            && CompressionEffortMap.Parse(CompressionEffortMap.ToTag(CompressionEffort.Balanced)) == CompressionEffort.Balanced
-            && CompressionEffortMap.Parse(CompressionEffortMap.ToTag(CompressionEffort.Fastest)) == CompressionEffort.Fastest);
+
+        // ── Tag 往返必须逐档位一一对上 ──
+        // 这条在 Quick 出现之前是三条断言写死三个名字；现在按枚举全集走，新增成员自动进表。
+        // 防的具体坏法：ToTag 的默认分支曾是 `_ => "Balanced"`，Quick 落进去 ⇒
+        // 用户选的是「快速」（Tag Quick）、盘上却写 "Balanced"、下次启动回填到另一格，且全程不报错。
+        var badRoundTrip = System.Enum.GetValues<CompressionEffort>()
+            .Where(t => CompressionEffortMap.Parse(CompressionEffortMap.ToTag(t)) != t)
+            .ToList();
+        Assert("压缩强度/Tag 往返对每个档位都一致（含 Quick）",
+            badRoundTrip.Count == 0 && System.Enum.GetValues<CompressionEffort>().Length == 4,
+            "没对上：" + string.Join(",", badRoundTrip)
+            + $"（枚举现值数 {System.Enum.GetValues<CompressionEffort>().Length}；"
+            + "若新增档位后忘了补 ToTag 一格，这里会点名到具体是哪个）");
+        // 四个档位的 Tag 字面量互不相同 —— 相同 = 两格并存成同一个词，持久化直接改义。
+        var tagWords = System.Enum.GetValues<CompressionEffort>().Select(CompressionEffortMap.ToTag).ToList();
+        Assert($"压缩强度/四个 Tag 字面量互不相同（{string.Join("/", tagWords)}）",
+            tagWords.Distinct().Count() == tagWords.Count);
 
         // ═══ 色域那一轴不比对白名单字符串，它存的是【裸索引】⇒ 要钉的是两张表的长度等式 ═══
         // Normalize 里的越界上界写的是字面量 5，而它的含义是"旧 6 项表的最后一项"（MainWindow.Settings.cs
@@ -4110,6 +6232,79 @@ public static class CorePipelineTests
                  && !whitelist.Except(tags, StringComparer.Ordinal).Any()
                  && !tags.Except(whitelist, StringComparer.Ordinal).Any();
         Assert($"设置白名单[{string.Join(",", whitelist)}] == {combo} Tag[{string.Join(",", tags)}]", same);
+    }
+
+    /// <summary>
+    /// 两档格式（WebP / JPEG LI / PNG / TIFF）的菜单顺序 + 三档旧词迁移。
+    /// <para>补的是 <see cref="CheckWhitelistEqualsTags"/> 看不见的两件事，因为它比的是<b>集合</b>
+    /// 相等（Except 双向），顺序与迁移分支对它都是盲区：</para>
+    /// <list type="number">
+    /// <item><b>顺序</b>。<c>FitTwoTierEffort</c> 把旧词折向 <c>tags[^1]</c> —— 末位必须是"更快"那一格。
+    /// 调用点把两个 Tag 写反（<c>"Quick", "Smallest"</c>）时白名单集合不变、判据不红，
+    /// 但一次升级会把"我不要最慢"迁成"我要最慢"（PNG 上每张多等约 20 秒）。
+    /// 这不是假想：本仓 2026-09-15 的 <c>FormatIndex</c> 缺陷就是"表序与代码序不一致"，
+    /// 只是那次是删了一行，这次是写反一行。</item>
+    /// <item><b>迁移分支的覆盖面</b>。三档时代的两个旧词必须【都】在迁移表里。漏掉一个
+    /// 不是崩，是"那个词穿过 Normalize、进了只有两格的下拉里找不到"—— 界面上的表现是
+    /// 该格式的设置页下拉显示空白，而编码照常按那个不存在的档跑。这正是 2026-09-15
+    /// ("Windows") / 2026-09-16 ("WindowsNotify") 两次缺陷的形状。</item>
+    /// </list>
+    /// <para>为什么用源码文本而不是行为：Test 工程只引用 Core（见 csproj 里 2026-10-01 那段
+    /// 撤掉 CopyCompiledShadersForTests 的记录），App 侧没有可加载的入口 ⇒ 沿用本仓对
+    /// XAML↔SettingsService 的既有做法（文本交叉核对），并把"解析不到"一律判红而不是跳过。</para>
+    /// </summary>
+    static void Test_SettingsEffort_TwoTierMenuAndMigration(string srv)
+    {
+        var two = new[] { "EffortWebp", "EffortJpegLi", "EffortPng", "EffortTiff" };
+        var three = new[] { "EffortAvif", "EffortJpegXl" };
+
+        // ── ① 四个两档调用点确实走 FitTwoTierEffort（缺席证明的正向活体：数得到 4 处）──
+        int twoTierCalls = Regex.Matches(srv, @"\bFitTwoTierEffort\(s\.").Count;
+        Assert($"两档收口通道被 4 个字段调用（实得 {twoTierCalls}）", twoTierCalls == 4,
+            "少一处 = 那个格式还在用三档白名单 FitTag，盘上能留着一个界面上没有的档");
+
+        foreach (var f in two)
+        {
+            var call = Regex.Match(srv, @"FitTwoTierEffort\(s\." + f + @"[^)]*\)");
+            Assert($"{f}: 找到两档收口调用", call.Success, $"解析不到 FitTwoTierEffort(s.{f}…)");
+            if (!call.Success) continue;
+            var listed = ExtractQuotedValues(call.Value, "\"");
+            Assert($"{f}: 菜单按【慢 → 快】写成 Smallest, Quick（旧词折向 tags[^1]，末位必须是更快那格）",
+                listed.Count == 2 && listed[0] == "Smallest" && listed[1] == "Quick",
+                $"实得 [{string.Join(",", listed)}]");
+            Assert($"{f}: 默认取该字段的 dft.{f}（不是写死的字面量，否则两处默认会分家）",
+                call.Value.Contains($"dft.{f}"), call.Value);
+        }
+
+        // ── ② 三档格式没被顺手改：仍走 FitTag，且带三个 Tag ──
+        foreach (var f in three)
+        {
+            var call = Regex.Match(srv, @"FitTag\(s\." + f + @"[^)]*\)");
+            Assert($"{f}: 三档格式仍走 FitTag（用户 2026-10-29 口径：AVIF / JPEG XL 保持三档）",
+                call.Success, $"解析不到 FitTag(s.{f}…)");
+            if (!call.Success) continue;
+            var listed = ExtractQuotedValues(call.Value, "\"");
+            Assert($"{f}: 三档菜单 = Smallest, Balanced, Fastest",
+                listed.Count == 3 && listed[0] == "Smallest" && listed[1] == "Balanced" && listed[2] == "Fastest",
+                $"实得 [{string.Join(",", listed)}]");
+        }
+
+        // ── ③ 迁移表必须同时认下三档时代的两个旧词，且折向 tags[^1] 而不是写死 "Quick" ──
+        var helper = Regex.Match(srv, @"private static void FitTwoTierEffort\([\s\S]*?\r?\n    \}");
+        Assert("FitTwoTierEffort 方法体解析到", helper.Success,
+            "签名或收尾变了 ⇒ 本判据看不见那条迁移分支了，必须让它红而不是静默跳过");
+        if (helper.Success)
+        {
+            var body = helper.Value;
+            Assert("迁移表覆盖 Balanced（漏了它 = 老用户盘上的这个值穿过收口、进不了两格下拉）",
+                body.Contains("\"Balanced\""), body);
+            Assert("迁移表覆盖 Fastest", body.Contains("\"Fastest\""), body);
+            Assert(@"迁移目标是 tags[^1] 而不是再写一遍 ""Quick""（两个事实源：改下拉忘改这里，"
+                   + "迁出来的仍是界面上不存在的值）",
+                body.Contains("tags[^1]") && !Regex.IsMatch(body, @"set\(""Quick""\)"), body);
+            // 正控：坏值仍回落该字段默认，不给未知值猜意图。
+            Assert("未识别值回落 def（不给未知值猜意图）", body.Contains("set(def);"), body);
+        }
     }
 
     /// <summary>
@@ -4295,7 +6490,7 @@ public static class CorePipelineTests
         {
             int c = mw.IndexOf($"case MainToolbarAction.{act}:", System.StringComparison.Ordinal);
             Assert($"HDR 覆盖层：case {act} 必须走合成后的像素（与保存/复制同源）",
-                c >= 0 && mw.Substring(c, System.Math.Min(600, mw.Length - c)).Contains("ComposeAnnotatedSdr(")
+                c >= 0 && mw.Substring(c, System.Math.Min(600, mw.Length - c)).Contains("ComposeAnnotatedSdr")
                 && !mw.Substring(c, System.Math.Min(600, mw.Length - c))
                        .Contains($"{act}FromPixelsAsync(sdrRegion", System.StringComparison.Ordinal),
                 "把未合成的 sdrRegion 直接交给下游 ⇒ 标注与马赛克在这条路上失效");
@@ -4747,7 +6942,12 @@ public static class CorePipelineTests
     /// </summary>
     static List<string> ExtractIsOneOfArgs(string cs, string propertyRef)
     {
+        // 两条收口通道都要认（2026-10-29 压缩强度分成三档/两档两组，新增 FitTwoTierEffort）：
+        // 只认 FitTag 的话，四个两档格式的白名单会被解析成"没找到"⇒ 下面那条
+        // "白名单: 解析到 X 的合法值"直接红，而红会被读成"白名单没写"。
+        // 两个前缀互不为子串（"FitTwoTierEffort(" 里不含 "FitTag("），所以不存在串台。
         int idx = cs.IndexOf("FitTag(" + propertyRef, StringComparison.Ordinal);
+        if (idx < 0) idx = cs.IndexOf("FitTwoTierEffort(" + propertyRef, StringComparison.Ordinal);
         if (idx < 0) return new List<string>();
         int close = cs.IndexOf(')', idx);
         var seg = close > idx ? cs[idx..close] : cs[idx..];
@@ -4946,8 +7146,10 @@ public static class CorePipelineTests
         var sig = new System.Text.RegularExpressions.Regex(
             @"^    (private|public|internal|protected|static|async|override|partial|unsafe)[^=;]*\(");
         var write = new System.Text.RegularExpressions.Regex(@"_settings\.[A-Za-z]\w* *= (?!/)");
+        // ScheduleSettingsSave = 500ms 去抖后的延迟落盘（滑块拖动用）；
+        // 它仍把该方法的修改写进磁盘，只是合并了连续的中间值，故与立即保存同列。
         var save = new System.Text.RegularExpressions.Regex(
-            @"Settings\.Save(Quiet)?\(\)|SaveSettings(Quiet)?\(\)");
+            @"Settings\.Save(Quiet)?\(\)|SaveSettings(Quiet)?\(\)|ScheduleSettingsSave\(\)");
 
         int sites = 0, methods = 0;
         var offenders = new List<string>();
@@ -5377,7 +7579,43 @@ public static class CorePipelineTests
         // Test_ToolbarContract_SingleSource 盯着契约形状、两渲染器取数与对照表键位。
         // 2026-10-27：45 → 49（+4）。新增全是背景面契约那三条日志/诊断串（颜色空间协商成功/失败、
         // 徽标纹理失败）与尺寸徽标位置换算里的那条；它们都是【日志】串，不是画进位图的字变多了。
-        const int BakedCnBaseline = 49;
+        // 2026-10-27（同日第二次）：49 → 52（+3）。修"点角调大小、范围却乱跳"时给松手路径补了
+        // `选区调整 / 选区平移 WxH @(窗口内 x,y)` 这条日志（与 `选区完成` 同一用途的前提见证），
+        // 三个中文字面量："选区调整"、"选区平移"、"@(窗口内 …)"。同样是日志串，不是烘焙文案。
+        // 2026-10-27（同日第三次）：52 → 59（+7）。富文本文字标注的日志/诊断串：
+        // 输入框打开（新建/再编辑）2 条、提交日志 1 条（含"新建/再编辑"两个内嵌字面量）、
+        // 拖动提交日志 1 条、图集装货区不足诊断 1 条。全是日志串，不是画进位图的字变多了
+        //（字体条的文字"字体/字号"当时住在 ToolbarContract 并接进了对照表，不落在本文件；
+        // 2026-10-28 字体条删掉后这两条常量与"字号"的译文一并删除 —— 历史计数不再回溯）。
+        // 2026-10-28：59 → 61（+2）。第二行工具选项条的两个马赛克方式按钮文案
+        // "区域框选"/"画笔涂抹" 直接作为 Win32 按钮文字建窗（与字体条的文字同理，
+        // 由 ToolbarContract 之外的一条 UI 路径渲染）；它们确实是【画给用户看的字】。
+        // 2026-10-28（第四次）：61 → 63（+2）。第二行选项条改画进 D3D 帧时补的两条点击日志：
+        // "标注线色 → …" 与 "马赛克方式 → …"。原有"区域框选/画笔涂抹"两个字面量从建控件处
+        // 搬成同文件的常量（数量不变），故净增只有这两条日志串。
+        // 2026-10-28（第五次）：63 → 70（+7）。文字工具的字体/字号下拉改画进 D3D 帧（Win32 组合框
+        // 在这块覆盖层上完全不可见）后新增的日志/诊断串："字体列表展开"、"字号列表展开"、
+        // "文字字体 → …"、"文字字号 → …"、"文字样式 → B=… I=…"、输入预览纹理失败的诊断串，
+        // 以及"画笔粗细 → … dip"一条。同理：全是日志串，没有新增画给用户看的烘焙字
+        //（选项行的家族名/字号/B/I 与列表项都是运行时烘的，不进本文件的字面量）。
+        // 2026-10-28（第六次）：70 → 71（+1）。画笔粗细改成 1..100 的滑条后，提交涂抹时新增一条
+        // "马赛克涂抹提交 笔宽 …px 点数 …" 的日志（滑条值落到图层的那一步要能在日志里对上）。
+        // 2026-10-29（第七次）：71 → 74（+3）。图集文字带容量自适应补的日志串："文字带装不下：
+        // 缩放 …、格高 …、带高 …"、"容量 … 格 —— 有格子没烘出来"，以及"缩放 … 下文字带只装得下
+        // … 行下拉列表"（降级要说得出口，不能再静默置零）。同前：全是日志串，没有新增画给用户看的字。
+        // 2026-10-29（第八次）：74 → 75（+1）。首帧延迟分解的一次性打点串"首帧合成 …（文字图集 …ms = 排版 …
+        // + 上传 …）+ 呈现 …ms"——把三段成本并进这一行，所以只加一条。全是日志串，没有新增画给用户看的字。
+        // 2026-10-30（第九次）：75 → 79（+4）。路线 B-2 预览直接采样共享纹理：打开成功/格式尺寸不合用/
+        // 打开失败/交还失败四条日志串。全是日志串，没有新增画给用户看的字。
+        // 2026-10-30（第十次）：79 → 81（+2）。路线 B-3 的整帧兜底：现取成功/兜底也取不到两条日志串。
+        // 同前：全是日志串，没有新增画给用户看的字。
+        // 2026-10-30（第十一次）：81 → 83（+2）。开窗固定成本打点：窗口构造（D3D 设备）/窗口初始化两条。
+        // 同前：全是日志串，没有新增画给用户看的字。
+        // 2026-10-30（第十二次）：83 → 87（+4）。选区起点预烘图集：投递/完成/失败/投递→取用四条日志串。
+        // 同前：全是日志串；壳烘的图集里没有新文案。
+        // 2026-10-30（第十三次）：87 → 93（+6）。阶段 4 共享设备：构造日志的自建/复用两档、建立/失败/丢失换新/
+        // 预热就绪各一条。同前：全是日志串，没有新增画给用户看的字。
+        const int BakedCnBaseline = 93;
 
         var p = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
         if (p is null)
@@ -5564,6 +7802,7 @@ public static class CorePipelineTests
         var ct = ReadSourceNormalized(ctPath);
 
         // ── ① 契约形状：主工具条 7 钮，顺序/动作/文字不许漂 ──
+        // 2026-10-28：8 → 7（删「复制」按钮：保存本来就"落盘+复制"，单独的复制按钮是重复项）。
         int m0 = ct.IndexOf("ToolbarButtonDef[] Main", StringComparison.Ordinal);
         int mEnd = m0 >= 0 ? ct.IndexOf("\n    };", m0, StringComparison.Ordinal) : -1;
         Assert("契约：Main 声明块找得到（形状变了判据得跟着改，不许静默放行）", m0 >= 0 && mEnd > m0);
@@ -5574,12 +7813,12 @@ public static class CorePipelineTests
             .ToList();
         Assert($"契约：主工具条必须声明 7 枚按钮（实得 {entries.Count}）", entries.Count == 7,
             "多一枚少一枚都意味着两个渲染器的按钮数一起变 —— 这种改动必须连 GetToolbarLayout/命中/图集一起核");
-        Assert("契约：主按钮动作序 == 保存/标注/复制/识字/翻译/二维码/取消（SDR 与 HDR 的命中序都由它决定）",
+        Assert("契约：主按钮动作序 == 保存/标注/贴图/识字/翻译/二维码/取消（SDR 与 HDR 的命中序都由它决定）",
             string.Join(",", entries.Select(e => e.Action))
-                == "Save,Annotate,Copy,Ocr,Translate,Qr,Cancel",
+                == "Save,Annotate,Pin,Ocr,Translate,Qr,Cancel",
             "实得：" + string.Join(",", entries.Select(e => e.Action)));
-        Assert("契约：按钮文字 == 保存/标注/复制/识字/翻译/二维码/取消",
-            string.Join(",", entries.Select(e => e.Text)) == "保存,标注,复制,识字,翻译,二维码,取消",
+        Assert("契约：按钮文字 == 保存/标注/贴图/识字/翻译/二维码/取消",
+            string.Join(",", entries.Select(e => e.Text)) == "保存,标注,贴图,识字,翻译,二维码,取消",
             "实得：" + string.Join(",", entries.Select(e => e.Text)));
         Assert("契约：7 条提示互不相同且都非空（提示槽按句宽取最大值，重复/空串都是声明事故）",
             entries.All(e => e.Hint.Length > 0) && entries.Select(e => e.Hint).Distinct().Count() == 7);
@@ -6526,7 +8765,7 @@ public static class CorePipelineTests
         var model = File.ReadAllText(modelPath);
         var svc = File.ReadAllText(svcPath);
 
-        // ① 属性初始化器：public double QualityAvif { get; set; } = 15;
+        // ① 属性初始化器：public double QualityAvif { get; set; } = 20;
         var modelDefaults = new Dictionary<string, double>(StringComparer.Ordinal);
         foreach (Match m in Regex.Matches(model,
             @"public double Quality(\w+)\s*\{\s*get;\s*set;\s*\}\s*=\s*([0-9]*\.?[0-9]+)\s*;"))
@@ -8052,28 +10291,19 @@ public static class CorePipelineTests
         Assert("光标屏顶替只允许出现在确实无源屏信息的入口，且集中成一个辅助函数",
             System.Text.RegularExpressions.Regex.Matches(mw, "GetMonitorUnderCursor\\(\\)").Count
             <= System.Text.RegularExpressions.Regex.Matches(mw, "DecisionForCursorScreen").Count + 3);
-        // ═══ 上游 PR #1（VS-Cap 侧车）合入时必须带的两条牙 ═══
-        // 侧车是"像素出进程、编辑完再回来"的入口：TTC1 头里只有 x/y，且 C++ 回写时恒填 0，
-        // 所以源屏身份只能由宿主自己带 —— 让它退回"保存那一刻的光标屏"就是 §41.4 那个缺口的翻版。
-        var vsCap = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.VSCap.cs"))!);
-        Assert("VS-Cap 导出沿用被截那块屏；只有剪贴板贴图路才退回光标屏",
-            vsCap.Contains("ExportVSCapAsync(f, avif, dest, display)")
-            && vsCap.Contains("ExportVSCapAsync(f, avif, dest, null)")
-            && vsCap.Contains("DecisionForDisplay(display, ui, hdrScenario, format)")
-            && !vsCap.Contains("DecisionForCursorScreen"));
-        // PR 原文在构造函数里无条件 RegisterNamed("vscap-pin") ⇒ 功能默认关着也抢注一个系统级热键，
-        // 与它自述的 "off by default; the original TTC workflow is preserved" 相反。
-        Assert("VS-Cap 关着就不注册 Ctrl+Alt+T，且关掉时真的注销",
-            System.Text.RegularExpressions.Regex.IsMatch(vsCap, @"bool on = .*_settings\.UseVSCap")
-            && vsCap.Contains("HotkeyManager.UnregisterNamed(\"vscap-pin\")")
-            && !mw.Contains("if (!HotkeyManager.RegisterNamed(this, \"vscap-pin\""));
-        // 侧车走的是 csproj 一条 glob：构建机上没有 Qt ⇒ 0 个条目 ⇒ 构建打包全绿而功能根本不存在。
-        // 那时还把开关摆着，等于给用户一个点了只会收到 FileNotFoundException 的按钮。
-        Assert("侧车不在包里时整个入口收起（开关+按钮+热键），并留一条可读日志",
-            vsCap.Contains("VSCapEditor.IsAvailable")
-            && vsCap.Contains("VSCapModeChk.Visibility = available ? Visibility.Visible : Visibility.Collapsed")
-            && File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "VSCapEditor.cs"))!)
-                   .Contains("public static bool IsAvailable"));
+        // ═══ VS-Cap 侧车（上游 PR #1）已归档（2026-10-27）═══
+        // 它带进来的三条能力已并入主程序：富文本文字（字体/字号/加粗/斜体 + 再编辑）、
+        // 统一的撤销栈（创建/移动/编辑）、置顶贴图窗。归档之后这里只该判"归档是完整的"：
+        // 源码/对撞工程/构建脚本都不在树里，设置项也不许留一个点了没反应的开关。
+        var mwDir = Path.GetDirectoryName(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"))!)!;
+        var repoRootV = Directory.GetParent(Directory.GetParent(mwDir.Replace('/', Path.DirectorySeparatorChar))!.FullName)!.FullName;
+        Assert("VS-Cap 归档：源码/对撞工程/构建脚本都已移除",
+            !Directory.Exists(Path.Combine(repoRootV, "src", "TrueToneCap.VSCap"))
+            && !Directory.Exists(Path.Combine(repoRootV, "tests", "VSCapInterop"))
+            && !File.Exists(Path.Combine(repoRootV, "scripts", "BuildVSCap.ps1")));
+        Assert("VS-Cap 归档：设置模型里不再有 UseVSCap（没有入口的开关只会是一份残留）",
+            !File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "AppSettingsData.cs"))!)
+                .Contains("UseVSCap"));
         // ═══ GainMap 两模式（§45）：模式判定只有一处，两条路共用 ═══
         var gmSrc = File.ReadAllText(FindRepoFile(Path.Combine(
             "src", "TrueToneCap.Core", "Encoding", "JpegGainMapEncoder.cs"))!);
@@ -8094,12 +10324,263 @@ public static class CorePipelineTests
         Assert("GainMap 分支不再禁用/强推色域下拉（锁住 = 用户拿不到 sRGB 底图那一档）",
             !mw.Contains("ColorCbo.IsEnabled = false") && !mw.Contains("bt2020Idx"));
         Assert("HDR 开关仍锁开启（Ultra HDR 没有『无增益图』这种产物），但只锁这一个",
-            mw.Contains("HdrSwitch.IsEnabled = false;") && mw.Contains("HdrSwitch.IsOn = true;"));
+            mw.Contains("HdrSwitch.IsEnabled = false;") && mw.Contains("SetHdrSwitchSilently(true)"));
+
+        // ═══ 2026-10-27 用户口径："HDR 下默认应该开启 HDR 输出" ═══
+        // "默认开"原先只写在首运行那一支（FirstRun ⇒ HdrEnabled = cap.SupportsHdr）里。
+        // 首运行落在 SDR 屏（或 EDID 没读出来）的用户换了 HDR 屏之后，盘上的 false 永久保留 ——
+        // 本机实机日志就是这形态：显示器枚举 "HDR当前启用=True, HDR硬件支持=True"，
+        // 而 settings.json 是 "HdrEnabled":false。下面两条一正一反钉住新的恢复规则。
+        Assert("★ HDR 屏上的默认开启不只在首运行：支持 HDR + 用户从未手动切换 ⇒ 自动打开并落盘",
+            mw.Contains("HdrOutputDefault.ShouldAutoEnable(cap.SupportsHdr, _settings.HdrEnabled, _settings.HdrUserToggled)")
+            && mw.Contains("_settings.HdrEnabled = true;"));
+        // 判定本体用真值表钉住：源码字符串只能证明"写了"，证明不了"写对"。
+        // 四格依次是：该开 / 已经开着（不重复写）/ 用户拨过（尊重关）/ 屏不支持（不越权）。
+        Assert("HdrOutputDefault 真值表：只有『支持 HDR + 当前关 + 没拨过』才自动打开",
+            HdrOutputDefault.ShouldAutoEnable(true, false, false)
+            && !HdrOutputDefault.ShouldAutoEnable(true, true, false)
+            && !HdrOutputDefault.ShouldAutoEnable(true, false, true)
+            && !HdrOutputDefault.ShouldAutoEnable(false, false, false));
+        Assert("★ 用户亲手拨过一次 ⇒ 记下显式选择，之后永不自动翻转（关着就一直是关）",
+            mw.Contains("_settings.HdrUserToggled = true;")
+            && mw.Contains("if (!_uiReady || _qualityPanelUpdating || _hdrSwitchUpdating) return;"));
+        // 程序性置位（启动回填 / 增益图锁开 / 离开增益图的还原）都不是用户意图：
+        // ToggleSwitch.Toggled 在程序赋值时也触发，裸赋值等于把 UI 约束写成偏好并落盘。
+        // 断言形状：赋值只允许出现在 SetHdrSwitchSilently 里那一处。
+        Assert("HDR 开关的程序性置位只走 SetHdrSwitchSilently（裸赋值只剩助手内部一处，否则锁开会写进设置）",
+            System.Text.RegularExpressions.Regex.Matches(mw, @"HdrSwitch\.IsOn = ").Count == 1
+            && mw.Contains("private void SetHdrSwitchSilently(bool on)")
+            && mw.Contains("_hdrSwitchUpdating = true;"));
+        // "改掉用户选的位深就必须留痕"这条纪律逐格式检查：PNG 升 10（管线 Toast）、AVIF 协商（管线 Toast）、
+        // TIFF 恒 16（编码器 LastReason）都已留痕，只有 JXL 的 HDR 分支一直静默 —— 2026-10-27 补齐。
+        Assert("HDR JXL 恒 16-bit 且改了位深就留痕（编码器侧 LastReason，与 TIFF 同一纪律）",
+            File.ReadAllText(FindRepoFile(Path.Combine(
+                "src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"))!)
+                .Contains("HDR JPEG XL 的容器位深恒为 16-bit"));
         Assert("能力表里 GainMap 不再被标成不支持广色域（那条声明与两档实现相反）",
             !System.Text.RegularExpressions.Regex.IsMatch(
                 mw, @"JPEG_GAINMAP\][\s\S]{0,120}SupportsWideGamut: false"));
     }
 
+
+    /// <summary>
+    /// <b>框选交互契约</b>（2026-10-27 用户报"点四个角调大小、范围却乱跳"）。
+    /// <para>四条根因都在 <c>HdrCaptureWindow</c> 的 Down/Move/Up 里，而这扇窗要 D3D 设备才活得起来，
+    /// 门禁里跑不了它的行为测试 —— <b>行为证据在真机探针</b> <c>--preview-ui-probe</c> 的 ④–⑧
+    /// （含变异对照：去掉 Up 的早退后 ④ 读到 5x5、偏差 dw=-1147、dh=-724）。这里钉形状：
+    /// 谁删掉这些分支，门禁至少有一格立刻变红，不必等下一次有人真的去点那个角。</para>
+    /// </summary>
+    /// <summary>
+    /// 富文本文字标注 + 撤销 + 贴图窗（2026-10-27 合并上游 PR #1）。
+    /// <para>两条腿：① <b>Core 模型行为</b>——Clone 必须保留图层身份（否则 UpdateLayer 之后
+    /// 撤销/重做与"再编辑"全都找不到那一层），文字移动/改写要能被同一条撤销栈回退；
+    /// ② <b>源码哨兵</b>——预览图集与最终输出必须调同一个 <c>RasterizeText</c>（固定 256×64 槽位
+    /// 拉伸 = 预览字号与文件里的字号本来就是两张图）；shader 的文字采样除数必须是【内框尺寸】
+    /// 而不是右上角坐标；Win32 读文字一律 StringBuilder（<c>char[]</c> 在 DllImport 下是 In 数组，
+    /// 实测读回一屏 NUL —— 这个坑同时打坏了输入框提交与字号控件）。</para>
+    /// <para>真机行为读数见 <c>--preview-ui-probe</c> ⑨（创建/撤销/重做/拖动/再编辑全链），
+    /// 这里守的是"那套链路还在代码里、形状没被改回去"。</para>
+    /// </summary>
+    static void Test_TextAnnotation_RichTextContract()
+    {
+        // ── ① 模型行为：身份、克隆、更新、撤销/重做 ──
+        var mgr = new AnnotationManager();
+        var tl = new TextLayer
+        {
+            X = 10, Y = 20, Text = "甲", FontSize = 24, Bold = true, Italic = true,
+            MaxWidth = 300, CachedWidth = 40, CachedHeight = 30,
+        };
+        mgr.AddLayer(tl);
+        var clone = (TextLayer)tl.Clone();
+        Assert("文字层 Clone 保留身份/字体状态/实测位图尺寸（只带字体不带 Id = 更新与撤销找不到那一层）",
+            clone.Id == tl.Id && clone.Bold && clone.Italic && clone.MaxWidth == 300
+            && clone.CachedWidth == 40 && clone.CachedHeight == 30 && clone.FontSize == 24);
+        Assert("文字层外框 = 实测位图 + Padding×2（GPU 预览与命中检测共用它）",
+            Math.Abs(tl.GetBounds().Width - (40 + 6 * 2)) < 0.01
+            && Math.Abs(tl.GetBounds().Height - (30 + 6 * 2)) < 0.01);
+
+        var edited = new TextLayer { X = 60, Y = 50, Text = "乙", CachedWidth = 40, CachedHeight = 30 };
+        edited.TakeIdentityFrom(tl);
+        mgr.UpdateLayer(tl.Id, edited);
+        var after = mgr.Layers[0] as TextLayer;
+        Assert("UpdateLayer 之后仍按原 Id 找得到（Clone 每次发新 Guid 会让后续更新/撤销全部失准）",
+            after is not null && after.Id == tl.Id && after.Text == "乙" && Math.Abs(after.X - 60) < 0.01);
+        mgr.Undo();
+        var undone = mgr.Layers[0] as TextLayer;
+        Assert("撤销一次回到改动前的文字与位置（拖动/再编辑共用这一条栈）",
+            undone is not null && undone.Text == "甲" && Math.Abs(undone.X - 10) < 0.01);
+        mgr.Redo();
+        var redone = mgr.Layers[0] as TextLayer;
+        Assert("重做再次拿到改动后状态", redone is not null && redone.Text == "乙" && Math.Abs(redone.X - 60) < 0.01);
+
+        // ── ② 源码哨兵 ──
+        var hcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        var hlslPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Shaders", "OverlayComposite.hlsl"));
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var pinPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "PinWindow.cs"));
+        var probePath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "PreviewUiProbe.cs"));
+        if (hcPath is null || hlslPath is null || mwPath is null || pinPath is null || probePath is null)
+        {
+            Assert("富文本契约：五份源文件必须都定位得到", false,
+                $"HdrCaptureWindow={hcPath is not null} shader={hlslPath is not null} MainWindow={mwPath is not null} PinWindow={pinPath is not null} probe={probePath is not null}");
+            return;
+        }
+        var hc = ReadSourceNormalized(hcPath);
+        var hlsl = ReadSourceNormalized(hlslPath);
+        var mw = ReadSourceNormalized(mwPath);
+        var pin = ReadSourceNormalized(pinPath);
+        var probe = ReadSourceNormalized(probePath);
+
+        Assert("文字位图只有一把尺：图集直接调 RasterizeText（不再用固定槽位的 RenderTextBitmap 拉伸）",
+            hc.Contains("AnnotationRasterizer.RasterizeText(tl.Text, tl.FontSize, tl.FontFamily,")
+            && !hc.Contains("const int slotW = 256, slotH = 64;"));
+        Assert("图集文字区按实测尺寸 shelf 打包（放大字号不会被 256×64 裁掉或拉伸）",
+            hc.Contains("textShelfY") && hc.Contains("shelfX + bw > atlasW"));
+        Assert("提交/再编辑都把实测尺寸写回图层（外框/命中/图集三处靠它）",
+            hc.Contains("AnnotationRasterizer.ApplyMetrics(layer);"));
+        Assert("拖动文字后只补一条 UpdateLayer（拖动前位置先还原 —— 否则撤销只能回到拖动后的位置）",
+            hc.Contains("hit.X = _textLayerStartX; hit.Y = _textLayerStartY;")
+            && hc.Contains("_annoManager.UpdateLayer(hit.Id, after);"));
+        Assert("Win32 读文字一律 StringBuilder（char[] 是 In 数组，实测读回 NUL ⇒ 图层内容是空的）",
+            hc.Contains("GetWindowTextSb") && !hc.Contains("GetWindowTextW(nint h, char[]"));
+        Assert("加粗/斜体只有一个状态源：选项行的 B/I 格与 Ctrl+B/I 都写同一对字段并走同一处收尾",
+            hc.Contains("if (i == 2) _textFontBold = !_textFontBold;")
+            && hc.Contains("else _textFontItalic = !_textFontItalic;")
+            && hc.Contains("_textFontBold = !_textFontBold; OnFontStateChanged();")
+            && hc.Contains("_textFontItalic = !_textFontItalic; OnFontStateChanged();")
+            && hc.Contains("private void StepFontSize(int dir)"));
+        Assert("文字槽序号与图集筛法同源（可见文字层）",
+            hc.Contains("if (layer is not TextLayer t || !t.IsVisible) continue;"));
+
+        Assert("shader 文字采样除数是内框尺寸（除以右上角坐标 ⇒ 文字离原点越远越小越糊）",
+            hlsl.Contains("float2 tmax = a1.zw - pad;")
+            && hlsl.Contains("(ap - tmin) / (tmax - tmin) * sub.zw + sub.xy"));
+        Assert("shader 画文字背景（CPU 合成画了，预览不画就是两幅图）",
+            hlsl.Contains("float4 bg = AnnoLayers[i * 16 + 4];"));
+
+        Assert("主工具条有「贴图」动作，且贴图走同一份合成像素 + 强制格式的另存",
+            mw.Contains("case MainToolbarAction.Pin:") && mw.Contains("Services.PinWindow.Show(")
+            && mw.Contains("EncodeAndSaveAsync(px, pw, ph, OutputFormat.PNG)")
+            && mw.Contains("EncodeAndSaveAsync(px, pw, ph, OutputFormat.AVIF)"));
+        Assert("贴图窗：置顶 + 滚轮 1.2 倍步进 + 右键菜单 + 可隐藏工具栏",
+            pin.Contains("WS_EX_TOPMOST") && pin.Contains("Math.Pow(1.2, delta / 120.0)")
+            && pin.Contains("TrackPopupMenuEx") && pin.Contains("_barVisible"));
+
+        Assert("探针保留 ⑨ 文字标注链（创建/撤销/重做/拖动/再编辑的真机读数）",
+            probe.Contains("⑨ 文字标注") && probe.Contains("RunTextPhaseAsync")
+            && probe.Contains("w.AnnoManager.Undo()"));
+        Assert("探针保留 ⑫ 画笔粗细滑条（点涂抹 → 拖轨两端/中段 → 涂一笔 → 图层笔宽必须等于滑条值）",
+            probe.Contains("⑫ 画笔粗细滑条") && probe.Contains("RunBrushSliderPhaseAsync")
+            && probe.Contains("OfType<MosaicBrushLayer>()") && probe.Contains("brushOk"));
+        // ⑫ 的期望值是探针自己从轨道矩形算的（不复用窗的换算），所以这里只需钉住"粗细只有一个来源"
+        Assert("画笔粗细只有一个取值点：涂抹预览与提交图层都读 MosaicBrushPx()（两处各算一份就会漂）",
+            hc.Contains("float brushW = MosaicBrushPx();") && hc.Contains("BrushWidth = MosaicBrushPx()"));
+        Assert("探针保留 ⑬ 工具条点击不改选区（按下被按钮吃掉时，松手不许重画选区）",
+            probe.Contains("⑬ 工具条点击不改选区") && probe.Contains("RunToolClickKeepsSelectionAsync")
+            && probe.Contains("w.ProbeSelection()"));
+        Assert("⑬ 第一臂带「点到了」的见证（只比选区不看标注模式，那一下没命中按钮也会绿 = 空过）",
+            probe.Contains("armedIn") && probe.Contains("w.ProbeAnnoMode()")
+            && hc.Contains("internal bool ProbeAnnoMode() => _annoMode;"));
+        Assert("工具条落位只有一处算术（绘制/两处命中/第二行几何都用 ToolbarFrame，selY2 + 10 只该出现一次）",
+            hc.Contains("private (int Tx, int Ty, int BtnW,")
+            && hc.Split(new[] { "selY2 + 10" }, StringSplitOptions.None).Length - 1 == 1
+            && hc.Contains("ToolbarFrame(n, _winW, _winH)") && hc.Contains("ToolbarFrame(10, _winW, _winH)"));
+        Assert("吃掉按下的三条路径都立闩，Up() 也真的读这道闩（少一处就是那类“点完成把选区改掉”）",
+            hc.Split(new[] { "_toolClickLatch = true;" }, StringSplitOptions.None).Length - 1 == 4
+            && hc.Contains("if (_toolClickLatch)"));
+        Assert("下拉可见行按文字带真实容量夹住（带高固定、格高随 DPI 长：≥250% 装不下的行不许留在列表里）",
+            hc.Contains("private static (int X, int Y, int W, int H)[] PackTextBand(")
+            && hc.Contains("private int DdBandCapacityAt(float scale, int panelW)")
+            && hc.Contains("Math.Min(maxRows, Math.Max(1, DdBandCapacity()))"));
+        Assert("文字带装不下的格子不再静默置零：走 PackTextBand 的容量、真缺格时点名告警",
+            !hc.Contains("if (sy + bh2 > atlasH) { subs[slot]")
+            && hc.Contains("文字带装不下")
+            && hc.Contains("int itemCap = DdBandCapacityAt((float)_uiScale, panelW);"));
+        Assert("探针读「可见行 vs 真烘出的行」，并在 250%/300% 缩放下扫容量",
+            probe.Contains("w.ProbeBakedDdRows()") && probe.Contains("w.ProbeDdBandCapacityAt(2.5f)")
+            && probe.Contains("bandSweepOk") && probe.Contains("bandOk"));
+        Assert("输入预览指纹的比较/写入在同一把锁里，UI 线程不再读渲染线程的 _editPrevW/H",
+            hc.Contains("changed = key != _editPrevKey;")
+            && hc.Contains("// 判据只认这把锁里的状态：_editPrevW/_editPrevH 归渲染线程")
+            && !hc.Contains("if (!_editPendingUpload && _editPrevW == 0 && _editPrevH == 0) return;"));
+        Assert("探针保留 ⑭ 托盘注册/删除（真机发 Shell_NotifyIcon；幂等闸靠实际 NIM_DELETE 次数判）",
+            probe.Contains("⑭ 托盘注册/删除") && probe.Contains("RunTrayPhase")
+            && probe.Contains("ProbeDeleteCalls") && probe.Contains("trayOk"));
+        var trayPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "TrayIconManager.cs"));
+        if (trayPath is null)
+        {
+            Assert("托盘契约：TrayIconManager.cs 必须定位得到", false, "FindRepoFile 未命中");
+            return;
+        }
+        var traySrc = ReadSourceNormalized(trayPath);
+        Assert("托盘删除把 Win32 返回值留成读数（不是只写日志），且幂等闸真的挡在发消息之前",
+            traySrc.Contains("ProbeRemoveResult = Shell_NotifyIconW(NIM_DELETE, ref nid);")
+            && traySrc.Contains("if (!IconRegistered) return;")
+            && traySrc.Contains("ProbeDeleteCalls++;"));
+        var rasterPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "AnnotationRasterizer.cs"));
+        if (rasterPath is null)
+        {
+            Assert("马赛克光照空间契约：AnnotationRasterizer.cs 必须定位得到", false, "FindRepoFile 未命中");
+            return;
+        }
+        var raster = ReadSourceNormalized(rasterPath);
+        // 真机两臂读数（黑白棋盘格、同选区同块 15px）：编码域求均值落 127，线性光求均值编码回 188。
+        Assert("马赛克块均值在线性光里求（解 sRGB→均值→编码一次；别再退回编码域均值）",
+            raster.Contains("s_srgbToLinear[px[idx]]")
+            && raster.Split(new[] { "LinearToSrgbByte(" }, StringSplitOptions.None).Length - 1 >= 3
+            && !raster.Contains("byte bAvg = (byte)(b2 / cnt)"));
+    }
+
+    static void Test_Selection_DragContract()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        if (path is null) { Skip("框选交互契约", "未找到 HdrCaptureWindow.cs"); return; }
+        var hc = File.ReadAllText(path);
+
+        // ① 松手不许无条件改写端点：抓 TL/TR/BL 时"另一个角"会被松手点带走 ⇒ 选区当场塌成一条线。
+        //    判据形状：早退的 return 必须落在端点写入【之前】（不能只数距离，日志块会变长）。
+        int guard = hc.IndexOf("if (_dragHandle >= 0 || _movingSel)", StringComparison.Ordinal);
+        int write = hc.IndexOf("_down = false; _sx2 = x; _sy2 = y;", StringComparison.Ordinal);
+        int earlyReturn = guard > 0 ? hc.IndexOf("return;", guard, StringComparison.Ordinal) : -1;
+        Assert("松手先判手柄/平移并早退，再写端点（顺序反了 = 抓角松手把选区压成一条线）",
+            guard > 0 && write > guard && earlyReturn > guard && earlyReturn < write);
+
+        // ② 抓取偏移：命中区有 12×DPI 宽，不记偏移，角会在第一帧跳到手心。
+        Assert("四个角都记下抓取偏移（角不许在按下瞬间跳到鼠标处）",
+            System.Text.RegularExpressions.Regex.Matches(hc, @"_dragOffX = x - x\d").Count == 4
+            && System.Text.RegularExpressions.Regex.Matches(hc, @"_dragOffY = y - y\d").Count == 4);
+
+        // ③ 手柄拖拽只动被抓的那个角，且坐标钳进窗口。
+        Assert("手柄拖拽只改被抓的角，坐标按偏移换算并钳进窗口",
+            hc.Contains("int nx = Math.Clamp(x - _dragOffX, 0, Math.Max(0, _winW - 1));")
+            && hc.Contains("case 0: _sx1 = nx; _sy1 = ny; break;")
+            && hc.Contains("case 3: _sx2 = nx; _sy2 = ny; break;"));
+
+        // ④ 选区内平移必须"点确实在框内"才成立；框外按下仍是重开新选区（想重画却搬走旧框是反的）。
+        int inside = hc.IndexOf("if (x >= x1 && x <= x2 && y >= y1 && y <= y2)", StringComparison.Ordinal);
+        int moving = hc.IndexOf("_movingSel = true;", StringComparison.Ordinal);
+        Assert("只有点在已完成的框内才平移；框外按下仍走重开新选区",
+            inside > 0 && moving > inside && hc.Contains("_selComplete = false;"));
+
+        // ⑤ 平移整框：尺寸不变、边界钳在窗口内。
+        Assert("平移整框时尺寸保持不变、边界钳在窗口内",
+            hc.Contains("int sw = Math.Abs(_sx2 - _sx1), sh = Math.Abs(_sy2 - _sy1);")
+            && hc.Contains("_sx2 = left + sw; _sy2 = top + sh;"));
+
+        // ⑥ 尺寸徽标在"拖拽中"也要画（不只落定后）。探针 ② 的像素读数只能取落定那帧
+        //    （拖拽中的矩形不由探针决定，见 PreviewUiProbe 里那段），所以条件里的 _down 这一半
+        //    只能靠这条源码判据钉住。
+        Assert("尺寸徽标在拖拽中与落定后都画（(_down || _selComplete) 不许只剩落定分支）",
+            hc.Contains("(_down || _selComplete) && selR - selL >= 1 && selB - selT >= 1"));
+
+        // ⑦ 探针的行为判据本身也不许被删（④–⑧ 是这套契约唯一的现场证据）。
+        var probePath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "PreviewUiProbe.cs"));
+        var probe = probePath is null ? "" : File.ReadAllText(probePath);
+        Assert("真机探针保留 ④ 角拖 + ⑤–⑧ 四条交互契约",
+            probe.Contains("── ④ 四角手柄") && probe.Contains("⑤ 框内平移")
+            && probe.Contains("⑥ 框内单击") && probe.Contains("⑦ 框外重画")
+            && probe.Contains("⑧ 角拖过对角"));
+    }
 
     /// <summary>
     /// <b>"HDR 开着"≠"HDR 直通"：五种交付形态 + 逐格式的声明通道</b>（2026-09-26 用户指令，交接 §53）。

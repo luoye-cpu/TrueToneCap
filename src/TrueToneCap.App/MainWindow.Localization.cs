@@ -52,7 +52,7 @@ public sealed partial class MainWindow : Window
         // PNG / TIFF / JPEG XL 三张位深卡片共用同一句（§4.3 双路径策略：不改行为，只把事实写进界面）
         if (BdPngNoteTxt is not null) BdPngNoteTxt.Text = LocaleManager.BitDepthSourceNote;
         if (BdTiffNoteTxt is not null) BdTiffNoteTxt.Text = LocaleManager.BitDepthSourceNote;
-        if (BdJpegXlNoteTxt is not null) BdJpegXlNoteTxt.Text = LocaleManager.BitDepthSourceNote;
+        if (BdJpegXlNoteTxt is not null) BdJpegXlNoteTxt.Text = LocaleManager.BitDepthJxlNote;
 
         ColorSpaceLabel.Text = LocaleManager.ColorSpace;
         GamutMapTitle.Text = LocaleManager.GamutMapTitle;
@@ -250,17 +250,25 @@ public sealed partial class MainWindow : Window
         SetComboItemText(TranslationModeCbo, "LLM", LocaleManager.Tr("LLM 翻译"));
         SetComboItemText(TranslationModeCbo, "Vision", LocaleManager.Tr("视觉翻译"));
 
-        // ═══ 压缩强度三档（2026-10-07）═══
-        // 三张卡片各有自己的一份，且卡片本身按格式显隐（Collapsed 时项不在可视树里）
+        // ═══ 压缩强度三档（2026-10-07；PNG / TIFF 于 2026-10-29 加入这一组）═══
+        // 每张卡片各有自己的一份，且卡片本身按格式显隐（Collapsed 时项不在可视树里）
         // ⇒ 与上面几个下拉同理：必须按 Tag 逐个点名，不能指望扫描器。
-        // ⚠ 三个下拉共用同一组 Tag/文案，所以下面三段是同一份文字写三遍 —— 有意为之：
+        // ⚠ 这些下拉共用同一组 Tag/文案，所以循环里是一次写六遍 —— 有意为之：
         //   一旦将来某个格式的档位含义分化（例如 WebP 只给两档），各自的文字就能独立改。
-        foreach (var effortCbo in new[] { EffortAvifCbo, EffortJpegXlCbo, EffortWebpCbo, EffortJpegLiCbo })
+        // 两档格式（PNG/TIFF/WebP/JPEG LI）：均衡（默认，= 参数拉满）+ 快速
+        foreach (var effortCbo in new[] { EffortPngCbo, EffortTiffCbo, EffortWebpCbo, EffortJpegLiCbo })
         {
             if (effortCbo is null) continue;
-            SetComboItemText(effortCbo, "Smallest", LocaleManager.Tr("最小体积（最慢）"));
-            SetComboItemText(effortCbo, "Balanced", LocaleManager.Tr("均衡（推荐）"));
-            SetComboItemText(effortCbo, "Fastest", LocaleManager.Tr("最快"));
+            SetComboItemText(effortCbo, "Smallest", LocaleManager.Tr("均衡"));
+            SetComboItemText(effortCbo, "Quick", LocaleManager.Tr("快速"));
+        }
+        // 三档格式（AVIF/JPEG XL）：极高 / 均衡（默认）/ 快速
+        foreach (var effortCbo in new[] { EffortAvifCbo, EffortJpegXlCbo })
+        {
+            if (effortCbo is null) continue;
+            SetComboItemText(effortCbo, "Smallest", LocaleManager.Tr("极高"));
+            SetComboItemText(effortCbo, "Balanced", LocaleManager.Tr("均衡"));
+            SetComboItemText(effortCbo, "Fastest", LocaleManager.Tr("快速"));
         }
 
         // AvifCodecCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。

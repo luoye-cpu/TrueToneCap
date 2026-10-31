@@ -92,8 +92,9 @@ public static class JpegLiNative
     /// <param name="chromaSubsampling">色度采样: "444" / "422" / "420"。</param>
     /// <param name="iccProfile">可选 ICC Profile。</param>
     /// <param name="forceBaseline">强制 Baseline Sequential (SOF0)。Gain Map Base JPEG 需要此模式。</param>
-    /// <param name="effort">压缩强度档位。只有「最小体积」档会加 <c>--xyb</c>（实测在所有内容与质量上
-    /// 一律更小 2.4–4.7%，代价约 1.5–1.8× 时间）。见 <see cref="CompressionEffortMap.JpegLiUseXyb"/>。</param>
+    /// <param name="effort">压缩强度档位。只有「最小体积」档会加 <c>--xyb</c>（2026-10-07 那批样本
+    /// 上小 2.4–4.7%、代价约 1.5–1.8× 时间；2026-10-29 换样本复测出现"反而大 3.0%"的反例，
+    /// 完整数据见 <see cref="CompressionEffortMap.JpegLiUseXyb"/>）。</param>
     /// <returns>JPEG 字节流 (FFD8...FFD9)。</returns>
     public static byte[] Encode(byte[] bgra, int width, int height, float distance = 1.0f,
         string chromaSubsampling = "444", byte[]? iccProfile = null, bool forceBaseline = false,
@@ -137,12 +138,15 @@ public static class JpegLiNative
             string progArg = forceBaseline ? " --progressive_level 0" : ""; // 默认 Progressive(2) 更省体积
 
             // ═══ 2026-10-07：「最小体积」档加 --xyb ═══
-            // 实测（两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）**一律更小**：
+            // 实测（2026-10-07：两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）在那批内容上全更小：
             //   样张 A −4.7% / −2.9% / −3.8% / −4.6%   样张 B −4.0% / −2.4% / −3.5%
             //   GainMap Baseline 路 −1.5%
-            // 这是本仓所有编码器小参里唯一"在所有测过的内容与质量上都为正"的开关。
-            // 机理：XYB 是感知均匀色彩空间，量化误差按人眼敏感度分布 ⇒ 同感知质量下码率更低。
-            // ⚠ 只在最小体积档：代价约 1.5–1.8× 时间，且默认档必须与改动前逐字节一致。
+            // ⚠ 2026-10-29 换三张新截图复测（-d 1.0）：两张 −5.5% / −10.4%，第三张【+3.0%】
+            //   ⇒ 收回"在所有测过的内容与质量上都为正"这句全称断言；改为"5 个测过的样本里 4 个更小"。
+            //   数据见 artifacts/tier_bench_2026-10-29.log 与 CompressionEffortMap.JpegLiUseXyb。
+            // 机理：XYB 是感知均匀色彩空间，量化误差按人眼敏感度分布 ⇒ 同感知质量下通常更省码率。
+            // ⚠ 只在最小体积档：本轮实测约 1.2~1.3× 时间（当年那批测到 1.5~1.8×），
+            //   且默认档必须与改动前逐字节一致。
             string xybArg = CompressionEffortMap.JpegLiXybArg(effort);
 
             var psi = new System.Diagnostics.ProcessStartInfo
@@ -253,18 +257,24 @@ public static class JpegLiNative
     /// <summary>将 BGRA8 像素写入 PPM 文件（彩色 P6 格式）。</summary>
     private static void WriteBgraToPpm(byte[] bgra, int w, int h, string path)
     {
-        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
-        using var writer = new System.IO.StreamWriter(fs, System.Text.Encoding.ASCII, leaveOpen: true);
-        writer.Write($"P6\n{w} {h}\n255\n");
-        writer.Flush();
+        // 逐字节 WriteByte 在 4K 上是 2490 万次调用；按行组一个 RGB 缓冲一次写出。
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
+        var header = System.Text.Encoding.ASCII.GetBytes($"P6\n{w} {h}\n255\n");
+        fs.Write(header, 0, header.Length);
 
-        int pixelCount = w * h;
-        for (int i = 0; i < pixelCount; i++)
+        var row = new byte[w * 3];
+        for (int y = 0; y < h; y++)
         {
-            int si = i * 4;
-            fs.WriteByte(bgra[si + 2]); // R
-            fs.WriteByte(bgra[si + 1]); // G
-            fs.WriteByte(bgra[si]);     // B
+            int src = y * w * 4;
+            int dst = 0;
+            for (int x = 0; x < w; x++)
+            {
+                row[dst++] = bgra[src + 2]; // R
+                row[dst++] = bgra[src + 1]; // G
+                row[dst++] = bgra[src];     // B
+                src += 4;
+            }
+            fs.Write(row, 0, row.Length);
         }
     }
 

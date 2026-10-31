@@ -42,7 +42,7 @@
 共 10 份，**全部留在 `docs/` 顶层**（分层只搬带日期的快照与台账；行数是**本轮改完之后**的实测值）：
 `architecture-design.md`(891) `ocr-model-landscape-2026.md`(429，只带年份)
 `roadmap-v0.4.md`(318) `ocr-parallel-analysis.md`(252) `performance-analysis.md`(241)
-`dependency-management.md`(232) `ocr-pipeline-review.md`(168) `repo-hygiene-review.md`(119) `ocr-accuracy-analysis.md`(111) `vscap-mode.md`(45，VS-Cap 可选模式说明)。
+`dependency-management.md`(232) `ocr-pipeline-review.md`(168) `repo-hygiene-review.md`(119) `ocr-accuracy-analysis.md`(111) `vscap-mode.md`（VS-Cap 模式的归档说明：能力已并入主程序，侧车与 Qt 依赖已移除）。
 （本索引自己不算在内 —— 它也是无日期名，但它是入口不是待同步对象。）
 
 **本次逐条核过的具体不同步点（只有这两份需要动，其余点名符号都能在 `src/` 里搜到）**：
@@ -67,18 +67,18 @@
 | 目录 | 份数 | 最新（读这份） |
 |---|---|---|
 | `docs/reviews/pipeline-review/` | 11 | `pipeline-implementation-review-2026-10-07.md` |
-| `docs/reviews/repo-governance/` | 8 | 无后继，按名读（CI/跟踪/文档体检/待发分诊那批 09-14 与 09-16 快照） |
+| `docs/reviews/repo-governance/` | 10 | 无后继，按名读（CI/跟踪/文档体检/待发分诊那批 09-14 与 09-16 快照） |
 | `docs/reviews/usability/` | 7 | `usability-audit-2026-10-02.md` |
-| `docs/reviews/msix-store/` | 7 | `realmachine-msix-verification-2026-10-07.md`（真机安装实测，mtime 最新） |
-| `docs/reviews/dependency/` | 4 | `dependency-update-analysis-2026-10-07.md` |
-| `docs/reviews/performance/` | 3 | `performance-analysis-2026-10-07.md` |
+| `docs/reviews/msix-store/` | 8 | `realmachine-msix-verification-2026-10-07.md`（真机安装实测，mtime 最新） |
+| `docs/reviews/dependency/` | 5 | `dependency-update-analysis-2026-10-07.md` |
+| `docs/reviews/performance/` | 9 | `perf-implementation-2026-10-31.md`（审查候选 A/C/D/E 的落地结果、真实样张读数、MSIX/分发与开关；先读这份）→ `pipeline-performance-audit-2026-10-30.md`（全管线审查 + 候选排序 + 判死表）与同日 `pipeline-measurements-2026-10-30.md`（审查 §6 待量清单的补测读数）；落地读数见 `preview-fixed-costs-result-2026-10-30.md`（计划的取证快照是同目录 `preview-fixed-costs-plan-2026-10-30.md`）；更早的取舍见 `region-readback-options-2026-10-30.md` |
 | `docs/reviews/compression/` | 3 | `encoder-params-and-smallest-tier-2026-10-07.md` |
 | `docs/reviews/capture/` | 3 | `root-cause-hdr-multimonitor-2026-09-16.md` |
-| `docs/reviews/ocr/` | 2 | `winml-migration-plan-2026-10-07.md` + `ocr-model-replaceability-2026-10-07.md` |
+| `docs/reviews/ocr/` | 3 | `winml-migration-plan-2026-10-07.md` + `ocr-model-replaceability-2026-10-07.md` |
 | `docs/reviews/notification/` | 2 | `windows-system-notification-2026-09-16.md` |
 | `docs/reviews/encoder/` | 1 | `avif-encoder-benchmark-2026-09-16.md` |
 | `docs/reviews/upstream/` | 1 | `upstream-pr1-review-2026-10-16.md` |
-| `docs/ledger/` | 2 | 见 §二（台账，不是快照） |
+| `docs/ledger/` | 3 | 见 §二（台账，不是快照） |
 
 ⚠ 本索引旧版把 `winml-migration-plan` **同时**列进 MSIX 族和 OCR 族（两处都写了它）。
 分层必须二选一，本次按内容归进 `reviews/ocr/`（它改的是 OCR 推理后端，与 MSIX 打包无关）。
@@ -96,6 +96,28 @@
 （上一轮 2026-09-26 审计记的是"38 份 / 30 份快照 / 15,954 行"；现在行数是它的 **1.90 倍**，那份计数已过期，别拿它做体积或成本判断。
 同一天更早一次记的"60 份 / 28,973 行"在 `ce1e9e7` 树里是真数，`20a3198` 把 4 份 10-07 快照落了地 ⇒ +4 份 / +1,361 行。）
 后又一轮（2026-10-21 本次提交）把台账 §71（26 KB 地板史）从 gate-baseline.json 搬进主台账 ⇒ +13 行 / +27,440 B，份数不变。
+
+**2026-10-30 重新量了一次**（口径同上，`find docs -name '*.md' ! -name README.md`）：**71 份 / 31,717 行 / 磁盘 2,411,710 B**。
+与上面那句 64 份的差是 **+7 份 / +1,329 行 / +101,013 B**，对得上账：`git log --diff-filter=A --since=2026-10-23` 数到
+10-22 之后新落地 **6 份**，本轮 `reviews/performance/region-readback-options-2026-10-30.md` 再加 **1 份**（150 行 / 12,473 B）。
+
+同日晚上第三次量（`find` + `wc -l/-c`，同一口径）：**75 份 / 32,417 行 / 磁盘 2,464,667 B**。
+与上面 71 份的差是 **+4 份 / +700 行 / +52,957 B**，逐份对得上：
+`preview-fixed-costs-plan-2026-10-30.md`（228 行 / 17,302 B）、`preview-fixed-costs-result-2026-10-30.md`（123 行 / 10,172 B）、
+`pipeline-performance-audit-2026-10-30.md`（200 行 / 16,061 B）、`pipeline-measurements-2026-10-30.md`（149 行 / 9,422 B）。
+本轮只按实测把 §四 的**份数**列更正了 6 行（dependency 4→5、msix-store 7→8、ocr 2→3、performance 3→4、
+repo-governance 8→10、ledger 2→3）；此后同日两轮又新增 4 份，performance 4→8；
+**"最新（读这份）"那一列除 performance 外没有逐族重判**——
+族里新增了哪几份、该读哪一份，得看内容而不是文件名，本轮没做这件事，别把那一列当现状。
+
+2026-10-31 第四次量（同一口径）：**76 份 / 32,665 行 / 磁盘 2,481,671 B**。
+与上面 75 份的差是 **+1 份 / +248 行 / +17,004 B**，正好是
+`perf-implementation-2026-10-31.md`（248 行 / 17,004 B）；performance 族 8→9，其余族未动。
+
+同日第五次量（写完真实样张 / MSIX / 签名结果之后，同一口径）：**76 份 / 32,715 行 / 磁盘 2,486,299 B**。
+与第四次量的差是 **份数不变 / +50 行 / +4,628 B**，全部来自
+`perf-implementation-2026-10-31.md`（248→298 行，17,004→21,632 B；§4 策略改为 level 10 + 0.05 阈值，
+补真实样张、产品 A/B、MSIX 与签名/杀软边界，§5 门禁表与 §7 未做项同批更新）。
 
 ## 五、孤儿（零入站引用，但仍是证据）
 

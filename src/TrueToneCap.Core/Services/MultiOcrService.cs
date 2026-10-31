@@ -22,13 +22,18 @@ public static class MultiOcrService
     /// <summary>所有已注册的引擎。</summary>
     public static IReadOnlyList<IOcrEngine> Engines => _engines;
 
-    /// <summary>获取当前选中的引擎实例。</summary>
+    /// <summary>获取当前选中的引擎实例（CPU 引擎按需构建）。</summary>
     public static IOcrEngine? SelectedEngine
     {
         get
         {
             if (SelectedEngineType is null) return null;
-            return _engines.FirstOrDefault(e => e.Info.EngineType == SelectedEngineType.Value);
+            var type = SelectedEngineType.Value;
+            var existing = _engines.FirstOrDefault(e => e.Info.EngineType == type);
+            if (existing is not null) return existing;
+            // 2026-10-30：CPU 会话改为按需构建（启动时只建 DirectML + 注册 Windows OCR）。
+            // 用户显式选了 CPU、或 DirectML 不可用而默认落到 CPU 时，这里补建一次。
+            return type == OcrEngineType.OnnxCpu ? EnsureCpuEngine() : null;
         }
     }
 
@@ -80,20 +85,22 @@ public static class MultiOcrService
             catch (Exception ex) { CoreLog.Warn("OCR", "DirectML 初始化异常", ex, LogCategory.OCR); }
 
             // 2️⃣ ONNX PP-OCRv6 CPU (FP16 模型, FP32 计算)
-            try
+            // 2026-10-30：默认【不】在启动期建。CPU 会话只有在两种场景下才会被用：
+            //   ① 用户显式选 OnnxCpu；② DirectML 不可用，默认落到 CPU。
+            //   GPU 可用时它整场无人调用，却要常驻一份 ~180ms 加载的会话与内存。
+            // 需要回到旧行为（启动即建）时设 TTC_OCR_EAGER_CPU=1。
+            bool gpuReady = _engines.Any(e => e.Info.EngineType == OcrEngineType.OnnxGpu);
+            bool eagerCpu = Environment.GetEnvironmentVariable("TTC_OCR_EAGER_CPU") == "1";
+            if (!gpuReady || eagerCpu)
             {
-                var cpuEngine = new OnnxOcrEngine(OnnxExecutionProvider.Cpu, modelDir);
-                if (cpuEngine.Info.IsAvailable)
-                {
-                    _engines.Add(cpuEngine);
-                    CoreLog.Info("OCR", "CPU 引擎就绪", LogCategory.OCR);
-                }
-                else
-                {
-                    CoreLog.Warn("OCR", "CPU 引擎不可用", LogCategory.OCR);
-                }
+                if (!eagerCpu)
+                    CoreLog.Info("OCR", "DirectML 不可用 ⇒ 启动期建 CPU 引擎", LogCategory.OCR);
+                BuildCpuEngineLocked();
             }
-            catch (Exception ex) { CoreLog.Warn("OCR", "CPU 初始化异常", ex, LogCategory.OCR); }
+            else
+            {
+                CoreLog.Info("OCR", "CPU 引擎按需构建（DirectML 可用）", LogCategory.OCR);
+            }
 
             // 3️⃣ Windows OCR (系统 OCR)
             _engines.Add(new WindowsOcrEngine());
@@ -112,6 +119,65 @@ public static class MultiOcrService
 
             // 必须等注册全部完成再置位，否则并发调用会看到"已初始化但引擎表为空"。
             _initialized = true;
+        }
+    }
+
+    /// <summary>启动期建 CPU 引擎（调用方须持有 <see cref="s_initLock"/>）。仅 DirectML 不可用时调用。</summary>
+    private static void BuildCpuEngineLocked()
+    {
+        try
+        {
+            var cpuEngine = new OnnxOcrEngine(OnnxExecutionProvider.Cpu, _modelDir);
+            if (cpuEngine.Info.IsAvailable)
+            {
+                _engines.Add(cpuEngine);
+                CoreLog.Info("OCR", "CPU 引擎就绪", LogCategory.OCR);
+            }
+            else
+            {
+                CoreLog.Warn("OCR", "CPU 引擎不可用", LogCategory.OCR);
+                cpuEngine.Dispose();
+            }
+        }
+        catch (Exception ex) { CoreLog.Warn("OCR", "CPU 初始化异常", ex, LogCategory.OCR); }
+    }
+
+    /// <summary>
+    /// 按需构建 CPU 引擎（用户选中 OnnxCpu，或 DirectML 不可用导致默认落到 CPU）。
+    /// <para>失败不缓存：下一次选择/调用会再试一次 —— 与"瞬时失败不写能力缓存"同一口径。</para>
+    /// </summary>
+    private static IOcrEngine? EnsureCpuEngine()
+    {
+        lock (s_initLock)
+        {
+            var existing = _engines.FirstOrDefault(e => e.Info.EngineType == OcrEngineType.OnnxCpu);
+            if (existing is not null) return existing;
+            // Initialize 持锁时不会被走到（RecognizeCoreAsync 先调 Initialize 再取引擎）；
+            // 这里兜的是"初始化尚未完成就有人来取"的并发形态。
+            if (!_initialized) return null;
+
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var cpuEngine = new OnnxOcrEngine(OnnxExecutionProvider.Cpu, _modelDir);
+                if (!cpuEngine.Info.IsAvailable)
+                {
+                    CoreLog.Warn("OCR", "CPU 引擎不可用", LogCategory.OCR);
+                    cpuEngine.Dispose();
+                    return null;
+                }
+                // 保持声明顺序：GPU → CPU → Windows OCR（降级优先级与日志口径不变）
+                int winIdx = _engines.FindIndex(e => e.Info.EngineType == OcrEngineType.WindowsOcr);
+                if (winIdx >= 0) _engines.Insert(winIdx, cpuEngine);
+                else _engines.Add(cpuEngine);
+                CoreLog.Info("OCR", $"CPU 引擎就绪（按需，{sw.ElapsedMilliseconds}ms）", LogCategory.OCR);
+                return cpuEngine;
+            }
+            catch (Exception ex)
+            {
+                CoreLog.Warn("OCR", "CPU 初始化异常", ex, LogCategory.OCR);
+                return null;
+            }
         }
     }
 

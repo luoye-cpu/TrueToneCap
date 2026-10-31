@@ -74,14 +74,6 @@ param(
     #       仅在本地调试 / 明确知晓后果时使用。
     [switch]$AllowDirty = $false,
 
-    # 明确本次【不】出 VS-Cap 侧车（构建机上没有 Qt 时用；CI 就没有）。
-    # ⚠ 它只改变"要不要要求侧车"，不改变功能语义：App 在 data/vscap/ttc-vscap.exe 不存在时
-    #   会自己收起整个入口（开关 + 按钮 + Ctrl+Alt+T，见 MainWindow.VSCap.cs 的 ApplyVSCapGate）。
-    #   ⇒ -NoVSCap 出的仍是"没有这个功能"的完整包，不是"有开关但点了只会报错"的残缺包。
-    #   这个开关存在的理由：csproj 那条 glob 在目录缺失时展开成 0 个条目，构建与打包【全绿】，
-    #   缺件这件事必须由下面的校验说出来，而不是静默通过。
-    [switch]$NoVSCap = $false,
-
     # 跳过「发布前测试」门禁（默认执行 headless 7 套件，约 90~120s）
     [switch]$SkipTests = $false,
 
@@ -235,6 +227,9 @@ $toolFiles = [ordered]@{
     "cjpegli.exe" = "JPEG LI 编码器"
     "cwebp.exe"   = "WebP 编码器"
     "cjxl.exe"    = "JPEG XL 编码器"
+    # 2026-10-31：可选无损压缩后端。缺它程序自动回退内置 zlib-ng，
+    # 但随包分发的承诺是"有它" ⇒ 这里仍按必需件检查/复制/校验哈希。
+    "deflate.dll" = "无损压缩（libdeflate）"
 }
 $modelFiles = [ordered]@{
     "PP-OCRv6_medium_det.onnx" = "ONNX 文字检测"
@@ -244,10 +239,8 @@ $modelFiles = [ordered]@{
 
 $missing = [System.Collections.Generic.List[string]]::new()
 
-# VS-Cap 侧车是否进了这枚包 —— 由下面的依赖校验填写。
-# 初值刻意不用 $null：ConvertTo-Json 会静默丢掉 null 键，事后就读不出"这枚包到底有没有侧车"，
-# 而这正是 verify-package 要对照的那一项。
-$vscapIncluded = '未判定(跳过依赖校验)'
+# VS-Cap（Qt 侧车）已于 2026-10-27 归档：App.csproj 不再有 data\vscap 那条 glob，
+# 这枚包里【不该】出现 ttc-vscap.exe / Qt6*.dll。verify-package.ps1 的 [5.5/6] 守这个方向。
 
 # 原生工具的「版本 + 来源」记录，由 [0/6] 的 SHA256 校验填充，最终写入 build-info.json
 $toolsInfo = @()
@@ -323,40 +316,16 @@ if ($SkipDependencyCheck) {
         Write-Host "   ⚠️ 未找到 models-manifest.json，跳过模型完整性校验" -ForegroundColor Yellow
     }
 
-    # ── VS-Cap 侧车（上游 PR #1 引入的可选 Qt 编辑器）──
-    # 为什么必须在这一层拦：App.csproj 用一条 glob 把 build\vscap-runtime\** 拷进 data\vscap，
-    # 目录不存在时 glob 展开成【0 个条目】⇒ 构建 0 警告 0 错误、打包全绿、7 套件也全绿
-    # （托管侧的调用点在运行时才碰那个文件）。缺件这件事没人说，就会变成一个点了只会报错的开关。
-    $vscapRuntime = Join-Path $RepoRoot "build\vscap-runtime"
-    $vscapExe     = Join-Path $vscapRuntime "ttc-vscap.exe"
-    if ($NoVSCap) {
-        Write-Host "   ⏭ -NoVSCap：本次不出 VS-Cap 侧车 ⇒ App 启动时会自动隐藏该功能入口" -ForegroundColor Yellow
-        $vscapIncluded = $false
-    } elseif (-not (Test-Path $vscapExe)) {
-        Write-Host "   ❌ VS-Cap 侧车未构建: $vscapExe" -ForegroundColor Red
-        Write-Host "      先跑: .\scripts\BuildVSCap.ps1 -QtRoot <Qt安装目录> -ToolchainBin <MSVC bin> -Test" -ForegroundColor Yellow
-        Write-Host "      或明确不出这个功能: .\Publish.ps1 -NoVSCap" -ForegroundColor Yellow
-        $missing.Add("VS-Cap 侧车未构建 (build\vscap-runtime\ttc-vscap.exe)")
-        $vscapIncluded = $false
-    } else {
-        $vscapAll = @(Get-ChildItem $vscapRuntime -Recurse -File)
-        $vscapLic = @('VS-Cap-LICENSE.txt', 'Qt-LGPL-3.0.txt', 'Qt-GPL-3.0.txt') |
-                    Where-Object { Test-Path (Join-Path $vscapRuntime $_) }
-        Write-Host "   🔒 VS-Cap 侧车就绪: ttc-vscap.exe + $($vscapAll.Count - 1) 个运行时文件（含许可文本 $($vscapLic.Count) 份）"
-        if ($vscapLic.Count -lt 1) {
-            Write-Host "   ❌ 侧车目录里没有任何 Qt/VS-Cap 许可文本 ⇒ 不许随包分发" -ForegroundColor Red
-            $missing.Add("VS-Cap 侧车缺许可文本 (build\vscap-runtime)")
-        }
-        $vscapIncluded = $true
-    }
+    # ── VS-Cap 侧车：已归档（2026-10-27），这里不再有"要么编出来、要么 -NoVSCap"的分支 ──
+    # 历史：侧车由 App.csproj 一条 glob 进包，目录不存在时展开成 0 个条目 ⇒ 构建与打包全绿而功能不在。
+    # 现在那条 glob 与「VS-Cap 模式」一起删了；包内若还冒出 data\vscap ⇒ verify-package 判红。
 
     if ($missing.Count -gt 0) {
         Write-Host ""
         Write-Host "❌ 依赖校验失败 — 拒绝继续发布，以下依赖缺失:" -ForegroundColor Red
         foreach ($m in $missing) { Write-Host "     · $m" -ForegroundColor Red }
         Write-Host ""
-        Write-Host "提示: 模型可由 .\download_models.ps1 获取；原生工具需放入 src/TrueToneCap.Core/Resources/；" -ForegroundColor Yellow
-        Write-Host "      VS-Cap 侧车由 .\scripts\BuildVSCap.ps1 产出，或本次用 -NoVSCap 明确不出它。" -ForegroundColor Yellow
+        Write-Host "提示: 模型可由 .\download_models.ps1 获取；原生工具需放入 src/TrueToneCap.Core/Resources/。" -ForegroundColor Yellow
         throw "依赖校验失败: 共 $($missing.Count) 项缺失。"
     }
 
@@ -867,15 +836,15 @@ if (Test-Path $toolsSrc) {
     $nativeDir = Join-Path $OutputDir "native"
     New-Item -ItemType Directory -Path $nativeDir -Force | Out-Null
 
-    foreach ($exe in $toolFiles.Keys) {
-        $src = Join-Path $toolsSrc $exe
+    foreach ($file in $toolFiles.Keys) {
+        $src = Join-Path $toolsSrc $file
         if (Test-Path $src) {
             Copy-Item $src $nativeDir -Force
             $sz = [math]::Round((Get-Item $src).Length / 1KB, 1)
-            Write-Host "   ✅ $exe ($sz KB)"
+            Write-Host "   ✅ $file ($sz KB)"
         } else {
-            Write-Host "   ❌ $exe 缺失" -ForegroundColor Red
-            throw "原生工具复制失败: $exe 不存在于 $toolsSrc"
+            Write-Host "   ❌ $file 缺失" -ForegroundColor Red
+            throw "原生工具复制失败: $file 不存在于 $toolsSrc"
         }
     }
     Write-Host "   📁 native/ — $($toolFiles.Count) 个文件"
@@ -959,10 +928,7 @@ if (-not (Test-Path $smokeScript)) {
     if (-not $commitSha) {
         try { $commitSha = (& git -C $RepoRoot rev-parse HEAD 2>$null).Trim() } catch {}
     }
-    # 把"本次到底声明带不带 VS-Cap 侧车"直接传给冒烟验证 ——
-    # build-info.json 要到 [6/6] 才写，冒烟跑在它之前，让脚本去包里读它只会永远"未判定"。
-    $vscapDecl = if ($vscapIncluded -eq $true) { 'true' } elseif ($vscapIncluded -eq $false) { 'false' } else { 'unknown' }
-    $smokeArgs = @{ PackageDir = $OutputDir; ExpectedVersion = $VersionForMsBuild; VSCapDeclared = $vscapDecl }
+    $smokeArgs = @{ PackageDir = $OutputDir; ExpectedVersion = $VersionForMsBuild }
     if ($commitSha)      { $smokeArgs['ExpectedCommit'] = $commitSha }
     if ($SkipExecProbe)  { $smokeArgs['SkipExecProbe'] = $true }
     & $smokeScript @smokeArgs
@@ -1075,10 +1041,7 @@ $buildInfo = [ordered]@{
     selfContained  = $true
     readyToRun     = (-not $NoReadyToRun)
     coreAot        = [bool]$CoreAot
-    # VS-Cap 侧车是否进包（true / false / '未判定(跳过依赖校验)'）。
-    # 记这一项是为了让"包里没有这个功能"成为【声明过的事实】而不是静默缺失 ——
-    # verify-package.ps1 会拿它跟包内 data/vscap/ 的实际内容对撞。
-    vscapIncluded  = $vscapIncluded
+    # VS-Cap 侧车已归档（2026-10-27）：不写 vscapIncluded，也不许出现 data\vscap。
     commitSha      = $commitSha
     # 版本标签（-Tag 时创建；空串表示本次发布未打标签）
     tag            = $tagName
@@ -1134,7 +1097,8 @@ Write-Host ""
 $totalSize  = (Get-ChildItem $OutputDir -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB
 $totalFiles = (Get-ChildItem $OutputDir -Recurse -File).Count
 
-$nativeCount = (Get-ChildItem (Join-Path $OutputDir "native") -Filter "*.exe" -ErrorAction SilentlyContinue).Count
+# 2026-10-31：native/ 里不再只有 exe（多了一枚可选 deflate.dll），按全部文件计数。
+$nativeCount = (Get-ChildItem (Join-Path $OutputDir "native") -File -ErrorAction SilentlyContinue).Count
 $modelSize   = (Get-ChildItem (Join-Path $OutputDir "data\Models") -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1MB
 $shaderCount = (Get-ChildItem (Join-Path $OutputDir "data\Shaders") -Filter "*.cso" -ErrorAction SilentlyContinue).Count
 

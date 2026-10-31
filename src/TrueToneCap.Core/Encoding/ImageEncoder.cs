@@ -238,8 +238,8 @@ public interface IAvifEncoder
     /// 不支持真 10-bit 输入的后端因此无需改动，且不会假装自己保留了精度
     /// （它们产出的仍是正确的 10-bit 容器，只是源精度被降到 8-bit，与现状一致）。</para>
     /// </summary>
-    Task EncodeArgb10Async(byte[] argb10, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 10, string? colorSpaceTag = null, byte[]? iccProfile = null)
-        => EncodeAsync(AvifPixelFormat.Argb10ToBgra8(argb10), w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile);
+    Task EncodeArgb10Async(byte[] argb10, int w, int h, int crf, string path, CancellationToken ct, string chroma = "420", int displayBitDepth = 10, string? colorSpaceTag = null, byte[]? iccProfile = null, CompressionEffort effort = CompressionEffort.Balanced)
+        => EncodeAsync(AvifPixelFormat.Argb10ToBgra8(argb10), w, h, crf, path, ct, chroma, displayBitDepth, colorSpaceTag, iccProfile, effort: effort);
 }
 
 /// <summary>AVIF 后端共用的像素格式辅助。

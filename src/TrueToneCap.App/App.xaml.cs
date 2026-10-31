@@ -27,6 +27,10 @@ public partial class App : Application
 {
     private static Mutex? s_mutex;
 
+    // 进程到主窗口的总耗时起点。静态字段初始化先于构造函数体里的 LogService.InitializeFileLog()，
+    // 所以日志系统起来之前的那一段也算在内；落点在 OnLaunched 里"主窗口已创建"那条旁边。
+    private static readonly long s_startTick = Environment.TickCount64;
+
     [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)] private static partial int MessageBoxW(nint h, string text, string caption, uint type);
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -193,6 +197,11 @@ public partial class App : Application
         {
             try { JpegLiNative.Initialize(); LogService.Info("App", "jpegli 编码器初始化"); }
             catch (Exception ex) { LogService.Warn("App", $"jpegli 初始化失败: {ex.Message}"); }
+
+            // ── 无损 deflate 后端：有可选 libdeflate 就用，没有/坏了自动回退内置 zlib-ng ──
+            // 探测只做一次（加载 + 自检压缩回读），结果缓存；这里只把结论记一行日志。
+            try { DeflateZlib.Initialize(); }
+            catch (Exception ex) { LogService.Warn("App", $"deflate 后端探测异常: {ex.Message}"); }
 
             // ═══ 2026-09-15：本机工具提取失败必须【用户可见】═══
             // NativeLibraryResolver 的提取失败原先只写 Debug.WriteLine —— Release 下完全无声，
@@ -425,6 +434,8 @@ public partial class App : Application
 
         var window = new MainWindow(isAutostart);
         LogService.Info("App", $"主窗口已创建, 自动启动={isAutostart}");
+        // 只到"窗口对象构造完"为止：Activate/Resize 之后打就会把首帧显示时间混进来。
+        LogService.Info("App", $"启动: 进程到主窗口 {Environment.TickCount64 - s_startTick}ms");
 
         // ── 显式设置窗口内容主题（Application.RequestedTheme 可能不被所有控件继承）──
         var effective = ResolveEffectiveTheme(initTheme);
@@ -538,6 +549,32 @@ public partial class App : Application
                 {
                     await Task.Delay(1200);
                     int rc = await Services.PreviewUiProbe.RunAsync();
+                    Environment.Exit(rc);
+                });
+            }
+            // ── --capture-freshness-probe：截图真的落后现实多少毫秒（Phase 0 仪表，读法见该文件头）──
+            // 这张表决定"让 WGC 两条池常驻"那 479ms 能不能拿；没有它就不许动捕获层的生命周期。
+            // 与上面两个探针同一形状：刻度窗的消息泵要靠 UI 线程活着，所以必须等 XAML 真起来、
+            // 且整段在 UI 线程 await（探针内部禁 ConfigureAwait(false)）。
+            if (Environment.GetCommandLineArgs().Any(a =>
+                    string.Equals(a, Services.CaptureFreshnessProbe.Flag, StringComparison.OrdinalIgnoreCase)))
+            {
+                _ = window.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await Task.Delay(1200);
+                    int rc = await Services.CaptureFreshnessProbe.RunAsync();
+                    Environment.Exit(rc);
+                });
+            }
+            // ── --frame-handoff-probe：交给消费者的那一块像素会不会被后续帧改写（路线 B 的验收前提）──
+            // 四条臂的读法见该文件头；同样必须跑在 UI 线程（自翻色小窗的 WM_TIMER 靠它泵）。
+            if (Environment.GetCommandLineArgs().Any(a =>
+                    string.Equals(a, Services.FrameHandoffProbe.Flag, StringComparison.OrdinalIgnoreCase)))
+            {
+                _ = window.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await Task.Delay(1200);
+                    int rc = await Services.FrameHandoffProbe.RunAsync();
                     Environment.Exit(rc);
                 });
             }

@@ -245,15 +245,15 @@ public static class NativeJxlEncoder
             // 该日志在 Release 下也会持续写入并最终无限增长，且命令行只在排查时才有意义。
             CoreLog.Debug("JXL", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
 
-            var result = NativeEncoderGuard.TryEncode("JXL", () =>
+            var result = NativeEncoderGuard.TryExecute("JXL", () =>
             {
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) throw new InvalidOperationException("无法启动 cjxl");
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "cjxl");
 
-                if (exitCode != 0 || !File.Exists(path))
+                // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
+                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
                     throw new InvalidOperationException($"[JXL] cjxl 编码失败 (exit={exitCode}) {stderr.Trim()}");
-                return File.ReadAllBytes(path);
             });
             if (!result.Success)
                 throw new InvalidOperationException($"[JXL] cjxl 编码失败: {result.Error?.Message}");
@@ -334,15 +334,15 @@ public static class NativeJxlEncoder
             CoreLog.Debug("JXL16", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
 
             // ═══ 照抄 Encode 的进程调用 + NativeEncoderGuard 隔离 ═══
-            var result = NativeEncoderGuard.TryEncode("JXL16", () =>
+            var result = NativeEncoderGuard.TryExecute("JXL16", () =>
             {
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) throw new InvalidOperationException("无法启动 cjxl");
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "cjxl");
 
-                if (exitCode != 0 || !File.Exists(path))
+                // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
+                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
                     throw new InvalidOperationException($"[JXL] cjxl 编码失败 (exit={exitCode}) {stderr.Trim()}");
-                return File.ReadAllBytes(path);
             });
             if (!result.Success)
                 throw new InvalidOperationException($"[JXL] cjxl 编码失败: {result.Error?.Message}");
@@ -387,7 +387,8 @@ public static class NativeJxlEncoder
         try
         {
             var bgra16 = FormatHelper.Rgba16ToBgra16Bytes(rgba16, w, h);
-            ManagedPngEncoder.Encode16(bgra16, w, h, tmpPng);
+            // 中转文件用完即删，压缩率不影响产物；与 AVIF 的两条 16-bit 中转一致走最快档
+            ManagedPngEncoder.Encode16(bgra16, w, h, tmpPng, fastest: true);
 
             var exePath = GetExePath();
 
@@ -425,15 +426,15 @@ public static class NativeJxlEncoder
             // 该日志在 Release 下也会持续写入并最终无限增长。
             CoreLog.Debug("JXL_HDR", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
 
-            var result = NativeEncoderGuard.TryEncode("JXL_HDR", () =>
+            var result = NativeEncoderGuard.TryExecute("JXL_HDR", () =>
             {
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) throw new InvalidOperationException("无法启动 cjxl");
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "cjxl(HDR)");
 
-                if (exitCode != 0 || !File.Exists(path))
+                // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
+                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
                     throw new InvalidOperationException($"[JXL] cjxl HDR 编码失败 (exit={exitCode}) {stderr.Trim()}");
-                return File.ReadAllBytes(path);
             });
             if (!result.Success)
                 throw new InvalidOperationException($"[JXL] cjxl HDR 编码失败: {result.Error?.Message}");
@@ -452,18 +453,24 @@ public static class NativeJxlEncoder
     /// <summary>BGRA8 → PPM (用于 SDR cjxl 输入)。</summary>
     private static void WriteBgraToPpm(byte[] bgra, int w, int h, string path)
     {
-        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
-        using var writer = new System.IO.StreamWriter(fs, System.Text.Encoding.ASCII, leaveOpen: true);
-        writer.Write($"P6\n{w} {h}\n255\n");
-        writer.Flush();
+        // 逐字节 WriteByte 在 4K 上是 2490 万次调用；按行组一个 RGB 缓冲一次写出。
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
+        var header = System.Text.Encoding.ASCII.GetBytes($"P6\n{w} {h}\n255\n");
+        fs.Write(header, 0, header.Length);
 
-        int pixelCount = w * h;
-        for (int i = 0; i < pixelCount; i++)
+        var row = new byte[w * 3];
+        for (int y = 0; y < h; y++)
         {
-            int si = i * 4;
-            fs.WriteByte(bgra[si + 2]); // R
-            fs.WriteByte(bgra[si + 1]); // G
-            fs.WriteByte(bgra[si]);     // B
+            int src = y * w * 4;
+            int dst = 0;
+            for (int x = 0; x < w; x++)
+            {
+                row[dst++] = bgra[src + 2]; // R
+                row[dst++] = bgra[src + 1]; // G
+                row[dst++] = bgra[src];     // B
+                src += 4;
+            }
+            fs.Write(row, 0, row.Length);
         }
     }
 }

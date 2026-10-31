@@ -24,6 +24,9 @@ internal static class AnnotationRasterizer
             case MosaicLayer m:
                 RenderMosaic(result, imgW, imgH, m);
                 break;
+            case MosaicBrushLayer mb:
+                RenderMosaicBrush(result, imgW, imgH, mb);
+                break;
             case RectangleLayer rl:
                 RenderRectOutline(result, imgW, imgH, rl.GetBounds(), rl.Style);
                 break;
@@ -125,9 +128,35 @@ internal static class AnnotationRasterizer
             DrawLine(px, w, h, pts[i - 1].X, pts[i - 1].Y, pts[i].X, pts[i].Y, r, g, b, t);
     }
 
-    private static void RenderMosaic(byte[] px, int w, int h, MosaicLayer m)
+    // ══════════════════════════════════════════════
+    //  马赛克块均值的光照空间
+    // ══════════════════════════════════════════════
+    // 预览（OverlayComposite.hlsl 的 MosaicBlockMean）在 scRGB 线性基上取均值，输出这条 CPU 路拿到的
+    // 是 BGRA8 sRGB 字节。直接在编码值上求均值会把块压暗：黑白棋盘格在编码值上均值 127，
+    // 线性光均值却该编码成 188 —— 预览亮、文件暗，同一张图两副样子。
+    // 所以两处求均值都改成"逐样本解到线性 → 求均值 → 编码回一次"。
+    private static readonly float[] s_srgbToLinear = BuildSrgbToLinear();
+
+    private static float[] BuildSrgbToLinear()
     {
-        int lx = Math.Max(0, (int)MathF.Floor(m.X)), ly = Math.Max(0, (int)MathF.Floor(m.Y));
+        var t = new float[256];
+        for (int i = 0; i < 256; i++)
+        {
+            float c = i / 255f;
+            t[i] = c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        return t;
+    }
+
+    private static byte LinearToSrgbByte(float v)
+    {
+        v = Math.Clamp(v, 0f, 1f);
+        float s = v <= 0.0031308f ? v * 12.92f : 1.055f * MathF.Pow(v, 1f / 2.4f) - 0.055f;
+        return (byte)Math.Clamp((int)MathF.Round(s * 255f), 0, 255);
+    }
+
+    private static void RenderMosaic(byte[] px, int w, int h, MosaicLayer m)
+    {        int lx = Math.Max(0, (int)MathF.Floor(m.X)), ly = Math.Max(0, (int)MathF.Floor(m.Y));
         int rx = Math.Min(w - 1, (int)MathF.Ceiling(m.X + m.Width) - 1);
         int ry = Math.Min(h - 1, (int)MathF.Ceiling(m.Y + m.Height) - 1);
         if (lx >= w || ly >= h || rx < 0 || ry < 0) return;
@@ -146,33 +175,98 @@ internal static class AnnotationRasterizer
         Parallel.For(0, blockRows, k =>
         {
             int blockY = firstBlockY + k * block;
-            for (int x = lx; x <= rx; x += block)
+            // x 也必须从整块边界起：原来从图层左边 lx 起，x/y 两个方向的网格原点不一致，
+            // 与预览（按图像原点取块）永远错位半格
+            for (int x = lx / block * block; x <= rx; x += block)
             {
                 int bx2 = Math.Min(x + block - 1, rx);
                 int by2 = Math.Min(blockY + block - 1, ry);
-                int r2 = 0, g2 = 0, b2 = 0, cnt = 0;
+                float r2 = 0, g2 = 0, b2 = 0;
+                int cnt = 0;
                 for (int yy = blockY; yy <= by2; yy++)
                     for (int xx = x; xx <= bx2; xx++)
                     {
                         int idx = (yy * w + xx) * 4;
-                        b2 += px[idx]; g2 += px[idx + 1]; r2 += px[idx + 2]; cnt++;
+                        b2 += s_srgbToLinear[px[idx]]; g2 += s_srgbToLinear[px[idx + 1]]; r2 += s_srgbToLinear[px[idx + 2]];
+                        cnt++;
                     }
                 if (cnt == 0) continue;
-                byte av = (byte)((r2 + g2 + b2) / (cnt * 3));
-                for (int yy = blockY; yy <= by2; yy++)
-                    for (int xx = x; xx <= bx2; xx++)
+                // ⚠ 逐通道求均值，不能把三个通道合成一个灰值：预览（着色器）一直是彩色块平均，
+                // 输出却落成灰度块 —— 同一张图两副样子（2026-10-28 实测保存的 PNG 里涂抹带 86%
+                // 的像素 r=g=b）。马赛克是"看不清"，不是"去色"。
+                byte bAvg = LinearToSrgbByte(b2 / cnt), gAvg = LinearToSrgbByte(g2 / cnt), rAvg = LinearToSrgbByte(r2 / cnt);
+                // 求均值必须整块（与预览同一网格），写入只落在图层矩形内：首块列/块行可能起在
+                // lx/ly 左边，照搬整块写会把马赛克涂出矩形外最多 block-1 像素（预览不外溢）
+                int wx0 = Math.Max(x, lx), wy0 = Math.Max(blockY, ly);
+                for (int yy = wy0; yy <= by2; yy++)
+                    for (int xx = wx0; xx <= bx2; xx++)
                     {
                         int idx = (yy * w + xx) * 4;
-                        px[idx] = px[idx + 1] = px[idx + 2] = av;
+                        px[idx] = bAvg; px[idx + 1] = gAvg; px[idx + 2] = rAvg;
                     }
             }
         });
     }
 
-    private static void RenderText(byte[] px, int w, int h, TextLayer tl)
+    /// <summary>马赛克（涂抹）：只把"块中心落在笔迹半径内"的方块打码，与 shader 的 type 7 同一判据。</summary>
+    private static void RenderMosaicBrush(byte[] px, int w, int h, MosaicBrushLayer m)
     {
-        var bmp = RasterizeText(tl.Text, tl.FontSize, tl.FontFamily);
-        if (bmp is not var (bgra, bw, bh)) return;
+        if (m.Points.Count == 0) return;
+        var b = m.GetBounds();
+        int lx = Math.Max(0, (int)MathF.Floor(b.Left)), ly = Math.Max(0, (int)MathF.Floor(b.Top));
+        int rx = Math.Min(w - 1, (int)MathF.Ceiling(b.Right) - 1);
+        int ry = Math.Min(h - 1, (int)MathF.Ceiling(b.Bottom) - 1);
+        if (lx > rx || ly > ry) return;
+        int block = Math.Max(2, (int)MathF.Round(m.BlockSize));
+        float rad = Math.Max(1f, m.BrushWidth / 2f);
+
+        int firstBlockY = ly / block * block;
+        for (int blockY = firstBlockY; blockY <= ry; blockY += block)
+        {
+            for (int x = lx / block * block; x <= rx; x += block)
+            {
+                // 块中心到折线的最近距离：> 半径就整块跳过（不产生"擦边"的块）
+                float cx = x + block / 2f, cy = blockY + block / 2f;
+                float best = float.MaxValue;
+                for (int i = 1; i < m.Points.Count; i++)
+                    best = Math.Min(best, DistToSegment(cx, cy, m.Points[i - 1], m.Points[i]));
+                if (m.Points.Count == 1) best = Vector2.Distance(new Vector2(cx, cy), m.Points[0]);
+                if (best > rad) continue;
+
+                int bx2 = Math.Min(x + block - 1, w - 1), by2 = Math.Min(blockY + block - 1, h - 1);
+                float r2 = 0, g2 = 0, b2 = 0;
+                int cnt = 0;
+                for (int yy = Math.Max(0, blockY); yy <= by2; yy++)
+                    for (int xx = Math.Max(0, x); xx <= bx2; xx++)
+                    {
+                        int idx = (yy * w + xx) * 4;
+                        b2 += s_srgbToLinear[px[idx]]; g2 += s_srgbToLinear[px[idx + 1]]; r2 += s_srgbToLinear[px[idx + 2]];
+                        cnt++;
+                    }
+                if (cnt == 0) continue;
+                byte bAvg = LinearToSrgbByte(b2 / cnt), gAvg = LinearToSrgbByte(g2 / cnt), rAvg = LinearToSrgbByte(r2 / cnt);
+                for (int yy = Math.Max(0, blockY); yy <= by2; yy++)
+                    for (int xx = Math.Max(0, x); xx <= bx2; xx++)
+                    {
+                        int idx = (yy * w + xx) * 4;
+                        px[idx] = bAvg; px[idx + 1] = gAvg; px[idx + 2] = rAvg;
+                    }
+            }
+        }
+    }
+
+    private static float DistToSegment(float px, float py, Vector2 a, Vector2 b)
+    {
+        float abx = b.X - a.X, aby = b.Y - a.Y;
+        float len2 = abx * abx + aby * aby;
+        float t = len2 > 1e-6f ? Math.Clamp(((px - a.X) * abx + (py - a.Y) * aby) / len2, 0f, 1f) : 0f;
+        float dx = px - (a.X + abx * t), dy = py - (a.Y + aby * t);
+        return MathF.Sqrt(dx * dx + dy * dy);
+    }
+
+    private static void RenderText(byte[] px, int w, int h, TextLayer tl)    {
+        if (RasterizeText(tl.Text, tl.FontSize, tl.FontFamily, tl.Bold, tl.Italic, tl.MaxWidth)
+            is not var (bgra, bw, bh)) return;
 
         float pad = Math.Max(2f, tl.Padding);
         int bgW = bw + (int)(pad * 2), bgH = bh + (int)(pad * 2);
@@ -264,7 +358,12 @@ internal static class AnnotationRasterizer
     //  文字位图（Win2D, 缓存）
     // ══════════════════════════════════════════════
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string Text, float Size, string Family), (byte[] Bgra, int W, int H)> s_textCache = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+        (string Text, float Size, string Family, bool Bold, bool Italic, int MaxW),
+        (byte[] Bgra, int W, int H)> s_textCache = new();
+
+    /// <summary>文字位图缓存条数上限（超限整张清空，见 <see cref="RasterizeText"/> 里那句判据）。</summary>
+    private const int TextCacheCap = 256;
 
     /// <summary>进程级共享的 Win2D 设备（懒加载，永不释放）。</summary>
     /// <remarks>
@@ -288,40 +387,69 @@ internal static class AnnotationRasterizer
         }
     }
 
-    /// <summary>用 Win2D 光栅化文字为 BGRA8 位图（白字, alpha=覆盖率, 合成时着色）。线程安全（共享设备）。</summary>
-    public static (byte[] Bgra, int W, int H)? RasterizeText(string text, float fontSize, string fontFamily)
+    /// <summary>
+    /// 用 Win2D 光栅化文字为 BGRA8 位图（白字, alpha=覆盖率, 合成时着色）。线程安全（共享设备）。
+    /// <para>尺寸由 <c>CanvasTextLayout.LayoutBounds</c> 实测（不是字数×字号估算），预览图集与最终输出
+    /// 都调这一处 ⇒ 两边的字号/折行/字宽是同一张位图。<paramref name="maxWidth"/> &gt; 0 时按该宽度折行。</para>
+    /// </summary>
+    public static (byte[] Bgra, int W, int H)? RasterizeText(string text, float fontSize, string fontFamily,
+        bool bold = false, bool italic = false, float maxWidth = 0f)
     {
         if (string.IsNullOrEmpty(text)) return null;
-        var key = (text, fontSize, fontFamily);
+        var key = (text, fontSize, fontFamily, bold, italic, (int)MathF.Round(maxWidth));
         if (s_textCache.TryGetValue(key, out var cached)) return cached;
 
         try
         {
             var device = SharedCanvasDevice;   // 共享设备：不 Dispose（见属性说明）
-            // 尺寸估算：中文全角字符 ≈ 1em 宽，行高 ≈ 1.6em
-            int w = Math.Max(8, (int)MathF.Ceiling(text.Length * fontSize * 1.05f));
-            int h = Math.Max(8, (int)MathF.Ceiling(fontSize * 1.7f));
+            var format = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+            {
+                FontFamily = fontFamily,
+                FontSize = fontSize,
+                FontWeight = bold ? Microsoft.UI.Text.FontWeights.Bold : Microsoft.UI.Text.FontWeights.Normal,
+                FontStyle = italic ? Windows.UI.Text.FontStyle.Italic : Windows.UI.Text.FontStyle.Normal,
+                WordWrapping = maxWidth > 1f
+                    ? Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.Wrap
+                    : Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Left,
+                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Top,
+            };
+            // 100000 = 不折行时的"足够宽"，LayoutBounds 仍会给出文本真实宽度
+            using var layout = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(
+                device, text, format, maxWidth > 1f ? maxWidth : 100000f, 100000f);
+            var lb = layout.LayoutBounds;
+            // +2：左右/上下各留 1px，给抗锯齿边缘与斜体伸出留位（预览与输出同加，不引入偏差）
+            int w = Math.Max(8, (int)Math.Ceiling(lb.Width) + 2);
+            int h = Math.Max(8, (int)Math.Ceiling(lb.Height) + 2);
             using var rt = new Microsoft.Graphics.Canvas.CanvasRenderTarget(device, w, h, 96);
             using var ds = rt.CreateDrawingSession();
             ds.Clear(Microsoft.UI.Colors.Transparent);
-            ds.DrawText(text, 0, 0, w, h, Microsoft.UI.Colors.White,
-                new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontFamily = fontFamily,
-                    FontSize = fontSize,
-                    HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Left,
-                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Top,
-                });
+            ds.DrawTextLayout(layout, 1, 1, Microsoft.UI.Colors.White);
             ds.Flush();
             var result = (rt.GetPixelBytes(), w, h);
-            if (s_textCache.Count < 256) // 防无界增长
-                s_textCache[key] = result;
+            // ═══ 2026-10-30 修复：满了整张清空，而不是"从此不再写" ═══
+            // 旧写法是 if (Count < 256) 才写 ⇒ 一旦到 256 条，这一句就永远不成立：既不逐出、
+            // 也不入库，缓存只剩 :397 那次 TryGetValue 恒 miss ⇒ 之后每一次文字光栅化都重画一遍。
+            // "防无界增长"因此变成了"防有缓存"。清空的代价是下一轮重画一次工作集（个位数条目），
+            // 换来的是上限仍然成立。
+            if (s_textCache.Count >= TextCacheCap) s_textCache.Clear();
+            s_textCache[key] = result;
             return result;
         }
         catch
         {
             return null; // Win2D 不可用时文字图层仅背景框（不崩溃）
         }
+    }
+
+    /// <summary>把实测位图尺寸写回图层（图集/命中/合成三处都靠它算外框）。</summary>
+    public static bool ApplyMetrics(TextLayer tl)
+    {
+        if (RasterizeText(tl.Text, tl.FontSize, tl.FontFamily, tl.Bold, tl.Italic, tl.MaxWidth) is not var (_, w, h))
+            return false;
+        tl.CachedWidth = w;
+        tl.CachedHeight = h;
+        return true;
     }
 
     // ══════════════════════════════════════════════

@@ -52,14 +52,15 @@ public sealed class AnimationRecorder : IDisposable
     /// <summary>本次录制的<b>色彩决定</b>，在 RecordLoop 拿到目标显示器时构造一次，逐帧复用。
     /// 与静默截图同一份形状（Core 的 <c>ColorDecision</c>）⇒ 不许在帧循环里再各自解析色域。
     /// null 只可能出现在 RecordLoop 之前（那种情况下也不会有帧可存）。
-    /// ⚠ 已知未收口的缺口（交接 §41.4）：动图中间帧走 <c>ManagedPngEncoder.Encode(…,8)</c>，
+    /// ⚠ 已知未收口的缺口（交接 §41.4）：动图中间帧走 <c>ManagedPngEncoder.EncodeFast</c>，
     /// 那条签名既不写 cICP 也不带 iCCP ⇒ 这里的决定只作用于像素，产物本身零声明。</summary>
     private ColorDecision? _colorDecision;
 
     /// <summary>取本次录制的色彩决定；理论上到不了 null（存帧前 RecordLoop 必然已赋值），
     /// 兜一份"无源屏信息"的决定，比在帧循环里再解析一次下拉好。
     /// <para>⚠ 有意不传第 5 个 format 参数（= null），两处调用点同理：录音里真正被本仓库编码的
-    /// 只有<b>中间 PNG 帧</b>（<c>ManagedPngEncoder.Encode</c>），而 PNG 不在
+    /// 只有<b>中间 PNG 帧</b>（<c>ManagedPngEncoder.EncodeFast</c>）与 ffmpeg 缺席时的
+    /// <b>单帧回退 PNG</b>（<c>ManagedPngEncoder.Encode</c>），而 PNG 不在
     /// <c>ColorDecision.DefaultsToRec709</c> 的白名单里；动图容器（WebP/APNG/GIF）由 ffmpeg
     /// 另编，本决定根本不参与它的色彩声明。传 OutputFormat.PNG 结果与 null 逐位相同，
     /// 但会把"这次编的是 PNG"写进签名，而这里并没有这种格式上下文
@@ -155,6 +156,10 @@ public sealed class AnimationRecorder : IDisposable
         // ═══ P1: PeriodicTimer 精确帧定时（替代 Thread.Sleep）═══
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(1000.0 / _config.FrameRate));
 
+        // 未变化、被丢弃的帧复用这块缓冲（所有权只在"入队"时移交），
+        // 静态画面下不再每 tick 新分配一整帧（4K 33MB）。
+        byte[]? scratch = null;
+
         try
         {
             while (await timer.WaitForNextTickAsync(ct))
@@ -165,7 +170,7 @@ public sealed class AnimationRecorder : IDisposable
                 try
                 {
                     // 无锁读取：直接从池化会话取最新帧，不与主截图竞争 s_captureLock
-                    var result = _wgcService.TryGetLatestFrame(displayInfo.MonitorHandle);
+                    var result = _wgcService.TryGetLatestFrame(displayInfo.MonitorHandle, scratch);
 
                     if (result?.SdrPixels is null) continue;
 
@@ -196,6 +201,14 @@ public sealed class AnimationRecorder : IDisposable
                         }
                         Interlocked.Increment(ref _framesCaptured);
                         last = pixels;
+                        // 纪律：scratch 只能持有"没有任何人还引用"的那块。
+                        // 走到这一支说明 pixels 已经被 last（变化帧还可能已被编码端）引用，
+                        // 再当 scratch 用就等于让 last 与自己比 ⇒ HasChange 恒假、后续全丢。
+                        scratch = null;
+                    }
+                    else
+                    {
+                        scratch = pixels;     // 未变化 ⇒ 没人引用它，下个 tick 直接拷进来
                     }
                 }
                 catch (Exception ex)
@@ -262,7 +275,10 @@ public sealed class AnimationRecorder : IDisposable
                 // ═══ ICC 色彩管理：烘焙到目标色域 ═══
                 var (bakedPixels, _, _) = CapturePipelineService.PreparePixelsWithIcc(
                     px, w, h, Decision());
-                TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(bakedPixels, w, h, framePath, 8);
+                // 中间帧只喂给 ffmpeg、随后整目录删除 ⇒ 用 EncodeFast（Filter=None + Fastest）。
+                // 4K 单帧实测 448~536ms → 55~63ms（2026-10-29 临时探针），30 帧从 ~15s 降到 ~2s。
+                // 与 JXL/AVIF/WebP 的中转文件同一处置办法；ffmpeg 读到的是像素，与压缩率无关。
+                TrueToneCap.Core.Encoding.ManagedPngEncoder.EncodeFast(bakedPixels, w, h, framePath);
                     encoded++;
                     Report();
                 }

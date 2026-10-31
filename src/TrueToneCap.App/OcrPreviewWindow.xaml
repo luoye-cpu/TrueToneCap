@@ -33,10 +33,17 @@
                             <TextBlock Text="复制全部" FontSize="13" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Button>
-                    <Button Height="32" Padding="12,0" Click="OnSaveClick" ToolTipService.ToolTip="保存截图">
+                    <Button x:Name="SaveTranslatedBtn" Height="32" Padding="12,0" Click="OnSaveCurrentClick"
+                            IsEnabled="False" ToolTipService.ToolTip="保存当前画面：译文模式会把译文画进图里，原文模式等于原图（格式跟随主窗口）">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <PathIcon Width="14" Height="14" Data="F0 M2,3 L11,3 L11,4.5 L2,4.5 Z M2,7 L9,7 L9,8.5 L2,8.5 Z M2,11 L7,11 L7,12.5 L2,12.5 Z M12,7 L20,12 L12,17 L12,13.6 L9.6,13.6 L9.6,10.4 L12,10.4 Z"/>
+                            <TextBlock Text="保存当前" FontSize="13" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button Height="32" Padding="12,0" Click="OnSaveClick" ToolTipService.ToolTip="保存选区原图（不含文字覆盖层）">
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <PathIcon Width="14" Height="14" Data="F0 M18.57,0 L19.14,0.11 L19.59,0.43 L19.9,0.87 L20,1.43 L20,20 L2.56,20 L0,17.44 L0,1.43 L0.11,0.87 L0.43,0.43 L0.87,0.11 L1.43,0 M4.29,8.57 L15.71,8.57 L15.71,1.43 L4.29,1.43 M12.86,14.29 L5.71,14.29 L5.71,18.57 L7.14,18.57 L7.14,15.71 L8.57,15.71 L8.57,18.57 L12.86,18.57 M18.57,1.43 L17.14,1.43 L17.14,10 L2.86,10 L2.86,1.43 L1.43,1.43 L1.43,16.84 L3.16,18.57 L4.29,18.57 L4.29,12.86 L14.29,12.86 L14.29,18.57 L18.57,18.57"/>
-                            <TextBlock Text="保存" FontSize="13" VerticalAlignment="Center"/>
+                            <TextBlock Text="保存原图" FontSize="13" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Button>
                     <Button Height="32" Padding="12,0" Click="OnCloseClick" ToolTipService.ToolTip="关闭 (Esc)">

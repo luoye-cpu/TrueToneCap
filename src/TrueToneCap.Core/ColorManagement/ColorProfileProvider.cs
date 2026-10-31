@@ -654,25 +654,33 @@ public static partial class ColorProfileProvider
                 return (bgra, targetColorSpace.Equals("sRGB", StringComparison.OrdinalIgnoreCase) ? null : targetIcc);
 
             // 执行像素级色彩转换
+            // ═══ 2026-10-29（P1-9）：6 次 MathF.Pow/像素 → 两条查表 ═══
+            // 原实现每像素 3 次解码 + 3 次编码 Pow，4K 单张实测 111~123 ms（2026-10-29 临时探针，
+            // 改后 20~25 ms），时间基本全砸在超越函数上。两条表各有独立依据，不是"先查表再对答案"：
+            //   解码：输入域是有限的 256 个字节码 ⇒ 表可做成逐字节精确（Δ=0，见 IccBake_SrgbCurveLut_Accuracy ①）；
+            //   编码：输入是矩阵乘出来的任意 float ⇒ 复用 ToneMapper 的 4096 段插值表
+            //        （与 Pow 差 <0.001 gamma，见 CorePipelineTests.Test_ToneMapper_SrgbLut_Accuracy），
+            //        不在这里再养一份 65536 项的表 —— 同一条曲线在仓里已经长出过第三份副本。
             var converted = new byte[bgra.Length];
             int pixelCount = w * h;
+            var eotf = s_srgbEotf;
             System.Threading.Tasks.Parallel.For(0, pixelCount, i =>
             {
                 int idx = i * 4;
-                // BGRA → linear RGB (去 sRGB gamma)
-                float bLin = SrgbEotf(bgra[idx] / 255f);
-                float gLin = SrgbEotf(bgra[idx + 1] / 255f);
-                float rLin = SrgbEotf(bgra[idx + 2] / 255f);
+                // BGRA → linear RGB (查表去 sRGB gamma)
+                float bLin = eotf[bgra[idx]];
+                float gLin = eotf[bgra[idx + 1]];
+                float rLin = eotf[bgra[idx + 2]];
 
                 // 矩阵转换 (RGB → XYZ → RGB)
                 float rOut = combined[0] * rLin + combined[1] * gLin + combined[2] * bLin;
                 float gOut = combined[3] * rLin + combined[4] * gLin + combined[5] * bLin;
                 float bOut = combined[6] * rLin + combined[7] * gLin + combined[8] * bLin;
 
-                // 应用目标 gamma + 量化
-                converted[idx]     = (byte)Math.Clamp((int)(SrgbOetf(bOut) * 255f + 0.5f), 0, 255);
-                converted[idx + 1] = (byte)Math.Clamp((int)(SrgbOetf(gOut) * 255f + 0.5f), 0, 255);
-                converted[idx + 2] = (byte)Math.Clamp((int)(SrgbOetf(rOut) * 255f + 0.5f), 0, 255);
+                // 应用目标 gamma + 量化（表内含 [0,1] 钳制与 +0.5 取整）
+                converted[idx]     = Processing.ToneMapper.LinearToSrgbByte(bOut);
+                converted[idx + 1] = Processing.ToneMapper.LinearToSrgbByte(gOut);
+                converted[idx + 2] = Processing.ToneMapper.LinearToSrgbByte(rOut);
                 converted[idx + 3] = bgra[idx + 3]; // Alpha 直通
             });
 
@@ -690,17 +698,23 @@ public static partial class ColorProfileProvider
 
     // ── 色彩转换辅助方法 ──
 
-    /// <summary>sRGB EOTF (gamma 解码): [0,1] gamma → [0,1] linear</summary>
+    /// <summary>sRGB EOTF 查表（字节 → 线性）。256 项覆盖全部输入码，逐字节精确、无插值误差。</summary>
+    private static readonly float[] s_srgbEotf = BuildSrgbEotfTable();
+
+    private static float[] BuildSrgbEotfTable()
+    {
+        var lut = new float[256];
+        for (int i = 0; i < 256; i++) lut[i] = SrgbEotf(i / 255f);
+        return lut;
+    }
+
+    /// <summary>测试用：读解码表。判据要求与解析式逐字节一致，故必须验的是生产表本身而非重建副本。</summary>
+    internal static float SrgbEotfFromTable(int code) => s_srgbEotf[code];
+
+    /// <summary>sRGB EOTF (gamma 解码): [0,1] gamma → [0,1] linear。只用于建表（每进程 256 次）。</summary>
     private static float SrgbEotf(float v)
     {
         return v <= 0.04045f ? v / 12.92f : MathF.Pow((v + 0.055f) / 1.055f, 2.4f);
-    }
-
-    /// <summary>sRGB OETF (gamma 编码): [0,1] linear → [0,1] gamma</summary>
-    private static float SrgbOetf(float v)
-    {
-        v = Math.Clamp(v, 0f, 1f);
-        return v <= 0.0031308f ? v * 12.92f : 1.055f * MathF.Pow(v, 1f / 2.4f) - 0.055f;
     }
 
     /// <summary>从 ICC profile 提取 RGB→XYZ 3×3 矩阵 (rXYZ + gXYZ + bXYZ tags)。</summary>
@@ -1714,18 +1728,12 @@ public static class ColorSpaceConverter
         return result;
     }
 
-    // ── sRGB gamma 解码/编码标量（用于字节级转换） ──
-
-    /// <summary>sRGB gamma 解码: byte [0,1] → linear [0,1]</summary>
-    private static float SrgbToLinear(float v) =>
-        v <= 0.04045f ? v / 12.92f : MathF.Pow((v + 0.055f) / 1.055f, 2.4f);
-
-    /// <summary>sRGB gamma 编码: linear [0,1] → [0,1]</summary>
-    private static float LinearToSrgb(float v)
-    {
-        v = Math.Clamp(v, 0f, 1f);
-        return v <= 0.0031308f ? 12.92f * v : 1.055f * MathF.Pow(v, 1f / 2.4f) - 0.055f;
-    }
+    // ═══ 2026-10-29 删除本类的第二份 sRGB 标量曲线 SrgbToLinear/LinearToSrgb ═══
+    // 它们是 SrgbEotf 的逐字副本，唯一调用方（字节级 16-bit 色域搬运 ApplySrgbToTargetGamut）
+    // 已于 2026-09-19 删除 ⇒ 两个方法早已无人调用。全仓 sRGB 曲线此后只剩：
+    //   本文件建表用的 SrgbEotf（每进程 256 次）、ToneMapper 的 4096 项编码表、
+    //   PixelOps.SrgbToLinearLut（256 项）。没有 16-bit ICC 烘焙路径 —— 16-bit SDR 输出
+    //   走的是 ToneMapper.FloatToSRgbBytes，本来就已是查表实现，不存在 Pow 热点。
 
     // ═══ 2026-09-19 删除 ApplySrgbToTargetGamut(byte[] bgra, int w, int h, string tag) ═══
     // 为什么不能这么写：它是一条 8-bit → float → 3×3 矩阵 → 8-bit 的链路，而传进来的字节

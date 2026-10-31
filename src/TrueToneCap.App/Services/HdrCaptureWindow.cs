@@ -33,6 +33,23 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private ID3D11Device _device;
     private ID3D11DeviceContext _ctx;
 
+    // ── 阶段 4（2026-10-30）：进程级设备复用 ──
+    // 每张截图一扇窗，原先每扇窗都 D3D11CreateDevice（本机实测 33–57ms）。设备与窗口无关
+    // （交换链/纹理才是每窗的），收成进程级惰性单例后第 2 扇起不再付这笔钱。
+    // 三条纪律（与 Win2D 的 SharedCanvasDevice 同口径）：
+    //   ① 共享设备与它的 ImmediateContext【永不】由某扇窗 Dispose —— 缓存在进程上，谁建谁收；
+    //   ② 设备丢失时由第一个发现的窗口把缓存整体换新，其余窗口在重建自己资源时拿到同一块新设备；
+    //   ③ ImmediateContext 非线程安全 ⇒ RenderCore 入口先拿 s_ctxLock（这是复用唯一新增的并发面；
+    //      产品路径同一时刻只有一扇窗在渲染，探针的多窗是串行的）。
+    private static readonly object s_ctxLock = new();
+    private static readonly object s_deviceCacheLock = new();
+    private static ID3D11Device? s_cachedDevice;
+    private static ID3D11DeviceContext? s_cachedCtx;
+    private static readonly bool s_sharedDeviceEnabled =
+        Environment.GetEnvironmentVariable("TTC_PREVIEW_SHARED_DEVICE") != "0";
+    /// <summary>这块设备是不是本窗自己建的（自建 ⇒ Dispose 时要收；共享 ⇒ 放手不收）。</summary>
+    private bool _ownsDevice;
+
     // ── D3D 设备丢失恢复 (2026-09-15) ──
     private volatile bool _deviceLost;            // 已检测到丢失（防止每帧重复处理/刷屏）
     private int _deviceLostRecoveryAttempts;      // 已尝试重建次数
@@ -54,6 +71,30 @@ public sealed partial class HdrCaptureWindow : IDisposable
     // 刷新窗口内任意相位呈现 → 选区拖拽更平滑、输入延迟更低。不支持时回退 Present(0)。
     /// <summary>中心行亮度打点的一次性开关（0=未打点）。</summary>
     private int _diagSampleDone;
+    /// <summary>首帧合成打点的一次性开关（0=未打点）。渲染线程独占访问。</summary>
+    private int _diagFirstCompositeDone;
+    /// <summary>文字图集首建里"CPU 排版 + 读回"那一段的耗时（ms）；余下的是上传。由首帧合成那条打点一并交出。</summary>
+    private long _rasterMsAtlas;
+    /// <summary>文字图集首建的总耗时（ms），0 = 这一帧没重建图集。</summary>
+    private long _atlasTotalMsAtlas;
+    /// <summary>预热那一趟排版自己花掉的毫秒数（<b>不</b>在首帧关键路径上），0 = 这次没吃到预热。</summary>
+    private long _atlasPrewarmMsAtlas;
+    /// <summary>图集预热【投递】的时刻（TickCount64）。与 <see cref="_atlasPrewarmStartedAtMs"/> 相减=任务排队。</summary>
+    private long _atlasPrewarmQueuedAtMs;
+    /// <summary>图集预热【真正开始跑】的时刻（TickCount64，由后台线程在 CPU 腿第一句盖）。渲染线程 Wait() 之后读到的是 happens-before 保证的值。</summary>
+    private long _atlasPrewarmStartedAtMs;
+    /// <summary>首帧图集被拆成的三段（ms）：任务排队（投递→开跑）、渲染线程等它跑完、纯上传。
+    /// 修前真机上传单独是 12ms；改后图集整腿读到 43ms 却分不出是"排队排晚了"还是"上传变慢"，这三段就是那把尺。</summary>
+    private long _atlasQueueMsAtlas, _atlasPrewarmWaitMs, _atlasUploadMs;
+    /// <summary>预热那一趟【排版】自己再拆成的三段（ms）：画（建目标 + 几十条 DrawText）、读回（11.5MB GPU→CPU）、
+    /// 并入（逐行 BlockCopy 文字图层预览）。三段之和 ≈ <see cref="_atlasPrewarmMsAtlas"/>。
+    /// 为什么要拆：整腿 34–84ms 里"读回"若是大头，出路是让图集生在 GPU 里（换拷贝形状）；
+    /// "画"若是大头，出路是整张缓存跨窗复用 —— 两条修法互斥，先要有尺。</summary>
+    private long _atlasPrewarmDrawMs, _atlasPrewarmReadMs, _atlasPrewarmMergeMs;
+    /// <summary>开窗时投递出去的图集 CPU 腿（见 <see cref="BuildAtlasLayout"/>）。渲染线程取走并置空。</summary>
+    private System.Threading.Tasks.Task<AtlasLayout>? _pendingAtlasLayout;
+    /// <summary>那次预热所依据的 DPI 缩放 —— 与当前值不一致就作废。</summary>
+    private double _pendingAtlasScale;
 
     private bool _vrrSupported; // 仅用于启动时诊断输出（Present 路径已固定 Present(0)）
     // ═══ 2026-08-16 增强: 多平面覆盖层 (MPO) / 硬件缩放合成支持 (独立翻转前提) ═══
@@ -75,10 +116,33 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private string _badgeText = "";
     private double _badgeScale;
     private int _badgeW, _badgeH;
+    // ── 输入中的文字预览：EDIT 子窗口在这块覆盖层上不可见，只能把它的内容烘成小纹理画进帧 ──
+    private const int EditTexW = 1024, EditTexH = 1024;
+    private ID3D11Texture2D? _editTex;
+    private ID3D11ShaderResourceView? _editSrv;
+    private readonly object _editPreviewLock = new();
+    private string _editPrevKey = "";                 // 上次烘的 (文字+字形+宽) 指纹；只在 _editPreviewLock 里读写
+    private byte[]? _editPendingBgra;                 // UI → 渲染线程 待上传位图
+    private int _editPendingW, _editPendingH;
+    private bool _editPendingUpload;
+    private int _editPrevW, _editPrevH;               // 渲染线程独占：当前纹理里那张位图的尺寸（UI 线程不读）
+    private int _editFrameX, _editFrameY;         // 输入框在帧内的左上角（预览贴同一位置）
     private int _idleHintW = 1, _idleHintH = 1;   // 静置提示在图集里的像素尺寸（随 DPI 重建）
     private ID3D11SamplerState? _samp;
     private ID3D11Texture2D? _desktopTex;
     private ID3D11ShaderResourceView? _desktopSrv;
+    // ═══ 2026-10-30 路线 B：桌面帧可能来自 WGC 会话的跨设备共享纹理（整帧不进 CPU）═══
+    // _sharedHandle/_sharedRelease 由 UI 线程在 Initialize 之前挂上；其余只在渲染线程用。
+    // _desktopTex 在共享模式下【就是】打开的那块共享纹理（我们持一份引用，Dispose 只减引用）。
+    private nint _sharedHandle;
+    private int _sharedW, _sharedH;
+    private bool _sharedAttached;
+    private Action? _sharedRelease;      // 交还共享槽（窗口 Dispose 时调一次）
+    private Func<float[]?>? _sharedFallback;   // 共享纹理打不开时现取一份整帧（路线 B-3，只在该失败路径用）
+    private bool _sharedFaultLogged;
+    // ⚠ 不能拿 _desktopTex 非空当"已经打开了共享纹理"：Initialize 会预建一块同尺寸的黑纹理
+    // （2026-08-25 的预热优化），那样判会让共享路径直接把它当桌面画出来 —— 整屏纯黑，且两头都没有日志。
+    private ID3D11Texture2D? _sharedTexOpen;
     // ── 池化 Staging 纹理 (2026-08-10: 消除每帧 CreateTexture2D ~32MB GPU 分配) ──
     private ID3D11Texture2D? _pooledStaging;
     private int _pooledStW, _pooledStH;
@@ -100,12 +164,16 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private float[]? _compPixels; // 合成缓冲（按窗口尺寸分配，见 CompositeUI）
     // ── 跨线程可见性：UI 线程写、渲染线程读，加 volatile 保证内存屏障 ──
     private volatile int _dragHandle = -1; // 当前拖拽的手柄 (0=TL, 1=TR, 2=BL, 3=BR, -1=无)
+    private volatile int _dragOffX, _dragOffY; // 手柄抓取偏移：按下点相对该角的位移（不存就一直"角跳到手心"）
+    private volatile bool _movingSel;          // 在已完成选区内部拖拽 = 平移整框
+    private volatile int _moveOffX, _moveOffY; // 平移抓取偏移：按下点相对选区左上角的位移
     private volatile int _handleSize = 8; // 手柄尺寸（物理像素，随 DPI 缩放）
     private volatile int _handleHit = 12; // 手柄命中区域（物理像素，随 DPI 缩放）
     private double _uiScale = 1.0; // DPI 缩放系数（GetDpiForWindow / 96）——仅 Initialize 写，渲染前已发布，无需 volatile
     private volatile bool _selComplete;
     private volatile int _sx1, _sy1, _sx2, _sy2, _mx, _my;
     private volatile bool _down, _moved;
+    private bool _toolClickLatch;   // 这次按下被标注工具条/选项条/下拉吃掉了 ⇒ Up 只许收尾，不许重画选区（只走 UI 线程）
 
     // ── 标注模式 (2026-08-11 A方案: GPU 内联标注) ──
     private volatile bool _annoMode;                      // 是否处于标注模式
@@ -118,6 +186,57 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private nint _editHwnd;                      // 文字输入 EDIT 子窗口
     private System.Numerics.Vector2 _textInsertPos; // 文字插入位置 (选区图像坐标)
     private bool _annoTextSlotsDirty;            // 文字槽图集需要重建
+
+    // ── 文字标注：字体状态 / 就地再编辑 / 拖动 (2026-10-27 对齐上游 PR 的富文本能力) ──
+    private string _textFontFamily = "Microsoft YaHei UI";
+    private float _textFontSizeDip = 18f;        // 界面单位（dip）；图层里存物理像素 = dip × _uiScale
+    private bool _textFontBold, _textFontItalic;
+    private TextLayer? _editingLayer;            // 正在再编辑的图层（null = 新建）
+    private nint _editFont;                      // EDIT 当前 HFONT（销毁时 DeleteObject）
+    private bool _textClickArmed;                // 按下在选区内，抬起仍没拖动 ⇒ 打开输入框
+    private TextLayer? _textHitLayer;            // 按下命中的文字层（拖动 = 移动它）
+    private int _textDownX, _textDownY;          // 按下点（帧坐标）
+    private float _textLayerStartX, _textLayerStartY; // 命中图层的原始位置（拖动预览用）
+    private bool _textDragging;                  // 已越过拖动阈值
+    private bool _textDragMoved;                 // 位置真的变了 ⇒ 抬手上报一条 UpdateLayer（撤销点）
+    // 字体/字号下拉（也画进 D3D 帧：Win32 组合框在这块覆盖层上一像素都不显示，见下方说明）
+    private int _ddOpen;                         // 0=关 1=字体家族 2=字号
+    private int _ddTop;                          // 列表首个可见项的绝对下标
+    private int _ddHover = -1;                   // 悬停项的绝对下标（-1 = 无）
+    private bool _uiTextDirty;                   // 动态文字（字体名/字号/列表项）需要重烘图集
+    private string[]? _fontFamilies;             // 系统字体名缓存（首次展开时取一次）
+    private const int DdMaxVisible = 12;
+    // 文字图集尺寸与最下方那条动态文字带（40-43 固定格 + 下拉项）。带宽固定，格高随 DPI 长，
+    // 所以"能装几项"不是常量 —— 必须按 PackTextBand 实测容量夹可见行数（见 DdBandCapacity）。
+    private const int AtlasW = 2048, AtlasH = 1408, AtlasBandH = 256;
+    private volatile int _ddBakedRows;           // 本轮图集真烘出来的下拉行数（探针读它对比 DdGeometry.Visible）
+    private int _ddCapLogged = -1;               // 上次记录过的文字带容量（只在容量变化时写一条日志）
+
+    // ── 第二行工具选项条（线色 / 马赛克方式）──
+    // ⚠ 2026-10-28 实测：这块全屏覆盖层的交换链位于合成平面之上，同进程的 Win32 子控件
+    // （按钮/组合框/编辑框）和目标窗口都一个像素都不显示 —— 连独立顶层弹窗也被盖住。
+    // 因此第二行改为画进 D3D 帧（几何/状态经 TextPos[38]/[39] 传给 OverlayComposite.hlsl），
+    // 命中检测在 Down() 里做。不要再退回 Win32 子控件。
+    private Color4 _annoColor = new(1f, 0.16f, 0.16f, 1f);   // 线色（默认红）
+    private float _annoStrokeW = 2f;                        // 线宽（图层坐标 = 像素）
+    private string _mosaicMode = "Rect";                    // Rect | Brush
+    private bool _optRowVisible;
+    private int _optHover = -1;                             // 第二行悬停格（-1 = 无）
+    private const int IdOptColorCount = 6, IdOptMosaicCount = 2;
+    // 马赛克画笔粗细（图像像素）：第二行里是一条可左右拉的滑条，1..100 px 直接写进图层 BrushWidth
+    private const float MosaicBrushMinPx = 1f, MosaicBrushMaxPx = 100f;
+    private float _mosaicBrushPx = 28f;
+    private bool _sliderDrag;                              // 正拖着粗细滑条
+    private const string MosaicModeRectText = "区域框选", MosaicModeBrushText = "画笔涂抹";
+    private static readonly Color4[] s_swatchColor =
+    [
+        new(1f, 40 / 255f, 40 / 255f, 1f),
+        new(1f, 215 / 255f, 0f, 1f),
+        new(40 / 255f, 200 / 255f, 90 / 255f, 1f),
+        new(60 / 255f, 140 / 255f, 1f, 1f),
+        new(1f, 1f, 1f, 1f),
+        new(0f, 0f, 0f, 1f),
+    ];
     /// <summary>标注管理器（MainWindow 保存/复制时读取层做 CPU 合成输出）。</summary>
     public AnnotationManager AnnoManager => _annoManager;
 
@@ -144,6 +263,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
     public event Action<MainToolbarAction, int, int, int, int>? ActionCompleted;
     public bool IsInitialized { get; private set; }
     public string? LastError { get; private set; }
+
+    /// <summary>本实例自己的窗口句柄（0 = 未建或已关闭）。探针按实例取窗，不按类名找 —— 全屏覆盖层
+    /// 可能同时存在多扇（上一相没来得及销毁 / 用户自己开着的预览窗），按类名 FindWindow 会打错窗。</summary>
+    internal nint Hwnd => _hwnd;
 
     private static bool _classReg;
     private const string CN = "TTC_HC";
@@ -192,6 +315,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private static partial nint SetWindowLongPtrW(nint hWnd, int nIndex, nint dwNewLong);
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint hwnd);
+    // 选区起点预热时窗口还没建、拿不到 HWND，只能按显示器查 DPI（Win8.1+ / shcore.dll）。
+    // 0 = MDT_EFFECTIVE_DPI，与 GetDpiForWindow 返回的是同一把尺（不相同时键会对不上，预热就白烘）。
+    [LibraryImport("shcore.dll")]
+    private static partial int GetDpiForMonitor(nint hmon, int dpiType, out uint dpiX, out uint dpiY);
     [LibraryImport("user32.dll")]
     private static partial nint GetParent(nint h);
     [LibraryImport("user32.dll")]
@@ -200,13 +327,28 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private static partial nint SetFocus(nint h);
     [LibraryImport("user32.dll")]
     private static partial nint GetWindowLongPtrW(nint hWnd, int nIndex);
+    // ⚠ 必须用 StringBuilder：`char[]` 在 [DllImport] 下默认按 In 数组封送，原生写进缓冲的内容
+    // 不会回到托管侧 —— 2026-10-27 实机探针测到"文字图层内容全是 NUL、字号控件读回恒为空串"
+    //（GetWindowText 返回了正确长度 9，但数组里 9 个 '\0'）。这个坑同时打坏了输入框提交与字体控件。
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetWindowTextW")]
+    private static extern int GetWindowTextSb(nint h, System.Text.StringBuilder sb, int max);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowTextW(nint h, char[] sb, int max);
+    private static extern bool SetWindowTextW(nint h, string text);
+    [LibraryImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static partial nint SendMessageInt(nint h, uint msg, nint w, nint l);
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    private static extern nint CreateFontW(int height, int width, int escapement, int orientation,
+        int weight, uint italic, uint underline, uint strikeOut, uint charSet,
+        uint outPrecision, uint clipPrecision, uint quality, uint pitchAndFamily, string face);
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(nint obj);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSW { public uint style; public nint proc; public int cbCls; public int cbWnd; public nint inst; public nint icon; public nint cur; public nint bg; public string? menu; public string? cls; }
     // ⚠ 必须与 Win32 PAINTSTRUCT 完全同构（x64 下 72 字节）。
     // 之前只声明了前 3 个字段（32 字节），BeginPaint 会写满整个结构
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int l, t, r, b; }
+
     // （含 fRestore/fIncUpdate/rgbReserved[32]）→ 每次 WM_PAINT 溢出约 40 字节破坏栈帧。
     [StructLayout(LayoutKind.Sequential)]
     private struct PAINTSTRUCT
@@ -218,7 +360,6 @@ public sealed partial class HdrCaptureWindow : IDisposable
         public int fIncUpdate;
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] public byte[] rgbReserved;
     }
-    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int l, t, r, b; }
     private delegate nint WndProcDelegate(nint h, uint m, nint w, nint l);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -235,13 +376,20 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private const uint SWP_F = 0x0040 | 0x0010;
     private static readonly nint TOP = new(-1), CROSS = new(32515);
     private const uint WM_PAINT = 0x000F, WM_ERASE = 0x0014, WM_KEY = 0x0100, WM_LD = 0x0201, WM_LU = 0x0202, WM_MM = 0x0200;
+    private const uint WM_CHAR = 0x0102, WM_KEYUP = 0x0101, WM_PASTE = 0x0302, WM_CUT = 0x0300, WM_UNDO = 0x0304;
+    private const uint WM_MOUSEWHEEL = 0x020A;
     private const uint WM_CLOSE = 0x0010; // Alt+F4 / 系统关闭
     private const uint WM_APP_TIMEOUT = 0x8000 + 1; // 超时消息（线程池 Timer → 窗口消息，由 UI 线程处理）
+    private const uint WM_SETFONT = 0x0030;
     private const int VK_ESC = 0x1B, VK_ENT = 0x0D, VK_S = 0x53, VK_C = 0x43;
-    private const int VK_Z = 0x5A, VK_Y = 0x59;
-    // EDIT 子窗口常量
+    private const int VK_Z = 0x5A, VK_Y = 0x59, VK_B = 0x42, VK_I = 0x49, VK_F = 0x46;
+    private const int VK_OEM_4 = 0xDB, VK_OEM_6 = 0xDD, VK_SHIFT = 0x10;
+    // 编辑框消息
+    private const uint EM_SETSEL = 0x00B1;
+    // EDIT 子窗口 / 子控件常量
     private const uint WS_CHILD = 0x40000000, WS_BORDER = 0x00800000;
-    private const uint ES_AUTOHSCROLL = 0x0080;
+    private const uint ES_AUTOHSCROLL = 0x0080, ES_MULTILINE = 0x0004, ES_WANTRETURN = 0x1000;
+    private const uint ES_AUTOVSCROLL = 0x0040, ES_NOHIDESEL = 0x0100;
     private const int GWLP_WNDPROC = -4;
     private bool _actionFired; // ActionCompleted 是否已触发（防止 WM_CLOSE 等兜底路径重复触发）
     private static int GX(nint l) => (short)(l.ToInt32() & 0xFFFF);
@@ -262,10 +410,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
         public System.Numerics.Vector4 MousePos;      // (mx,my,0,0)
         public System.Numerics.Vector4 Flags;         // (selComplete,down,0,dark)
         public System.Numerics.Vector4 FrameSize;     // (w,h,0,0)
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 160)]
-        public float[] TextSubs;  // 40 槽 × 4 (0-6 主按钮, 8-17 标注, 18 标注提示, 19-26 文字, 27 悬停标题, 28-34 主逐钮提示)
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 160)]
-        public float[] TextPos;   // 40 槽 × 4
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 224)]
+        public float[] TextSubs;  // 56 槽 × 4 (0-6 主按钮, 8-17 标注, 18 标注提示, 19-26 文字, 27 悬停标题, 28-34 主逐钮提示,
+                                  //            36 静置, 37 主提示框, 38/39 第二行, 40-43 文字行格子, 44-55 下拉列表项)
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 224)]
+        public float[] TextPos;   // 56 槽 × 4
         public System.Numerics.Vector4 AnnoState;     // (mode, tool, down, 0)
         public System.Numerics.Vector4 AnnoColor;     // 标注颜色 (线性 RGBA)
         public System.Numerics.Vector4 AnnoStroke;    // (strokeW, opacity, 0, 0)
@@ -274,6 +423,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         public System.Numerics.Vector4 SizeBadgePos;  // 尺寸徽标帧内位置 (x,y,w,h)
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 1024)]
         public float[] AnnoLayers; // 256 槽 × 4 (16 层 × 16 vec)
+        public System.Numerics.Vector4 EditSub;       // 输入中文字纹理子矩形 (u0,v0,du,dv); w<=0 不画
+        public System.Numerics.Vector4 EditPos;       // 输入中文字帧内位置 (x,y,w,h)
     }
 
     private static void SetV4(float[] arr, int idx, System.Numerics.Vector4 v)
@@ -326,15 +477,123 @@ public sealed partial class HdrCaptureWindow : IDisposable
         }
     }
 
-    /// <summary>独立 D3D11 设备：渲染线程独占 context，不与 WGC 共享设备竞争。</summary>
+    /// <summary>取 D3D11 设备：默认复用进程级共享设备（阶段 4），<c>TTC_PREVIEW_SHARED_DEVICE=0</c> 时本窗独建。</summary>
     public HdrCaptureWindow()
     {
-        _device = D3D11.D3D11CreateDevice(Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
-        _ctx = _device.ImmediateContext;
+        // 每张截图都要新建一扇：这一段就是"按完键到窗口能画"里除捕获外的固定成本，
+        // 单独立一条读数是为了决定要不要把设备改成进程级复用（没有这条数就只是猜）。
+        // 2026-10-30：设备已改成默认复用 ⇒ 这一行的毫秒数从此回答"复用有没有生效"。
+        var swCtor = System.Diagnostics.Stopwatch.StartNew();
+        var (dev, ctx) = AcquireDevice();
+        _device = dev;
+        _ctx = ctx;
+        LogService.Info("HdrCapture",
+            $"窗口构造 {swCtor.ElapsedMilliseconds}ms（{(_ownsDevice ? "D3D11 设备" : "复用进程级共享设备")}）",
+            LogCategory.Capture);
     }
+
+    /// <summary>取设备：共享开启且缓存可建 ⇒ 用缓存（<see cref="_ownsDevice"/>=false）；否则本窗独建。</summary>
+    private (ID3D11Device Device, ID3D11DeviceContext Ctx) AcquireDevice()
+    {
+        if (!s_sharedDeviceEnabled)
+        {
+            _ownsDevice = true;
+            return NewDevice();
+        }
+        var pair = GetOrCreateCachedDevice();
+        if (pair.Device is null)
+        {
+            // 建共享设备失败（驱动/显存）：退回本窗独建 —— 宁可多付 33–57ms，也不能没有设备。
+            _ownsDevice = true;
+            return NewDevice();
+        }
+        _ownsDevice = false;
+        return (pair.Device, pair.Ctx!);
+    }
+
+    private static (ID3D11Device? Device, ID3D11DeviceContext? Ctx) GetOrCreateCachedDevice()
+    {
+        lock (s_deviceCacheLock)
+        {
+            if (s_cachedDevice is not null) return (s_cachedDevice, s_cachedCtx);
+            try
+            {
+                var dev = D3D11.D3D11CreateDevice(Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+                s_cachedDevice = dev;
+                s_cachedCtx = dev.ImmediateContext;
+                LogService.Info("HdrCapture", "预览设备: 建立进程级共享 D3D11 设备（后续窗口复用）", LogCategory.Capture);
+                return (dev, s_cachedCtx);
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn("HdrCapture", $"共享 D3D11 设备建立失败，本窗退回独建设备: {ex.Message}", LogCategory.Capture);
+                return (null, null);
+            }
+        }
+    }
+
+    /// <summary>把进程级共享 D3D11 设备提前建好（选区起点投递，与捕获那 30–150ms 重叠）。
+    /// 失败只留 Warn：设备是建窗时才用的东西，这里只负责把首扇窗的那 33–65ms 挪进捕获窗口。</summary>
+    internal static void WarmSharedDevice()
+    {
+        if (!s_sharedDeviceEnabled) return;
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var pair = GetOrCreateCachedDevice();
+            if (pair.Device is not null)
+                LogService.Debug("HdrCapture",
+                    $"预览设备预热: 共享设备就绪 {sw.ElapsedMilliseconds}ms", LogCategory.Capture);
+        });
+    }
+
+    private static (ID3D11Device Device, ID3D11DeviceContext Ctx) NewDevice()
+    {
+        var dev = D3D11.D3D11CreateDevice(Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+        return (dev, dev.ImmediateContext);
+    }
+
+    /// <summary>设备丢失后换新共享缓存：只换一次（后到的窗口看到的是已换好的那块），旧设备先收。</summary>
+    /// <remarks>必须在 <see cref="s_deviceCacheLock"/> 内判断"缓存那块是不是真的没了"——否则两个窗口
+    /// 前后脚报丢失时，第二个会把第一个刚建好的设备再收掉一次。</remarks>
+    private static (ID3D11Device Device, ID3D11DeviceContext Ctx) ReplaceCachedDevice()
+    {
+        lock (s_deviceCacheLock)
+        {
+            bool dead = s_cachedDevice is null || D3DDeviceLost.IsDeviceRemoved(s_cachedDevice);
+            if (!dead) return (s_cachedDevice!, s_cachedCtx!);
+
+            var oldDev = s_cachedDevice;
+            var oldCtx = s_cachedCtx;
+            s_cachedDevice = null;
+            s_cachedCtx = null;
+            try { oldCtx?.Dispose(); } catch { }
+            try { oldDev?.Dispose(); } catch { }
+
+            var dev = D3D11.D3D11CreateDevice(Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+            s_cachedDevice = dev;
+            s_cachedCtx = dev.ImmediateContext;
+            LogService.Warn("HdrCapture", "共享 D3D11 设备已丢失 ⇒ 换新（后续窗口自动跟进）", LogCategory.Capture);
+            return (dev, s_cachedCtx);
+        }
+    }
+
+#pragma warning disable CS8618 // 无设备壳：_device/_ctx 刻意不建（见下），壳只跑 BuildAtlasLayout 这一条腿
+    /// <summary>
+    /// 无设备预热壳：只带一个 DPI 缩放，<b>不建 D3D11 设备、不建窗口</b>。
+    /// <see cref="BuildAtlasLayout"/> 这条 CPU 腿只碰 Win2D 的进程级共享设备（<c>AnnotationRasterizer.SharedCanvasDevice</c>），
+    /// 与窗口自己的 <c>_device</c>/<c>_ctx</c> 无关（这条纪律已有判据钉着，见 BuildAtlasLayout 上方注释），
+    /// 所以可以用一个没有设备的壳，在选区起点就把它丢到后台提前烘，真窗口建好后直接吃跨窗缓存。
+    /// </summary>
+    private HdrCaptureWindow(float uiScale)
+    {
+        _uiScale = uiScale;
+    }
+#pragma warning restore CS8618
 
     public bool Initialize(int x, int y, int w, int h)
     {
+        var swInit = System.Diagnostics.Stopwatch.StartNew();
         _winX = x; _winY = y; _winW = w; _winH = h;
         try
         {
@@ -416,13 +675,12 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 {
                     _overlayPs = _device.CreatePixelShader(File.ReadAllBytes(osp));
                     // ═══ 2026-08-26 根因修复: 常量缓冲大小必须 ≥ HLSL cbuffer 声明大小 ═══
-                    // 旧: ByteWidth = Marshal.SizeOf<UiCbData>() = 4624
-                    // HLSL 需要: 9×vec4(144) + TextSubs[40]×16(640) + TextPos[40]×16(640)
-                    //           + 6×vec4(96) + AnnoLayers[256]×16(4096) = 5616
+                    // HLSL 需要: 9×vec4(144) + TextSubs[56]×16(896) + TextPos[56]×16(896)
+                    //           + 6×vec4(96) + AnnoLayers[256]×16(4096) + 2×vec4(32) = 6160
                     // D3D11 规则: ByteWidth < 着色器声明 → Draw 静默失败/无输出
                     //   (桌面帧仍显示因为走 CopyResource 不依赖 cbuffer; UI 层全灭)
-                    // 硬编码 5616 而非依赖 Marshal.SizeOf (ByValArray float[] 封送大小不可靠)
-                    const uint UiCbByteWidth = 5616;
+                    // 硬编码而非依赖 Marshal.SizeOf (ByValArray float[] 封送大小不可靠)
+                    const uint UiCbByteWidth = 6160;
                     _uiCb = _device.CreateBuffer(new BufferDescription
                     {
                         ByteWidth = UiCbByteWidth,
@@ -464,24 +722,29 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // UploadFrame 首次调用会创建 _desktopTex + _pooledStaging (~5-10ms),
             // 提前到 Initialize 阶段 (窗口显示前) 完成, 首帧只需 Map+转换+Copy。
             // 尺寸为窗口分辨率 (全屏时=显示器桌面分辨率)。_ctx 仅创建纹理, 无渲染操作, UI 线程安全。
-            try
+            // 路线 B-3（2026-10-30）：共享帧已挂上时桌面就是那块共享纹理，这两块（4K Float16 = 132MB）
+            // 建了也会被 EnsureSharedDesktop 立刻换掉 —— 共享路直接跳过；整帧兜底路由 UploadFrame 按需建。
+            if (!_sharedAttached)
             {
-                if (_desktopTex is null || _desktopTex.Description.Width != w || _desktopTex.Description.Height != h)
+                try
                 {
-                    _desktopSrv?.Dispose(); _desktopTex?.Dispose();
-                    _desktopTex = _device.CreateTexture2D(new Texture2DDescription { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Default, BindFlags = BindFlags.ShaderResource });
-                    _desktopSrv = _device.CreateShaderResourceView(_desktopTex);
+                    if (_desktopTex is null || _desktopTex.Description.Width != w || _desktopTex.Description.Height != h)
+                    {
+                        _desktopSrv?.Dispose(); _desktopTex?.Dispose();
+                        _desktopTex = _device.CreateTexture2D(new Texture2DDescription { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Default, BindFlags = BindFlags.ShaderResource });
+                        _desktopSrv = _device.CreateShaderResourceView(_desktopTex);
+                    }
+                    if (_pooledStaging is null || _pooledStW != w || _pooledStH != h)
+                    {
+                        _pooledStaging?.Dispose();
+                        _pooledStaging = _device.CreateTexture2D(new Texture2DDescription { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Staging, BindFlags = BindFlags.None, CPUAccessFlags = CpuAccessFlags.Write });
+                        _pooledStW = w; _pooledStH = h;
+                    }
                 }
-                if (_pooledStaging is null || _pooledStW != w || _pooledStH != h)
+                catch (Exception ex)
                 {
-                    _pooledStaging?.Dispose();
-                    _pooledStaging = _device.CreateTexture2D(new Texture2DDescription { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = Format.R16G16B16A16_Float, SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Staging, BindFlags = BindFlags.None, CPUAccessFlags = CpuAccessFlags.Write });
-                    _pooledStW = w; _pooledStH = h;
+                    LogService.Warn("HdrCapture", $"预创建纹理失败 (首帧将惰性创建): {ex.Message}", LogCategory.Capture);
                 }
-            }
-            catch (Exception ex)
-            {
-                LogService.Warn("HdrCapture", $"预创建纹理失败 (首帧将惰性创建): {ex.Message}", LogCategory.Capture);
             }
 
             // ── DPI 缩放：全屏 CPU 渲染的 UI（工具栏/手柄/文字）按物理像素绘制，
@@ -493,6 +756,18 @@ public sealed partial class HdrCaptureWindow : IDisposable
             _hoverTipW = Math.Max(160, (int)Math.Round(200 * _uiScale));
             _hoverTipH = Math.Max(22, (int)Math.Round(28 * _uiScale));
             LogService.Info("HdrCapture", $"DPI={dpi} Scale={_uiScale:F2} 手柄={_handleSize}/{_handleHit}", LogCategory.UI);
+
+            // ═══ 2026-10-30：图集的 CPU 腿提前到开窗时开跑 ═══
+            // 真机读数（4K + 150% 缩放）：首帧合成 111ms 里 98ms 是图集，而 98ms 中 86ms 是 DirectWrite
+            // 排版 —— 它只用 Win2D 的进程级共享设备，不需要本窗口的 D3D 设备/上下文，所以能搬走。
+            // 启动预热那 96 个逐格位图喂的是 CPU 兜底合成（DrawTextGdi），GPU 合成开着时一次也不被读，
+            // 因此这 86ms 一直留在"按下热键之后"的关键路径上。现在让它与窗口初始化 + 区域检测 + 首帧上传
+            // （本机这三段约 350ms）重叠，渲染线程在 EnsureTextAtlas 取用；期间脏标记被置起或缩放变了就作废重排。
+            _pendingAtlasScale = _uiScale;
+            _atlasPrewarmQueuedAtMs = Environment.TickCount64;   // 投递时刻；与后台线程开跑时刻相减=任务排队
+            // 跨窗缓存命中就不再排这一趟：渲染线程在 EnsureTextAtlas 里直接取缓存（省一条后台任务与争核）
+            if (!AtlasCacheHot())
+                _pendingAtlasLayout = System.Threading.Tasks.Task.Run(BuildAtlasLayout);
 
             // 启动专用渲染线程（UI 线程不再执行任何渲染）
             StartRenderThread();
@@ -526,6 +801,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // 后台检测窗口区域（QQ截图式快速选择）
             StartRegionDetection();
 
+            LogService.Info("HdrCapture", $"窗口初始化 {swInit.ElapsedMilliseconds}ms（含纹理预建/图集投递/渲染线程）", LogCategory.Capture);
             return true;
         }
         catch (Exception ex) { LastError = ex.ToString(); Cleanup(); return false; }
@@ -547,6 +823,82 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _hasFrame = false;
         LogService.Info("HdrCapture", $"LoadFrame: {w}x{h} (win={_winW}x{_winH})", LogCategory.Capture);
         RequestRedraw();
+    }
+
+    /// <summary>路线 B：把桌面帧改成直接采样 WGC 会话那块跨设备共享纹理（整帧不再过 CPU）。
+    /// 必须在 <see cref="Initialize"/> 之前调用；<paramref name="release"/> 在本窗口 Dispose 时调一次。
+    /// 打不开、格式或尺寸对不上时自动退回 <see cref="LoadFrame"/> 的整帧上传，画面不依赖它成功。
+    /// <paramref name="fallback"/> 是路线 B-3 之后新增的：捕获侧不再预读整帧，共享纹理打不开时
+    /// 没有 CPU 帧可退 ⇒ 渲染线程现问它要一份（只在失败时付这笔钱，正常路径一次都不调）。</summary>
+    public void AttachSharedFrame(nint sharedHandle, int w, int h, Action? release,
+        Func<float[]?>? fallback = null)
+    {
+        if (_disposed || sharedHandle == 0) return;
+        _sharedHandle = sharedHandle;
+        _sharedW = w; _sharedH = h;
+        _sharedRelease = release;
+        _sharedFallback = fallback;
+        _sharedAttached = true;
+    }
+
+    /// <summary>打开共享纹理并建成桌面 SRV（渲染线程独占 <c>_device</c>，只能在渲染线程调）。</summary>
+    /// <remarks>两条硬约束：
+    /// ① NTHANDLE 只能用 <c>OpenSharedResource1</c> 打开（<c>OpenSharedResource</c> 走旧式共享句柄，拿到的是空/异常）；
+    /// ② 着色器 <c>OverlayComposite</c> 把 t0 当 scRGB 线性 Float16 采样、且 UV 按窗口尺寸展开 ⇒
+    ///   格式不是 R16G16B16A16_Float、尺寸不等于窗口时一律不接（否则整屏错位/颜色全错）。
+    /// 设备丢失重建后 <c>_desktopTex</c> 为空、句柄仍在 ⇒ 在这里按新设备重开一次。</remarks>
+    private bool EnsureSharedDesktop()
+    {
+        if (!_sharedAttached) return false;
+        if (_sharedTexOpen is not null) return true;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var dev1 = _device.QueryInterface<ID3D11Device1>();
+            var tex = dev1.OpenSharedResource1<ID3D11Texture2D>(_sharedHandle);
+            var desc = tex.Description;
+            if (desc.Format != Format.R16G16B16A16_Float || desc.Width != (uint)_winW || desc.Height != (uint)_winH)
+            {
+                if (!_sharedFaultLogged)
+                {
+                    _sharedFaultLogged = true;
+                    LogService.Warn("HdrCapture",
+                        $"共享桌面帧不合用（{desc.Width}x{desc.Height} {desc.Format}，窗口 {_winW}x{_winH}）⇒ 退回整帧上传",
+                        LogCategory.Capture);
+                }
+                tex.Dispose();
+                return false;
+            }
+            _sharedTexOpen = tex;
+            // 换掉 Initialize 预建的那块占位纹理（共享路径下桌面帧就是这一块）
+            _desktopSrv?.Dispose();
+            _desktopTex?.Dispose();
+            _desktopTex = tex;
+            _desktopSrv = _device.CreateShaderResourceView(tex);
+            LogService.Info("HdrCapture",
+                $"桌面帧走共享纹理: {_winW}x{_winH} 打开+建SRV {sw.ElapsedMilliseconds}ms（整帧不过 CPU）", LogCategory.Capture);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!_sharedFaultLogged)
+            {
+                _sharedFaultLogged = true;
+                LogService.Warn("HdrCapture", $"打开共享桌面帧失败 ⇒ 退回整帧上传: {ex.Message}", LogCategory.Capture);
+            }
+            return false;
+        }
+    }
+
+    /// <summary>交还共享槽（只发一次）。预览关闭后下一帧才能继续覆写那块纹理。</summary>
+    private void ReleaseSharedSource()
+    {
+        var release = Interlocked.Exchange(ref _sharedRelease, null);
+        _sharedAttached = false;
+        _sharedHandle = 0;
+        _sharedFallback = null;
+        try { release?.Invoke(); }
+        catch (Exception ex) { LogService.Warn("HdrCapture", $"交还共享槽失败: {ex.Message}", LogCategory.Capture); }
     }
 
     /// <summary>请求渲染线程重绘（UI 线程仅发信号，微秒级返回）。</summary>
@@ -579,7 +931,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
             if (_disposed || _closing) return;
             try
             {
-                RenderCore();
+                // ═══ 阶段 4：ImmediateContext 可能被多扇窗共用（进程级设备）⇒ 渲染段串行 ═══
+                // 产品路径同一时刻只有一扇窗在渲染，这把锁在真机上恒无竞争；它挡的是探针那种
+                // "旧窗还没 Dispose、新窗已在渲染"的叠加场景（Map/Unmap 交错 = 偶发花屏/设备丢失）。
+                lock (s_ctxLock) { RenderCore(); }
                 frameCount++;
                 // 每 10 帧打点属调试信息，降级为 Debug（默认不落盘），
                 // 避免正常使用时日志文件被高频渲染打点持续撑大。
@@ -626,13 +981,37 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // ═══ Phase 2 (2026-08-11): GPU 合成路径 — 桌面帧纹理 + OverlayComposite PS 直接画 UI ═══
             // CPU 路径（CompositeUI 全屏混合）仅作回退。收益: 拖拽合成 ~20-30ms → GPU <2ms
             var frame = Volatile.Read(ref _frame);
-            if (_useGpuCompositor && frame is not null && _overlayPs is not null && _uiCb is not null)
+            // 路线 B（2026-10-30）：桌面帧优先来自 WGC 会话那块共享纹理 —— 整帧不再 float[]→half→
+            // 暂存纹理→CopyResource。打不开就退回下面的整帧上传（frame 仍在，画面不受影响）。
+            bool sharedReady = _useGpuCompositor && EnsureSharedDesktop();
+            // 路线 B-3（2026-10-30）：捕获侧不再预读整帧 ⇒ 共享纹理打不开时没有 frame 可退。
+            // 现问捕获侧要一份整帧（它仍冻着），只在失败路径付这笔钱；正常路径一次都不调。
+            if (!sharedReady && frame is null && _sharedFallback is not null)
+            {
+                var fb = _sharedFallback;
+                _sharedFallback = null;
+                var swf = System.Diagnostics.Stopwatch.StartNew();
+                var px = fb();
+                if (px is not null && (long)_winW * _winH * 4 <= px.Length)
+                {
+                    Volatile.Write(ref _frame, new FrameData(px, _winW, _winH));
+                    _compPixels = null;
+                    _hasFrame = false;
+                    frame = Volatile.Read(ref _frame);
+                    LogService.Warn("HdrCapture",
+                        $"共享帧不可用 ⇒ 现取整帧兜底 {swf.ElapsedMilliseconds}ms（{_winW}x{_winH}）", LogCategory.Capture);
+                }
+                else
+                    LogService.Error("HdrCapture", "共享帧打不开、整帧兜底也取不到 ⇒ 预览只有遮罩没有桌面", LogCategory.Capture);
+            }
+            if (_useGpuCompositor && _overlayPs is not null && _uiCb is not null
+                && (sharedReady || frame is not null))
             {
                 // 首次渲染时上传桌面帧到 _desktopTex（帧内容不变，只传一次）
-                if (!_hasFrame)
+                if (!sharedReady && !_hasFrame)
                 {
                     var sw = System.Diagnostics.Stopwatch.StartNew();
-                    UploadFrame(frame.Pixels, frame.W, frame.H);
+                    UploadFrame(frame!.Pixels, frame.W, frame.H);
                     LogService.Info("HdrCapture", $"首帧 UploadFrame: {sw.ElapsedMilliseconds}ms", LogCategory.Capture);
                 }
                 if (_desktopTex is not null)
@@ -641,8 +1020,27 @@ public sealed partial class HdrCaptureWindow : IDisposable
                     // RenderGpuComposite 已用 OverlayComposite PS 把 UI 绘到后台缓冲。
                     // 之前的 CopyResource(_backBuffer, _desktopTex) 用桌面纹理覆盖了后台缓冲
                     // → UI 被桌面擦掉 → 用户看到"直接显示桌面"无任何覆盖层。
+                    //
+                    // 首帧一次性分解打点：实机日志里"首帧 UploadFrame"之后到"首帧 RenderCore 完成"
+                    // 恒定还有 172–567ms（44 次真跑，p50=244ms），而这段时间里只有下面两次调用，
+                    // 分不清是合成（文字图集首建在其中）还是第一次 Present 被 DWM 拖住。
+                    bool diag = Volatile.Read(ref _diagFirstCompositeDone) == 0;
+                    long compositeMs = 0, presentMs = 0;
+                    var swc = System.Diagnostics.Stopwatch.StartNew();
                     RenderGpuComposite();
+                    if (diag) { compositeMs = swc.ElapsedMilliseconds; swc.Restart(); }
                     PresentFrame();
+                    if (diag)
+                    {
+                        presentMs = swc.ElapsedMilliseconds;
+                        Volatile.Write(ref _diagFirstCompositeDone, 1);
+                        // 图集这一腿拆成三段交出来（2026-10-30）：修前真机"上传"单独 12ms，改后整腿读到 43ms
+                        // 却分不出是【预热任务排队排晚了】还是【上传本身变慢】——这两件事的修法相反，只能用尺子分。
+                        // 排队记在预热那一侧：它发生在渲染线程"问它"之前，不在图集整腿的总时间里。
+                        LogService.Info("HdrCapture",
+                            $"首帧合成 {compositeMs}ms（文字图集 {_atlasTotalMsAtlas}ms = 排版 {_rasterMsAtlas} + 等 {_atlasPrewarmWaitMs} + 上传 {_atlasUploadMs}，预热排版 {_atlasPrewarmMsAtlas}ms〔画 {_atlasPrewarmDrawMs} + 读回 {_atlasPrewarmReadMs} + 并入 {_atlasPrewarmMergeMs}〕排队 {_atlasQueueMsAtlas}）+ 呈现 {presentMs}ms",
+                            LogCategory.Capture);
+                    }
                     return;
                 }
             }
@@ -728,15 +1126,24 @@ public sealed partial class HdrCaptureWindow : IDisposable
         Safe(_desktopSrv); Safe(_desktopTex); Safe(_pooledStaging);
         Safe(_textAtlasSrv); Safe(_textAtlas);
         Safe(_badgeSrv); Safe(_badgeTex);
+        Safe(_editSrv); Safe(_editTex);
         Safe(_samp); Safe(_rsNoCull); Safe(_uiCb);
         Safe(_overlayPs); Safe(_vs);   // _ps 已删除（死代码，见文件头说明）
         Safe(_rtv); Safe(_backBuffer); Safe(_swapChain);
-        // 注意：先释放子资源再释放设备/上下文
-        Safe(_ctx); Safe(_device);
+        // 注意：先释放子资源再释放设备/上下文。
+        // 阶段 4：共享设备归进程缓存所有 ⇒ 这里只放手、不 Dispose（否则下一扇窗拿到的是已死的 COM 对象）。
+        if (_ownsDevice) { Safe(_ctx); Safe(_device); }
 
         _desktopSrv = null; _desktopTex = null; _pooledStaging = null;
+        _sharedTexOpen = null;   // 设备已换：共享纹理要按新设备重开（句柄留着，见下）
+        // _sharedHandle 刻意不在这里清：设备丢失重建后要按新设备把同一块共享纹理重开一次
+        // （句柄由 WGC 会话持有，与我们的设备无关）。只有 Dispose 交还共享槽时才置 0。
         _textAtlasSrv = null; _textAtlas = null;
         _badgeSrv = null; _badgeTex = null; _badgeText = "";
+        // 输入预览纹理跟着设备一起没了：指纹清空，下一次按键/改字形会重新烘一张
+        _editSrv = null; _editTex = null;
+        _editPrevW = _editPrevH = 0;
+        lock (_editPreviewLock) { _editPrevKey = ""; _editPendingUpload = false; _editPendingBgra = null; }
         _samp = null; _rsNoCull = null; _uiCb = null;
         _overlayPs = null; _vs = null;
         _rtv = null; _backBuffer = null; _swapChain = null;
@@ -761,9 +1168,12 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // ① 释放旧资源
             ReleaseDeviceResources();
 
-            // ② 重建设备（与构造函数一致：独占设备，不与其他组件共享）
-            _device = D3D11.D3D11CreateDevice(Vortice.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
-            _ctx = _device.ImmediateContext;
+            // ② 重建/换新设备
+            // 共享模式：缓存那块若真的丢了就整体换新（见 ReplaceCachedDevice 的锁内判断），
+            // 没丢就跟着换新的窗口一起用同一块；自建模式：照旧本窗独建。
+            var (dev, ctx) = _ownsDevice ? NewDevice() : ReplaceCachedDevice();
+            _device = dev;
+            _ctx = ctx;
 
             // ③ 重建交换链 + 后台缓冲 + RTV（参数与 Initialize 一致）
             using (var dxgiD = _device.QueryInterface<IDXGIDevice>())
@@ -796,7 +1206,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 {
                     _overlayPs = _device.CreatePixelShader(File.ReadAllBytes(osp));
                     // 必须与 Initialize 中的 UiCbByteWidth 一致（HLSL cbuffer 声明大小）
-                    const uint UiCbByteWidth = 5616;
+                    const uint UiCbByteWidth = 6160;
                     _uiCb = _device.CreateBuffer(new BufferDescription
                     {
                         ByteWidth = UiCbByteWidth,
@@ -902,33 +1312,259 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _ctx.PSSetShaderResource(1, _textAtlasSrv ?? _desktopSrv!); // 图集缺失时兜底绑定桌面（无文字）
         // 徽标纹理缺失时同样兜底绑定桌面：SizeBadgePos.w<=0 本来就不进采样分支
         _ctx.PSSetShaderResource(2, _badgeSrv ?? _desktopSrv!);
+        _ctx.PSSetShaderResource(3, _editSrv ?? _desktopSrv!); // 输入中文字预览（EditPos.z<=0 不采样）
         _ctx.PSSetSampler(0, _samp!);
         _ctx.Draw(3, 0);
     }
 
-    private System.Numerics.Vector4[] _atlasSubs = new System.Numerics.Vector4[40];
+    private System.Numerics.Vector4[] _atlasSubs = new System.Numerics.Vector4[56];
 
     /// <summary>
     /// 确保工具栏文字图集存在（按 _uiScale 构建）。
-    /// 布局 2048×704: 行0 = 主工具栏 7 按钮 (槽 0-6), 行1 = 标注工具栏 11 项 (槽 8-18),
-    /// 行2 = 文字槽 8 个 × 256×64 (槽 19-26), 行3 = 悬停标题 (槽 27),
-    /// 行4-7 = 主工具条逐钮悬停提示 7 个 (槽 28-34, shader 按 hover 取 TextSubs[28+hover]),
-    /// 行8 = 静置操作提示 (槽 35, 未框选时居中)。
+    /// 布局 2048×1152: 行0 = 主工具栏 8 按钮 (槽 0-7), 行1 = 标注工具栏 10 项 + 提示 (槽 8-18),
+    /// 文字层 = 2048×512 装货区（槽 19-26, 按实测位图尺寸 shelf 打包, 不缩放不拉伸）,
+    /// 悬停标题 (槽 27), 主工具条逐钮悬停提示 8 个 (槽 28-35, shader 按 hover 取 TextSubs[28+hover]),
+    /// 静置操作提示 (槽 36, 未框选时居中)。
     /// 按钮文字/提示一律取自 ToolbarContract（契约单源）——本文件不许再出现按钮文案字面量。
+    /// </summary>
+    /// <summary>图集的 CPU 腿（整张排版 + 一次读回）的产物，连同它自己花掉的毫秒数。
+    /// IdleW/IdleH/DdBakedRows 是排版时写进实例字段的三个读数（静置提示尺寸、下拉已烘行数）——
+    /// 从缓存取布局时必须连同它们一起恢复，否则静置提示会按 1×1 贴、滚轮也会按 0 行夹。</summary>
+    private readonly record struct AtlasLayout(byte[] Bytes, System.Numerics.Vector4[] Subs, long Ms, long ReadMs, long MergeMs,
+        int IdleW, int IdleH, int DdBakedRows);
+
+    // ═══ 图集跨窗缓存（2026-10-30）═══
+    // 每扇预览窗都是新对象，但同一份 (DPI/字体/文案/下拉状态/悬停标题/文字层) 烘出来的是同一张图集。
+    // 没有缓存时第二扇窗起仍要重排 + 读回 11.5MB（本机实测首帧里"等预热 16–33ms + 上传 2–5ms"）。
+    // 键必须并进 BuildAtlasLayout 实际读到的【全部】输入 —— 漏一项就是"显示的是旧字，而界面看着完全正常"。
+    private static readonly object s_atlasCacheLock = new();
+    private static AtlasLayout? s_atlasCache;
+    private static string? s_atlasCacheKey;
+    // 选区起点预热是否已在途（0=空闲 1=已投递）：连按截图键可能连着来两次起点，同一张图集不值得烘两遍
+    //（两趟同键排版还会并发写壳上的 _ddBakedRows/_idleHintW，读数就不可信了）。
+    private static int s_atlasPrewarmInFlight;
+    // 诊断开关：TTC_ATLAS_CACHE=0 关掉跨窗缓存（真机 A/B 用；默认开）
+    private static readonly bool s_atlasCacheEnabled = Environment.GetEnvironmentVariable("TTC_ATLAS_CACHE") != "0";
+
+    /// <summary>图集缓存的键 = <see cref="BuildAtlasLayout"/> 实际读到的每一个输入。
+    /// 改烘焙逻辑时先问"它多读了什么"，多读一项就要多并一项 —— 否则界面会安静地显示旧字。</summary>
+    private string BuildAtlasCacheKey()
+    {
+        var sb = new System.Text.StringBuilder(512);
+        sb.Append(_uiScale.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)).Append('|');
+        sb.Append(_textFontFamily).Append('|')
+          .Append(_textFontSizeDip.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)).Append('|');
+        sb.Append(_ddOpen).Append('|').Append(_ddTop).Append('|').Append(_hoverTitle ?? "").Append('|');
+        foreach (var b in ToolbarContract.Main) sb.Append(b.Glyph).Append(b.Text).Append(b.Hint).Append('\u0001');
+        foreach (var t in ToolbarContract.Anno) sb.Append(t.Glyph).Append(t.Text).Append('\u0001');
+        sb.Append(ToolbarContract.AnnoHint).Append('\u0001').Append(ToolbarContract.IdleHint).Append('\u0001');
+        sb.Append(MosaicModeRectText).Append('\u0001').Append(MosaicModeBrushText).Append('|');
+        int n = Math.Min(DdItemCount(), 64);
+        for (int i = 0; i < n; i++) sb.Append(DdItemText(i)).Append('\u0001');
+        // 文字层预览也烘进图集（槽 19-26）：新窗口本来没有图层，键里带上签名，
+        // 才不会把上一扇窗里用户刚打的字当成这扇窗自己的预览。
+        foreach (var layer in _annoManager.GetLayersSnapshot())
+        {
+            if (layer is not TextLayer t || !t.IsVisible) continue;
+            sb.Append(t.Id).Append('\u0001').Append(t.Text).Append('\u0001')
+              .Append(t.FontFamily).Append('\u0001')
+              .Append(t.FontSize.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)).Append('\u0001')
+              .Append(t.Bold).Append(t.Italic).Append('\u0001')
+              .Append(t.MaxWidth.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)).Append('\u0001');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>开窗时先问一句：这一套输入的图集已经在缓存里了吗（在就不用再排那一趟后台排版）。</summary>
+    private bool AtlasCacheHot()
+    {
+        if (!s_atlasCacheEnabled) return false;
+        var key = BuildAtlasCacheKey();
+        lock (s_atlasCacheLock) return s_atlasCacheKey == key && s_atlasCache is not null;
+    }
+
+    private bool TryTakeCachedAtlas(out AtlasLayout layout)
+    {
+        layout = default;
+        if (!s_atlasCacheEnabled) return false;
+        var key = BuildAtlasCacheKey();
+        lock (s_atlasCacheLock)
+        {
+            if (s_atlasCacheKey == key && s_atlasCache is { } hit) { layout = hit; return true; }
+        }
+        layout = default;
+        return false;
+    }
+
+    private static void StoreAtlasCache(string key, AtlasLayout layout)
+    {
+        lock (s_atlasCacheLock) { s_atlasCacheKey = key; s_atlasCache = layout; }
+    }
+
+    /// <summary>
+    /// 选区起点就把图集 CPU 腿丢到后台。起点时窗口还没 CreateWindow（拿不到 DPI），所以只拿 HMONITOR
+    /// 查一次缩放，用一个无设备壳提前烘；产物由 <see cref="BuildAtlasLayout"/> 自己写进跨窗缓存，
+    /// 真窗口建好后 <see cref="TryTakeCachedAtlas"/> 直接命中，首帧只剩上传。
+    /// </summary>
+    internal static void PrewarmAtlasForMonitor(nint hmonitor)
+    {
+        // 设备预热与图集缓存是两个开关：图集缓存关了，设备该建还得建（首扇窗要用）。
+        WarmSharedDevice();
+
+        if (!s_atlasCacheEnabled) return;   // 尊重 TTC_ATLAS_CACHE=0：缓存关了，烘出来也没人取
+
+        var (scale, key, shell) = AtlasKeyForMonitor(hmonitor);
+        lock (s_atlasCacheLock)
+        {
+            // 已经有同键的干净图集 ⇒ 真窗口也会直接命中，这一趟不必烘（热路径不打日志）
+            if (s_atlasCacheKey == key && s_atlasCache is not null) return;
+        }
+        if (Interlocked.CompareExchange(ref s_atlasPrewarmInFlight, 1, 0) != 0) return;   // 已有一趟在跑
+
+        LogService.Info("HdrCapture", $"图集预热(选区起点): 投递 scale={scale:0.##}", LogCategory.UI);
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                shell.BuildAtlasLayout();
+                LogService.Info("HdrCapture", $"图集预热(选区起点): 完成 {sw.ElapsedMilliseconds}ms", LogCategory.UI);
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn("HdrCapture", $"图集预热(选区起点) 失败: {ex.Message}", LogCategory.UI);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref s_atlasPrewarmInFlight, 0);
+            }
+        });
+    }
+
+    /// <summary>探针口：这块屏的"默认态图集"是否已经躺在缓存里（预热落地与否的唯一判据）。
+    /// 缓存被关时恒 false —— 调用方要自己按 <c>TTC_ATLAS_CACHE</c> 决定这条算不算失败。</summary>
+    internal static bool AtlasCacheWarmForMonitor(nint hmonitor)
+    {
+        if (!s_atlasCacheEnabled) return false;
+        var (_, key, _) = AtlasKeyForMonitor(hmonitor);
+        lock (s_atlasCacheLock) return s_atlasCacheKey == key && s_atlasCache is not null;
+    }
+
+    /// <summary>按显示器查缩放并算默认态缓存键（顺带把算键用的壳交回去，投递那趟要拿它跑排版）。
+    /// 查询失败（HMONITOR 无效 / 老系统）一律按 100%：预热只是加速，不许让截图流程抛异常。</summary>
+    private static (double Scale, string Key, HdrCaptureWindow Shell) AtlasKeyForMonitor(nint hmonitor)
+    {
+        double scale;
+        try
+        {
+            int hr = GetDpiForMonitor(hmonitor, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
+            scale = hr == 0 && dpiX > 0 ? dpiX / 96.0 : 1.0;
+        }
+        catch { scale = 1.0; }
+        var shell = new HdrCaptureWindow((float)scale);
+        return (scale, shell.BuildAtlasCacheKey(), shell);
+    }
+
+    /// <summary>
+    /// 图集 = 两段，分开写是因为它们能待的地方不一样：
+    /// <para>① <see cref="BuildAtlasLayout"/> 只碰 Win2D 的【进程级共享设备】⇒ 可以搬到后台线程，
+    /// 于是在开窗时就开跑，把那条 4K 实测 86ms 的 DirectWrite 排版盖进"窗口初始化 + 区域检测 + 首帧上传"
+    /// 那段时间里（那三段本机实测约 350ms）。② 上传碰本窗口自己的 <c>_device</c>/<c>_ctx</c>（ImmediateContext
+    /// 非线程安全）⇒ 必须留在渲染线程。</para>
+    /// <para>预热产物只在【投递之后没有脏标记被置起、且缩放没变】时才用；否则作废、现地重排一遍。
+    /// 用"等它跑完"而不是"另起一遍"：这一条腿无论如何都要花那么多 CPU，重跑等于付两遍，
+    /// 还会让两个排版并发写 <c>_ddBakedRows</c>/<c>_idleHintW</c> 这类共享读数。</para>
     /// </summary>
     private void EnsureTextAtlas()
     {
-        if (_textAtlas is not null && Math.Abs(_atlasScale - _uiScale) < 0.01 && !_annoTextSlotsDirty)
+        if (_textAtlas is not null && Math.Abs(_atlasScale - _uiScale) < 0.01
+            && !_annoTextSlotsDirty && !_uiTextDirty)
             return;
 
+        // 先清脏标记再重建：重建途中 UI 线程再置脏，不会被这轮末尾的清零吞掉（旧写法会丢一次更新）
+        // 取走预热产物也必须排在读脏标记之后、清之前 —— 脏了就说明这段文字已经不是开窗时那一段了。
+        var pending = _pendingAtlasLayout;
+        _pendingAtlasLayout = null;
+        bool prewarmed = pending is not null
+            && !_annoTextSlotsDirty && !_uiTextDirty
+            && Math.Abs(_pendingAtlasScale - _uiScale) < 0.01;
+        _uiTextDirty = false;
+        _annoTextSlotsDirty = false;
+        // 首建打点：图集 = 几十条 DirectWrite 排版 + 2048×1408 全量上传，而它现在落在首帧合成的
+        // 关键路径上（RenderGpuComposite 的第一句）。命中上面的早退时不计时，逐帧零开销。
+        var swAtlas = _textAtlas is null ? System.Diagnostics.Stopwatch.StartNew() : null;
         try
         {
+            AtlasLayout layout;
+            bool fromCache = false;
+            if (prewarmed)
+            {
+                pending!.Wait();          // 异常在这里原样抛出 ⇒ 交给下面同一个 catch，与现地排版同一条失败路
+                layout = pending.Result;
+                // 投递→取用隔了多久：把"投递太晚"直接量出来（比首帧那条"等它跑完"多含一段排队）
+                if (_atlasPrewarmQueuedAtMs > 0)
+                    LogService.Debug("HdrCapture", $"图集预热: 投递→取用 {Environment.TickCount64 - _atlasPrewarmQueuedAtMs}ms");
+            }
+            else if (TryTakeCachedAtlas(out var hit))
+            {
+                // 第二扇窗起：排版与 11.5MB 读回都不再做，只剩上传（本机 2–5ms）
+                layout = hit;
+                fromCache = true;
+            }
+            else
+            {
+                layout = BuildAtlasLayout();
+            }
+            // 「问它 → bytes 到手」= 渲染线程在这条腿上等预热的净时长（未命中预热时≈本地排版那一趟）
+            long askToHaveMs = swAtlas?.ElapsedMilliseconds ?? 0;
+            if (swAtlas is not null)
+            {
+                _rasterMsAtlas = prewarmed || fromCache ? 0 : layout.Ms;   // 关键路径上的排版；预热/缓存命中就是 0
+                _atlasPrewarmMsAtlas = prewarmed ? layout.Ms : 0;    // 预热那一趟自己花了多少（不在关键路径上）
+                _atlasPrewarmDrawMs = prewarmed ? layout.Ms - layout.ReadMs - layout.MergeMs : 0;
+                _atlasPrewarmReadMs = prewarmed ? layout.ReadMs : 0;
+                _atlasPrewarmMergeMs = prewarmed ? layout.MergeMs : 0;
+                _atlasQueueMsAtlas = prewarmed
+                    ? Math.Max(0L, _atlasPrewarmStartedAtMs - _atlasPrewarmQueuedAtMs) : 0;
+            }
+            UploadTextAtlas(layout.Bytes);
+            _atlasSubs = layout.Subs;
+            // 从缓存取的布局要把它烘出来的三个读数一起搬回来（见 AtlasLayout 注释）：
+            // 少搬这两个尺寸 ⇒ 静置提示按 1×1 贴到中间，探针"静置提示"那一相会红。
+            _idleHintW = layout.IdleW; _idleHintH = layout.IdleH;
+            _ddBakedRows = layout.DdBakedRows;
+            _atlasScale = _uiScale;
+            if (swAtlas is not null)
+            {
+                _atlasPrewarmWaitMs = prewarmed ? askToHaveMs : 0;                     // 命中预热才有"等它跑完"
+                _atlasTotalMsAtlas = swAtlas.ElapsedMilliseconds;                      // 问它 → 上传完 = 图集整腿
+                _atlasUploadMs = Math.Max(0L, _atlasTotalMsAtlas - askToHaveMs);       // 剩下的才是纯上传
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("HdrCapture", $"文字图集构建失败（GPU 合成降级）: {ex.Message}");
             _textAtlasSrv?.Dispose(); _textAtlasSrv = null;
             _textAtlas?.Dispose(); _textAtlas = null;
+        }
+    }
 
-            // 布局: 2048×704 图集
-            const int atlasW = 2048, atlasH = 704;
-            const int row1Y = 128, row2Y = 256;
+    /// <summary>Stopwatch 时间戳差换算成毫秒（图集那三条子腿各自只有几毫秒，用 TickCount64 会读到一堆 0）。</summary>
+    private static long ElapsedMsSince(long startTimestamp)
+        => (System.Diagnostics.Stopwatch.GetTimestamp() - startTimestamp) * 1000
+           / System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>图集的 CPU 腿：整张排版 + 一次读回。只用 Win2D 共享设备，不许出现 <c>_device</c>/<c>_ctx</c>
+    /// （那正是它能被搬到后台线程、从而盖进开窗那段时间的前提；判据钉的就是这一条）。</summary>
+    private AtlasLayout BuildAtlasLayout()    {
+        {
+            _atlasPrewarmStartedAtMs = Environment.TickCount64;   // 开跑时刻（这必须是本方法第一句，否则量不到排队）
+            var swLayout = System.Diagnostics.Stopwatch.StartNew();
+            string cacheKey = BuildAtlasCacheKey();               // 入缓存用；也代表这一趟读到的输入
+            // 布局: 2048×1408
+            const int atlasW = AtlasW, atlasH = AtlasH;
+            const int row1Y = 128;
+            const int textShelfY = 256, textShelfH = 512;
             var mainItems = ToolbarContract.Main
                 .Select(b => (text: $"{b.Glyph} {b.Text}", w: 0, h: 0))
                 .ToArray();
@@ -936,7 +1572,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 .Select(t => (text: $"{t.Glyph} {t.Text}", w: 0, h: 0))
                 .Append((text: ToolbarContract.AnnoHint, w: 0, h: 0))
                 .ToArray();
-            var lay = GetToolbarLayout(7);
+            var lay = GetToolbarLayout(ToolbarContract.Main.Length);
             int btnW = lay.BtnW, btnH = lay.BtnH;
             int hintH = Math.Max(24, (int)Math.Round(30 * _uiScale));
 
@@ -944,147 +1580,275 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // 提到 18f（字高/按钮 ≈ 0.56，与 SDR SelectionOverlay 的 28/48 观感一致）。
             float fontSize = ToolbarFontSize * (float)_uiScale;
             int hintW = ToolbarContract.MainHintWidthPx(fontSize);
+            // 标注行 = 10 按钮 + 末尾提示，必须整行装进 2048：200% DPI 下不夹一下就会越界写进下一行
+            int annoRowUsed = 10 * (btnW + 8);
+            if (annoRowUsed + hintW > atlasW) hintW = Math.Max(120, atlasW - annoRowUsed);
             for (int i = 0; i < mainItems.Length; i++) { mainItems[i].w = btnW; mainItems[i].h = btnH; }
             for (int i = 0; i < 10; i++) { annoItems[i].w = btnW; annoItems[i].h = btnH; }
             annoItems[10].w = hintW; annoItems[10].h = hintH;
-            var atlasBytes = new byte[atlasW * atlasH * 4];
-            var subs = new System.Numerics.Vector4[40];
+            var subs = new System.Numerics.Vector4[56];
             // 共享设备：不 Dispose（见 AnnotationRasterizer.SharedCanvasDevice 的说明）
             var device = AnnotationRasterizer.SharedCanvasDevice;
+            // ═══ 2026-10-29 整张图集一次排版：一格一个 CanvasRenderTarget 改为全图一个 ═══
+            // 原先每个格子新建一张渲染目标 + 一次 GetPixelBytes() 再逐行拷进 atlasBytes。
+            // 实测首帧那 ~250ms 里，DrawText 本身只占 50–100ms（把 DrawText 整段跳过的变异跑
+            // 仍读到 176–225ms），剩下的都是这几十次"建目标/会话/读回/销毁"。
+            // 现在一次画进同一张 2048×1408 的目标、只在末尾读回一次；格子坐标与 subs 完全不变，
+            // 未画到的区域仍是 Clear(Transparent) 的全零，与旧的 zero-init 缓冲同值。
+            using var atlasTarget = new Microsoft.Graphics.Canvas.CanvasRenderTarget(device, atlasW, atlasH, 96);
+            byte[] atlasBytes;
+            // 文字图层预览是"别处烘好的位图"（AnnotationRasterizer.RasterizeText），只能事后并入 CPU 缓冲；
+            // 先记下位置，等整张目标读回来再逐行拷（图集槽位互不重叠，先后顺序不影响结果）。
+            var pendingPreviews = new List<(int X, int Y, int W, int H, byte[] Pixels)>();
+            using (var ds = atlasTarget.CreateDrawingSession())
             {
+                ds.Clear(Microsoft.UI.Colors.Transparent);
+                void DrawSlot(int x, int y, int w, int h, string text, float px)
+                {
+                    if (w <= 0 || h <= 0 || string.IsNullOrEmpty(text)) return; // 与旧的"这一格不入库"同语义
+                    try
+                    {
+                        ds.DrawText(text, x, y, w, h, Microsoft.UI.Colors.White,
+                            new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                            {
+                                FontFamily = "Microsoft YaHei UI",
+                                FontSize = px,
+                                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+                                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                            });
+                    }
+                    catch
+                    {
+                        // 单格失败只丢这一格（旧实现每格自带 try/catch，不能让一格拖垮整张图集）
+                    }
+                }
                 // 行 0: 主工具栏 7 按钮 (槽 0-6)
                 int cursorX = 0;
                 for (int i = 0; i < mainItems.Length; i++)
                 {
-                    var bmp = RenderTextBitmap(device, mainItems[i].text, mainItems[i].w, mainItems[i].h, fontSize);
-                    if (bmp is null) continue;
                     int dstX = cursorX;
                     subs[i] = new System.Numerics.Vector4(dstX / (float)atlasW, 0, mainItems[i].w / (float)atlasW, mainItems[i].h / (float)atlasH);
-                    for (int row = 0; row < mainItems[i].h; row++)
-                        Buffer.BlockCopy(bmp, row * mainItems[i].w * 4, atlasBytes, (row * atlasW + dstX) * 4, mainItems[i].w * 4);
+                    DrawSlot(dstX, 0, mainItems[i].w, mainItems[i].h, mainItems[i].text, fontSize);
                     cursorX += mainItems[i].w + 8;
                 }
                 // 行 1: 标注工具栏 11 项 (槽 8-18)
                 cursorX = 0;
                 for (int i = 0; i < annoItems.Length; i++)
                 {
-                    var bmp = RenderTextBitmap(device, annoItems[i].text, annoItems[i].w, annoItems[i].h, fontSize);
-                    if (bmp is null) continue;
                     int dstX = cursorX;
                     subs[8 + i] = new System.Numerics.Vector4(dstX / (float)atlasW, row1Y / (float)atlasH, annoItems[i].w / (float)atlasW, annoItems[i].h / (float)atlasH);
-                    for (int row = 0; row < annoItems[i].h; row++)
-                        Buffer.BlockCopy(bmp, row * annoItems[i].w * 4, atlasBytes, ((row1Y + row) * atlasW + dstX) * 4, annoItems[i].w * 4);
+                    DrawSlot(dstX, row1Y, annoItems[i].w, annoItems[i].h, annoItems[i].text, fontSize);
                     cursorX += annoItems[i].w + 8;
                 }
-                // 行 2: 文字槽 8 个 × 256×64 (槽 19-26) — 每个 256×64 固定 (2048/256=8 个, 超限不显示但输出合成仍正确)
-                const int slotW = 256, slotH = 64;
+                // 文字层装货区 (槽 19-26, y=256..768): 每层按【实测位图】原尺寸入库。
+                // 旧实现固定 256×64 槽 + 字距拉伸，字号/字宽/折行全被改写；现在子矩形就是位图本身，
+                // shader 把它贴到图层内框上，预览与输出用的是同一张位图（见 TextLayer 注释）。
                 int slot = 0;
+                int shelfX = 0, shelfTop = textShelfY, shelfRowH = 0;
                 // ═══ 2026-08-16 P1-3: 快照遍历 (渲染线程与 UI 线程修改互斥) ═══
                 foreach (var layer in _annoManager.GetLayersSnapshot().Where(l => l is TextLayer && l.IsVisible))
                 {
                     if (slot >= 8) break;
                     var tl = (TextLayer)layer;
-                    int dstX = slot * slotW;
-                    subs[19 + slot] = new System.Numerics.Vector4(dstX / (float)atlasW, row2Y / (float)atlasH, slotW / (float)atlasW, slotH / (float)atlasH);
-                    float tfs = Math.Clamp(tl.FontSize, 10f, 48f) * (float)_uiScale;
-                    var bmp = RenderTextBitmap(device, tl.Text, slotW, slotH, tfs);
-                    if (bmp is not null)
+                    if (AnnotationRasterizer.RasterizeText(tl.Text, tl.FontSize, tl.FontFamily,
+                            tl.Bold, tl.Italic, tl.MaxWidth) is not var (bmp, bw, bh))
                     {
-                        for (int row = 0; row < slotH; row++)
-                            Buffer.BlockCopy(bmp, row * slotW * 4, atlasBytes, ((row2Y + row) * atlasW + dstX) * 4, slotW * 4);
+                        subs[19 + slot] = System.Numerics.Vector4.Zero; // 没有位图 ⇒ 不采样（输出仍会画背景框）
+                        slot++;
+                        continue;
                     }
+                    // shelf 打包：一行放不下就换行；整块装货区放不下就放弃预览（输出合成本来就不走图集）
+                    if (shelfX + bw > atlasW) { shelfTop += shelfRowH; shelfX = 0; shelfRowH = 0; }
+                    if (shelfTop + bh > textShelfY + textShelfH || bw > atlasW)
+                    {
+                        subs[19 + slot] = System.Numerics.Vector4.Zero;
+                        LogService.Warn("HdrCapture",
+                            $"文字预览槽不足（{bw}x{bh}），图层不参与预览；输出合成不受影响", LogCategory.UI);
+                        slot++;
+                        continue;
+                    }
+                    int dstX = shelfX, dstY = shelfTop;
+                    subs[19 + slot] = new System.Numerics.Vector4(
+                        dstX / (float)atlasW, dstY / (float)atlasH, bw / (float)atlasW, bh / (float)atlasH);
+                    pendingPreviews.Add((dstX, dstY, bw, bh, bmp));
+                    shelfX += bw + 2;
+                    shelfRowH = Math.Max(shelfRowH, bh);
                     slot++;
                 }
-                // 行 3: 悬停窗口标题槽 (槽 27, 512×64) — QQ截图式窗口标题提示
+                // 悬停窗口标题槽 (槽 27, 512×64) — QQ截图式窗口标题提示
                 {
-                    const int tipW = 512, tipH = 64, row3Y = 320;
+                    const int tipW = 512, tipH = 64, row3Y = textShelfY + textShelfH;
                     subs[27] = new System.Numerics.Vector4(0, row3Y / (float)atlasH, tipW / (float)atlasW, tipH / (float)atlasH);
                     string hoverTitle = _hoverTitle ?? "";
                     if (hoverTitle.Length > 0)
-                    {
-                        float tfs2 = 12f * (float)_uiScale;
-                        var bmp = RenderTextBitmap(device, hoverTitle, tipW, tipH, tfs2);
-                        if (bmp is not null)
-                        {
-                            for (int row = 0; row < tipH; row++)
-                                Buffer.BlockCopy(bmp, row * tipW * 4, atlasBytes, ((row3Y + row) * atlasW + 0) * 4, tipW * 4);
-                        }
-                    }
+                        DrawSlot(0, row3Y, tipW, tipH, hoverTitle, 12f * (float)_uiScale);
                 }
-                // 行 4-7: 主工具条逐钮悬停提示 (槽 28-34, 1024×64 槽格, 1024 宽是 300% DPI 下最长句也不裁的余量)。
+                // 主工具条逐钮悬停提示 (槽 28-35, 1024×64 槽格, 1024 宽是 300% DPI 下最长句也不裁的余量)。
                 // 修复 2026-10-26 复核发现的老 divergence：GPU 路此前槽 7 只有"保存截图到文件"一句静态提示，
                 // 悬停哪枚按钮都显示它；GDI 回退路却是逐钮的。shader 现按 hover 取 TextSubs[28+hover]。
                 {
-                    const int hintSlotW = 1024, hintSlotH = 64, row4Y = 384;
+                    const int hintSlotW = 1024, hintSlotH = 64, row4Y = textShelfY + textShelfH + 64;
                     for (int i = 0; i < ToolbarContract.Main.Length; i++)
                     {
                         int dstX = (i % 2) * hintSlotW;
                         int dstY = row4Y + (i / 2) * hintSlotH;
                         subs[28 + i] = new System.Numerics.Vector4(dstX / (float)atlasW, dstY / (float)atlasH, hintW / (float)atlasW, hintH / (float)atlasH);
-                        var bmp = RenderTextBitmap(device, ToolbarContract.Main[i].Hint, hintW, hintH, fontSize);
-                        if (bmp is null) continue;
-                        for (int row = 0; row < hintH; row++)
-                            Buffer.BlockCopy(bmp, row * hintW * 4, atlasBytes, ((dstY + row) * atlasW + dstX) * 4, hintW * 4);
+                        DrawSlot(dstX, dstY, hintW, hintH, ToolbarContract.Main[i].Hint, fontSize);
                     }
                 }
-                // 行 8: 静置操作提示 (槽 35, 整行 2048×64) —— 未框选/未拖拽时居中显示一句操作说明。
+                // 静置操作提示 (槽 36, 整行 2048×64) —— 未框选/未拖拽时居中显示一句操作说明。
                 {
-                    const int idleRowY = 640, idleH = 64;
+                    const int idleRowY = 1088, idleH = 64;
                     int idleW = Math.Min(atlasW, ToolbarContract.EstimateTextWidthPx(ToolbarContract.IdleHint, fontSize));
-                    subs[35] = new System.Numerics.Vector4(0, idleRowY / (float)atlasH, idleW / (float)atlasW, idleH / (float)atlasH);
-                    var bmp = RenderTextBitmap(device, ToolbarContract.IdleHint, idleW, idleH, fontSize);
-                    if (bmp is not null)
-                    {
-                        for (int row = 0; row < idleH; row++)
-                            Buffer.BlockCopy(bmp, row * idleW * 4, atlasBytes, ((idleRowY + row) * atlasW + 0) * 4, idleW * 4);
-                    }
+                    subs[36] = new System.Numerics.Vector4(0, idleRowY / (float)atlasH, idleW / (float)atlasW, idleH / (float)atlasH);
+                    DrawSlot(0, idleRowY, idleW, idleH, ToolbarContract.IdleHint, fontSize);
                     _idleHintW = idleW; _idleHintH = idleH;
                 }
+                // 第二行「马赛克方式」两个标签 (槽 38-39) —— 复用行 0 右侧空闲区
+                // （行 0 只用到 mainItems.Length×(btnW+8)，2048 宽还剩近千像素）。
+                {
+                    int optX = mainItems.Length * (btnW + 8) + 16;
+                    int optW = Math.Max(70, (int)Math.Round(96 * _uiScale));
+                    int optH = btnH;
+                    string[] labels = [MosaicModeRectText, MosaicModeBrushText];
+                    for (int i = 0; i < labels.Length; i++)
+                    {
+                        if (optX + optW > atlasW) break;
+                        subs[38 + i] = new System.Numerics.Vector4(optX / (float)atlasW, 0, optW / (float)atlasW, optH / (float)atlasH);
+                        DrawSlot(optX, 0, optW, optH, labels[i], fontSize);
+                        optX += optW + 8;
+                    }
+                }
+                // 文字行的格子文字与下拉列表（槽 40-55）—— 内容随用户选择变化，
+                // 与按钮文案不同，只能在打开/翻动列表时整张重烘（_uiTextDirty）。
+                // 带宽固定 256px，格高随 DPI 长：装不下的格子一个都不许往列表里画（旧写法整格置零 ⇒
+                // 250% DPI 下列表后几行是空白条）。可见行数与烘焙行数都取 PackTextBand 的实测容量。
+                {
+                    int cellH = OptionsRowHeight();
+                    var (famW, sizeW, biW, _) = TextRowWidths((float)_uiScale);
+                    // 烘的格宽必须等于画的面板宽：shader 把整个子矩形铺进面板，烘宽了字就被横向压扁
+                    int panelW = DdPanelWidth();
+                    int itemCap = DdBandCapacityAt((float)_uiScale, panelW);
+                    float uiFpx = Math.Max(11f, 15f * (float)_uiScale);
+                    const int fixedCells = 4;
+                    string[] fixedTexts = [_textFontFamily,
+                        _textFontSizeDip.ToString("0", System.Globalization.CultureInfo.InvariantCulture), "B", "I"];
+                    int[] fixedW = [famW, sizeW, biW, biW];
+                    int[] cw = new int[fixedCells + itemCap], ch = new int[fixedCells + itemCap];
+                    for (int i = 0; i < fixedCells; i++) { cw[i] = fixedW[i]; ch[i] = cellH; }
+                    for (int i = 0; i < itemCap; i++) { cw[fixedCells + i] = panelW; ch[fixedCells + i] = cellH; }
+                    var rects = PackTextBand(atlasW, AtlasH - AtlasBandH, AtlasBandH, cw, ch);
+                    void Bake(int slot, string text, (int X, int Y, int W, int H) r)
+                    {
+                        subs[slot] = new System.Numerics.Vector4(
+                            r.X / (float)atlasW, r.Y / (float)atlasH, r.W / (float)atlasW, r.H / (float)atlasH);
+                        DrawSlot(r.X, r.Y, r.W, r.H, text, uiFpx);
+                    }
+                    bool dropped = false;
+                    for (int i = 0; i < fixedCells; i++)
+                    {
+                        if (rects[i].H > 0) { Bake(40 + i, fixedTexts[i], rects[i]); continue; }
+                        subs[40 + i] = System.Numerics.Vector4.Zero;
+                        dropped = true;
+                    }
+                    int baked = 0;
+                    for (int i = 0; i < itemCap; i++)
+                    {
+                        int idx = _ddTop + i;
+                        var r = rects[fixedCells + i];
+                        if (_ddOpen == 0 || idx >= DdItemCount() || r.H <= 0)
+                        {
+                            subs[44 + i] = System.Numerics.Vector4.Zero;
+                            if (r.H <= 0) dropped = true;
+                            continue;
+                        }
+                        Bake(44 + i, DdItemText(idx), r);
+                        baked++;
+                    }
+                    for (int i = itemCap; i < DdMaxVisible; i++) subs[44 + i] = System.Numerics.Vector4.Zero;
+                    _ddBakedRows = baked;
+                    if (dropped)
+                        LogService.Warn("HdrCapture",
+                            $"文字带装不下：缩放 {_uiScale:0.##}、格高 {cellH}、带高 {AtlasBandH}，"
+                            + $"容量 {itemCap}/{DdMaxVisible} 格 —— 有格子没烘出来（列表会缺文字）", LogCategory.UI);
+                    if (itemCap != _ddCapLogged)
+                    {
+                        _ddCapLogged = itemCap;
+                        if (itemCap < DdMaxVisible)
+                            LogService.Info("HdrCapture",
+                                $"缩放 {_uiScale:0.##} 下文字带只装得下 {itemCap}/{DdMaxVisible} 行下拉列表（超出部分靠滚轮翻）",
+                                LogCategory.UI);
+                    }
+                }
             }
-            _atlasScale = _uiScale;
-            _annoTextSlotsDirty = false;
+            // 整张一次读回（ds 已在上面 using 结束时 Flush），再把"别处烘好的"文字图层预览并进去。
+            // 三条各自计时（2026-10-30）：这一腿 34–84ms 里【DirectWrite 排版】【11.5MB GPU→CPU 读回】
+            // 【逐行并入预览】哪条贵，决定下一步往哪打 —— 读回贵就换 GPU 内拷贝，排版贵就缓存整张。
+            long tAtlasRead = System.Diagnostics.Stopwatch.GetTimestamp();
+            atlasBytes = atlasTarget.GetPixelBytes();
+            long tAtlasMerge = System.Diagnostics.Stopwatch.GetTimestamp();
+            foreach (var p in pendingPreviews)
+                for (int row = 0; row < p.H; row++)
+                    Buffer.BlockCopy(p.Pixels, row * p.W * 4, atlasBytes, ((p.Y + row) * atlasW + p.X) * 4, p.W * 4);
+            long atlasMergeMs = ElapsedMsSince(tAtlasMerge);
+            var built = new AtlasLayout(atlasBytes, subs, swLayout.ElapsedMilliseconds,
+                ElapsedMsSince(tAtlasRead), atlasMergeMs, _idleHintW, _idleHintH, _ddBakedRows);
+            // 只缓存「干净」的那张工具条图集：下拉展开/悬停标题/带文字层都是窗口内的瞬态，
+            // 存进去只会把常驻那张挤掉（缓存只有一个槽），下一扇窗反而要重烘 —— 真机跑
+            // --preview-ui-probe 时就撞到过：第二扇窗仍读到"预热排版 21ms"，正是被下拉那张挤掉了。
+            bool pristine = _ddOpen == 0 && string.IsNullOrEmpty(_hoverTitle)
+                && !_annoManager.GetLayersSnapshot().Any(l => l is TextLayer t && t.IsVisible);
+            // 脏标记意味着用户刚改过字/图层：这一张可能是两段状态拼出来的，不能入缓存。
+            if (s_atlasCacheEnabled && pristine && !_uiTextDirty && !_annoTextSlotsDirty)
+                StoreAtlasCache(cacheKey, built);
+            return built;
+        }
+    }
+
+    /// <summary>图集的 GPU 腿：整张上传。<b>必须留在渲染线程</b> —— 用的是本窗口自己的
+    /// <c>_device</c>/<c>_ctx</c>，而 ImmediateContext 非线程安全（与 <c>_gpuLock</c> 那条纪律同源）。</summary>
+    private void UploadTextAtlas(byte[] atlasBytes)
+    {
+        const int atlasW = AtlasW, atlasH = AtlasH;
+        // 纹理复用：尺寸固定，重烘只换内容（每敲一个字/翻一屏列表都重建 9 MB 纹理太贵）
+        if (_textAtlas is null)
+        {
             _textAtlas = _device.CreateTexture2D(new Texture2DDescription
             {
                 Width = atlasW, Height = atlasH, MipLevels = 1, ArraySize = 1,
                 Format = Format.B8G8R8A8_UNorm, SampleDescription = new(1, 0),
                 Usage = ResourceUsage.Default, BindFlags = BindFlags.ShaderResource
             });
-            // staging 上传（与项目既有风格一致）
-            using (var staging = _device.CreateTexture2D(new Texture2DDescription
+            _textAtlasSrv?.Dispose();
+            _textAtlasSrv = _device.CreateShaderResourceView(_textAtlas);
+        }
+        // staging 上传（与项目既有风格一致）
+        using (var staging = _device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = atlasW, Height = atlasH, MipLevels = 1, ArraySize = 1,
+            Format = Format.B8G8R8A8_UNorm, SampleDescription = new(1, 0),
+            Usage = ResourceUsage.Staging, BindFlags = BindFlags.None,
+            CPUAccessFlags = CpuAccessFlags.Write
+        }))
+        {
+            var m = _ctx.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
+            if (m.DataPointer != 0)
             {
-                Width = atlasW, Height = atlasH, MipLevels = 1, ArraySize = 1,
-                Format = Format.B8G8R8A8_UNorm, SampleDescription = new(1, 0),
-                Usage = ResourceUsage.Staging, BindFlags = BindFlags.None,
-                CPUAccessFlags = CpuAccessFlags.Write
-            }))
-            {
-                var m = _ctx.Map(staging, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None);
-                if (m.DataPointer != 0)
+                try
                 {
-                    try
+                    unsafe
                     {
-                        unsafe
+                        fixed (byte* src = atlasBytes)
                         {
-                            fixed (byte* src = atlasBytes)
-                            {
-                                int rowPitch = atlasW * 4;
-                                for (int row = 0; row < atlasH; row++)
-                                    Buffer.MemoryCopy(src + row * rowPitch, (byte*)m.DataPointer.ToPointer() + row * m.RowPitch, rowPitch, rowPitch);
-                            }
+                            int rowPitch = atlasW * 4;
+                            for (int row = 0; row < atlasH; row++)
+                                Buffer.MemoryCopy(src + row * rowPitch, (byte*)m.DataPointer.ToPointer() + row * m.RowPitch, rowPitch, rowPitch);
                         }
                     }
-                    finally { _ctx.Unmap(staging, 0); } // 异常路径也必须 Unmap，否则该资源永久无法再写入
                 }
-                _ctx.CopyResource(_textAtlas, staging);
+                finally { _ctx.Unmap(staging, 0); } // 异常路径也必须 Unmap，否则该资源永久无法再写入
             }
-            _textAtlasSrv = _device.CreateShaderResourceView(_textAtlas);
-            _atlasSubs = subs;
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("HdrCapture", $"文字图集构建失败（GPU 合成降级）: {ex.Message}");
-            _textAtlasSrv?.Dispose(); _textAtlasSrv = null;
-            _textAtlas?.Dispose(); _textAtlas = null;
+            _ctx.CopyResource(_textAtlas, staging);
         }
     }
 
@@ -1147,13 +1911,131 @@ public sealed partial class HdrCaptureWindow : IDisposable
         }
     }
 
+    /// <summary>
+    /// 把输入框里的文字烘成一张小纹理 —— EDIT 子窗口在这块全屏交换链上一个像素都不显示，
+    /// 不这么做用户就是在"闭眼打字"。内容/字形/折行宽度任一变化才重烘。
+    /// <para>⚠ 只在 UI 线程算位图（与 CommitTextEdit 的 ApplyMetrics 同一把尺），
+    /// 上传纹理留给渲染线程 <see cref="UploadEditPreview"/> —— D3D 立即上下文只归渲染线程。</para>
+    /// </summary>
+    private void SyncEditPreview()
+    {
+        if (_editHwnd == 0)
+        {
+            bool queued = false;
+            lock (_editPreviewLock)
+            {
+                // 判据只认这把锁里的状态：_editPrevW/_editPrevH 归渲染线程、它的写端不在这把锁里，
+                // 拿它当"已经清过"的凭据等于读别人的裸字段（旧写法就是这样）。
+                if (_editPrevKey.Length == 0 && !_editPendingUpload) return;
+                _editPendingBgra = null;
+                _editPendingW = _editPendingH = 0;
+                _editPendingUpload = true;
+                _editPrevKey = "";
+                queued = true;
+            }
+            if (queued) RequestRedraw();
+            return;
+        }
+
+        var sb = new System.Text.StringBuilder(8192);
+        int len = GetWindowTextSb(_editHwnd, sb, sb.Capacity);
+        string text = len > 0 ? sb.ToString(0, len) : "";
+        float fontPx = Math.Max(8f, _textFontSizeDip * (float)_uiScale);
+        float maxW = Math.Clamp(Math.Abs(_sx2 - _sx1) - 12f, 120f, 1600f);
+        string key = $"{text}\u0001{fontPx:F1}\u0001{_textFontFamily}\u0001{_textFontBold}\u0001{_textFontItalic}\u0001{maxW:F0}";
+        bool changed;
+        lock (_editPreviewLock)
+        {
+            // 比较与写入同一把锁：ReleaseDeviceResources（渲染线程）会把 key 清空，裸比较会漏掉那次清空
+            changed = key != _editPrevKey;
+            if (changed) _editPrevKey = key;
+        }
+        if (!changed) return;
+
+        var bmp = text.Length == 0
+            ? ((byte[] Bgra, int W, int H)?)null
+            : (AnnotationRasterizer.RasterizeText(text, fontPx, _textFontFamily,
+                   _textFontBold, _textFontItalic, maxW) is { } r
+               && r.W <= EditTexW && r.H <= EditTexH ? r : null);
+        lock (_editPreviewLock)
+        {
+            _editPendingBgra = bmp?.Bgra;
+            _editPendingW = bmp?.W ?? 0;
+            _editPendingH = bmp?.H ?? 0;
+            _editPendingUpload = true;
+        }
+        RequestRedraw();
+    }
+
+    /// <summary>渲染线程：把 UI 线程烘好的输入预览位图传进小纹理（D3D 上下文只归渲染线程）。</summary>
+    private void UploadEditPreview()
+    {
+        byte[]? bgra;
+        int bw, bh;
+        lock (_editPreviewLock)
+        {
+            if (!_editPendingUpload) return;
+            bgra = _editPendingBgra;
+            bw = _editPendingW;
+            bh = _editPendingH;
+            _editPendingUpload = false;
+            _editPendingBgra = null;
+        }
+        if (bgra is null || bw <= 0 || bh <= 0)
+        {
+            _editPrevW = _editPrevH = 0;
+            return;
+        }
+        try
+        {
+            if (_editTex is null)
+            {
+                _editTex = _device.CreateTexture2D(new Texture2DDescription
+                {
+                    Width = EditTexW, Height = EditTexH, MipLevels = 1, ArraySize = 1,
+                    Format = Format.B8G8R8A8_UNorm, SampleDescription = new(1, 0),
+                    Usage = ResourceUsage.Dynamic, BindFlags = BindFlags.ShaderResource,
+                    CPUAccessFlags = CpuAccessFlags.Write
+                });
+                _editSrv?.Dispose();
+                _editSrv = _device.CreateShaderResourceView(_editTex);
+            }
+            var m = _ctx.Map(_editTex, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            if (m.DataPointer != 0)
+            {
+                try
+                {
+                    unsafe
+                    {
+                        fixed (byte* src = bgra)
+                        {
+                            int rowBytes = bw * 4;
+                            for (int row = 0; row < bh; row++)
+                                Buffer.MemoryCopy(src + row * rowBytes,
+                                    (byte*)m.DataPointer.ToPointer() + row * m.RowPitch, rowBytes, rowBytes);
+                        }
+                    }
+                }
+                finally { _ctx.Unmap(_editTex, 0); }
+            }
+            _editPrevW = bw; _editPrevH = bh;
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("HdrCapture", $"输入文字预览纹理构建失败（预览隐藏）: {ex.Message}");
+            _editSrv?.Dispose(); _editSrv = null;
+            _editTex?.Dispose(); _editTex = null;
+            _editPrevW = _editPrevH = 0;
+        }
+    }
+
     /// <summary>更新 GPU 合成常量缓冲（与 CompositeUI 的绘制逻辑一致 + 标注层数据）。</summary>
     private void UpdateUiConstantBuffer()
     {
         var cb = new UiCbData
         {
-            TextSubs = new float[160],
-            TextPos = new float[160],
+            TextSubs = new float[224],
+            TextPos = new float[224],
             AnnoLayers = new float[1024]
         };
         int w = _winW, h = _winH;
@@ -1179,16 +2061,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
         bool isDark = App.ResolveEffectiveTheme(App.CurrentTheme) is AppThemeMode.Dark or AppThemeMode.OLED;
         if (_selComplete)
         {
-            int n = _annoMode ? 10 : 7;
+            int n = _annoMode ? 10 : ToolbarContract.Main.Length;
             int subBase = _annoMode ? 8 : 0;
-            var lay = GetToolbarLayout(n);
-            int selX1 = Math.Min(_sx1, _sx2), selX2 = Math.Max(_sx1, _sx2);
-            int selY1 = Math.Min(_sy1, _sy2), selY2 = Math.Max(_sy1, _sy2);
+            var lay = ToolbarFrame(n, w, h);
             int totalW = lay.TotalW, totalH = lay.TotalH;
-            int tx = Math.Clamp(selX1 + (selX2 - selX1) / 2 - totalW / 2, 4, w - totalW - 4);
-            int ty = selY2 + 10;
-            if (ty + totalH + 10 > h) ty = selY1 - totalH - 12;
-            if (ty < 0) ty = 4;
+            int tx = lay.Tx, ty = lay.Ty;
             cb.ToolbarRect = new System.Numerics.Vector4(tx, ty, totalW, totalH);
             cb.ButtonLayout = new System.Numerics.Vector4(lay.BtnW, lay.BtnH, lay.Gap, n);
             cb.PadHandle = new System.Numerics.Vector4(lay.PadX, lay.PadY, _handleSize, 0);
@@ -1206,8 +2083,76 @@ public sealed partial class HdrCaptureWindow : IDisposable
             int hintH = Math.Max(24, (int)Math.Round(30 * _uiScale));
             int hx = Math.Clamp(tx + totalW / 2 - hintW / 2, 4, w - hintW - 4);
             int hy = ty + totalH + 4;
+            // 第二行（字体条 / 颜色 / 马赛克方式）占住了工具条下方：提示改到上方，别压住选项行
+            if (_annoMode && _optRowVisible) hy = ty - hintH - 4;
             if (hy + hintH + 4 > h) hy = ty - hintH - 4;
-            SetV4(cb.TextPos, subBase + n, new System.Numerics.Vector4(hx, hy, hintW, hintH));
+            if (hy < 4) hy = ty + totalH + 4;
+            // 主工具条 8 枚按钮占满 TextPos[0..7] ⇒ 提示框位置改住槽 37（标注模式仍是槽 18，与图集同源）
+            SetV4(cb.TextPos, _annoMode ? 18 : 37, new System.Numerics.Vector4(hx, hy, hintW, hintH));
+
+            // ── 第二行选项条（线色 / 马赛克方式 / 画笔粗细 / 文字字体）：画在帧里 ──
+            // 槽 38 = (行左, 行上, 等宽模式的格子宽, 格高)；槽 39 = (gap, 格数, 形态, 状态)；
+            // 槽 40 = 形态 3 的四格宽度 / 形态 2 的 (数值格宽, 徽标像素宽, 徽标像素高, 0)；
+            // 槽 41/42/43 = 下拉面板矩形 / (可见行, 首行, 悬停, 形态) / 当前项（形态 2 的槽 43 = 粗细刻度）。
+            var optG = OptionsRowForTool() ? CurrentOptionsRow() : default;
+            if (OptionsRowForTool())
+            {
+                int optMode = OptionsRowMode();
+                SetV4(cb.TextPos, 38, new System.Numerics.Vector4(optG.X, optG.Y, optG.W[0], optG.CellH));
+                // 槽 43 = (当前字体/字号项, 加粗, 斜体, 0)
+                SetV4(cb.TextPos, 43, optMode == 3
+                    ? new System.Numerics.Vector4(DdSelIndex(), _textFontBold ? 1 : 0, _textFontItalic ? 1 : 0, 0)
+                    : System.Numerics.Vector4.Zero);
+                if (optMode == 3)
+                {
+                    SetV4(cb.TextPos, 39, new System.Numerics.Vector4(optG.Gap, optG.W.Length, optMode, _optHover + 1));
+                    SetV4(cb.TextPos, 40, new System.Numerics.Vector4(
+                        optG.W[0], optG.W[1], optG.W[2], optG.W[3]));
+                }
+                else if (optMode == 2)
+                {
+                    // 形态 2 没有"选中第几格"：槽 39.w 只放 悬停格+1（shader 按 optMode>=2 解）
+                    SetV4(cb.TextPos, 39, new System.Numerics.Vector4(optG.Gap, optG.W.Length, optMode, _optHover + 1));
+                    // 槽 43 = (当前粗细, 最小, 最大, 轨道内缩)
+                    SetV4(cb.TextPos, 43, new System.Numerics.Vector4(
+                        _mosaicBrushPx, MosaicBrushMinPx, MosaicBrushMaxPx, SliderInset()));
+                    // 槽 40 = (数值格宽, 徽标像素宽, 徽标像素高, 0)：数值按原始大小居中贴，不铺满整格
+                    EnsureSizeBadge($"{(int)MathF.Round(_mosaicBrushPx)}px");
+                    SetV4(cb.TextPos, 40, new System.Numerics.Vector4(optG.W[1], _badgeW, _badgeH, 0));
+                    if (_badgeSrv is not null)
+                        cb.SizeBadgeSub = new System.Numerics.Vector4(
+                            0, 0, _badgeW / (float)BadgeTexW, _badgeH / (float)BadgeTexH);
+                }
+                else
+                {
+                    int sel = optMode switch
+                    {
+                        0 => SwatchIndex(),
+                        2 => 0, // 粗细用滑条，没有"选中第几格"这回事
+                        _ => _mosaicMode == "Rect" ? 0 : 1,
+                    };
+                    // (gap, count, mode, sel + 1 + (hover + 1) * 16)
+                    SetV4(cb.TextPos, 39, new System.Numerics.Vector4(optG.Gap, optG.W.Length, optMode,
+                        sel + 1 + (_optHover + 1) * 16));
+                    SetV4(cb.TextPos, 40, System.Numerics.Vector4.Zero);
+                }
+
+                if (_ddOpen != 0)
+                {
+                    var d = DdGeometry();
+                    SetV4(cb.TextPos, 41, new System.Numerics.Vector4(d.X, d.Y, d.W, d.ItemH));
+                    SetV4(cb.TextPos, 42, new System.Numerics.Vector4(d.Visible, _ddTop, _ddHover + 1, _ddOpen));
+                }
+                else
+                {
+                    SetV4(cb.TextPos, 41, System.Numerics.Vector4.Zero);
+                    SetV4(cb.TextPos, 42, System.Numerics.Vector4.Zero);
+                }
+            }
+            else
+            {
+                for (int i = 38; i <= 43; i++) SetV4(cb.TextPos, i, System.Numerics.Vector4.Zero);
+            }
         }
         else
         {
@@ -1261,12 +2206,20 @@ public sealed partial class HdrCaptureWindow : IDisposable
         {
             int ix = Math.Clamp((w - _idleHintW) / 2, 4, Math.Max(4, w - _idleHintW - 4));
             int iy = Math.Max(4, (h - _idleHintH) / 2);
-            SetV4(cb.TextPos, 35, new System.Numerics.Vector4(ix, iy, _idleHintW, _idleHintH));
+            SetV4(cb.TextPos, 36, new System.Numerics.Vector4(ix, iy, _idleHintW, _idleHintH));
         }
 
-        // 图集子矩形（40 槽）
-        for (int i = 0; i < 40 && i < _atlasSubs.Length; i++)
+        // 图集子矩形（56 槽）
+        for (int i = 0; i < 56 && i < _atlasSubs.Length; i++)
             SetV4(cb.TextSubs, i, _atlasSubs[i]);
+
+        // ── 输入中的文字预览（EDIT 子窗口不可见 ⇒ 用纹理画在同一位置）──
+        UploadEditPreview();
+        if (_editHwnd != 0 && _editSrv is not null && _editPrevW > 0 && _editPrevH > 0)
+        {
+            cb.EditSub = new System.Numerics.Vector4(0, 0, _editPrevW / (float)EditTexW, _editPrevH / (float)EditTexH);
+            cb.EditPos = new System.Numerics.Vector4(_editFrameX, _editFrameY, _editPrevW, _editPrevH);
+        }
 
         // ── 标注层数据 ──
         BuildAnnoCb(ref cb);
@@ -1290,17 +2243,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 *(System.Numerics.Vector4*)(p + 112) = cb.Flags;
                 *(System.Numerics.Vector4*)(p + 128) = cb.FrameSize;
                 fixed (float* ts = cb.TextSubs)
-                    Buffer.MemoryCopy(ts, p + 144, 640, 640);
+                    Buffer.MemoryCopy(ts, p + 144, 896, 896);
                 fixed (float* tp = cb.TextPos)
-                    Buffer.MemoryCopy(tp, p + 784, 640, 640);
-                *(System.Numerics.Vector4*)(p + 1424) = cb.AnnoState;
-                *(System.Numerics.Vector4*)(p + 1440) = cb.AnnoColor;
-                *(System.Numerics.Vector4*)(p + 1456) = cb.AnnoStroke;
-                *(System.Numerics.Vector4*)(p + 1472) = cb.HoverRect;
-                *(System.Numerics.Vector4*)(p + 1488) = cb.SizeBadgeSub;
-                *(System.Numerics.Vector4*)(p + 1504) = cb.SizeBadgePos;
+                    Buffer.MemoryCopy(tp, p + 1040, 896, 896);
+                *(System.Numerics.Vector4*)(p + 1936) = cb.AnnoState;
+                *(System.Numerics.Vector4*)(p + 1952) = cb.AnnoColor;
+                *(System.Numerics.Vector4*)(p + 1968) = cb.AnnoStroke;
+                *(System.Numerics.Vector4*)(p + 1984) = cb.HoverRect;
+                *(System.Numerics.Vector4*)(p + 2000) = cb.SizeBadgeSub;
+                *(System.Numerics.Vector4*)(p + 2016) = cb.SizeBadgePos;
                 fixed (float* al = cb.AnnoLayers)
-                    Buffer.MemoryCopy(al, p + 1520, 4096, 4096);
+                    Buffer.MemoryCopy(al, p + 2032, 4096, 4096);
+                *(System.Numerics.Vector4*)(p + 6128) = cb.EditSub;
+                *(System.Numerics.Vector4*)(p + 6144) = cb.EditPos;
             }
             }
             finally { _ctx.Unmap(_uiCb!, 0); } // 异常路径也必须 Unmap，否则常量缓冲永久无法再写入
@@ -1325,6 +2280,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         foreach (var layer in _annoManager.GetLayersSnapshot().Where(l => l.IsVisible))
         {
             if (slot >= 15) break; // 层 0-14 提交层, 15 保留预览
+            // 正在再编辑的文字层由输入预览接管：两处都画会看到重影
+            if (_editHwnd != 0 && ReferenceEquals(layer, _editingLayer)) continue;
             WriteAnnoLayer(ref cb, slot, layer);
             slot++;
         }
@@ -1337,7 +2294,13 @@ public sealed partial class HdrCaptureWindow : IDisposable
             ClearAnnoLayer(ref cb, 15);
     }
 
-    private static int AnnoToolIndex() => 0; // 工具索引未用 (shader 仅按层类型绘制)
+    /// <summary>当前绘图工具的槽位（0..5 = 矩形/椭圆/箭头/画笔/文字/马赛克），其余 -1。
+    /// shader 用它把"选中的那枚"高亮出来 —— 没有这层反馈，用户点完工具看不出自己选了谁。</summary>
+    private int AnnoToolIndex() => _annoTool switch
+    {
+        "Rect" => 0, "Ellipse" => 1, "Arrow" => 2, "Pen" => 3, "Text" => 4, "Mosaic" => 5,
+        _ => -1
+    };
 
     private void WriteAnnoLayer(ref UiCbData cb, int idx, AnnotationLayer layer)
     {
@@ -1346,25 +2309,67 @@ public sealed partial class HdrCaptureWindow : IDisposable
         {
             ShapeType.Rectangle => 1, ShapeType.Ellipse => 2, ShapeType.Arrow => 3,
             ShapeType.Freehand => 4, ShapeType.Text => 5, ShapeType.Mosaic => 6,
+            ShapeType.MosaicBrush => 7,
             _ => 1
         };
+        // 线色/线宽按图层自己的样式（第二行工具选项条选的颜色），不再是写死的红
+        BrushStyle? style = layer switch
+        {
+            RectangleLayer rl2 => rl2.Style,
+            EllipseLayer el2 => el2.Style,
+            ArrowLayer al2 => al2.Style,
+            FreehandLayer fl2 => fl2.Style,
+            _ => null,
+        };
         var b = layer.GetBounds();
-        SetV4(cb.AnnoLayers, o + 0, new System.Numerics.Vector4(type, layer.Opacity, 2f, 0));
-        SetV4(cb.AnnoLayers, o + 1, new System.Numerics.Vector4(b.Left, b.Top, b.Right, b.Bottom));
-        SetV4(cb.AnnoLayers, o + 2, new System.Numerics.Vector4(1f, 0f, 0f, 1f)); // 红色
+        SetV4(cb.AnnoLayers, o + 0, new System.Numerics.Vector4(
+            type, layer.Opacity, Math.Max(1f, style?.StrokeWidth ?? 2f), 0));
+        // ⚠ 箭头的 V1 必须写【起止点】，不能写外接框：shader 的箭头分支把 a1.xy→a1.zw 当主线，
+        // 喂外接框（左上→右下）会让所有箭头在预览里恒指向右下 —— 2026-10-28 用户实测"箭头无法选择方向"。
+        // 提交层与拖拽预览（WriteAnnoPreview）是同一个坑，两处一起改。
+        SetV4(cb.AnnoLayers, o + 1, layer is ArrowLayer a0
+            ? new System.Numerics.Vector4(a0.StartX, a0.StartY, a0.EndX, a0.EndY)
+            : new System.Numerics.Vector4(b.Left, b.Top, b.Right, b.Bottom));
+        SetV4(cb.AnnoLayers, o + 2, style is { } st
+            ? new System.Numerics.Vector4(
+                SrgbToLinear(st.StrokeColor.R), SrgbToLinear(st.StrokeColor.G),
+                SrgbToLinear(st.StrokeColor.B), Math.Clamp(st.StrokeColor.A, 0f, 1f))
+            : new System.Numerics.Vector4(1f, 0f, 0f, 1f));
 
         float param = 0, slot = 0;
+        float extraZ = 0;
         switch (layer)
         {
             case ArrowLayer al: param = al.ArrowHeadSize; break;
             case MosaicLayer m: param = m.BlockSize; break;
-            case TextLayer tl: param = tl.FontSize; slot = TextSlotOf(tl); break;
+            case MosaicBrushLayer mb: param = mb.BlockSize; extraZ = mb.BrushWidth; break;
+            case TextLayer tl:
+                param = tl.FontSize; slot = TextSlotOf(tl);
+                // 文字颜色按图层（CPU 合成用的也是它）；形状仍是统一红色。
+                // sRGB → 线性：着色器在 scRGB 线性基上做 lerp，CPU 侧是 BGRA8 字节。
+                SetV4(cb.AnnoLayers, o + 2, new System.Numerics.Vector4(
+                    SrgbToLinear(tl.TextColor.R), SrgbToLinear(tl.TextColor.G),
+                    SrgbToLinear(tl.TextColor.B), Math.Clamp(tl.TextColor.A, 0f, 1f)));
+                // V4 = 文字背景（含 Padding 的外框）；a3.z = Padding（内框 = 外框减它）
+                SetV4(cb.AnnoLayers, o + 4, new System.Numerics.Vector4(
+                    SrgbToLinear(tl.BackgroundColor.R), SrgbToLinear(tl.BackgroundColor.G),
+                    SrgbToLinear(tl.BackgroundColor.B), Math.Clamp(tl.BackgroundColor.A, 0f, 1f)));
+                break;
         }
-        SetV4(cb.AnnoLayers, o + 3, new System.Numerics.Vector4(param, slot, 0, 0));
+        SetV4(cb.AnnoLayers, o + 3, new System.Numerics.Vector4(param, slot,
+            layer is TextLayer t2 ? Math.Max(2f, t2.Padding) : extraZ, 0));
 
         if (layer is FreehandLayer fl)
         {
             var pts = SimplifyPolyline(fl.Points, 13);
+            for (int k = 0; k < 12; k++)
+                SetV4(cb.AnnoLayers, o + 4 + k, k + 1 < pts.Count
+                    ? new System.Numerics.Vector4(pts[k].X, pts[k].Y, pts[k + 1].X, pts[k + 1].Y)
+                    : s_invalidSeg);
+        }
+        else if (layer is MosaicBrushLayer mbl)
+        {
+            var pts = SimplifyPolyline(mbl.Points, 13);
             for (int k = 0; k < 12; k++)
                 SetV4(cb.AnnoLayers, o + 4 + k, k + 1 < pts.Count
                     ? new System.Numerics.Vector4(pts[k].X, pts[k].Y, pts[k + 1].X, pts[k + 1].Y)
@@ -1383,18 +2388,29 @@ public sealed partial class HdrCaptureWindow : IDisposable
         int o = 15 * 16;
         var start = _annoDragStart;
         var end = ScreenToAnno(_mx, _my);
-        float type = _annoTool switch
+        bool brushMosaic = _annoTool == "Mosaic" && _mosaicMode == "Brush";
+        float type = brushMosaic ? 7 : _annoTool switch
         {
             "Rect" => 1, "Ellipse" => 2, "Arrow" => 3, "Pen" => 4, "Text" => 5, "Mosaic" => 6,
             _ => 1
         };
         float x1 = Math.Min(start.X, end.X), y1 = Math.Min(start.Y, end.Y);
         float x2 = Math.Max(start.X, end.X), y2 = Math.Max(start.Y, end.Y);
-        SetV4(cb.AnnoLayers, o + 0, new System.Numerics.Vector4(type, 1f, 2f, 0));
-        SetV4(cb.AnnoLayers, o + 1, new System.Numerics.Vector4(x1, y1, x2, y2));
-        SetV4(cb.AnnoLayers, o + 2, new System.Numerics.Vector4(1f, 0f, 0f, 1f));
-        SetV4(cb.AnnoLayers, o + 3, new System.Numerics.Vector4(type == 3 ? 12f : (type == 6 ? 10f : 0f), 0, 0, 0));
-        if (type == 4)
+        SetV4(cb.AnnoLayers, o + 0, new System.Numerics.Vector4(type, 1f, Math.Max(1f, _annoStrokeW), 0));
+        // 箭头（type 3）的主线是 a1.xy→a1.zw：这里必须给拖拽真实起止点，给外接框就永远指向右下
+        SetV4(cb.AnnoLayers, o + 1, type == 3
+            ? new System.Numerics.Vector4(start.X, start.Y, end.X, end.Y)
+            : new System.Numerics.Vector4(x1, y1, x2, y2));
+        // 预览也用当前选的颜色（以前写死红 ⇒ 换色只在提交后才生效，画的时候看不出来）
+        SetV4(cb.AnnoLayers, o + 2, new System.Numerics.Vector4(
+            SrgbToLinear(_annoColor.R), SrgbToLinear(_annoColor.G), SrgbToLinear(_annoColor.B),
+            Math.Clamp(_annoColor.A, 0f, 1f)));
+        // 涂抹预览的笔宽与提交时同一个来源（MosaicBrushPx），不再各算一份
+        float brushW = MosaicBrushPx();
+        SetV4(cb.AnnoLayers, o + 3, new System.Numerics.Vector4(
+            type == 3 ? 12f : (type == 6 || type == 7 ? Math.Max(4f, 10f * (float)_uiScale) : 0f),
+            0, type == 7 ? brushW : 0, 0));
+        if (type == 4 || type == 7)
         {
             List<System.Numerics.Vector2> pts;
             lock (_penPointsLock) { pts = SimplifyPolyline(_penPoints, 13); }
@@ -1412,14 +2428,16 @@ public sealed partial class HdrCaptureWindow : IDisposable
         return new System.Numerics.Vector2(fx - x1, fy - y1);
     }
 
-    /// <summary>文字层在图集文字槽中的序号（与 EnsureTextAtlas 渲染顺序一致）。</summary>
+    /// <summary>文字层在图集文字槽中的序号（与 EnsureTextAtlas 的筛法/顺序严格一致）。
+    /// <para>两处都用 <c>l is TextLayer && l.IsVisible</c>：此前图集按"可见"筛、这里按"全部"数，
+    /// 只要有一层被隐藏，其后的文字就会各自错位采样到别人的位图。</para></summary>
     private float TextSlotOf(TextLayer tl)
     {
         int slot = 0;
         // ═══ 2026-08-16 P1-3: 快照遍历 ═══
         foreach (var layer in _annoManager.GetLayersSnapshot())
         {
-            if (layer is not TextLayer t) continue;
+            if (layer is not TextLayer t || !t.IsVisible) continue;
             if (ReferenceEquals(t, tl)) return slot;
             slot++;
         }
@@ -1703,19 +2721,13 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 .ToArray();
 
             // 工具栏 — QQ 风格工具栏（每个按钮独立显示，图标+文字并排，悬停提示功能）
-            // 尺寸随 DPI 缩放（绘制与 Down() 命中检测共用 GetToolbarLayout 保证一致）
+            // 落位与尺寸一律取 ToolbarFrame（与 GPU 绘制、Down()/HitAnnoToolbar 命中、第二行几何同源）
             int n = items.Length;
-            var lay = GetToolbarLayout(n);
+            var lay = ToolbarFrame(n, w, h);
             int btnW = lay.BtnW, btnH = lay.BtnH, gap = lay.Gap;
             int padX = lay.PadX, padY = lay.PadY;
             int totalW = lay.TotalW, totalH = lay.TotalH;
-
-            int selX1 = Math.Min(_sx1, _sx2), selX2 = Math.Max(_sx1, _sx2);
-            int selY1 = Math.Min(_sy1, _sy2), selY2 = Math.Max(_sy1, _sy2);
-            int tx = Math.Clamp(selX1 + (selX2 - selX1) / 2 - totalW / 2, 4, w - totalW - 4);
-            int ty = selY2 + 10;
-            if (ty + totalH + 10 > h) ty = selY1 - totalH - 12;
-            if (ty < 0) ty = 4;
+            int tx = lay.Tx, ty = lay.Ty;
 
             // 绘制毛玻璃背景（圆角）
             float bgA = 0.88f;
@@ -1780,6 +2792,36 @@ public sealed partial class HdrCaptureWindow : IDisposable
         int totalW = n * btnW + (n - 1) * gap + padX * 2;
         int totalH = btnH + padY * 2;
         return (btnW, btnH, gap, padX, padY, totalW, totalH);
+    }
+
+    /// <summary>
+    /// 工具条在帧内的整块落位（左上角 + 布局）—— 绘制、两处命中、第二行几何【四处同源】。
+    /// <para>以前每处各抄一遍夹取算术：改一处就分叉，而分叉的表现是"画在那儿的按钮点不到 /
+    /// 点到的按钮画在别处"。2026-10-28 真机还暴露出另一层代价：命中侧的算术被人当依据去改状态时，
+    /// 谁也算不清是哪一处在错。</para>
+    /// </summary>
+    private (int Tx, int Ty, int BtnW, int BtnH, int Gap, int PadX, int PadY, int TotalW, int TotalH)
+        ToolbarFrame(int n, int frameW, int frameH)
+    {
+        var lay = GetToolbarLayout(n);
+        int selX1 = Math.Min(_sx1, _sx2), selX2 = Math.Max(_sx1, _sx2);
+        int selY1 = Math.Min(_sy1, _sy2), selY2 = Math.Max(_sy1, _sy2);
+        int tx = Math.Clamp(selX1 + (selX2 - selX1) / 2 - lay.TotalW / 2, 4, Math.Max(4, frameW - lay.TotalW - 4));
+        int ty = selY2 + 10;
+        if (ty + lay.TotalH + 10 > frameH) ty = selY1 - lay.TotalH - 12;
+        if (ty < 0) ty = 4;
+        return (tx, ty, lay.BtnW, lay.BtnH, lay.Gap, lay.PadX, lay.PadY, lay.TotalW, lay.TotalH);
+    }
+
+    /// <summary>探针读数口：工具条落位（用帧尺寸，与绘制/命中同一处算术）。</summary>
+    internal (int Tx, int Ty, int BtnW, int BtnH, int Gap, int PadX, int PadY, int TotalW, int TotalH)
+        ProbeToolbarFrame(int n) => ToolbarFrame(n, _winW, _winH);
+
+    /// <summary>探针读数口：当前选区（帧内、已归一化）。工具条点击一类"不该动选区"的判据要读它。</summary>
+    internal (int X, int Y, int W, int H) ProbeSelection()
+    {
+        int x1 = Math.Min(_sx1, _sx2), y1 = Math.Min(_sy1, _sy2);
+        return (x1, y1, Math.Abs(_sx2 - _sx1), Math.Abs(_sy2 - _sy1));
     }
 
     /// <summary>工具栏文字位图缓存（文字内容固定，避免每次 Win2D 渲染 + GPU 回读）。</summary>
@@ -2048,6 +3090,9 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 LogService.Debug("HdrCapture", $"WM_LBUTTONUP ({GX(l)},{GY(l)}) moved={_moved} down={_down}", LogCategory.Capture);
                 Up(GX(l), GY(l)); ReleaseCapture(); return 0;
             case WM_KEY: Key((int)w); return 0;
+            case WM_MOUSEWHEEL: // 下拉列表翻页（高字 = 带符号的滚轮增量）
+                DdScroll((short)((w.ToInt64() >> 16) & 0xFFFF));
+                return 0;
             case WM_CLOSE: // Alt+F4 / 系统关闭 → 兜底触发 Cancel，保证 MainWindow 防重入锁必然释放
                 FireAction(MainToolbarAction.Cancel, 0, 0, 0, 0);
                 Close();
@@ -2071,13 +3116,27 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private void Down(int x, int y)
     {
         TouchIdle();
-        _down = true; _moved = false; _dragHandle = -1;
+        // 上一次滑条拖拽没收到抬起（丢焦点/捕获被抢）→ 新一次按下先收尾，否则 Move 永远走拖拽分支
+        if (_sliderDrag) { _sliderDrag = false; ReleaseCapture(); }
+        _down = true; _moved = false; _dragHandle = -1; _movingSel = false;
+        // 闩描述的是【这一次按下】归谁，所以每次按下都重算：不在这儿清零，拖完滑条留下的闩
+        // 会把下一笔"涂一笔"的松手也吃掉（2026-10-28 探针 ⑫ 当场抓到：涂抹图层没了）。
+        _toolClickLatch = false;
 
         if (_annoMode)
         {
             // ── 标注模式：工具栏 / 选区内绘制 / 文字输入 ──
+            // ⚠ 吃掉按下时必须立 _toolClickLatch：_down=false 之后 Up() 就不再有"这次按下属于谁"的信息，
+            // 会一路落到"重画选区"的收尾，把 (_sx2,_sy2) 写成那次点击的位置 —— 2026-10-28 真机日志：
+            // 点标注工具条「完成」后 选区完成 1280x820 → 1133x861，保存出去的图比用户框的少 147 px 宽。
+            // 旧写法 `_moved = true` 挡不住：Up() 尾部的"单击"分支判的是 !_moved，动了就直接重画选区。
             var (hit, idx) = HitAnnoToolbar(x, y);
-            if (hit) { _down = false; _moved = true; OnAnnoToolbarClick(idx); return; } // _moved=true 防 Up 重置选区
+            if (hit) { _down = false; _moved = true; _toolClickLatch = true; OnAnnoToolbarClick(idx); return; }
+
+            // 下拉列表优先于第二行：面板盖在行上方/下方，点它不能当成选格子或开始画图
+            if (HitDropdown(x, y)) { _down = false; _moved = true; _toolClickLatch = true; return; }
+            // 第二行选项条（线色 / 马赛克方式 / 画笔粗细 / 文字字体）：命中就吃掉这次按下
+            if (HitOptionsRow(x, y)) { _down = false; _moved = true; _toolClickLatch = true; return; }
 
             int x1 = Math.Min(_sx1, _sx2), y1 = Math.Min(_sy1, _sy2);
             int x2 = Math.Max(_sx1, _sx2), y2 = Math.Max(_sy1, _sy2);
@@ -2085,10 +3144,20 @@ public sealed partial class HdrCaptureWindow : IDisposable
             {
                 if (_annoTool == "Text")
                 {
-                    _textInsertPos = ScreenToAnno(x, y);
-                    _down = false;
-                    ShowTextEdit(new System.Numerics.Vector2(x, y)); // 帧坐标
-                    return;
+                    // 文字不是"拖出来"的：按下只记账 —— 抬起仍没拖动才开输入框；
+                    // 落在已有文字上拖动 = 移动它（位置变化在抬手上报一条 UpdateLayer ⇒ Ctrl+Z 可回）。
+                    var ap = ScreenToAnno(x, y);
+                    _textClickArmed = true;
+                    _textHitLayer = TextLayerAt(ap.X, ap.Y);
+                    _textDownX = x; _textDownY = y;
+                    _textDragging = false; _textDragMoved = false;
+                    if (_textHitLayer is not null)
+                    {
+                        _textLayerStartX = _textHitLayer.X;
+                        _textLayerStartY = _textHitLayer.Y;
+                    }
+                    SetCapture(_hwnd);
+                    return; // _down 保持 true，由 Up/Move 收尾
                 }
                 _down = false; // 标注绘制不使用选区拖拽标志（shader 遮罩由选区外条件控制）
                 _annoDown = true;
@@ -2111,15 +3180,9 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // 1. 工具栏按钮点击检测（QQ风格）。槽位序 = ToolbarContract.Main 声明序，动作直接取声明值。
             var items = ToolbarContract.Main;
             int n = items.Length;
-            var lay = GetToolbarLayout(n);
+            var lay = ToolbarFrame(n, _winW, _winH);
             int btnW = lay.BtnW, btnH = lay.BtnH, gap = lay.Gap, padX = lay.PadX, padY = lay.PadY;
-            int totalW = lay.TotalW, totalH = lay.TotalH;
-            int selX1 = Math.Min(_sx1, _sx2), selX2 = Math.Max(_sx1, _sx2);
-            int selY1 = Math.Min(_sy1, _sy2), selY2 = Math.Max(_sy1, _sy2);
-            int tx = Math.Clamp(selX1 + (selX2 - selX1) / 2 - totalW / 2, 4, _winW - totalW - 4);
-            int ty = selY2 + 10;
-            if (ty + totalH + 10 > _winH) ty = selY1 - totalH - 12;
-            if (ty < 0) ty = 4;
+            int tx = lay.Tx, ty = lay.Ty;
             for (int i = 0; i < n; i++)
             {
                 int ix = tx + padX + i * (btnW + gap);
@@ -2128,6 +3191,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 {
                     _down = false;
                     _moved = true; // 防 Up 单击逻辑重置选区 (2026-08-11 bugfix)
+                    _toolClickLatch = true; // 同一闩：这一下属于按钮，不属于"重画选区"（DoAction 若没关窗，Up 会把右下角写到按钮上）
                     DoAction(items[i].Action);
                     return;
                 }
@@ -2138,26 +3202,51 @@ public sealed partial class HdrCaptureWindow : IDisposable
             int x2 = Math.Max(_sx1, _sx2), y2 = Math.Max(_sy1, _sy2);
             int hit = _handleHit;
             bool Near(int px, int py, int tx, int ty) => (px - tx) * (px - tx) + (py - ty) * (py - ty) <= hit * hit;
-            if (Near(x, y, x1, y1)) { _dragHandle = 0; return; } // TL
-            if (Near(x, y, x2, y1)) { _dragHandle = 1; return; } // TR
-            if (Near(x, y, x1, y2)) { _dragHandle = 2; return; } // BL
-            if (Near(x, y, x2, y2)) { _dragHandle = 3; return; } // BR
+            // 记下"手心到角的偏移"：手柄命中区有 12×DPI 那么宽，不记偏移的话，
+            // 就算按在离角 10px 的地方，角也会在第一次 Move 时立刻跳到手心（看起来像"点一下就变形"）。
+            if (Near(x, y, x1, y1)) { _dragHandle = 0; _dragOffX = x - x1; _dragOffY = y - y1; return; } // TL
+            if (Near(x, y, x2, y1)) { _dragHandle = 1; _dragOffX = x - x2; _dragOffY = y - y1; return; } // TR
+            if (Near(x, y, x1, y2)) { _dragHandle = 2; _dragOffX = x - x1; _dragOffY = y - y2; return; } // BL
+            if (Near(x, y, x2, y2)) { _dragHandle = 3; _dragOffX = x - x2; _dragOffY = y - y2; return; } // BR
 
+            // 3. 选区内部：拖拽 = 平移整框；单击 = 什么都不做（保持选区）。
+            //    旧写法落进下面那行"从按下点重开一个选区"，于是一次误触就把整框重置，
+            //    松开时又按"单击=选中悬停窗口/全屏"处理 ⇒ 选区一下跳成别的范围。
+            //    ⚠ 必须先判"点确实在框内"：框外按下仍是【重开新选区】，否则用户想重画却平移了旧框。
+            if (x >= x1 && x <= x2 && y >= y1 && y <= y2)
+            {
+                _movingSel = true;
+                _moveOffX = x - x1;
+                _moveOffY = y - y1;
+                return;
+            }
+            // 4. 选区之外：重开一个新选区。
+            //    这里必须把 _selComplete 放下 —— 否则整个重画过程里工具条/手柄仍按"已选完"画着，
+            //    用户看到的是"框没断、按钮还在"，实际在画的是一个新框（同一个"看起来不像鼠标做的"症状）。
         }
 
+        _selComplete = false;
         _sx1 = _sx2 = x; _sy1 = _sy2 = y;
     }
 
     private void Move(int x, int y)
     {
         TouchIdle();
+        if (_sliderDrag)
+        {
+            float v = SliderValueAt(x);
+            if (Math.Abs(v - _mosaicBrushPx) > 0.01f) { _mosaicBrushPx = v; RequestRedraw(); }
+            _mx = x; _my = y;
+            return; // 拖滑条时不画形状、也不更新格子悬停
+        }
+        if (_annoMode) UpdateOptionsHover(x, y);
         _mx = x; _my = y;
 
         if (_annoDown)
         {
             // 标注拖拽：画笔累积轨迹, 其他工具实时更新预览
             _moved = true;
-            if (_annoTool == "Pen")
+            if (_annoTool == "Pen" || (_annoTool == "Mosaic" && _mosaicMode == "Brush"))
             {
                 var ap = ScreenToAnno(x, y);
                 lock (_penPointsLock)
@@ -2170,19 +3259,56 @@ public sealed partial class HdrCaptureWindow : IDisposable
             return;
         }
 
-        if (_annoMode) { RequestRedraw(); return; } // 标注模式 hover 刷新工具栏高亮
+        if (_annoMode)
+        {
+            // 文字工具：拖动已有文字 = 移动（预览直接改图层位置，抬手时再补一条可撤销的 UpdateLayer）
+            if (_down && _textClickArmed)
+            {
+                if (!_textDragging && (Math.Abs(x - _textDownX) > 3 || Math.Abs(y - _textDownY) > 3))
+                    _textDragging = true;
+                if (_textDragging && _textHitLayer is not null)
+                {
+                    int selW = Math.Abs(_sx2 - _sx1), selH = Math.Abs(_sy2 - _sy1);
+                    float bw = _textHitLayer.GetBounds().Width, bh = _textHitLayer.GetBounds().Height;
+                    float nx = Math.Clamp(_textLayerStartX + (x - _textDownX), 0, Math.Max(0, selW - bw));
+                    float ny = Math.Clamp(_textLayerStartY + (y - _textDownY), 0, Math.Max(0, selH - bh));
+                    if (Math.Abs(nx - _textLayerStartX) >= 1 || Math.Abs(ny - _textLayerStartY) >= 1)
+                        _textDragMoved = true;
+                    _textHitLayer.X = nx; _textHitLayer.Y = ny;
+                    RequestRedraw();
+                }
+                return;
+            }
+            RequestRedraw(); return; // 标注模式 hover 刷新工具栏高亮
+        }
 
         if (_down && _dragHandle >= 0)
         {
-            // 拖拽手柄调整选区
+            // 拖拽手柄调整选区：只动被抓住的那个角，另一角保持原位。
+            // 坐标按抓取偏移换算并钳进窗口，避免"角跑出屏幕后回来时对不上"。
+            int nx = Math.Clamp(x - _dragOffX, 0, Math.Max(0, _winW - 1));
+            int ny = Math.Clamp(y - _dragOffY, 0, Math.Max(0, _winH - 1));
             _moved = true;
             switch (_dragHandle)
             {
-                case 0: _sx1 = x; _sy1 = y; break; // TL
-                case 1: _sx2 = x; _sy1 = y; break; // TR
-                case 2: _sx1 = x; _sy2 = y; break; // BL
-                case 3: _sx2 = x; _sy2 = y; break; // BR
+                case 0: _sx1 = nx; _sy1 = ny; break; // TL
+                case 1: _sx2 = nx; _sy1 = ny; break; // TR
+                case 2: _sx1 = nx; _sy2 = ny; break; // BL
+                case 3: _sx2 = nx; _sy2 = ny; break; // BR
             }
+            RequestRedraw();
+            return;
+        }
+
+        if (_down && _movingSel)
+        {
+            // 平移已完成选区：整框跟着鼠标走，尺寸不变，边界钳在窗口内。
+            int sw = Math.Abs(_sx2 - _sx1), sh = Math.Abs(_sy2 - _sy1);
+            int left = Math.Clamp(x - _moveOffX, 0, Math.Max(0, _winW - 1 - sw));
+            int top = Math.Clamp(y - _moveOffY, 0, Math.Max(0, _winH - 1 - sh));
+            if (left != Math.Min(_sx1, _sx2) || top != Math.Min(_sy1, _sy2)) _moved = true;
+            _sx1 = left; _sy1 = top;
+            _sx2 = left + sw; _sy2 = top + sh;
             RequestRedraw();
             return;
         }
@@ -2205,6 +3331,24 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     private void Up(int x, int y)
     {
+        if (_sliderDrag)
+        {
+            _sliderDrag = false;
+            _mosaicBrushPx = SliderValueAt(x);
+            ReleaseCapture();
+            LogService.Info("HdrCapture", $"画笔粗细 → {_mosaicBrushPx:F0}px", LogCategory.UI);
+            RequestRedraw();
+            return;
+        }
+        if (_toolClickLatch)
+        {
+            // 按下已经被标注工具条/选项条/下拉吃掉：这一次松手只是收尾。
+            // 少了这道闩，退出标注模式后的那次 Up 会落到下面"重画选区"的尾巴，把右下角写成点击位置。
+            _toolClickLatch = false;
+            _down = false; _moved = false;
+            RequestRedraw();
+            return;
+        }
         if (_annoDown)
         {
             // ── 标注绘制完成：提交图层 ──
@@ -2212,14 +3356,37 @@ public sealed partial class HdrCaptureWindow : IDisposable
             _down = false;
             ReleaseCapture();
             var end = ScreenToAnno(x, y);
-            if (_annoTool == "Pen")
+            bool brushMosaic = _annoTool == "Mosaic" && _mosaicMode == "Brush";
+            if (_annoTool == "Pen" || brushMosaic)
             {
                 lock (_penPointsLock)
                 {
                     if (_penPoints.Count >= 2)
                     {
                         _penPoints.Add(end);
-                        _annoManager.AddLayer(new FreehandLayer { Points = [.. _penPoints] });
+                        if (brushMosaic)
+                        {
+                            var stroke = new MosaicBrushLayer
+                            {
+                                Points = [.. _penPoints],
+                                BlockSize = Math.Max(4f, 10f * (float)_uiScale),
+                                BrushWidth = MosaicBrushPx(),
+                            };
+                            _annoManager.AddLayer(stroke);
+                            LogService.Info("HdrCapture",
+                                $"马赛克涂抹提交 笔宽 {stroke.BrushWidth:F0}px 点数 {stroke.Points.Count}", LogCategory.UI);
+                        }
+                        else
+                            _annoManager.AddLayer(new FreehandLayer
+                            {
+                                Points = [.. _penPoints],
+                                Style = new BrushStyle
+                                {
+                                    StrokeColor = _annoColor,
+                                    StrokeWidth = Math.Max(1f, _annoStrokeW),
+                                    IsFillEnabled = false,
+                                },
+                            });
                     }
                     _penPoints.Clear();
                 }
@@ -2231,13 +3398,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 float w = Math.Abs(end.X - start.X), h = Math.Abs(end.Y - start.Y);
                 if (w >= 3 && h >= 3)
                 {
+                    var style = new BrushStyle
+                    {
+                        StrokeColor = _annoColor,
+                        StrokeWidth = Math.Max(1f, _annoStrokeW),
+                        IsFillEnabled = false,
+                    };
                     AnnotationLayer layer = _annoTool switch
                     {
-                        "Rect" => new RectangleLayer { X = x1, Y = y1, Width = w, Height = h },
-                        "Ellipse" => new EllipseLayer { CenterX = x1 + w / 2, CenterY = y1 + h / 2, RadiusX = w / 2, RadiusY = h / 2 },
-                        "Arrow" => new ArrowLayer { StartX = start.X, StartY = start.Y, EndX = end.X, EndY = end.Y },
-                        "Mosaic" => new MosaicLayer { X = x1, Y = y1, Width = w, Height = h },
-                        _ => new RectangleLayer { X = x1, Y = y1, Width = w, Height = h }
+                        "Rect" => new RectangleLayer { X = x1, Y = y1, Width = w, Height = h, Style = style },
+                        "Ellipse" => new EllipseLayer { CenterX = x1 + w / 2, CenterY = y1 + h / 2, RadiusX = w / 2, RadiusY = h / 2, Style = style },
+                        "Arrow" => new ArrowLayer { StartX = start.X, StartY = start.Y, EndX = end.X, EndY = end.Y, Style = style },
+                        "Mosaic" => new MosaicLayer { X = x1, Y = y1, Width = w, Height = h, BlockSize = Math.Max(4f, 10f * (float)_uiScale) },
+                        _ => new RectangleLayer { X = x1, Y = y1, Width = w, Height = h, Style = style }
                     };
                     _annoManager.AddLayer(layer);
                 }
@@ -2246,7 +3419,58 @@ public sealed partial class HdrCaptureWindow : IDisposable
             return;
         }
 
-        if (_annoMode) { _down = false; return; } // 标注模式下 Up 不处理选区 (2026-08-11 bugfix)
+        if (_annoMode)
+        {
+            if (_textClickArmed)
+            {
+                var hit = _textHitLayer;
+                bool dragged = _textDragging;
+                bool moved = _textDragging && _textDragMoved;
+                _textClickArmed = false;
+                _textHitLayer = null;
+                _textDragging = false;
+                _textDragMoved = false;
+                _down = false;
+                if (moved && hit is not null)
+                {
+                    var after = (TextLayer)hit.Clone();   // Clone 保留 Id（见 AnnotationLayer.Id 注释）
+                    // 先把 live 层还原到拖动前：UpdateLayer 抓的 before 必须是"拖动前"，
+                    // 否则撤销只能回到拖动后的位置（等于没有撤销）。
+                    hit.X = _textLayerStartX; hit.Y = _textLayerStartY;
+                    _annoManager.UpdateLayer(hit.Id, after);
+                    LogService.Info("HdrCapture", $"文字移动 → ({after.X:0},{after.Y:0})", LogCategory.UI);
+                    RequestRedraw();
+                    return;
+                }
+                if (dragged) { RequestRedraw(); return; } // 空处拖了一段：不当单击，不开输入框
+                // 单击：命中文字 = 再编辑它；空处 = 在这一点新建
+                ShowTextEdit(new System.Numerics.Vector2(x, y), hit);
+                RequestRedraw();
+                return;
+            }
+            _down = false; return; // 标注模式下 Up 不处理选区 (2026-08-11 bugfix)
+        }
+
+        // ═══ 手柄拖拽 / 平移选区：端点已由 Move 维护，这里【不许】再把 (_sx2,_sy2) 写成松手点 ═══
+        // 旧写法无条件执行下面那两行 ⇒ 抓 TL/TR/BL 时"被固定的那个角"会被改写成鼠标位置：
+        // 抓左上角松手 = 右上角也被拖到左上角 ⇒ 选区当场塌成一条线（只有 BR 恰好正确）。
+        // 这也是"点四个角调大小，范围却乱跳"的主因；顺带把"点一下角就变全屏/别的窗口"一起止住。
+        if (_dragHandle >= 0 || _movingSel)
+        {
+            bool resized = _dragHandle >= 0;
+            _down = false;
+            _dragHandle = -1;
+            _movingSel = false;
+            RequestRedraw();
+            // 与下面"选区完成"同一用途的前提见证：调整/平移之后交给裁切链的到底是多大一块，
+            // 只有窗自己写得出来。单击框内不动不记（没调整，别污染日志）。
+            if (_moved)
+                LogService.Info("HdrCapture",
+                    $"{(resized ? "选区调整" : "选区平移")} {Math.Abs(_sx2 - _sx1)}x{Math.Abs(_sy2 - _sy1)} "
+                    + $"@(窗口内 {Math.Min(_sx1, _sx2)},{Math.Min(_sy1, _sy2)})",
+                    LogCategory.Capture);
+            return;
+        }
 
         _down = false; _sx2 = x; _sy2 = y;
         if (!_moved)
@@ -2281,9 +3505,18 @@ public sealed partial class HdrCaptureWindow : IDisposable
         if (_editHwnd != 0) return; // 文字输入中：EDIT 子窗口自己处理 Enter/Esc
         if (_annoMode)
         {
+            if (vk == VK_ESC && _ddOpen != 0) { CloseDropdown(); return; }
             if (vk == VK_ESC) { ExitAnnotationMode(); return; }
             if (ctrl && vk == VK_Z) { _annoManager.Undo(); _annoTextSlotsDirty = true; RequestRedraw(); return; }
             if (ctrl && vk == VK_Y) { _annoManager.Redo(); _annoTextSlotsDirty = true; RequestRedraw(); return; }
+            // 文字字体的键盘等价物（控件条之外的快路；写进同一份状态）
+            if (ctrl && _annoTool == "Text" && vk == VK_B) { _textFontBold = !_textFontBold; OnFontStateChanged(); return; }
+            if (ctrl && _annoTool == "Text" && vk == VK_I) { _textFontItalic = !_textFontItalic; OnFontStateChanged(); return; }
+            if (ctrl && _annoTool == "Text" && (vk == VK_OEM_4 || vk == VK_OEM_6))
+            {
+                StepFontSize(vk == VK_OEM_6 ? +1 : -1);
+                return;
+            }
             // 标注模式下 Enter = 保存（保持现状行为）
         }
         if (vk == VK_ESC) { FireAction(MainToolbarAction.Cancel, 0, 0, 0, 0); Close(); }
@@ -2316,17 +3549,52 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _annoMode = true;
         _annoTool = "Rect";
         _annoDown = false;
+        ShowSecondRowForTool(); // 矩形工具 → 第二行出颜色格
         LogService.Info("HdrCapture", "进入标注模式", LogCategory.UI);
         RequestRedraw();
     }
+
+    /// <summary>探针/内嵌入口：不经工具条点击直接进入标注模式并选中工具（工具条点击仍走 OnAnnoToolbarClick）。</summary>
+    internal void EnterAnnotationModeForProbe(string tool)
+    {
+        EnterAnnotationMode();
+        _annoTool = tool;
+        ShowSecondRowForTool();
+        RequestRedraw();
+    }
+
+    // ── 探针读数口（--preview-ui-probe）──
+    // 第二行的字体/字号/滑条都画在 D3D 帧里，没有 Win32 句柄可拿 ⇒ 探针只能拿"窗自己算出来的
+    // 格子矩形"，再用真鼠标消息点那些坐标（走 Down→HitOptionsRow→HitDropdown 这条产品路径）。
+    // 这些成员只读、不改状态，产品侧不消费。
+    internal int ProbeOptionsRowMode() => OptionsRowMode();
+    internal (int X, int Y, int CellH, int Gap, int[] W, int[] CellX) ProbeOptionsRow() => CurrentOptionsRow();
+    internal int ProbeSliderInset() => SliderInset();
+    internal int ProbeDropdownOpen() => _ddOpen;
+    internal int ProbeDropdownTop() => _ddTop;
+    internal (int X, int Y, int W, int ItemH, int Visible) ProbeDropdownGeometry() => DdGeometry();
+    internal int ProbeDdBandCapacity() => DdBandCapacity();
+    internal int ProbeDdBandCapacityAt(float scale) => DdBandCapacityAt(scale, TextRowWidths(scale).PanelW);
+    internal int ProbeBakedDdRows() => _ddBakedRows;
+    internal int ProbeDdMaxVisible() => DdMaxVisible;
+    internal int[] ProbeTextFontSizes() => TextFontSizes;
+    internal float ProbeFontSizeDip() => _textFontSizeDip;
+    internal bool ProbeTextBold() => _textFontBold;
+    internal bool ProbeAnnoMode() => _annoMode;
+    internal double ProbeUiScale() => _uiScale;
+    internal float ProbeBrushPx() => MosaicBrushPx();
 
     private void ExitAnnotationMode()
     {
         if (!_annoMode) return;
         _annoMode = false;
         _annoDown = false;
+        // 拖滑条时按 Esc：Move() 会先看 _sliderDrag 再看出标注模式，不收尾就把整块界面卡住
+        if (_sliderDrag) { _sliderDrag = false; ReleaseCapture(); }
         lock (_penPointsLock) { _penPoints.Clear(); }
         DestroyEdit();
+        CloseDropdown();
+        HideOptionsRow();
         LogService.Info("HdrCapture", "退出标注模式", LogCategory.UI);
         RequestRedraw();
     }
@@ -2336,13 +3604,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
     {
         if (!_selComplete) return (false, -1);
         int n = 10;
-        var lay = GetToolbarLayout(n);
-        int selX1 = Math.Min(_sx1, _sx2), selX2 = Math.Max(_sx1, _sx2);
-        int selY1 = Math.Min(_sy1, _sy2), selY2 = Math.Max(_sy1, _sy2);
-        int tx = Math.Clamp(selX1 + (selX2 - selX1) / 2 - lay.TotalW / 2, 4, _winW - lay.TotalW - 4);
-        int ty = selY2 + 10;
-        if (ty + lay.TotalH + 10 > _winH) ty = selY1 - lay.TotalH - 12;
-        if (ty < 0) ty = 4;
+        var lay = ToolbarFrame(n, _winW, _winH);
+        int tx = lay.Tx, ty = lay.Ty;
         for (int i = 0; i < n; i++)
         {
             int ix = tx + lay.PadX + i * (lay.BtnW + lay.Gap);
@@ -2368,10 +3631,12 @@ public sealed partial class HdrCaptureWindow : IDisposable
             case 8: ExitAnnotationMode(); break; // 完成
             case 9: ExitAnnotationMode(); break; // 取消
         }
+        ShowSecondRowForTool(); // 选工具 → 弹出它自己的第二行（文字=字体/字号，形状=颜色，马赛克=方式）
         RequestRedraw();
     }
 
-    // ── 文字输入 (Win32 EDIT 子窗口, 原生 IME 支持) ──
+    // ── 文字标注：字体工具条 / 就地输入 / 再编辑 / 拖动（2026-10-27 富文本） ──
+    // 字形度量与位图只走 AnnotationRasterizer.RasterizeText —— 预览图集与最终输出是同一张位图。
 
     private static WndProcDelegate? s_editProc;
     private static nint s_editOrigProc;
@@ -2381,7 +3646,9 @@ public sealed partial class HdrCaptureWindow : IDisposable
         if (m == WM_KEY)
         {
             int vk = (int)w;
-            if (vk == VK_ENT || vk == VK_ESC)
+            bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            // Enter 提交；Shift+Enter 交给 EDIT 自己插换行（ES_WANTRETURN）；Esc 放弃
+            if (vk == VK_ESC || (vk == VK_ENT && !shift))
             {
                 if (s_windows.TryGetValue(GetParent(h), out var self))
                 {
@@ -2390,25 +3657,471 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 }
             }
         }
+        // 每次内容变化都重烘预览（输入框本身看不见，画在帧里的才是用户看到的那份）
+        if (m == WM_CHAR || m == WM_KEYUP || m == WM_PASTE || m == WM_CUT || m == WM_UNDO)
+        {
+            nint r = CallWindowProcW(s_editOrigProc, h, m, w, l);
+            if (s_windows.TryGetValue(GetParent(h), out var owner)) owner.SyncEditPreview();
+            return r;
+        }
         return CallWindowProcW(s_editOrigProc, h, m, w, l);
     }
 
-    private void ShowTextEdit(System.Numerics.Vector2 framePos)
+    /// <summary>命中测试：点（选区图像坐标）所在的最上层可见文字图层。</summary>
+    private TextLayer? TextLayerAt(float ax, float ay)
+    {
+        var layers = _annoManager.GetLayersSnapshot();
+        for (int i = layers.Length - 1; i >= 0; i--)
+        {
+            if (layers[i] is not TextLayer t || !t.IsVisible) continue;
+            var b = t.GetBounds();
+            if (ax >= b.Left && ax <= b.Right && ay >= b.Top && ay <= b.Bottom) return t;
+        }
+        return null;
+    }
+
+    private static readonly int[] TextFontSizes =
+        [12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64, 72];
+
+    // ── 第二行工具选项条 ──
+    // 明确要求（2026-10-28 用户）：选中某个工具后，工具条【下方】再出一行它自己的选项。
+    // 形状/画笔/箭头 → 线色；马赛克 → 区域框选/画笔涂抹 → 画笔涂抹时再出粗细；
+    // 文字 → 字体家族 / 字号（下拉）+ B / I。
+    // 整条都画在 D3D 帧里（Win32 子控件在这块全屏交换链上一个像素都不显示，见 _annoColor 上方说明）。
+
+    private int OptionsRowHeight() => Math.Max(26, (int)Math.Round(30 * _uiScale));
+
+    /// <summary>当前工具是否要出第二行。</summary>
+    private bool OptionsRowForTool()
+        => _annoMode && _selComplete
+           && _annoTool is "Rect" or "Ellipse" or "Arrow" or "Pen" or "Mosaic" or "Text";
+
+    /// <summary>第二行形态：0=线色色板 1=马赛克方式 2=画笔粗细 3=文字字体。</summary>
+    private int OptionsRowMode() => _annoTool switch
+    {
+        "Text" => 3,
+        "Mosaic" => _mosaicMode == "Brush" ? 2 : 1,
+        _ => 0,
+    };
+
+    /// <summary>每个格子的宽度（文字行的家族/字号/B/I 四种宽度不同，其余等宽）。</summary>
+    private int[] OptionsRowWidths()
+    {
+        int hs = OptionsRowHeight();
+        switch (OptionsRowMode())
+        {
+            case 0: return [hs, hs, hs, hs, hs, hs];
+            case 1: return [.. Enumerable.Repeat(Math.Max(70, (int)Math.Round(96 * _uiScale)), IdOptMosaicCount)];
+            // 画笔粗细：左格是滑条（宽），右格是当前值（窄）
+            case 2: return [Math.Max(200, (int)Math.Round(260 * _uiScale)), Math.Max(70, (int)Math.Round(96 * _uiScale))];
+            default:
+            {
+                var (famW, sizeW, biW, _) = TextRowWidths((float)_uiScale);
+                return [famW, sizeW, biW, biW];
+            }
+        }
+    }
+
+    /// <summary>
+    /// 文字行（形态 3）四格宽度与下拉面板宽 —— 只依赖缩放，所以图集烘焙、命中检测、容量计算
+    /// 都可以用同一份表达式（容量还要算"别的缩放下装得下几行"，不能读当前状态）。
+    /// PanelW 取家族/字号两列里较宽的那个：容量按最坏的列算，任何一列打开都不会超。
+    /// </summary>
+    private static (int FamW, int SizeW, int BiW, int PanelW) TextRowWidths(float scale)
+    {
+        int famW = Math.Max(150, (int)Math.Round(220 * scale));
+        int sizeW = Math.Max(64, (int)Math.Round(84 * scale));
+        int biW = Math.Max(30, (int)Math.Round(40 * scale));
+        int panelW = Math.Max(Math.Max(famW, sizeW), Math.Max(160, (int)Math.Round(200 * scale)));
+        return (famW, sizeW, biW, panelW);
+    }
+
+    /// <summary>往文字带里逐格排版（纯算术）。装不下的格子返回 H=0，后续格子也不会再装回去。</summary>
+    private static (int X, int Y, int W, int H)[] PackTextBand(
+        int atlasW, int bandTop, int bandH, int[] cw, int[] ch)
+    {
+        var rects = new (int X, int Y, int W, int H)[cw.Length];
+        int sx = 0, sy = bandTop, rowH = 0;
+        for (int i = 0; i < cw.Length; i++)
+        {
+            if (sx + cw[i] > atlasW) { sy += rowH; sx = 0; rowH = 0; }
+            if (sy + ch[i] > bandTop + bandH) continue;
+            rects[i] = (sx, sy, cw[i], ch[i]);
+            sx += cw[i] + 2;
+            rowH = Math.Max(rowH, ch[i]);
+        }
+        return rects;
+    }
+
+    /// <summary>文字带在给定缩放下真能烘下几项下拉列表（与 EnsureTextAtlas 同一份排版算术）。</summary>
+    private int DdBandCapacityAt(float scale, int panelW)
+    {
+        int cellH = Math.Max(26, (int)Math.Round(30 * scale));
+        var (famW, sizeW, biW, _) = TextRowWidths(scale);
+        int[] cw = [famW, sizeW, biW, biW];
+        int[] ch = [cellH, cellH, cellH, cellH];
+        Array.Resize(ref cw, 4 + DdMaxVisible);
+        Array.Resize(ref ch, 4 + DdMaxVisible);
+        for (int i = 0; i < DdMaxVisible; i++) { cw[4 + i] = panelW; ch[4 + i] = cellH; }
+        var rects = PackTextBand(AtlasW, AtlasH - AtlasBandH, AtlasBandH, cw, ch);
+        int n = 0;
+        while (n < DdMaxVisible && rects[4 + n].H > 0) n++;
+        return n;
+    }
+
+    private int DdBandCapacity() => DdBandCapacityAt((float)_uiScale, DdPanelWidth());
+
+    private int OptionsRowGap() => Math.Max(4, (int)Math.Round(6 * _uiScale));
+
+    /// <summary>第二行的几何（绘制与命中检测共用一处，避免两边算法漂移）。</summary>
+    private (int X, int Y, int CellH, int Gap, int[] W, int[] CellX) OptionsRowGeometry(
+        (int Tx, int Ty, int BtnW, int BtnH, int Gap, int PadX, int PadY, int TotalW, int TotalH) tb)
+    {
+        int cellH = OptionsRowHeight();
+        int gap = OptionsRowGap();
+        var w = OptionsRowWidths();
+        int totalW = w.Sum() + (w.Length - 1) * gap;
+        int bx = Math.Clamp(tb.Tx + tb.TotalW / 2 - totalW / 2, 4, Math.Max(4, _winW - totalW - 4));
+        int by = tb.Ty + tb.TotalH + 6;                                  // 工具条正下方
+        if (by + cellH + 4 > _winH) by = Math.Max(4, tb.Ty - cellH - 6);  // 下方放不下 → 上方
+        var xs = new int[w.Length];
+        int cx = bx;
+        for (int i = 0; i < w.Length; i++) { xs[i] = cx; cx += w[i] + gap; }
+        return (bx, by, cellH, gap, w, xs);
+    }
+
+    /// <summary>第二行几何（命中/悬停/上传三处共用；工具条落位取自 ToolbarFrame 这一处）。</summary>
+    private (int X, int Y, int CellH, int Gap, int[] W, int[] CellX) CurrentOptionsRow()
+        => OptionsRowGeometry(ToolbarFrame(10, _winW, _winH));
+
+    /// <summary>按当前工具切换第二行（文字行 = 字体/字号/B/I）。</summary>
+    private void ShowSecondRowForTool()
+    {
+        CloseDropdown();
+        _optRowVisible = OptionsRowForTool();
+        _optHover = -1;
+        _uiTextDirty = true;
+        if (_optRowVisible) RequestRedraw();
+    }
+
+    // ── 字体/字号下拉列表 ──
+
+    private string[] FontFamilies()
+    {
+        if (_fontFamilies is not null) return _fontFamilies;
+        var list = FontLoader.GetSystemFonts()
+            .Select(f => f.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        list.Sort(StringComparer.CurrentCultureIgnoreCase);
+        if (!list.Any(n => string.Equals(n, _textFontFamily, StringComparison.OrdinalIgnoreCase)))
+            list.Insert(0, _textFontFamily);
+        return _fontFamilies = [.. list];
+    }
+
+    private int DdItemCount() => _ddOpen == 1 ? FontFamilies().Length : TextFontSizes.Length;
+
+    private string DdItemText(int i) => _ddOpen == 1
+        ? FontFamilies()[i]
+        : TextFontSizes[i].ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private int FamilyIndex()
+    {
+        int i = Array.FindIndex(FontFamilies(), n => string.Equals(n, _textFontFamily, StringComparison.OrdinalIgnoreCase));
+        return i < 0 ? 0 : i;
+    }
+
+    private int SizeIndex()
+    {
+        int i = Array.IndexOf(TextFontSizes, (int)Math.Round(_textFontSizeDip));
+        return i < 0 ? 0 : i;
+    }
+
+    private int DdSelIndex() => _ddOpen == 2 ? SizeIndex() : FamilyIndex();
+
+    private int DdPanelWidth() => Math.Max(
+        OptionsRowWidths()[_ddOpen == 2 ? 1 : 0],
+        Math.Max(160, (int)Math.Round(200 * _uiScale)));
+
+    /// <summary>下拉面板几何（打开状态才有效）。放不下就翻到行的上方，再不行就贴底。</summary>
+    private (int X, int Y, int W, int ItemH, int Visible) DdGeometry()
+    {
+        var g = CurrentOptionsRow();
+        int w = DdPanelWidth();
+        int itemH = OptionsRowHeight();
+        int count = DdItemCount();
+        int maxRows = Math.Max(3, (_winH / 2) / Math.Max(1, itemH));
+        // 可见行数还必须 ≤ 文字带真装得下的行数：多出来的行图集里没有字，只会画成空白条
+        int vis = Math.Min(Math.Min(count, DdMaxVisible), Math.Min(maxRows, Math.Max(1, DdBandCapacity())));
+        int x = Math.Clamp(g.CellX[_ddOpen == 2 ? 1 : 0], 4, Math.Max(4, _winW - w - 4));
+        int y = g.Y + g.CellH + 2;
+        if (y + vis * itemH + 4 > _winH)
+        {
+            int above = g.Y - 2 - vis * itemH;
+            y = above >= 4 ? above : Math.Max(4, _winH - vis * itemH - 4);
+        }
+        return (x, y, w, itemH, vis);
+    }
+
+    private void CloseDropdown()
+    {
+        if (_ddOpen == 0) return;
+        _ddOpen = 0;
+        _ddTop = 0;
+        _ddHover = -1;
+        _uiTextDirty = true;
+        RequestRedraw();
+    }
+
+    private void ToggleFontDropdown(int which)
+    {
+        if (_ddOpen == which) { CloseDropdown(); return; }
+        _ddOpen = which;
+        _ddHover = -1;
+        var d = DdGeometry();
+        _ddTop = Math.Clamp(DdSelIndex() - d.Visible / 2, 0, Math.Max(0, DdItemCount() - d.Visible));
+        _uiTextDirty = true;
+        RequestRedraw();
+        LogService.Info("HdrCapture", which == 1 ? "字体列表展开" : "字号列表展开", LogCategory.UI);
+    }
+
+    /// <summary>滚轮翻列表（只在展开时吃）。delta > 0 = 上滚。</summary>
+    private void DdScroll(int delta)
+    {
+        if (_ddOpen == 0) return;
+        var d = DdGeometry();
+        int maxTop = Math.Max(0, DdItemCount() - d.Visible);
+        int step = Math.Max(1, d.Visible / 2);
+        int nt = Math.Clamp(_ddTop + (delta > 0 ? -step : step), 0, maxTop);
+        if (nt == _ddTop) return;
+        _ddTop = nt;
+        _uiTextDirty = true;
+        RequestRedraw();
+    }
+
+    private bool DdContains(int x, int y)
+    {
+        if (_ddOpen == 0) return false;
+        var d = DdGeometry();
+        return x >= d.X && x <= d.X + d.W && y >= d.Y && y <= d.Y + d.Visible * d.ItemH;
+    }
+
+    /// <summary>下拉命中：点面板内 = 选中该项；点面板外 = 只收起列表（这一下不再落到画布上）。</summary>
+    private bool HitDropdown(int x, int y)
+    {
+        if (_ddOpen == 0) return false;
+        if (!DdContains(x, y)) { CloseDropdown(); return true; }
+        var d = DdGeometry();
+        int idx = _ddTop + (y - d.Y) / d.ItemH;
+        if (idx >= 0 && idx < DdItemCount())
+        {
+            if (_ddOpen == 1) _textFontFamily = FontFamilies()[idx];
+            else _textFontSizeDip = TextFontSizes[idx];
+            ApplyFontToEditor();
+            SyncEditPreview();
+            LogService.Info("HdrCapture",
+                _ddOpen == 1 ? $"文字字体 → {_textFontFamily}" : $"文字字号 → {_textFontSizeDip:F0} dip", LogCategory.UI);
+        }
+        CloseDropdown();
+        return true;
+    }
+
+    private void HideOptionsRow()
+    {
+        if (!_optRowVisible) return;
+        _optRowVisible = false;
+        _optHover = -1;
+    }
+
+    /// <summary>当前线色在色板里的下标（不在色板里返回 -1）。</summary>
+    private int SwatchIndex()
+    {
+        for (int i = 0; i < s_swatchColor.Length; i++)
+            if (Math.Abs(_annoColor.R - s_swatchColor[i].R) < 0.01f
+                && Math.Abs(_annoColor.G - s_swatchColor[i].G) < 0.01f
+                && Math.Abs(_annoColor.B - s_swatchColor[i].B) < 0.01f)
+                return i;
+        return -1;
+    }
+
+    /// <summary>粗细滑条的轨道内缩（物理像素）。绘制与拖拽换算共用这一处，避免两边刻度漂移。</summary>
+    private int SliderInset() => Math.Max(8, (int)Math.Round(12 * _uiScale));
+
+    /// <summary>滑条轨道左右端（物理像素 x）。</summary>
+    private (int X0, int X1) SliderTrack()
+    {
+        var g = CurrentOptionsRow();
+        int inset = SliderInset();
+        return (g.CellX[0] + inset, g.CellX[0] + g.W[0] - inset);
+    }
+
+    /// <summary>把鼠标 x 换算成 1..100 px 的粗细（越界自动夹住）。</summary>
+    private float SliderValueAt(int x)
+    {
+        var (x0, x1) = SliderTrack();
+        float t = x1 > x0 ? Math.Clamp((x - x0) / (float)(x1 - x0), 0f, 1f) : 0f;
+        return MathF.Round(MosaicBrushMinPx + t * (MosaicBrushMaxPx - MosaicBrushMinPx));
+    }
+
+    /// <summary>
+    /// 画笔粗细的唯一取值点：拖拽中的涂抹预览与提交进图层的 BrushWidth 必须读它。
+    /// <para>两边各算一份就会漂 —— 2026-10-28 实测预览写死 `28 × UI 缩放`，于是 150%/200% 下
+    /// 预览比输出粗一倍、滑条拖到 100 松手反而变细。</para>
+    /// </summary>
+    private float MosaicBrushPx() => Math.Clamp(_mosaicBrushPx, MosaicBrushMinPx, MosaicBrushMaxPx);
+
+    /// <summary>第二行命中检测：命中就应用选择并返回 true（调用方应吃掉这次点击）。</summary>
+    private bool HitOptionsRow(int x, int y)
+    {
+        if (!OptionsRowForTool()) return false;
+        var g = CurrentOptionsRow();
+        if (y < g.Y || y > g.Y + g.CellH) return false;
+        int mode = OptionsRowMode();
+        for (int i = 0; i < g.W.Length; i++)
+        {
+            if (x < g.CellX[i] || x > g.CellX[i] + g.W[i]) continue;
+            switch (mode)
+            {
+                case 0:
+                    _annoColor = s_swatchColor[i];
+                    LogService.Info("HdrCapture",
+                        $"标注线色 → #{_annoColor.R * 255:F0},{_annoColor.G * 255:F0},{_annoColor.B * 255:F0}", LogCategory.UI);
+                    break;
+                case 2:
+                    // 粗细是一条滑条：按下即跳到该处并进入拖拽（随后由 Move/Up 收尾）
+                    if (i == 0)
+                    {
+                        _sliderDrag = true;
+                        _mosaicBrushPx = SliderValueAt(x);
+                        RequestRedraw();
+                        return true;
+                    }
+                    return true; // 右格只是数值显示
+
+                case 3:
+                    if (i == 0) { ToggleFontDropdown(1); return true; }
+                    if (i == 1) { ToggleFontDropdown(2); return true; }
+                    if (i == 2) _textFontBold = !_textFontBold;
+                    else _textFontItalic = !_textFontItalic;
+                    LogService.Info("HdrCapture",
+                        $"文字样式 → B={(_textFontBold ? 1 : 0)} I={(_textFontItalic ? 1 : 0)}", LogCategory.UI);
+                    OnFontStateChanged();
+                    return true;
+                default:
+                    _mosaicMode = i == 0 ? "Rect" : "Brush";
+                    LogService.Info("HdrCapture", $"马赛克方式 → {_mosaicMode}", LogCategory.UI);
+                    CloseDropdown();
+                    break;
+            }
+            RequestRedraw();
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>悬停高亮：第二行格子 + 下拉列表项（变化才重绘）。</summary>
+    private void UpdateOptionsHover(int x, int y)
+    {
+        int hov = -1;
+        if (OptionsRowForTool())
+        {
+            var g = CurrentOptionsRow();
+            if (y >= g.Y && y <= g.Y + g.CellH)
+                for (int i = 0; i < g.W.Length; i++)
+                    if (x >= g.CellX[i] && x <= g.CellX[i] + g.W[i]) { hov = i; break; }
+        }
+        if (hov != _optHover) { _optHover = hov; RequestRedraw(); }
+
+        int dhov = -1;
+        if (_ddOpen != 0 && DdContains(x, y))
+        {
+            var d = DdGeometry();
+            int row = (y - d.Y) / d.ItemH;
+            if (row >= 0 && row < d.Visible) dhov = _ddTop + row;
+        }
+        if (dhov != _ddHover) { _ddHover = dhov; RequestRedraw(); }
+    }
+
+    /// <summary>字体状态变了：格子文字要重烘、EDIT 与输入预览跟着换字形。</summary>
+    private void OnFontStateChanged()
+    {
+        _uiTextDirty = true;
+        ApplyFontToEditor();
+        SyncEditPreview();
+        RequestRedraw();
+    }
+
+    /// <summary>Ctrl+[ / Ctrl+]：在预设字号表里走一格（界面上与下拉框保持同步）。</summary>
+    private void StepFontSize(int dir)
+    {
+        int cur = (int)Math.Round(_textFontSizeDip);
+        int idx = Array.IndexOf(TextFontSizes, cur);
+        if (idx < 0)
+        {
+            idx = dir > 0
+                ? Array.FindIndex(TextFontSizes, s => s > cur)
+                : Array.FindLastIndex(TextFontSizes, s => s < cur);
+            if (idx < 0) idx = dir > 0 ? TextFontSizes.Length - 1 : 0;
+        }
+        else idx = Math.Clamp(idx + dir, 0, TextFontSizes.Length - 1);
+        _textFontSizeDip = TextFontSizes[idx];
+        OnFontStateChanged();
+    }
+
+    /// <summary>按当前字体状态重建 EDIT 的 HFONT（输入框里看到的字号/字形 = 将写进图层的）。</summary>
+    private void ApplyFontToEditor()
+    {
+        if (_editHwnd == 0) return;
+        if (_editFont != 0) { DeleteObject(_editFont); _editFont = 0; }
+        int px = Math.Max(8, (int)Math.Round(_textFontSizeDip * _uiScale));
+        _editFont = CreateFontW(-px, 0, 0, 0, _textFontBold ? 700 : 400,
+            _textFontItalic ? 1u : 0u, 0, 0, 1 /* DEFAULT_CHARSET */, 0, 0, 0, 0, _textFontFamily);
+        if (_editFont != 0) SendMessageInt(_editHwnd, WM_SETFONT, _editFont, 1);
+    }
+
+    private void ShowTextEdit(System.Numerics.Vector2 framePos, TextLayer? existing)
     {
         if (_editHwnd != 0) return;
-        int ew = Math.Max(160, (int)Math.Round(240 * _uiScale));
-        int eh = Math.Max(24, (int)Math.Round(30 * _uiScale));
-        int ex = Math.Clamp((int)framePos.X, 0, _winW - ew);
-        int ey = Math.Clamp((int)framePos.Y, 0, _winH - eh);
-        _editHwnd = CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VIS | WS_BORDER | ES_AUTOHSCROLL,
+        if (existing is not null)
+        {
+            // 再编辑：把该层的字体状态带回控件条（与上游"选中文字后工具条跟随"同一语义）
+            _textFontFamily = existing.FontFamily;
+            _textFontSizeDip = Math.Max(1f, existing.FontSize / (float)_uiScale);
+            _textFontBold = existing.Bold;
+            _textFontItalic = existing.Italic;
+            _uiTextDirty = true;
+            // existing.X/Y 是【选区图像坐标】，输入框要的是帧坐标 ⇒ 加上选区原点
+            framePos = new System.Numerics.Vector2(
+                Math.Min(_sx1, _sx2) + existing.X, Math.Min(_sy1, _sy2) + existing.Y);
+        }
+        _editingLayer = existing;
+        _textInsertPos = ScreenToAnno((int)framePos.X, (int)framePos.Y);
+
+        int selW = Math.Abs(_sx2 - _sx1);
+        int ew = Math.Max(180, (int)Math.Round(Math.Min(360 * _uiScale, Math.Max(180, selW - 20))));
+        int eh = existing is { CachedHeight: > 0 }
+            ? (int)Math.Clamp(existing.CachedHeight + 16, (int)Math.Round(40 * _uiScale), (int)Math.Round(320 * _uiScale))
+            : Math.Max(40, (int)Math.Round(40 * _uiScale));
+        if (eh > _winH) eh = Math.Max(30, _winH - 8);
+        int ex = Math.Clamp((int)framePos.X, 0, Math.Max(0, _winW - ew));
+        int ey = Math.Clamp((int)framePos.Y, 0, Math.Max(0, _winH - eh));
+        _editFrameX = ex; _editFrameY = ey;
+        _editHwnd = CreateWindowExW(0, "EDIT", "",
+            WS_CHILD | WS_VIS | WS_BORDER | ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | ES_NOHIDESEL,
             ex, ey, ew, eh, _hwnd, (nint)1001, GetModuleHandleW(null), 0);
         if (_editHwnd == 0) return;
+
+        if (existing is not null)
+        {
+            SetWindowTextW(_editHwnd, existing.Text);
+            SendMessageInt(_editHwnd, EM_SETSEL, 0, -1); // 全选旧文字，输入即替换
+        }
+        ApplyFontToEditor();
 
         // ═══ 2026-09-15 修复：文字标注第二次起失效 ═══
         // 原实现 `if (s_editOrigProc == 0)` 只在【首次】做子类化，且 s_editOrigProc 是 static、
         // DestroyEdit 又不还原 ⇒ 第二次及以后新建的 EDIT 完全没有自定义 WndProc：
         // Enter/Esc 无响应 → 文字无法提交，输入框也不销毁、一直挡在截图上。
-        // 该变量是 static 意味着跨 HDR 会话同样只在首次生效。
         // 现改为每次创建都记录并子类化；DestroyEdit 中还原并清零。
         // （同一时刻最多存在一个文字输入框，static 保存"当前"值是安全的。
         //   s_editProc 必须用 static 字段持有委托引用，否则委托被 GC 后原生回调会崩。）
@@ -2416,28 +4129,81 @@ public sealed partial class HdrCaptureWindow : IDisposable
         s_editOrigProc = GetWindowLongPtrW(_editHwnd, GWLP_WNDPROC);
         SetWindowLongPtrW(_editHwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(s_editProc));
         SetFocus(_editHwnd);
+        SyncEditPreview();
+        LogService.Info("HdrCapture", existing is null ? "文字输入框打开（新建）" : "文字输入框打开（再编辑）", LogCategory.UI);
     }
 
     private void OnEditKey(int vk)
     {
-        if (vk == VK_ENT)
+        if (vk == VK_ENT) CommitTextEdit();
+        else if (vk == VK_ESC) CancelTextEdit();
+    }
+
+    /// <summary>提交输入框 → AddLayer（新建）或 UpdateLayer（再编辑），两者都进同一撤销栈。</summary>
+    private void CommitTextEdit()
+    {
+        if (_editHwnd == 0) return;
+        var sb = new System.Text.StringBuilder(4096);
+        int len = GetWindowTextSb(_editHwnd, sb, sb.Capacity);
+        string text = len > 0 ? sb.ToString(0, len).Trim() : "";
+        var editing = _editingLayer;
+        var insert = _textInsertPos;
+        DestroyEdit();
+
+        if (text.Length == 0)
         {
-            var chars = new char[512];
-            int len = GetWindowTextW(_editHwnd, chars, 512);
-            string text = len > 0 ? new string(chars, 0, len).Trim() : "";
-            DestroyEdit();
-            if (text.Length > 0)
+            // 清空已有文字 = 删除该层（可撤销）；新建空文字 = 什么都不做
+            if (editing is not null)
             {
-                _annoManager.AddLayer(new TextLayer
-                {
-                    X = _textInsertPos.X, Y = _textInsertPos.Y,
-                    Text = text, FontSize = 16
-                });
-                _annoTextSlotsDirty = true; // 文字槽图集重建
+                _annoManager.RemoveLayer(editing.Id);
+                _annoTextSlotsDirty = true;
                 RequestRedraw();
             }
+            return;
         }
-        else if (vk == VK_ESC) DestroyEdit();
+
+        float pad = 6f;
+        float fontPx = Math.Max(8f, _textFontSizeDip * (float)_uiScale);
+        int selW = Math.Abs(_sx2 - _sx1);
+        // 折行宽度 = 选区宽度（两端量法相同）；上限 1600 防止一张图被一行字撑爆
+        float maxW = Math.Clamp(selW - pad * 2, 120f, 1600f);
+
+        TextLayer layer;
+        if (editing is null)
+        {
+            layer = new TextLayer { X = insert.X, Y = insert.Y };
+        }
+        else
+        {
+            // 必须新建实例再 UpdateLayer：直接改 live 对象会让管理器抓到的 before 也是新状态（撤销/重做全失效）
+            layer = new TextLayer { X = editing.X, Y = editing.Y };
+            layer.TakeIdentityFrom(editing);
+        }
+        layer.Text = text;
+        layer.FontFamily = _textFontFamily;
+        layer.FontSize = fontPx;
+        layer.Bold = _textFontBold;
+        layer.Italic = _textFontItalic;
+        layer.MaxWidth = maxW;
+        layer.Padding = pad;
+        layer.TextColor = editing?.TextColor ?? layer.TextColor;
+        layer.BackgroundColor = editing?.BackgroundColor ?? layer.BackgroundColor;
+        AnnotationRasterizer.ApplyMetrics(layer);
+
+        if (editing is null) _annoManager.AddLayer(layer);
+        else _annoManager.UpdateLayer(editing.Id, layer);
+        _annoTextSlotsDirty = true;
+        LogService.Info("HdrCapture",
+            $"文字{(editing is null ? "新建" : "再编辑")} {layer.CachedWidth:0}×{layer.CachedHeight:0} " +
+            $"@{layer.X:0},{layer.Y:0} [{layer.FontFamily} {layer.FontSize:0}px{(layer.Bold ? " B" : "")}{(layer.Italic ? " I" : "")}]",
+            LogCategory.UI);
+        RequestRedraw();
+    }
+
+    private void CancelTextEdit()
+    {
+        DestroyEdit();
+        RequestRedraw();
     }
 
     private void DestroyEdit()
@@ -2453,6 +4219,9 @@ public sealed partial class HdrCaptureWindow : IDisposable
             DestroyWindow(_editHwnd);
             _editHwnd = 0;
         }
+        if (_editFont != 0) { DeleteObject(_editFont); _editFont = 0; }
+        _editingLayer = null;
+        SyncEditPreview(); // _editHwnd 已清零 ⇒ 走"清预览"分支（排队给渲染线程）
     }
 
     private void TouchIdle()
@@ -2588,6 +4357,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _badgeTex?.Dispose(); _badgeTex = null;
         _desktopSrv?.Dispose(); _desktopSrv = null;
         _desktopTex?.Dispose(); _desktopTex = null;
+        _sharedTexOpen = null;
         _pooledStaging?.Dispose(); _pooledStaging = null;
         _rtv?.Dispose(); _rtv = null;
         _backBuffer?.Dispose(); _backBuffer = null;
@@ -2603,15 +4373,21 @@ public sealed partial class HdrCaptureWindow : IDisposable
         if (_disposed) return;
         _disposed = true;
         Cleanup();
-        // ═══ 2026-08-16(复审 P1-1): 释放独立 D3D11 设备+上下文 ═══
-        // HdrCaptureWindow 构造时创建独立设备 (渲染线程独占), 旧实现 Dispose
-        // 从不释放 → 每次 HDR 截图泄漏一整套 D3D11 设备/上下文/显存。
+        // 路线 B：交还共享槽排在渲染线程停下之后（Cleanup 里已 Join），且只发一次。
+        // 早交还 ⇒ 下一帧就会覆写用户正看着的画面；漏交还 ⇒ 槽一直冻着（靠取槽轮换兜底，但那是在浪费一张图）。
+        ReleaseSharedSource();
+        // ═══ 2026-08-16(复审 P1-1): 释放本窗自己建的 D3D11 设备+上下文 ═══
+        // 旧实现 Dispose 从不释放 → 每次 HDR 截图泄漏一整套 D3D11 设备/上下文/显存。
         // Cleanup() 已先停渲染线程, 此处安全释放。
         //
         // ═══ 2026-09-15: 但若渲染线程卡住（设备丢失时 Present/Map 挂起），
         //     释放设备会让该线程立刻 use-after-free ⇒ 不可捕获的 AV ⇒ 进程终止。
         //     这里同样跳过 —— 泄漏优于崩溃。
         if (_renderThreadStuck) return;
+        // ═══ 阶段 4：共享设备归进程缓存所有 ═══
+        // 这里只放手不 Dispose —— 否则下一扇窗复用到的是一块已释放的 COM 对象（立刻 use-after-free）。
+        // 自建模式（TTC_PREVIEW_SHARED_DEVICE=0）保持 2026-08-16 的收法不变。
+        if (!_ownsDevice) { _ctx = null!; _device = null!; return; }
         _ctx?.Dispose();
         _device?.Dispose();
     }

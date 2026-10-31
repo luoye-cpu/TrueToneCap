@@ -80,6 +80,9 @@ public sealed partial class MainWindow : Window
     /// <summary>将 _settings 中的值应用到 UI 控件。</summary>
     private void ApplySettingsToUI()
     {
+        // 435ms 那一格（Brief 档实测）到底是哪一段贵：决定"能不能把某一段搬到首帧之后"。
+        // 分段口径 = 下面四个 m 标记之间的间隔，四段之和必须等于本方法总时长。
+        var swApply = System.Diagnostics.Stopwatch.StartNew();
         FormatCbo.SelectedIndex = Math.Clamp(_settings.FormatIndex, 0, _formats.Count - 1);
         QualitySld.Minimum = 0; QualitySld.Maximum = 100;
         PathTxt.Text = _settings.OutputPath;
@@ -87,7 +90,7 @@ public sealed partial class MainWindow : Window
             PathTxt.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "TrueToneCap");
         PrefixTxt.Text = _settings.FileNamePrefix;
         if (string.IsNullOrEmpty(PrefixTxt.Text)) PrefixTxt.Text = "TrueToneCap_";
-        HdrSwitch.IsOn = _settings.HdrEnabled;
+        SetHdrSwitchSilently(_settings.HdrEnabled);
         // IccBakeSwitch 已随开关一并删除（色彩管理不可关，见 CapturePipelineService.PreparePixelsWithIcc）
         // ═══ 色域下拉的持久化单位是【索引】，而项数从 6 缩到 3 ⇒ 不能只 clamp ═══
         // 直接按新项数 clamp 会把老配置静默换掉：旧索引 2/3/4 是 DisplayP3/DCI_P3/AdobeRGB，
@@ -126,7 +129,6 @@ public sealed partial class MainWindow : Window
         AutoStartChk.IsChecked = _settings.AutoStart;
         PreviewChk.IsChecked = _settings.ShowPreview;
         MinimizeTrayChk.IsChecked = _settings.MinimizeToTray;
-        VSCapModeChk.IsChecked = _settings.UseVSCap;
         UiAnimationsChk.IsChecked = _settings.EnableUiAnimations;
         // 换格式保底开关（2026-09-29）：默认勾上 = 与这次改动之前的行为一致
         PngFallbackChk.IsChecked = _settings.PngFallbackEnabled;
@@ -138,11 +140,18 @@ public sealed partial class MainWindow : Window
         SetComboByTag(BorderColorCbo, _settings.BorderColor);
         AvifPngSuffixChk.IsChecked = _settings.AvifPngSuffix;
         JxlPngSuffixChk.IsChecked = _settings.JxlPngSuffix;
+        long m1 = swApply.ElapsedMilliseconds;   // ↑ 基础：格式/质量/路径/热键/开关/托盘/提示
         // ═══ 2026-09-16 重构：单一「AVIF 编码器」下拉 ═══
         // 恢复上次选择。软件编码器（libaom/svt）由 SelectByKind 按需解析，
         // 不再写全局静态 Codec（P2-5 修复，见 Core 侧）。
         SetComboByTag(AvifCodecCbo, _settings.AvifEncoder);
-        UpdateAvifEncoderLabels();
+        // ═══ 2026-10-30：这一句实测吃掉 478ms（启动回显四段里 95%）═══
+        // 它逐个问 `IsKindAvailable`，软件那几种要真去探测 avifenc.exe（进程创建本机冷启动约 200ms 一档）。
+        // 而它只改下拉的**文字后缀**（"（本机不可用）"），不参与任何读取：格式/编码器的实际选择走
+        // `_settings.AvifEncoder`。⇒ 推到首帧之后再刷，窗口先出来；探测结果本身仍有进程内缓存，
+        // 后面真要用时不会重付。队列还没就绪就直接跑（标签宁可晚一点，不能永远不刷）。
+        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, UpdateAvifEncoderLabels))
+            UpdateAvifEncoderLabels();
         // ═══ 2026-09-18：「硬件编码」复选框已移除（与编码器下拉重复）═══
         // 硬件总闸注入恒为 true（Core 默认值），崩溃哨兵降级保护仍在 Core 层生效。
         NvencAvifBackend.HardwareEncodingEnabled = _settings.HardwareEncodingEnabled;
@@ -164,6 +173,7 @@ public sealed partial class MainWindow : Window
         RecordQualitySld.Value = _settings.RecordQuality;
         if (ArchiveChk is not null) ArchiveChk.IsChecked = _settings.ArchiveEnabled;
         if (ArchiveModeCbo is not null) { SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode); ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed; }
+        long m2 = swApply.ElapsedMilliseconds;   // ↑ 编码选项：AVIF 编码器/位深/色度/归档
 
         // LLM 设置
         SetComboByTag(TranslationModeCbo, _settings.TranslationMode);
@@ -183,6 +193,7 @@ public sealed partial class MainWindow : Window
         SetComboByTag(OcrEngineCbo, _settings.OcrEngineMode);
         SetComboByTag(ThemeCbo, _settings.ThemeMode);
         SetComboByTag(LanguageCbo, _settings.Language);
+        long m3 = swApply.ElapsedMilliseconds;   // ↑ 翻译/LLM/日志档位/语言/主题
         // 字体
         RestoreFontSelection();
         RefreshColorMappingUi();
@@ -199,13 +210,21 @@ public sealed partial class MainWindow : Window
         // Gain Map 模式
         if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
 
-        // ═══ 压缩强度三档（2026-10-07）═══
+        // ═══ 压缩强度档位（2026-10-07；2026-10-29 扩到 PNG / TIFF 并分成两组）═══
         // 逐格式恢复各自的档位。SetComboByTag 已处理"未实化容器上写 IsSelected 是空操作"
         // 与"大小写不敏感"两件事，这里直接用即可。
+        // ⚠ 两组下拉格数不同（AVIF / JPEG XL 三格，PNG / TIFF / WebP / JPEG LI 两格），
+        //   所以这里的六行是"逐格式点名"而不是扫一遍可视树：卡片默认 Collapsed，
+        //   项不在可视树里时扫不到 ⇒ 只能显式写全六个（漏一个 = 重启后那一格落回 XAML 的默认档）。
         if (EffortAvifCbo is not null) SetComboByTag(EffortAvifCbo, _settings.EffortAvif);
         if (EffortJpegXlCbo is not null) SetComboByTag(EffortJpegXlCbo, _settings.EffortJpegXl);
         if (EffortWebpCbo is not null) SetComboByTag(EffortWebpCbo, _settings.EffortWebp);
         if (EffortJpegLiCbo is not null) SetComboByTag(EffortJpegLiCbo, _settings.EffortJpegLi);
+        if (EffortPngCbo is not null) SetComboByTag(EffortPngCbo, _settings.EffortPng);
+        if (EffortTiffCbo is not null) SetComboByTag(EffortTiffCbo, _settings.EffortTiff);
+        LogService.Info("Settings",
+            $"启动: 回显分段 = 基础 {m1} + 编码选项 {m2 - m1} + 翻译/语言 {m3 - m2}"
+            + $" + OCR/字体/其余 {swApply.ElapsedMilliseconds - m3}ms");
     }
 
     private static void SetComboByTag(ComboBox cbo, string tag)
@@ -305,7 +324,10 @@ public sealed partial class MainWindow : Window
             _settings.SetQuality(CurrentFormat(), QualitySld.Value);
             _settings.OutputPath = PathTxt.Text;
             _settings.FileNamePrefix = PrefixTxt.Text;
-            _settings.HdrEnabled = HdrSwitch.IsOn;
+            // 增益图态下这个开关是被【锁开】的 UI 状态（见 UpdateQualityPanel），不是用户选择：
+            // 读它会把手开增益图那一刻的 true 当成意图落盘，之后关掉增益图 HDR 还一直是开。
+            if (CurrentFormat() != OutputFormat.JPEG_GAINMAP)
+                _settings.HdrEnabled = HdrSwitch.IsOn;
             _settings.ColorSpaceIndex = ColorCbo.SelectedIndex;
             _settings.Hotkey = HotkeyTxt.Text;
             _settings.RecordHotkey = RecordHotkeyTxt.Text;
@@ -315,7 +337,6 @@ public sealed partial class MainWindow : Window
             _settings.AutoStart = AutoStartChk.IsChecked == true;
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.MinimizeToTray = MinimizeTrayChk.IsChecked == true;
-            _settings.UseVSCap = VSCapModeChk.IsChecked == true;
             _settings.EnableUiAnimations = UiAnimationsChk.IsChecked == true;
             _settings.PngFallbackEnabled = PngFallbackChk.IsChecked == true;
             _settings.ToastOnCapture = ToastCaptureChk.IsChecked == true;

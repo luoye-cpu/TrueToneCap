@@ -221,7 +221,6 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         {
             ct.ThrowIfCancellationRequested();
             int w = frame.Width, h = frame.Height;
-            int pixelCount = w * h;
             // 色彩模式在这一步一次定死（默认 sRGB / 显式 BT.2020 全 2020），后面 base、增益比、
             // 声明全部消费同一份线性像素与同一个 ICC ⇒ 三者不可能各说各话。
             var (hdrPixels, baseIcc) = PrepareGainMapColorSpace(frame.Pixels, w, h, settings);
@@ -263,19 +262,14 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             // ── 4. 增益比计算（统一到 SDR 白点相对线性空间）──
             var gainMapMode = settings.GainMapMode;
             // HDR scRGB (1.0=80 nits) → SDR 白点相对空间 (与 sdrLinear 一致)
+            //     归一化不在这里整帧预乘一遍再交给 ComputeGainMap，而是作为参数传进去、
+            //     在增益计算的那一次并行遍历里逐像素就地乘 —— 省掉一张与源同尺寸的
+            //     float[]（4K = 13.1 MB）和一整趟 33M 次乘法。
+            //     乘的是同一个 invSdrWhite、操作数与顺序都没变 ⇒ 每个通道值逐位相同。
             float invSdrWhite = 1.0f / Math.Max(sdrWhiteScrgb, 1.0f);
-            float[] normHdr = new float[hdrPixels.Length];
-            for (int pi = 0; pi < pixelCount; pi++)
-            {
-                int o = pi * 4;
-                normHdr[o]     = hdrPixels[o] * invSdrWhite;
-                normHdr[o + 1] = hdrPixels[o + 1] * invSdrWhite;
-                normHdr[o + 2] = hdrPixels[o + 2] * invSdrWhite;
-                normHdr[o + 3] = hdrPixels[o + 3];
-            }
             // 最大 log2 增益：像素量化、XMP、ISO 三处必须用同一个数（见 GainMapMaxLog2）
             float maxLog2Gain = GainMapMaxLog2(headroom);
-            byte[] gainMapPixels = ComputeGainMap(normHdr, sdrLinear, w, h, gainMapMode, maxLog2Gain);
+            byte[] gainMapPixels = ComputeGainMap(hdrPixels, sdrLinear, w, h, gainMapMode, maxLog2Gain, invSdrWhite);
             ct.ThrowIfCancellationRequested();
 
             // ── 5. 增益图降采样 + 编码 (jpegli) ──
@@ -467,14 +461,20 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// <summary>
     /// 计算增益图像素。
     /// 输入: hdrPixels = 原始 HDR scRGB 线性，sdrLinear = Reinhard 色调映射后的 SDR 线性。
-    /// 两者在同一线性空间 (1.0=80 nits)，增益比 = HDR / SDR 反映色调映射压缩的额外亮度。
+    /// hdrPixels 先就地乘 <paramref name="invSdrWhite"/> 归一化到 SDR 白点相对空间，
+    /// 才与 sdrLinear 同尺；增益比 = HDR / SDR 反映色调映射压缩的额外亮度。
     /// Reinhard 是单调压缩，保证 SDR ≤ HDR → 增益恒 ≥ 1 → log2(gain) ∈ [0, log2(headroom)]。
     /// Gray 模式：gain = log2(max(HDR_lum / SDR_lum, 1.0))，单通道 8-bit。
     /// RGB 模式：gain_c = log2(max(HDR_c / SDR_c, 1.0))，三通道 8-bit。
     /// 增益值映射为 8-bit：gain_byte = log_gain / maxLog2 * 255（映射 [0,maxLog2] → [0,255]，全精度）。
     /// </summary>
-    private static byte[] ComputeGainMap(float[] hdrPixels, float[] sdrLinear, int w, int h,
-        GainMapMode mode, float maxLog2Gain)
+    /// <remarks>⚠ <b>归一化必须逐通道先乘、再进后面的加权/除法</b>：把 <c>invSdrWhite</c> 提进亮度权重
+    /// （写成 <c>k·(0.2126r+0.7152g+0.0722b)</c>）在浮点上不是同一个数。
+    /// <c>CorePipelineTests.Test_GainMap_NormalizeFusion_ByteIdentical</c> 钉住的是"融合遍历 == 整帧预乘"
+    /// 这条等式；它<b>抓不到</b>上面那种改写 —— 增益最后量化成 8-bit，末位差几乎从不跨量化边界
+    /// （2026-10-29 变异验证：改成提进权重的写法，判据仍全绿）。所以这一条靠本注释，不靠判据。</remarks>
+    internal static byte[] ComputeGainMap(float[] hdrPixels, float[] sdrLinear, int w, int h,
+        GainMapMode mode, float maxLog2Gain, float invSdrWhite)
     {
         int pixelCount = w * h;
         int channels = mode == GainMapMode.Gray ? 1 : 3;
@@ -483,9 +483,10 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         Parallel.For(0, pixelCount, i =>
         {
             int hdrOff = i * 4;
-            float hR = hdrPixels[hdrOff];
-            float hG = hdrPixels[hdrOff + 1];
-            float hB = hdrPixels[hdrOff + 2];
+            // 与原"整帧预乘到 normHdr 再读"的写法逐位相同：同一操作数、同一次单精度乘法
+            float hR = hdrPixels[hdrOff] * invSdrWhite;
+            float hG = hdrPixels[hdrOff + 1] * invSdrWhite;
+            float hB = hdrPixels[hdrOff + 2] * invSdrWhite;
 
             float sR = sdrLinear[hdrOff];
             float sG = sdrLinear[hdrOff + 1];

@@ -127,15 +127,11 @@ function Invoke-Scenario {
 
     $thrown = $null
     try {
-        # -NoVSCap 是【本 harness 的既定条件】，不是被测分支的一部分：
-        #   Publish.ps1 [0/6] 的 VS-Cap 前置检查（2026-10-17 新加）看的是
-        #   build\vscap-runtime\ttc-vscap.exe 在不在盘上，而 harness 跑在任何机器上
-        #   都可能没编 Qt 侧车 ⇒ 不传 -NoVSCap 时 A 之外的四个场景全部提前死在
-        #   "依赖校验失败"，[1.5/6] 测试门禁根本没被执行（实测 4/5 场景不符）。
-        #   这一格自身的回归由下面的静态顺序检查 F 兜住。
-        if ($AllowDirty -and $SkipTests) { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty -SkipTests -NoVSCap }
-        elseif ($AllowDirty)             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty -NoVSCap }
-        else                             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -NoVSCap }
+        # 2026-10-27 起不再传 -NoVSCap：VS-Cap 侧车已归档，Publish.ps1 里也没有这条分支了。
+        # 本 harness 只关心"门禁在哪一步拦/放行"，与侧车无关。
+        if ($AllowDirty -and $SkipTests) { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty -SkipTests }
+        elseif ($AllowDirty)             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun -AllowDirty }
+        else                             { & $pub -Version '0.0.0-stub' -OutputDir $out -NoReadyToRun }
     } catch { $thrown = $_.Exception.Message }
 
     $script:results += [pscustomobject]@{
@@ -174,41 +170,40 @@ Invoke-Scenario 'E -SkipTests → 应跳过门禁' `
     -GitMode 'dirty' -DotnetRunExit 1 -ExpectThrow 'STUB_STOP_AT_PUBLISH' -ExpectDotnetRuns 0 -AllowDirty -SkipTests
 
 # ── 场景 F：静态顺序检查（不跑子进程）──────────────────────────
-# [0/6] 的 VS-Cap 前置必须排在 [1/6]「准备输出目录」之前。
+# [0/6] 的依赖校验必须排在 [1/6]「准备输出目录」之前。
 #   为什么要单独钉：[1/6] 里含一次 Remove-Item -Recurse（对着输出目录），
-#   顺序一旦颠倒，"没编侧车"的一次发布会先把同版本号的历史包删掉再报错。
-#   上面 A~E 因为统一传了 -NoVSCap，走不到这一格 ⇒ 只能这样判。
-#   （2026-10-17 那次 [5.5/6]"永远判不到"是同一类错误，只是方向相反：
-#    判据跑在被判对象写出之前。）
+#   顺序一旦颠倒，"依赖缺失"的一次发布会先把同版本号的历史包删掉再报错。
+#   A~E 都靠"让依赖校验通过/失败"来测行为，看不到两段的先后 ⇒ 只能这样判。
+#   2026-10-27：VS-Cap 侧车归档后锚点换成 $missing 列表的声明处（依赖校验的入口）。
 $pubSrc   = Get-Content -LiteralPath $pub -Raw
-$idxVSCap = $pubSrc.IndexOf('$vscapRuntime = Join-Path $RepoRoot "build\vscap-runtime"')
+$idxDeps  = $pubSrc.IndexOf('$missing = [System.Collections.Generic.List[string]]::new()')
 $idxPurge = $pubSrc.IndexOf('Write-Host "[1/6] 准备输出目录..."')
 $lineOf   = { param($i) if ($i -lt 0) { -1 } else { ($pubSrc.Substring(0, $i) -split "`n").Count } }
-$orderOk  = ($idxVSCap -ge 0) -and ($idxPurge -ge 0) -and ($idxVSCap -lt $idxPurge)
+$orderOk  = ($idxDeps -ge 0) -and ($idxPurge -ge 0) -and ($idxDeps -lt $idxPurge)
 $script:results += [pscustomobject]@{
-    Scenario      = 'F 侧车前置检查排在删输出目录之前（静态）'
-    Threw         = if ($orderOk) { "顺序正确 (L$(& $lineOf $idxVSCap) < L$(& $lineOf $idxPurge))" }
-                    else { "两个锚点取不到或颠倒 (vscap=L$(& $lineOf $idxVSCap), prepare=L$(& $lineOf $idxPurge))" }
-    ExpectedThrow = 'VS-Cap 检查行号 < [1/6] 准备输出目录行号'
+    Scenario      = 'F 依赖校验排在删输出目录之前（静态）'
+    Threw         = if ($orderOk) { "顺序正确 (L$(& $lineOf $idxDeps) < L$(& $lineOf $idxPurge))" }
+                    else { "两个锚点取不到或颠倒 (deps=L$(& $lineOf $idxDeps), prepare=L$(& $lineOf $idxPurge))" }
+    ExpectedThrow = '依赖校验行号 < [1/6] 准备输出目录行号'
     DotnetRuns    = 0
     ExpectRuns    = 0
     Pass          = $orderOk
 }
 
 # ── 场景 G/H：release.yml 的两条接线（静态，不跑子进程）──────────
-# 为什么钉这两条（2026-10-22）：
-#   G：Publish.ps1 的 [0/6] 侧车闸门要求"不带 -NoVSCap 就必须有侧车"，而 release job 跑在
-#      没有 Qt 的自托管 runner 上 ⇒ 漏了这个开关，发布 job 第一步就死，且死因写着"缺侧车"，
-#      看不出真正的问题在 workflow 文件里。
+# 为什么钉这两条：
+#   G：release.yml 与 Publish.ps1 的参数面必须一致 —— 2026-10-22 记过"workflow 漏传开关、
+#      发布 job 第一步就死"那一课；2026-10-27 归档 VS-Cap 后，这一格改成判【两边都不再有
+#      -NoVSCap】：workflow 还传一个已删除的参数，发布 job 同样会死，只是死因换成了"未知参数"。
 #   H：verify-package-content.ps1 提升入库后长期零调用点 ⇒ "包里的内容是不是这一轮的"没人观测。
 #   A~F 全都走 Publish.ps1 本体，碰不到 workflow 文本，所以只能这样判。
 $relYml = Get-Content -LiteralPath (Join-Path $RepoRoot '.github\workflows\release.yml') -Raw
 $pubLine = ($relYml -split "`n" | Where-Object { $_ -match 'Publish\.ps1\s+-Version' } | Select-Object -First 1)
-$gOk = ($null -ne $pubLine) -and ($pubLine -match '-NoVSCap')
+$gOk = ($null -ne $pubLine) -and ($pubLine -notmatch '-NoVSCap') -and ($pubSrc -notmatch '\$NoVSCap')
 $script:results += [pscustomobject]@{
-    Scenario      = 'G release.yml 的发布步骤带 -NoVSCap（静态）'
-    Threw         = if ($gOk) { "已带 (行: $($pubLine.Trim()))" } else { "没带或找不到该行: $pubLine" }
-    ExpectedThrow = 'run: .\Publish.ps1 -Version … -NoVSCap'
+    Scenario      = 'G workflow 与 Publish.ps1 都不再带 -NoVSCap（静态，归档一致）'
+    Threw         = if ($gOk) { "已一致 (行: $($pubLine.Trim()))" } else { "仍有一侧带 -NoVSCap: $pubLine" }
+    ExpectedThrow = 'release.yml 的 Publish.ps1 调用行不含 -NoVSCap，且 Publish.ps1 不声明 $NoVSCap'
     DotnetRuns    = 0
     ExpectRuns    = 0
     Pass          = $gOk

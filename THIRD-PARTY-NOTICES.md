@@ -113,6 +113,12 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 | libwebp | 1.5.0 | `LicenseRef-Google-WebM-Patent-Grant` | `licenses/libwebp-LicenseRef-Google-WebM-Patent-Grant.txt` | Google 就 WebM/VP8/WebP 实现给出附终止条件的免费专利授权，属于 LICENSE 之外的额外授予，分发二进制时应一并放出。 |
 | libwebp + libsharpyuv | 1.5.0（libsharpyuv 0.4.1 同仓同 tag；v1.5.0 的 sharpyuv/ 目录内无独立 LICENSE，受仓根 COPYING 覆盖） | `BSD-3-Clause` | `licenses/libwebp-BSD-3-Clause.txt` | BSD-3 第 2 条：二进制再分发（官方 libwebp-tools Windows release）须复制 “Copyright (c) 2010, Google Inc.” 声明与免责声明，且不得用 Google/贡献者名义背书。 |
 
+### 无损压缩库 deflate.dll（libdeflate）
+
+| 组件 | 版本 | SPDX | 许可全文 | 再分发义务 |
+|---|---|---|---|---|
+| libdeflate — 随包分发的可选无损压缩 DLL（deflate.dll，PNG/TIFF Smallest 档高熵内容） | 1.26（上游 commit 2b7cdc5，2026-10-31 本机构建） | `MIT` | `licenses/libdeflate-MIT.txt` | MIT：Copyright 2016 Eric Biggers / 2024 Google LLC。二进制再分发须随包保留版权声明与许可全文（本文件）。DLL 为自编译件，未静态链入任何第三方库，故本条即全部义务。 |
+
 ### .NET 运行时与微软组件
 
 | 组件 | 版本 | SPDX | 许可全文 | 再分发义务 |
@@ -143,7 +149,7 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 |---|---|---|---|---|
 | PaddleOCR (PP-OCRv6_medium det/rec 权重来源) | 权重为 PP-OCRv6 medium；LICENSE 取自 PaddleOCR tag v3.3.0（v3.2.0 与 v3.3.0 的 LICENSE 字节一致，但未确认发模型的确切 release） | `Apache-2.0` | `licenses/paddleocr-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发 ONNX 权重须附带许可副本、保留来源的 NOTICE/版权头、改动文件（FP16/FP32 导出）须加显著标注；data/Models/ 三个件（PP-OCRv6_medium_det.onnx、_rec.onnx、ppocrv6_dict.txt 词表）同受此条约束；下载记录见 download_models.ps1（huggingface.co/RapidAI/RapidOCR，两模型已在脚本内固化 SHA256），HF 侧的 license 元数据本环境连不上... |
 
-> ⚠️ 有 3 份许可全文没有归到任何产物桶：['microsoft-winml-LicenseRef-Microsoft-EULA.txt', 'qt-LGPL-3.0.txt', 'vs-cap-MIT.txt']
+> ⚠️ 有 1 份许可全文没有归到任何产物桶：['microsoft-winml-LicenseRef-Microsoft-EULA.txt']
 
 ### 产物级 SPDX 表达式（来自 `src/TrueToneCap.Core/Resources/tools-manifest.json`）
 
@@ -153,6 +159,7 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 | `cjpegli.exe` | `BSD-3-Clause AND IJG AND MIT AND Zlib AND libpng-2.0 AND Apache-2.0 AND LicenseRef-Google-BSD-plus-Patents` |
 | `cjxl.exe` | `BSD-3-Clause AND IJG AND MIT AND Zlib AND libpng-2.0 AND Apache-2.0 AND LicenseRef-Google-BSD-plus-Patents` |
 | `cwebp.exe` | `BSD-3-Clause AND LicenseRef-Google-WebM-Patent-Grant` |
+| `deflate.dll` | `MIT` |
 
 ## 许可全文
 
@@ -2809,6 +2816,40 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+~~~
+
+---
+
+### libdeflate — 随包分发的可选无损压缩 DLL（deflate.dll，PNG/TIFF Smallest 档高熵内容） — MIT
+
+- 版本：1.26（上游 commit 2b7cdc5，2026-10-31 本机构建）
+- 随包于：deflate.dll
+- 来源：上游源码树内的 `COPYING`（libavif v1.4.2 的 CMake FetchContent 拉取的固定版本，各依赖的 tag 见 `src/TrueToneCap.Core/Resources/tools-manifest.json` 的 upstream 字段）
+- 本地副本：`licenses/libdeflate-MIT.txt`（SHA256 `41b60f2caab6bffdd5ba360687bd23ca653c0a1235c00380ecffc939b4cd8d75`）
+
+~~~text
+Copyright 2016 Eric Biggers
+Copyright 2024 Google LLC
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation files
+(the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of the Software,
+and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ~~~
 
 ---

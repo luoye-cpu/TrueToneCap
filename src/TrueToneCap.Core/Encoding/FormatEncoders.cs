@@ -54,7 +54,7 @@ public sealed class PngEncoder : ImageEncoder
                     // 与 PQ 像素矛盾 → 按 iCCP 解码的查看器图像错误。CICP 声明足够。
                     byte[]? icc = null;
                     // IHDR 始终为 16-bit，sBIT 标记实际位深 (PNG 3.0 Table 12: color type 6 仅允许 8/16)
-                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, iccProfile: icc, bitDepth: hdrBitDepth);
+                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, path, cicp: cicp, iccProfile: icc, bitDepth: hdrBitDepth, effort: s.Effort);
                 }, ct);
             }
         }
@@ -74,7 +74,7 @@ public sealed class PngEncoder : ImageEncoder
                 {
                     ct.ThrowIfCancellationRequested();
                     var (icc, cicp) = FormatHelper.GetColorMetadata(s);
-                    ManagedPngEncoder.Encode16(px16, f.Width, f.Height, path, cicp: cicp, iccProfile: icc, bitDepth: s.OutputBitDepth);
+                    ManagedPngEncoder.Encode16(px16, f.Width, f.Height, path, cicp: cicp, iccProfile: icc, bitDepth: s.OutputBitDepth, effort: s.Effort);
                 }, ct);
                 return;
             }
@@ -104,7 +104,7 @@ public sealed class PngEncoder : ImageEncoder
         {
             ct.ThrowIfCancellationRequested();
             var (icc, cicp) = FormatHelper.GetColorMetadata(s);
-            ManagedPngEncoder.Encode(px, w, h, path, bitDepth, icc, cicp);
+            ManagedPngEncoder.Encode(px, w, h, path, bitDepth, icc, cicp, effort: s.Effort);
         }, ct);
     }
 }
@@ -197,6 +197,14 @@ public sealed class JpegXlEncoder : ImageEncoder
                 ct.ThrowIfCancellationRequested();
                 var csTag = FormatHelper.HdrDeclarableTag(s);
                 // JXL HDR 固定 16-bit 全精度
+                // ═══ 2026-10-27：这一句会覆盖用户的位深选择，必须留痕（与 TIFF 同一条纪律）═══
+                // EncodeHdr 没有位深形参，中转 PNG 恒 16-bit、cjxl 按输入位深出 16-bit ⇒
+                // 界面上默认 10-bit 的选择在 HDR 下从来不会生效。TIFF 早就为同一形态加了提示，
+                // JXL 这条一直静默 ⇒ 用户只会看到"我选了 10-bit，文件却是 16-bit 的"而无从归因。
+                if (s.OutputBitDepth != 16)
+                    EncoderFallbackNotifier.LastReason =
+                        $"HDR JPEG XL 的容器位深恒为 16-bit（PQ 走 16-bit 中转，cjxl 按输入位深输出）"
+                        + $"⇒ 本张未按所选的 {s.OutputBitDepth}-bit 输出";
                 var pq16 = FormatHelper.HdrToPq16(f, csTag, 16);
                 // ═══ 2026-08-10 修复(2): intensity_target = 显示器 HDR 峰值 ═══
                 // 截图内容的主控目标 = 源显示器 (截的就是显示器显示的)。
@@ -331,7 +339,7 @@ public sealed class AvifEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.AVIF;
     public override bool SupportsHdr => true;
-    public override (float, float, float, QualityScale) GetQualityRange() => (0f, 63f, 15f, QualityScale.Crf);
+    public override (float, float, float, QualityScale) GetQualityRange() => (0f, 63f, 20f, QualityScale.Crf);
     public override QualityDesc GetQualityDescription(float q) => q <= 0 ? new(QualityDescKind.Lossless, q) : new(QualityDescKind.Crf, q);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {
@@ -376,7 +384,7 @@ public sealed class AvifEncoder : ImageEncoder
                             s, FormatHelper.ComputePeakNitsFromArgb10(pq10));
                         // 已在外层 Task.Run 的线程池线程上，直接同步调用（内部为阻塞实现）
                         bool hwOk = NvencAvifBackend.TryEncodeNvencHdrAvif(
-                            pq10, f.Width, f.Height, (int)s.Quality, path, ct, csTag, hwPeakNits);
+                            pq10, f.Width, f.Height, (int)s.Quality, path, ct, csTag, hwPeakNits, s.Effort);
                         if (hwOk)
                         {
                             CoreLog.Debug("AVIF HDR", "NVENC 硬件 10-bit 直通成功", LogCategory.Encoding);
@@ -447,7 +455,7 @@ public sealed class AvifEncoder : ImageEncoder
                 // 浮点链（矩阵 → 色调映射 → gamma）后量化一次到 A2R10G10B10；tag/ICC 记账与容器声明同源
                 var px10 = FormatHelper.PrepareSdrArgb10Pixels(f, s);
                 await be.EncodeArgb10Async(px10, f.Width, f.Height, (int)s.Quality, path, ct,
-                    s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile);
+                    s.ChromaSubsampling, s.OutputBitDepth, s.ColorSpaceTag, s.IccProfile, s.Effort);
                 return;
             }
             // ═══ 软件后端（avifenc）只吃 8-bit BGRA 输入 ⇒ ≥10-bit 请求改走 16-bit PNG 中转，
@@ -638,7 +646,7 @@ public sealed class TiffEncoder : ImageEncoder
                         "HDR TIFF 的容器位深恒为 16-bit（TIFF 只承认 8/16 两档 BitsPerSample，"
                         + $"而 8-bit 装不下 PQ）⇒ 本张未按所选的 {s.OutputBitDepth}-bit 输出，而是 16-bit";
                 // 显式声明输入为 16-bit，避免依赖数组长度推断
-                ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, iccHdr, inputBitDepth: 16);
+                ManagedTiffEncoder.Encode(bgra16, f.Width, f.Height, path, 16, iccHdr, inputBitDepth: 16, effort: s.Effort);
             }, ct);
         }
         else
@@ -654,7 +662,7 @@ public sealed class TiffEncoder : ImageEncoder
                 {
                     ct.ThrowIfCancellationRequested();
                     var icc = SdrIccForTiff(s);
-                    ManagedTiffEncoder.Encode(px16, f.Width, f.Height, path, 16, icc, inputBitDepth: 16);
+                    ManagedTiffEncoder.Encode(px16, f.Width, f.Height, path, 16, icc, inputBitDepth: 16, effort: s.Effort);
                 }, ct);
                 return;
             }
@@ -672,7 +680,7 @@ public sealed class TiffEncoder : ImageEncoder
             // ═══ 2026-09-17 双路径策略：byte[] 入口恒为 8-bit 源 ⇒ 不升位深 ═══
             if (s.OutputBitDepth > 8) s.OutputBitDepth = 8;
             // SDR 输入恒为 8-bit BGRA（每像素 4 字节），显式声明避免按长度推断
-            ManagedTiffEncoder.Encode(px, w, h, path, s.OutputBitDepth, icc, inputBitDepth: 8);
+            ManagedTiffEncoder.Encode(px, w, h, path, s.OutputBitDepth, icc, inputBitDepth: 8, effort: s.Effort);
         }, ct);
     }
 }
@@ -960,22 +968,44 @@ public sealed class NvencAvifBackend : IAvifEncoder
     private static volatile bool s_texturePathFailed;
     private static volatile bool s_nvencFailed;
 
+    // ═══ 2026-10-29：可用性探测结果缓存 ═══
+    // NvEncoderNative.IsAvailable 每次都会新建 D3D11 设备并尝试打开一次 NVENC 会话；
+    // 而 IsKindAvailable 会被 Auto 选择、UI 可用性刷新反复调用 ⇒ 成功结果也必须缓存，
+    // 否则每张 AVIF 都付一次设备创建 + 会话打开。失效交给 ResetFailureCache（新设备/设备丢失）。
+    private static int s_availState; // 0=未探测 1=可用 -1=不可用
+    private static readonly object s_availProbeLock = new();
+
     public bool IsAvailable
     {
         get
         {
-            try
+            int state = Volatile.Read(ref s_availState);
+            if (state != 0) return state > 0;
+
+            lock (s_availProbeLock)
             {
-                if (s_nvencFailed) return false; // 快速短路: 上次已失败
-                var avail = NvEncoderNative.IsAvailable;
-                CoreLog.Trace("AVIF", () => $"NVENC IsAvailable: {avail}", LogCategory.Encoding);
-                return avail;
-            }
-            catch (Exception ex)
-            {
-                CoreLog.Warn("AVIF", "NVENC 检测异常，本次判定为不可用并缓存失败", ex, LogCategory.Encoding);
-                s_nvencFailed = true;
-                return false;
+                state = Volatile.Read(ref s_availState);
+                if (state != 0) return state > 0;
+                try
+                {
+                    if (s_nvencFailed)
+                    {
+                        Volatile.Write(ref s_availState, -1);
+                        return false;
+                    }
+
+                    var avail = NvEncoderNative.IsAvailable;
+                    Volatile.Write(ref s_availState, avail ? 1 : -1);
+                    CoreLog.Trace("AVIF", () => $"NVENC IsAvailable: {avail}", LogCategory.Encoding);
+                    return avail;
+                }
+                catch (Exception ex)
+                {
+                    CoreLog.Warn("AVIF", "NVENC 检测异常，本次判定为不可用并缓存失败", ex, LogCategory.Encoding);
+                    s_nvencFailed = true;
+                    Volatile.Write(ref s_availState, -1);
+                    return false;
+                }
             }
         }
     }
@@ -985,6 +1015,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
     {
         s_texturePathFailed = false;
         s_nvencFailed = false;
+        Volatile.Write(ref s_availState, 0); // 可用性也要重新探测
     }
 
     // 缓存的 D3D11 设备 (避免每次编码创建新设备)
@@ -1399,10 +1430,11 @@ public sealed class NvencAvifBackend : IAvifEncoder
     /// <see cref="EncodeAsync"/></b>（按 8-bit 输入重来），所有兜底逻辑仍只有一份。
     /// </remarks>
     public async Task EncodeArgb10Async(byte[] argb10, int w, int h, int crf, string path, CancellationToken ct,
-        string chroma = "420", int displayBitDepth = 10, string? colorSpaceTag = null, byte[]? iccProfile = null)
+        string chroma = "420", int displayBitDepth = 10, string? colorSpaceTag = null, byte[]? iccProfile = null,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         bool ok = await Task.Run(() =>
-            TryEncodeNvencArgb10(argb10, w, h, crf, path, ct, colorSpaceTag, iccProfile), ct);
+            TryEncodeNvencArgb10(argb10, w, h, crf, path, ct, colorSpaceTag, iccProfile, effort), ct);
         if (ok)
         {
             // 真 10-bit 通路成功也要记色度降级：TryEncodeNvencArgb10 不接 chroma 形参
@@ -1429,7 +1461,8 @@ public sealed class NvencAvifBackend : IAvifEncoder
     /// 容器 colr 按 HDR 声明 PQ（transfer=16）。码流级 CDI 驱动不写（实测），
     /// 色彩声明完全依赖容器 —— 与 avifenc 路径同构。</remarks>
     internal static bool TryEncodeNvencHdrAvif(byte[] pq10, int w, int h, int crf, string path,
-        CancellationToken ct, string? colorSpaceTag, float peakNits)
+        CancellationToken ct, string? colorSpaceTag, float peakNits,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         LastEncodeUsedHardware = false;
 
@@ -1458,7 +1491,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
             var result = NativeEncoderGuard.TryEncode("NVENC_HDR_PQ10", () =>
             {
                 using var nv = new NvEncoderNative(device!, hwCicp);
-                return nv.EncodeAv1Argb10(pq10, w, h, crf);
+                return nv.EncodeAv1Argb10(pq10, w, h, crf, effort);
             });
 
             if (!result.Success)
@@ -1496,7 +1529,8 @@ public sealed class NvencAvifBackend : IAvifEncoder
 
     /// <summary>尝试用 NVENC 的 ARGB10 通路编码；成功写文件并返回 true，任何失败返回 false。</summary>
     private bool TryEncodeNvencArgb10(byte[] argb10, int w, int h, int crf, string path,
-        CancellationToken ct, string? colorSpaceTag, byte[]? iccProfile)
+        CancellationToken ct, string? colorSpaceTag, byte[]? iccProfile,
+        CompressionEffort effort = CompressionEffort.Balanced)
     {
         LastEncodeUsedHardware = false;
         LastFallbackReason = null;
@@ -1529,7 +1563,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
             {
                 using var nv = new NvEncoderNative(device!, hwCicp);
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var bs = nv.EncodeAv1Argb10(argb10, w, h, crf);
+                var bs = nv.EncodeAv1Argb10(argb10, w, h, crf, effort);
                 CoreLog.Debug("AVIF",
                     $"✅ NVENC AV1 (ARGB10 真 10-bit): {w}x{h} CRF={crf} {sw.ElapsedMilliseconds}ms {bs.Length / 1024}KB",
                     LogCategory.Encoding);
@@ -1545,7 +1579,7 @@ public sealed class NvencAvifBackend : IAvifEncoder
                     result = NativeEncoderGuard.TryEncode("NVENC_ARGB10_Nvidia", () =>
                     {
                         using var nv = new NvEncoderNative(nvDevice, hwCicp);
-                        return nv.EncodeAv1Argb10(argb10, w, h, crf);
+                        return nv.EncodeAv1Argb10(argb10, w, h, crf, effort);
                     });
                 }
             }
@@ -1713,6 +1747,9 @@ public static class FormatHelper
             // 保底 PNG 也必须带色域声明：少了它，产物是"广色域像素 + 零色彩声明"的 PNG，
             // 查看器一律按 sRGB 解 ⇒ 系统性偏色。取法三处保底同一条，映射逻辑不在这里再写一份。
             var (pngIcc, pngCicp) = GetColorMetadata(colorSpaceTag, iccProfile);
+            // 刻意不传 effort：走到这里说明用户选的是【别的格式】，此刻不存在"他的 PNG 档位"；
+            // 把那个格式的档位挪到 PNG 的 deflate 上是一次没人承诺过的跨格式借用。编码器默认
+            // Smallest = 本文件 2026-10-29 之前的硬编码档 ⇒ 保底产物逐字节不变。
             ManagedPngEncoder.Encode(bgra, w, h, pngPath, 8, pngIcc, pngCicp);
             CoreLog.Info(who, $"PNG 保底成功，实际落盘: {pngPath}", LogCategory.Encoding);
 
@@ -2220,7 +2257,8 @@ public static class FormatHelper
     {
         int pixelCount = w * h;
         var bgra16 = new byte[pixelCount * 8]; // 4 channels × 2 bytes
-        for (int i = 0; i < pixelCount; i++)
+
+        void Convert(int i)
         {
             int si = i * 4;
             int di = i * 8;
@@ -2230,6 +2268,10 @@ public static class FormatHelper
             WriteU16BE(bgra16, di + 4, rgba16[si]);     // R
             WriteU16BE(bgra16, di + 6, rgba16[si + 3]); // A
         }
+
+        // 4K 是 132MB 的逐像素转换，单线程是白扔多核
+        if (pixelCount >= 65536) System.Threading.Tasks.Parallel.For(0, pixelCount, Convert);
+        else for (int i = 0; i < pixelCount; i++) Convert(i);
         return bgra16;
     }
 
@@ -2253,15 +2295,21 @@ public static class FormatHelper
     /// <returns>长度为 <c>bgra.Length * 2</c> 的 BGRA16 大端数组。</returns>
     public static byte[] Bgra8ToBgra16BE(byte[] bgra)
     {
-        var bgra16 = new byte[bgra.Length * 2];
-        for (int i = 0, di = 0; i < bgra.Length; i += 4, di += 8)
+        int pixelCount = bgra.Length / 4;
+        var bgra16 = new byte[pixelCount * 8];
+
+        void Convert(int i)
         {
-            byte b = bgra[i], g = bgra[i + 1], r = bgra[i + 2], a = bgra[i + 3];
+            int si = i * 4, di = i * 8;
+            byte b = bgra[si], g = bgra[si + 1], r = bgra[si + 2], a = bgra[si + 3];
             bgra16[di + 0] = b; bgra16[di + 1] = b;   // B
             bgra16[di + 2] = g; bgra16[di + 3] = g;   // G
             bgra16[di + 4] = r; bgra16[di + 5] = r;   // R
             bgra16[di + 6] = a; bgra16[di + 7] = a;   // A（保留原始 alpha）
         }
+
+        if (pixelCount >= 65536) System.Threading.Tasks.Parallel.For(0, pixelCount, Convert);
+        else for (int i = 0; i < pixelCount; i++) Convert(i);
         return bgra16;
     }
 

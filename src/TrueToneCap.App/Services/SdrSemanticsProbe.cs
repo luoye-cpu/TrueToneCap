@@ -323,7 +323,7 @@ public static partial class SdrSemanticsProbe
         try
         {
             // ── 0. 先印现场事实，再谈读数 ──
-            var displays = DisplayEnumerator.EnumerateDisplays();
+            var displays = DisplayEnumerator.EnumerateDisplaysUncached();
             var (sysHdr, acm, supportsHdr) = CapabilityService.DetectDisplayState();
             int sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
             double k = SdrSessionSemantics.SdrWhiteScale(sdrWhiteNits);

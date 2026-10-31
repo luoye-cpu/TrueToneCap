@@ -103,7 +103,7 @@ public sealed partial class MainWindow : Window
                 LocaleManager.Tr("本次按 SDR 色调映射：这个格式的容器没有 HDR 通道（HDR 开关会落空，产物是 8-bit SDR）。"),
             _ => d.NeedsMapping
                 ? (d.ExtendedRangeAuthorized
-                    ? LocaleManager.Tr("WGC Float16 捕获完整广色域 → 3×3 矩阵搬到目标 → 分段 Reinhard → SDR 输出。")
+                    ? LocaleManager.Tr("广色域源按目标色域映射后，色调映射为 SDR。")
                     : LocaleManager.Tr("8-bit 源 → ICC/矩阵搬到目标 → SDR 输出。"))
                 : LocaleManager.Tr("源与目标同一套原色 ⇒ 矩阵是恒等变换，本次不跑搬色。"),
         });

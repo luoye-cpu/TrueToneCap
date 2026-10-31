@@ -39,8 +39,8 @@ public sealed partial class PrivacyPolicyWindow : MarkdownDocumentWindow
     // 入口卡片文案：与主窗口 ApplyLocale() 读同一组属性，避免"卡片英文、窗口中文"的分叉。
     public static string CardTitleText => En ? "Privacy policy" : "隐私政策";
     public static string CardDescText => En
-        ? "Screenshots and OCR run entirely on this device. Content is sent to third parties only when you use translation — Vision translation uploads the whole screenshot."
-        : "截图与文字识别均在本机完成。仅在你使用翻译功能时会向第三方发送内容——视觉翻译会上传整张截图，请阅读详情。";
+        ? "Screenshots and OCR run entirely on this device; content is sent to third parties only by translation, and Vision translation sends the whole screenshot."
+        : "截图与文字识别均在本机完成；只有翻译会把内容发往第三方，视觉翻译发送整张截图。";
     public static string CardButtonText => En ? "View privacy policy" : "查看隐私政策";
     private static string WindowTitleText => En ? "TrueToneCap Privacy Policy" : "TrueToneCap 隐私政策";
 

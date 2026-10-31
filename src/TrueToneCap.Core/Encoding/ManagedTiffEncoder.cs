@@ -3,8 +3,6 @@
 // TrueToneCap.Core/Encoding/ManagedTiffEncoder.cs
 // 托管 TIFF 编码器 — 零依赖，支持 8-bit 和 16-bit BGRA
 
-using System.IO.Compression;
-
 namespace TrueToneCap.Core.Encoding;
 
 /// <summary>托管 TIFF 编码器 — 8/16-bit BGRA, Deflate 压缩, ICC 嵌入。</summary>
@@ -12,13 +10,15 @@ public static class ManagedTiffEncoder
 {
     /// <summary>把 BGRA 像素编码为 TIFF 文件。</summary>
     /// <param name="inputBitDepth">输入像素位深（8 或 16）；null 时按数组长度推断。详见 Stream 重载说明。</param>
+    /// <param name="effort">压缩强度档（2026-10-29）。默认 Smallest = 本文件历史上硬编码的
+    /// level 9；2026-10-31 起压缩字节可能来自 libdeflate，承诺改"解压后逐字节相同"。</param>
     public static void Encode(byte[] bgra, int w, int h, string path, int bitDepth = 8,
-        byte[]? iccProfile = null, int? inputBitDepth = null)
+        byte[]? iccProfile = null, int? inputBitDepth = null, CompressionEffort effort = CompressionEffort.Smallest)
     {
         // 2026-09-19：原先的 File.Create(path) 直写，在 Stream 重载抛 ArgumentException 时（参数无效 /
         // 像素长度不足都发生在写第一个字节之前）会在最终路径留下一个【0 字节但 File.Exists 为真】的
         // .tiff，上层照样把那个路径当作已产出的文件报告出去。现走同目录临时文件 + 成功后替换。
-        AtomicFileWriter.Write(path, fs => Encode(bgra, w, h, fs, bitDepth, iccProfile, inputBitDepth));
+        AtomicFileWriter.Write(path, fs => Encode(bgra, w, h, fs, bitDepth, iccProfile, inputBitDepth, effort));
     }
 
     /// <summary>把 BGRA 像素编码为 TIFF 写入流。</summary>
@@ -39,7 +39,7 @@ public static class ManagedTiffEncoder
     /// </para>
     /// </param>
     public static void Encode(byte[] bgra, int w, int h, Stream output, int bitDepth = 8,
-        byte[]? iccProfile = null, int? inputBitDepth = null)
+        byte[]? iccProfile = null, int? inputBitDepth = null, CompressionEffort effort = CompressionEffort.Smallest)
     {
         // ═══ 2026-09-17 修复（审查 P2-7）：BPS 只有 8/16 合法，必须先钳制 ═══
         // 设置层曾对全部格式放行 10/12-bit，而本编码器以 bitDepth > 8 为界
@@ -182,11 +182,10 @@ public static class ManagedTiffEncoder
         // ═══ 压缩：Tag 8 = "Adobe Deflate" = 【zlib 封装】的 deflate（RFC1951+RFC1950 头）═══
         // DeflateStream 写的是【裸】deflate（无 zlib 头），libtiff/ffmpeg 按 tag 8 解时等头 →
         // "incorrect header check" → 整幅图解不出来。要么换成 tag 32946( raw Deflate )，
-        // 要么换成 ZLibStream 保住 tag 8 的既有含义 —— 取后者：32946 的兼容性更差。
-        using var ms = new MemoryStream();
-        using (var zs = new ZLibStream(ms, CompressionLevel.SmallestSize))
-            zs.Write(raw, 0, raw.Length);
-        var compressed = ms.ToArray();
+        // 要么保住 zlib 封装 —— 取后者：32946 的兼容性更差。DeflateZlib 两条臂都输出 zlib 封装。
+        // 2026-10-29：档位接「压缩强度」；Smallest == 这里历史上硬编码的 level 9。
+        // 2026-10-31：实现可选 libdeflate，缺失/失败自动回退内置 zlib-ng（见 DeflateZlib）。
+        var compressed = DeflateZlib.Compress(raw, CompressionEffortMap.PngTiffDeflateLevel(effort));
         writer.Write(compressed);
 
         // ── 回填内联的 strip offset 与 byte count（写回各自条目的 value 域）──

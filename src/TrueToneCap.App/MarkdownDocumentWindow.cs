@@ -242,8 +242,8 @@ public abstract partial class MarkdownDocumentWindow : Window
                                sb.ToString().TrimEnd();
 
         FooterTxt.Text = IsEnglish
-            ? "Nothing was loaded — the message above is a fallback, not empty content."
-            : "未加载任何内容 —— 上面是降级提示，不是「内容为空」。";
+            ? "Nothing was loaded."
+            : "未加载任何内容。";
     }
 
     /// <summary>

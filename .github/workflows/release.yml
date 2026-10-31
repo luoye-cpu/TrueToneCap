@@ -44,12 +44,10 @@ jobs:
 
       - name: 发布打包
         shell: pwsh
-        # ⚠ 必须带 -NoVSCap：Publish.ps1 的 [0/6] 侧车闸门是"不带 -NoVSCap 且
-        #   build\vscap-runtime 里没有 ttc-vscap.exe ⇒ 拒绝发布"。这个 job 跑在
-        #   [self-hosted, Windows, X64] 上，而那台机器没有 Qt 工具链 ⇒ 不加这个开关，
-        #   本 workflow 会在第一步就中止（2026-10-22 审 release.yml 时发现的，此前无人调过它）。
-        #   要出带侧车的包：先在装有 Qt 的机器上跑 .\scripts\BuildVSCap.ps1，再去掉这个开关。
-        run: .\Publish.ps1 -Version '${{ inputs.version }}' -NoVSCap
+        # 2026-10-27：VS-Cap（Qt 侧车）已归档，Publish.ps1 不再有 -NoVSCap 参数
+        #（传一个不存在的参数会让发布 job 在第一步就死）。这条 workflow 与脚本的参数面
+        # 由 scripts/verify-publish-gates.ps1 的场景 G 静态对撞。
+        run: .\Publish.ps1 -Version '${{ inputs.version }}'
 
       - name: 定位发布目录
         id: locate

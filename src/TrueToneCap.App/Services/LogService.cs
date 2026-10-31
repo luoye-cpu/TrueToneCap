@@ -84,6 +84,13 @@ public static class LogService
     private static string? s_currentDate;
     private static long s_maxFileSize = 4_194_304; // 4MB 轮转
 
+    // ═══ 2026-10-29：常驻 writer ═══
+    // 原实现每条日志都 RotateLogFile（stat）+ File.AppendAllText（open/write/close），
+    // 全程持 s_lock ⇒ 每条 3-4 次 syscall。改成常驻 StreamWriter + 内存字节计数：
+    // 日期/大小判断不再碰磁盘，每条只留一次 WriteFile（AutoFlush 保证崩溃前的行已交给 OS）。
+    private static StreamWriter? s_writer;
+    private static long s_writerBytes;
+
     // ── 日志保留策略 ──
     private const int MaxLogFiles = 30;          // 最多保留 30 个日志文件
     private const int MaxLogDays = 30;           // 最多保留 30 天
@@ -232,41 +239,56 @@ public static class LogService
         });
     }
 
-    /// <summary>停止后台清理任务。应用退出时调用，避免进程无法干净退出。</summary>
+    /// <summary>停止后台清理任务并关闭日志 writer。应用退出时调用，避免进程无法干净退出。</summary>
     public static void Shutdown()
     {
         s_cleanupCts?.Cancel();
         s_cleanupCts?.Dispose();
         s_cleanupCts = null;
+        lock (s_lock) CloseWriter();
     }
 
     /// <summary>按日期轮转日志文件。同一天超过大小上限时创建分片 app_日期_N.log。</summary>
+    /// <remarks>常驻 writer：只在"日期变了/超大小/尚未打开"时重开，其余条目不碰磁盘。</remarks>
     private static void RotateLogFile()
     {
         var today = DateTime.Now.ToString("yyyy-MM-dd");
-        if (s_currentDate == today && s_currentLogPath is not null)
-        {
-            try
-            {
-                var fi = new FileInfo(s_currentLogPath);
-                if (fi.Exists && fi.Length < s_maxFileSize) return;
-                // 超 4MB → 分片轮转 (不覆盖)
-                if (fi.Exists)
-                {
-                    s_currentLogPath = NextSlicePath(today);
-                    File.AppendAllText(s_currentLogPath, $"=== TrueToneCap 日志分片 [{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ===\n");
-                    return;
-                }
-            }
-            catch { }
-        }
+        if (s_writer is not null && s_currentDate == today && s_writerBytes < s_maxFileSize)
+            return;
+
+        bool slice = s_writer is not null && s_currentDate == today; // 同一天但超大小
+        CloseWriter();
+
         s_currentDate = today;
-        s_currentLogPath = Path.Combine(s_logDir!, $"app_{today}.log");
+        s_currentLogPath = slice
+            ? NextSlicePath(today)
+            : Path.Combine(s_logDir!, $"app_{today}.log");
+
         try
         {
-            File.AppendAllText(s_currentLogPath, $"=== TrueToneCap 日志 [{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ===\n");
+            var fs = new FileStream(s_currentLogPath, FileMode.Append, FileAccess.Write,
+                FileShare.ReadWrite, 64 * 1024);
+            var writer = new StreamWriter(fs) { AutoFlush = true };
+            writer.WriteLine(slice
+                ? $"=== TrueToneCap 日志分片 [{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ==="
+                : $"=== TrueToneCap 日志 [{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ===");
+            s_writerBytes = fs.Position;
+            s_writer = writer;
         }
-        catch { }
+        catch
+        {
+            // 打开失败（目录被删/磁盘满）→ 保持 null，下次写入再试；不抛给调用方
+            s_writer = null;
+            s_currentLogPath = null;
+        }
+    }
+
+    /// <summary>关闭常驻 writer（Shutdown 与写失败时调用；调用方须持 s_lock）。</summary>
+    private static void CloseWriter()
+    {
+        try { s_writer?.Dispose(); } catch { }
+        s_writer = null;
+        s_writerBytes = 0;
     }
 
     /// <summary>生成下一个分片路径 app_日期_N.log。</summary>
@@ -353,14 +375,19 @@ public static class LogService
             try
             {
                 RotateLogFile();
-                if (s_currentLogPath is not null)
+                if (s_writer is not null)
                 {
-                    File.AppendAllText(s_currentLogPath, entry.FormattedLine + "\n");
+                    s_writer.WriteLine(entry.FormattedLine);
                     if (detail is not null)
-                        File.AppendAllText(s_currentLogPath, "    └─ " + detail.Replace("\n", "\n       ") + "\n");
+                        s_writer.WriteLine("    └─ " + detail.Replace("\n", "\n       "));
+                    s_writerBytes = s_writer.BaseStream.Position;
                 }
             }
-            catch { }
+            catch
+            {
+                // 写失败（文件被占用/目录被删）→ 丢掉句柄，下次重开；不抛给调用方
+                CloseWriter();
+            }
         }
     }
 

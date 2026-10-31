@@ -93,6 +93,8 @@ public static class ColorPipelineTests
         // ─── 7. 色域映射 ───
         Console.WriteLine("\n── 7. 色域映射 ──");
         GamutMap_SrgbToP3();
+        // 2026-10-29 P1-9：ICC 烘焙 6 次 Pow/像素 → 查表，精度必须钉住
+        IccBake_SrgbCurveLut_Accuracy();
         // 2026-09-19 §4.3 双路径策略：色域矩阵跟【源精度】走，容器位深跟【用户请求】走，两者解耦。
         GamutDepth_DecoupledAtEveryOutputDepth();
         // §30.9 声明与像素矛盾家族：D-1 直通不得冒充目标色域；HDR 意图被改掉必须留痕
@@ -1290,6 +1292,91 @@ public static class ColorPipelineTests
             pixels[4] == 0 && pixels[5] == 0 && pixels[6] == 0,
             $"B={pixels[4]} G={pixels[5]} R={pixels[6]}");
         Assert("sRGB→P3: Alpha 直通", pixels[3] == 255 && pixels[7] == 255);
+    }
+
+    /// <summary>
+    /// P1-9：ICC 烘焙把每像素 6 次 MathF.Pow 换成查表后的精度判据。
+    /// <para>三条各管一段，缺一条都会留下"改坏了仍然绿"的缝：</para>
+    /// <para>① 解码表 —— 输入域只有 256 个字节码，要求与解析式<b>逐字节相同</b>（这个方向上
+    /// 插值误差没有存在理由，Δ 必须为 0）；</para>
+    /// <para>② 编码表 —— 输入是矩阵乘出来的任意 float，要求全域（含越界值）与解析式量化差
+    /// ≤1 LSB；</para>
+    /// <para>③ 端到端 —— 256 级阶梯喂进真实 <c>BakeIccToTarget</c>，与公共矩阵
+    /// <c>ColorSpaceConverter.SrgbToDisplayP3</c> 的浮点参照逐通道比：这条才抓得住"表建对了但循环里接错通道"
+    /// （② 直接调表函数，接错也不会红）。</para>
+    /// </summary>
+    static void IccBake_SrgbCurveLut_Accuracy()
+    {
+        static float Decode(float c) =>
+            c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
+        static int EncodeQuant(float lin)
+        {
+            lin = Math.Clamp(lin, 0f, 1f);
+            float g = lin <= 0.0031308f ? 12.92f * lin : 1.055f * MathF.Pow(lin, 1f / 2.4f) - 0.055f;
+            return Math.Clamp((int)(g * 255f + 0.5f), 0, 255);
+        }
+
+        // ── ① 解码表：逐码精确 ──
+        float decMax = 0f; int decAt = -1;
+        for (int c = 0; c < 256; c++)
+        {
+            float d = MathF.Abs(ColorProfileProvider.SrgbEotfFromTable(c) - Decode(c / 255f));
+            if (d > decMax) { decMax = d; decAt = c; }
+        }
+        Assert($"ICC LUT ① 解码表：256 级与解析式逐字节一致（Δ={decMax:E2}"
+            + (decAt < 0 ? "，无偏离码" : $" @ code {decAt}") + "）", decMax == 0f);
+
+        // ── ② 编码表：全域扫描（矩阵乘出的值可能 <0 或 >1，钳制行为也在射程内）──
+        int encWorst = 0; float encAt = 0f;
+        for (int i = 0; i <= 65536; i++)
+        {
+            float lin = -0.1f + 1.2f * (i / 65536f);
+            int got = ToneMapper.LinearToSrgbByte(lin);
+            int d = Math.Abs(got - EncodeQuant(lin));
+            if (d > encWorst) { encWorst = d; encAt = lin; }
+        }
+        Assert($"ICC LUT ② 编码表：全域 [-0.1,1.1] 与解析式量化差 {encWorst} LSB ≤1（最差 @ lin={encAt:F5}）",
+            encWorst <= 1);
+
+        // ── ③ 端到端：真实烘焙 vs 公共矩阵浮点参照 ──
+        // 参照矩阵用公开的 ColorSpaceConverter.SrgbToDisplayP3（scRGB/709 原色 → P3 线性，D65 引用），
+        // 与烘焙内部"ICM 的 D50 PCS 列 × 逆适配"是两条独立推导；两者只剩 s15Fixed16
+        // 量化差（~1e-4 量级，近黑区 ×12.92 斜率后仍 <1 LSB）。
+        var srgbIcc = ColorProfileProvider.GetDefaultSRgbIcc();
+        const int N = 256;
+        var ramp = new byte[N * 4];
+        for (int c = 0; c < N; c++)
+        {
+            ramp[c * 4] = (byte)c;                  // B
+            ramp[c * 4 + 1] = (byte)(255 - c);      // G
+            ramp[c * 4 + 2] = (byte)((c * 97) & 0xFF); // R
+            ramp[c * 4 + 3] = 255;
+        }
+        var (baked, _) = ColorProfileProvider.BakeIccToTarget(ramp, N, 1, srgbIcc, "DisplayP3");
+        if (baked is null)
+        {
+            Skip("ICC LUT ③ 端到端", "BakeIccToTarget 返回空（环境限制）");
+            return;
+        }
+
+        var m = ColorSpaceConverter.SrgbToDisplayP3;
+        int e2e = 0, e2eAt = -1;
+        for (int c = 0; c < N; c++)
+        {
+            float bn = Decode(ramp[c * 4] / 255f);
+            float gn = Decode(ramp[c * 4 + 1] / 255f);
+            float rn = Decode(ramp[c * 4 + 2] / 255f);
+            float r = m[0, 0] * rn + m[0, 1] * gn + m[0, 2] * bn;
+            float g = m[1, 0] * rn + m[1, 1] * gn + m[1, 2] * bn;
+            float b = m[2, 0] * rn + m[2, 1] * gn + m[2, 2] * bn;
+            int d = Math.Max(
+                Math.Abs(baked[c * 4 + 2] - EncodeQuant(r)),
+                Math.Max(Math.Abs(baked[c * 4 + 1] - EncodeQuant(g)),
+                         Math.Abs(baked[c * 4] - EncodeQuant(b))));
+            if (d > e2e) { e2e = d; e2eAt = c; }
+        }
+        Assert($"ICC LUT ③ 端到端：sRGB→DisplayP3 256 级阶梯与公共矩阵参照差 {e2e} LSB ≤1（@ ramp {e2eAt}）",
+            e2e <= 1);
     }
 
     /// <summary>

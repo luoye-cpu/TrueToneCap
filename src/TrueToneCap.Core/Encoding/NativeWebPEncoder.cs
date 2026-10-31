@@ -85,15 +85,15 @@ public static class NativeWebPEncoder
                 CreateNoWindow = true
             };
 
-            var result = NativeEncoderGuard.TryEncode("WebP", () =>
+            var result = NativeEncoderGuard.TryExecute("WebP", () =>
             {
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) throw new InvalidOperationException("无法启动 cwebp");
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 30_000, "cwebp");
 
-                if (exitCode != 0 || !File.Exists(path))
+                // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
+                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
                     throw new InvalidOperationException($"[WebP] cwebp 失败 (exit={exitCode}) {stderr.Trim()}");
-                return File.ReadAllBytes(path);
             });
             if (!result.Success)
                 throw new InvalidOperationException($"[WebP] cwebp 编码失败: {result.Error?.Message}");

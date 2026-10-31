@@ -54,6 +54,10 @@ public static partial class SecretStore
         lock (s_lock)
         {
             var dict = Load();
+            // 值没变就不重写（与 Delete 的 dict.Remove 短路同一条纪律）：
+            // 每次 Save 设置都会无条件调进来两次（LLM Key / 有道 Secret），
+            // 原先等于每次存设置都白做两次 DPAPI 加密 + 两次整文件写。
+            if (dict.TryGetValue(key, out var current) && current == value) return;
             dict[key] = value;
             Save(dict);
         }

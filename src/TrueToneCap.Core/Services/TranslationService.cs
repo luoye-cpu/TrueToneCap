@@ -33,6 +33,22 @@ public class TranslationService
     })
     { Timeout = TimeSpan.FromSeconds(15) };
 
+    // ═══ 2026-10-29：视觉路单独一个客户端 ═══
+    // 共享实例的 15s 是给"逐行短文本"定的；整图 + 推理实测常在 20–60s（本机网关单图 28s），
+    // 套 15s 等于让视觉路必然超时。这里只放宽时限，连接复用策略与文本路一致。
+    private static readonly HttpClient s_visionHttp = new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        MaxConnectionsPerServer = 8,
+        AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+        ConnectTimeout = TimeSpan.FromSeconds(10),
+    })
+    { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>视觉请求的时限。用链接 CTS 实现（共享 HttpClient 的 Timeout=∞），
+    /// 这样"用户关窗"与"端点太慢"能分开：前者重抛取消，后者给出可读原因。</summary>
+    internal static readonly TimeSpan VisionRequestTimeout = TimeSpan.FromSeconds(120);
+
     private readonly HttpClient _http;
     private readonly LlmConfig _config;
 
@@ -1191,16 +1207,27 @@ public class TranslationService
             request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");
 
         string content;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        linkedCts.CancelAfter(VisionRequestTimeout);
         try
         {
-            var response = await _http.SendAsync(request, ct);
+            var response = await s_visionHttp.SendAsync(request, linkedCts.Token);
             response.EnsureSuccessStatusCode();
-            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linkedCts.Token));
             content = doc.RootElement
                 .GetProperty("choices")[0]
                 .GetProperty("message")
                 .GetProperty("content")
                 .GetString() ?? "";
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // 端点太慢，不是用户关窗：必须留下一条可读原因，否则调用方只看到"取消"、界面卡在"翻译中"
+            _lastBackendNote = $"视觉请求超过 {VisionRequestTimeout.TotalSeconds:F0} 秒没有返回";
+            CoreLog.Warn("Translate", "视觉路失败: " + _lastBackendNote, LogCategory.Network);
+            throw new TranslationException(
+                _lastBackendNote + "。整图直传的耗时随模型与图片大小增长，可缩小选区、换更快的模型，" +
+                "或把翻译模式切回 LLM（文字路）。");
         }
         catch (Exception ex) when (ex is not TranslationException and not OperationCanceledException)
         {

@@ -103,7 +103,7 @@
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="IccStrategyHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
-                                    Text="这里选的是【目标色域】：像素搬去哪儿、容器就声明成什么，是同一个值。对增益图（JPEG 卡片里的开关）而言，它选的就是【底图】的色彩空间。至于某个格式靠什么通道把声明交给查看器（ICC / 代码点 / 什么都不写），下面「色域映射」按当前格式说。"/>
+                                    Text="目标色域同时决定像素与容器声明。"/>
                             </StackPanel>
                         </Border>
 
@@ -123,7 +123,7 @@
                                         Text="Rec.709" FontWeight="SemiBold"/>
                                 </Grid>
                                 <TextBlock x:Name="GamutMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
-                                    Text="分段 Reinhard — 广色域自动感知缩限到目标色域，确保色彩准确。"/>
+                                    Text="广色域自动缩限到目标色域。"/>
                             </StackPanel>
                         </Border>
 
@@ -141,7 +141,7 @@
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="AvifCodecHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="120,0,0,0"
-                                           Text="自动模式优先使用实测可用的硬件加速；硬件编码器受色度/位深限制，不满足时会自动降级并提示。"/>
+                                           Text="自动优先硬件编码器；色度或位深不满足时自动降级并提示。"/>
                                 <!-- ═══ 2026-09-18（用户指令）：移除「硬件编码」复选框 ═══
                                      编码器下拉已能显式选择硬件（NVENC/QSV），复选框与之语义重复。
                                      硬件总闸恒开（含崩溃哨兵自动降级保护，保留在 Core 层）。 -->
@@ -171,22 +171,25 @@
                                      >8-bit 是否"真"取决于源：只有 Float16 采集
                                      且编码器支持真 10-bit 输入时才保留源精度，否则是容器级升位深。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="位深按所选编码器能力生效（软件 ≤12-bit、NVENC ≤10-bit、QSV 8-bit），不支持的档位已隐藏；HDR 至少 10-bit，软件编码器（libaom）在 HDR 下还可选 12-bit。8-bit 兼容性最广；&gt;8-bit 仅在源为 Float16（HDR/高级颜色采集）时保留真精度，普通 8-bit 截图恒输出 8-bit。"/>
+                                    Text="上限取决于编码器：软件 ≤12-bit，NVENC ≤10-bit，QSV 8-bit；HDR 至少 10-bit。8-bit 源恒输出 8-bit。"/>
                                 <!-- 压缩强度（2026-10-07）：软件路改 avifenc 的 -s，硬件路改 NVENC 的 preset -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="EffortAvifCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                        <ComboBoxItem Tag="Smallest">极高</ComboBoxItem>
+                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡</ComboBoxItem>
+                                        <ComboBoxItem Tag="Fastest">快速</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <!-- ═══ 2026-10-07：这一档同时作用于两条路，但两把尺不同 ═══
                                      软件路 = avifenc 的 speed（0 最慢）+ libaom 的 tune=ssim；
                                      硬件路 = NVENC 的 preset（P1 最快）。二者【不可横向比较】。
-                                     "最小体积"档在软件路上会明显变慢（实测 4K：0.3 s → 7.1 s），
-                                     体积降约 24%（123.4 → 93.7 KB），必须在界面上说清代价。 -->
+                                     显示名 ↔ Tag：「极高」= Smallest（-s 0 + tune=ssim）、
+                                     「均衡」= Balanced（-s 6，默认）、「快速」= Fastest（-s 10）。
+                                     代价读数（本机 4K，只在源码里留档，界面不写：性能随机器变）：
+                                     "极高"档 0.3 s → 7.1 s、体积 123.4 → 93.7 KB（约 −24%）。
+                                     ⚠ 界面只说"方向"和"两把尺不同"，不给秒数与百分比。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="只改变编码耗时，不影响质量设置。软件编码器（libaom）差异很大：实测 4K 下最小体积约 7.1 秒 / 93.7 KB、均衡约 0.3 秒 / 123.4 KB、最快约 0.1 秒 / 148.8 KB。最小体积档会同时启用 libaom 的 tune=ssim 以求更小。硬件编码（NVENC）三档都很快，差异小得多。"/>
+                                    Text="只影响编码耗时与文件体积，不影响质量。软件路改 avifenc 的 speed，硬件路改 NVENC 的 preset。"/>
                             </StackPanel>
                         </Border>
 
@@ -202,24 +205,31 @@
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="ChromaJpegLiNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小（截图里的文字边缘最容易看出差别）。增益图开与不开共用这一项。"/>
+                                    Text="采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小。"/>
                                 <!-- 压缩强度（2026-10-07）：改 cjpegli 的 xyb 开关（色彩空间） -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="EffortJpegLiCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                        <ComboBoxItem Tag="Smallest" IsSelected="True">均衡</ComboBoxItem>
+                                        <ComboBoxItem Tag="Quick">快速</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <!-- ═══ 2026-10-07：为什么 JPEG LI 也加这一栏（与"只有三个格式加"的初版口径不同）═══
                                      初版把 JPEG LI 排除在外，理由写的是"它的压缩强度与质量是同一个旋钮"。
-                                     但 xyb 开关换的是**色彩空间**、不是质量，且实测在两张真实截图 ×
-                                     -d 0.5/1.0/2.0/3.0 以及 GainMap 的 Baseline 路上**一律更小**
-                                     （1.5%~4.7%，无一例外）—— 是本仓所有编码器小参里唯一
-                                     "在所有测过的内容与质量上都为正"的开关。用户据实测要求纳入 ⇒ 加。
-                                     代价只有时间，正是这一栏管的轴。 -->
+                                     但 xyb 开关换的是**色彩空间**、不是质量 ⇒ 纳入。
+                                     ⚠ 2026-10-29 复测【推翻】了当年那句"一律更小，无一例外"：
+                                     那次的证据是两张 4K 截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 Baseline 路，
+                                     在【那些内容】上确实全为正向（1.5%~4.7%）。本轮换三张新的真实截图
+                                     （735x840 / 893x491 / 1000x700，-d 1.0，见
+                                     artifacts/tier_bench_2026-10-29.log）重测：开 xyb 的两张分别小
+                                     5.5% / 10.4%，第三张【反而大 3.0%】⇒ "无一例外"不再成立，
+                                     这里按复测改写。代价一侧也一并更正：本轮实测时间 1.2~1.3 倍
+                                     （当年记的是 1.5~1.8 倍，样本与距离都不同，两个数各归各的样本）。
+                                     档位含义不变，2026-10-29 同日只改显示名：Tag Smallest 显示「均衡」
+                                     （默认，= 开 xyb 开关），Tag Quick 显示「快速」（= 关 xyb）。
+                                     ⚠ 注释里不能出现两个连续的减号（XML 规则），所以全文写"xyb 开关"
+                                        而不是那个双连字符参数名 —— 参数串本身见 CompressionEffortMap。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="只改变编码耗时，不影响质量设置。实测 4K 截图：最小体积档约 0.16~0.28 秒、均衡约 0.10~0.17 秒；最小体积档体积小约 2%~5%（它改用 XYB 色彩空间，同样的观感质量下码率更低）。最快档与均衡档的产物相同（本格式没有更快的档位可用）。"/>
+                                    Text="均衡开 XYB 色彩空间，快速不开；两档质量相同。"/>
                                 <!-- ═══ 增益图开关 ═══
                                      2026-09-26（用户口径）：GainMap 不再是输出格式下拉里的一项，
                                      而是"JPEG LI 的另一个形态"。打开后编码走 JPEG_GAINMAP 那条路，
@@ -229,7 +239,7 @@
                                 <CheckBox x:Name="GainMapEnableChk" Content="附带增益图（输出 Ultra HDR 照片）"
                                           Checked="OnGainMapToggled" Unchecked="OnGainMapToggled"/>
                                 <TextBlock x:Name="GainMapOptionsDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
-                                    Text="底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。这条口径不只管增益图：JPEG 与 WebP 两族格式的默认目标同样是 Rec.709，只有你亲手选 Rec.2020 才产出 Rec.2020。打开此开关时 HDR 输出锁定为开。"/>
+                                    Text="底图恒为 SDR，HDR 在增益图里。「目标色域」决定底图与增益图的原色；打开此开关时 HDR 输出锁定为开。"/>
                                 <Grid x:Name="GainMapModeRow" ColumnDefinitions="120,*">
                                     <TextBlock x:Name="GainMapModeLabelTxt" Text="增益图模式" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="GainMapModeCbo" Grid.Column="1" SelectionChanged="OnGainMapModeChanged">
@@ -258,7 +268,27 @@
                                      但用户容易以为"选 16-bit 就得到 16-bit 截图"——8-bit 源升上去不产生信息，
                                      这句话必须写在界面上，而不是藏在文档里。 -->
                                 <TextBlock x:Name="BdPngNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。"/>
+                                    Text="8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。"/>
+                                <!-- ═══ 压缩强度（2026-10-29，用户点名"编码速度相对过慢的几个要给档位"，同日定为两档并定了显示名）═══
+                                     PNG 无损 ⇒ 这一档改的只是 deflate 的搜索强度（zlib level 9 / 8），
+                                     像素、滤波后码流结构与解码结果完全相同，任何一档的产物都同样合法。
+                                     它也是 PNG 唯一的旋钮：质量滑块对本格式恒锁在 100。
+                                     显示名 ↔ Tag（只改名，Tag 与枚举不动 ⇒ 已存的设置不需迁移）：
+                                     「均衡」= Tag Smallest = level 9（默认，= 拉满），「快速」= Tag Quick = level 8。
+                                     实测（2026-10-29 复测，artifacts/tier_bench_2026-10-29.log）：
+                                     三张真截图（735x840 / 893x491 / 1000x700）切「快速」快 1.2~2.4 倍、
+                                     体积 +0.3%~+1.4%；4K HDR 合成噪声帧快 8.1 倍、体积【反而小 1.1%】。
+                                     ⚠ 这里的「均衡」按"默认档"命名，它其实就是拉满档，且不保证严格最小
+                                        （那张 4K 上「快速」反而更小）⇒ 别把名字读成"参数在中点"。
+                                     ⚠ 真截图样本只有 100 万像素级，4K 那一档用的是合成内容，别当成同一把尺。 -->
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="EffortPngCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Smallest" IsSelected="True">均衡</ComboBoxItem>
+                                        <ComboBoxItem Tag="Quick">快速</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="无损：只影响压缩耗时与文件体积，像素不变。均衡=压缩最强，快速=更快。"/>
                                 <!-- PNG 色度采样：PNG 是 RGB 无损格式，不支持色度子采样 -->
                             </StackPanel>
                         </Border>
@@ -283,7 +313,7 @@
                                      JXL 的 8 / 10 / 16 三档产物确实互不相同，但"16-bit"对 8-bit 截图源
                                      只是容器精度、不产生新信息 —— 这一点必须写在界面上而不是文档里。 -->
                                 <TextBlock x:Name="BdJpegXlNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。cjxl 没有独立的位深参数，位深由输入容器决定 ⇒ 10-bit 与 16-bit 都装在 16-bit 容器里，差别在 sBIT 标注与量化步长。"/>
+                                    Text="8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。10-bit 与 16-bit 都用 16-bit 容器，差别在 sBIT 标注。"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="ChromaJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
                                         <ComboBoxItem Tag="444" IsSelected="True">4:4:4</ComboBoxItem>
@@ -293,24 +323,26 @@
                                 <!-- 压缩强度（2026-10-07）：只动 cjxl 的 -e，不动质量（-d） -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="EffortJpegXlCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                        <ComboBoxItem Tag="Smallest">极高</ComboBoxItem>
+                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡</ComboBoxItem>
+                                        <ComboBoxItem Tag="Fastest">快速</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <!-- ═══ 2026-10-07：这一档为什么是 7/5/3，且为什么"最小体积"不更高 ═══
+                                <!-- ═══ 2026-10-07：这一档为什么是 7/5/3，且为什么"极高"不再往上 ═══
+                                     显示名 ↔ Tag：「极高」= Smallest（-e 7）、「均衡」= Balanced（-e 5，默认）、
+                                     「快速」= Fastest（-e 3）。
                                      实测两张真实 4K 截图：样张 A 上 e8 省 5.4%，样张 B 上 e8 反而涨 8.9%
                                      ⇒ cjxl 的高 effort 对体积的方向【随内容而变】，无法承诺"拉满一定更小"。
-                                     故最高档停在 e7，并把"本档价值在时间"写进界面，不假称能省体积。 -->
+                                     故最高档停在 e7。读数只留在源码，界面不给秒数（性能随机器变）。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="三档只改变编码耗时（cjxl 的 effort），与上方的质量设置无关。实测 4K 截图：最小体积约 0.4~0.9 秒、均衡约 0.3~0.8 秒、最快约 0.3~0.6 秒。⚠ 本格式的档位主要影响速度而非体积：更高的 effort 对部分内容更小、对另一部分反而更大，因此最高档停在 e7，不提供更慢的档位。"/>
+                                    Text="只影响压缩耗时，不影响质量。档位越高越慢，体积不一定更小。"/>
                                 <!-- ═══ 2026-09-26：这一格为什么只有两档（用户问"JXL 缺 4:2:2"）═══
                                      不是没接线：cjxl 的 resampling 参数只有 1/2/4/8 且各向同性；
                                      码流虽有逐轴 YCbCrChromaSubsampling，编码器只在转码 JPEG 时写它，
                                      像素输入直接报错 ⇒ 界面必须写清"没有这一档"，而不是补个假选项。
                                      （注：XML 注释内不许出现连续两个减号，故这里不写命令行原形） -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="本格式没有 4:2:2：cjxl 只能整幅 1x1 或 2x2 降采样（不是只减色度），逐轴子采样仅在转码 JPEG 时可用 ⇒ 想要 4:2:2 请改用 JPEG 或 AVIF。"/>
+                                    Text="本格式只有 4:4:4 与 4:2:0；需要 4:2:2 请改用 JPEG 或 AVIF。"/>
                                 <CheckBox x:Name="JxlPngSuffixChk" Content="额外添加 .png 后缀来提高兼容性" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                             </StackPanel>
                         </Border>
@@ -325,21 +357,27 @@
                                      没有任何色度形参；而有损 WebP 的格式定义就是 4:2:0（无损为 RGB）。
                                      留一个选了也不改变任何东西的下拉 = 界面撒谎，所以撤控件、把事实写在这里。 -->
                                 <TextBlock x:Name="WebPChromaNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
-                                    Text="有损 WebP 恒 4:2:0（格式定义）；无损为 RGB。本格式无色度可选，也没有对应设置项。"/>
+                                    Text="有损恒为 4:2:0，无损为 RGB；本格式没有色度选项。"/>
                                 <!-- 压缩强度（2026-10-07）：改 cwebp 的 -m（压缩方法） -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="EffortWebpCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="Smallest">最小体积（最慢）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Balanced" IsSelected="True">均衡（推荐）</ComboBoxItem>
-                                        <ComboBoxItem Tag="Fastest">最快</ComboBoxItem>
+                                        <ComboBoxItem Tag="Smallest" IsSelected="True">均衡</ComboBoxItem>
+                                        <ComboBoxItem Tag="Quick">快速</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <!-- ═══ 2026-10-07：如实说明这一档对 WebP 收益有限 ═══
-                                     实测 4K：m0 0.39s/306KB、m2 0.42s/268KB、m4 0.74s/258KB、m6 0.95s/248KB。
-                                     总跨度只有约 0.4→1.0 秒、体积差约 20%，远小于 AVIF/JXL 的档位跨度。
+                                <!-- ═══ 2026-10-07 立这一栏；2026-10-29 用户定为两档并定显示名，如实说明收益有限 ═══
+                                     显示名 ↔ Tag：「均衡」= Tag Smallest = -m 6（默认），「快速」= Tag Quick = -m 5。
+                                     端到端实测（2026-10-29 复测，artifacts/tier_bench_2026-10-29.log）：
+                                     三张真截图切「快速」快 1.2~1.5 倍、体积 +0.1%~+1.7%。
+                                     ⚠ 这个耗时里含【启动 cwebp 进程 + 写一张临时 PNG】的固定开销，
+                                         两档同量 ⇒ 比值是被固定开销【压低】的下界，不是 -m 本身的跨度。
+                                     ⚠ 与无损那两个格式同样按"默认/非默认"命名：这里的「均衡」是 -m 6
+                                        （最拼的一档），不是 cwebp 自己的默认 -m 4。
+                                     对照 2026-10-07 的 CLI 裸测：m6 0.95s/248KB、m4 0.74s/258KB、
+                                     m2 0.42s/268KB、m0 0.39s/306KB —— 跨度本来就比 AVIF/JXL 小。
                                      不夸大：这一栏的价值在于"可控"，不在于"省很多"。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="只改变编码耗时，不影响质量设置。WebP 的档位差异比 JPEG XL / AVIF 小：实测 4K 下三档约 0.4 / 0.7 / 1.0 秒，体积相差约两成。"/>
+                                    Text="只影响压缩耗时与体积，不影响质量。均衡=-m 6，快速=-m 5。"/>
                             </StackPanel>
                         </Border>
                         <!-- TIFF 选项卡片 -->
@@ -357,7 +395,24 @@
                                      已在 ManagedTiffEncoder 入口兜底）；而 16-bit 对 8-bit 源只是把每个
                                      采样铺到 16 位，像素信息一条没多 —— 这行说明就是补这个认知差。 -->
                                 <TextBlock x:Name="BdTiffNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。"/>
+                                    Text="8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。"/>
+                                <!-- ═══ 压缩强度（2026-10-29）═══ 与 PNG 同一条通道：TIFF 的 Deflate
+                                     （tag 8 = zlib 封装）档位 = deflate 搜索强度，像素无损、码流格式不变，
+                                     换档不影响任何查看器的解码。
+                                     显示名 ↔ Tag：「均衡」= Smallest = level 9（默认，= 拉满）、
+                                     「快速」= Quick = level 8。
+                                     本机复测读数（artifacts/tier_bench_2026-10-29.log，只留源码，界面不写）：
+                                     三张真截图切「快速」快 1.2~1.8 倍、体积 +0.5%~+5.2%；
+                                     4K HDR 16-bit 合成帧 7.61s/31.2MB → 1.76s/31.7MB（+1.4%）。
+                                     ⚠ TIFF 没有 PNG 那种逐行滤波，体积更依赖这一档。 -->
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="EffortTiffCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Smallest" IsSelected="True">均衡</ComboBoxItem>
+                                        <ComboBoxItem Tag="Quick">快速</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
+                                    Text="无损：只影响压缩耗时与文件体积，像素不变。均衡=压缩最强，快速=更快。"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -368,8 +423,6 @@
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
                                 <TextBlock Text="截图" FontSize="14" FontWeight="SemiBold"/>
-                                <CheckBox x:Name="VSCapModeChk" Content="VS-Cap 模式（当前屏幕选区、编辑与贴图）" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
-                                <Button x:Name="VSCapPasteBtn" Content="贴图剪贴板图片（Ctrl+Alt+T）" Click="OnVSCapPasteClick" Visibility="Collapsed"/>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="快捷键" VerticalAlignment="Center"/><TextBox x:Name="HotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+S" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="CaptureHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnCaptureHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="无感截图快捷键" VerticalAlignment="Center"/><TextBox x:Name="SilentHotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+Q" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="SilentHotkeyRecordBtn" Grid.Column="2" Content="录制" Click="OnSilentHotkeyRecordClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <CheckBox x:Name="PreviewChk" Content="截图后右下角缩略图预览" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
@@ -436,7 +489,7 @@
                                     <PathIcon Data="F0 M5.75,8.57 L9.55,20 L8.01,20 L7.05,17.14 L2.76,17.14 L1.82,20 L0.26,20 L4.08,8.57 M6.58,15.71 L4.91,10.71 L3.25,15.71 M7.48,4.64 L7.49,3.11 L7.48,1.59 L7.51,1.47 L7.65,1.44 L8.58,1.47 L9.51,1.49 L12.58,1.49 L12.58,0.74 L12.48,0 L14.01,0.07 L14.15,0.11 L14.22,0.21 L14.19,0.36 L14.14,0.49 L14.09,0.66 L14.06,0.9 L14.06,1.16 L14.06,1.33 L14.06,1.49 L17.36,1.49 L18.31,1.47 L19.24,1.44 L19.38,1.49 L19.41,1.59 L19.39,1.99 L19.38,2.39 L19.38,3.03 L19.39,3.84 L19.41,4.64 L19.41,4.73 L19.38,4.8 L19.24,4.81 L18.98,4.83 L18.55,4.83 L18.15,4.83 L17.92,4.79 L17.89,4.39 L17.89,3.8 L17.91,3.21 L17.92,2.77 L8.96,2.77 L8.96,3 L8.98,3.39 L8.98,3.84 L8.98,4.3 L8.96,4.64 L8.94,4.8 L8.79,4.83 L7.65,4.83 L7.51,4.8 L7.48,4.64 M19.71,7.53 L19.74,7.67 L19.74,8.74 L19.71,8.89 L19.56,8.9 L18.69,8.89 L17.81,8.87 L14.22,8.87 L14.22,10.21 L14.26,11.56 L14.18,12.11 L13.84,12.56 L13.41,12.73 L12.79,12.83 L12.16,12.86 L11.68,12.86 L11.46,12.86 L11.26,12.8 L11.19,12.61 L11.12,12.41 L10.94,11.87 L10.68,11.37 L11.44,11.43 L12.19,11.44 L12.59,11.36 L12.71,11.23 L12.74,10.99 L12.74,8.87 L9.18,8.87 L8.28,8.89 L7.39,8.9 L7.26,8.87 L7.24,8.74 L7.24,7.67 L7.24,7.59 L7.26,7.51 L7.39,7.5 L8.28,7.51 L9.18,7.53 L12.74,7.53 L12.71,6.94 L12.65,6.36 L13.12,6.4 L13.61,6.44 L14.35,5.86 L15.06,5.21 L11.64,5.21 L10.71,5.23 L9.76,5.26 L9.64,5.21 L9.61,5.1 L9.61,4.04 L9.64,3.9 L9.76,3.89 L10.71,3.9 L11.64,3.91 L15.79,3.91 L16.14,3.86 L16.41,3.81 L16.66,3.94 L17.01,4.26 L17.29,4.63 L17.42,4.9 L17.35,5.07 L17.19,5.17 L16.89,5.37 L16.61,5.61 L15.45,6.54 L14.22,7.4 L14.22,7.53 L17.81,7.53 L18.69,7.51 L19.56,7.5 L19.71,7.53"/>
                                     <TextBlock Text="OCR 文字识别" FontSize="14" FontWeight="SemiBold"/>
                                 </StackPanel>
-                                <TextBlock Text="框选后在覆盖层点「识字 / 翻译」提取图中文字（不自动触发）。中文、英文最准；日文需字高 ≥24px；韩文不支持，会自动改走系统 OCR 兜底" FontSize="11"
+                                <TextBlock Text="框选后点「识字 / 翻译」提取文字，不会自动触发；中英文最准。" FontSize="11"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="引擎" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="OcrEngineCbo" Grid.Column="1" SelectionChanged="OnOcrEngineChanged">
@@ -462,7 +515,7 @@
                                     <PathIcon Data="F0 M10,0 L11.36,0.09 L12.66,0.36 L13.9,0.79 L15.05,1.36 L16.12,2.09 L17.08,2.92 L17.92,3.89 L18.64,4.96 L19.23,6.11 L19.65,7.35 L19.91,8.65 L20,10 L19.91,11.36 L19.65,12.66 L19.23,13.9 L18.64,15.05 L17.92,16.12 L17.08,17.08 L16.12,17.92 L15.05,18.64 L13.9,19.23 L12.66,19.65 L11.36,19.91 L10,20 L8.65,19.91 L7.35,19.65 L6.11,19.23 L4.96,18.64 L3.89,17.92 L2.92,17.08 L2.09,16.12 L1.36,15.05 L0.79,13.9 L0.36,12.66 L0.09,11.36 L0,10 L0.09,8.65 L0.36,7.35 L0.79,6.11 L1.36,4.96 L2.09,3.89 L2.92,2.92 L3.89,2.09 L4.96,1.36 L6.11,0.79 L7.35,0.36 L8.65,0.09 L10,0 M17.91,6.25 L17.01,4.76 L15.84,3.49 L14.44,2.46 L13.68,2.06 L12.86,1.74 L13.5,2.78 L14,3.9 L14.38,5.08 L14.65,6.25 M18.75,10 L18.66,8.74 L18.4,7.5 L14.85,7.5 L14.96,8.75 L15,10 L14.96,11.26 L14.85,12.5 L18.4,12.5 L18.66,11.28 L18.75,10 M10,18.75 L10.48,18.69 L10.9,18.49 L11.3,18.19 L11.66,17.8 L12.3,16.82 L12.79,15.73 L13.15,14.65 L13.38,13.75 L6.64,13.75 L6.86,14.65 L7.22,15.73 L7.71,16.82 L8.35,17.8 L8.71,18.19 L9.11,18.49 L9.54,18.69 L10,18.75 M13.59,12.5 L13.71,11.26 L13.75,10 L13.71,8.75 L13.59,7.5 L6.43,7.5 L6.3,8.75 L6.25,10 L6.3,11.26 L6.43,12.5 M1.25,10 L1.34,11.28 L1.61,12.5 L5.16,12.5 L5.05,11.26 L5,10 L5.05,8.75 L5.16,7.5 L1.61,7.5 L1.34,8.74 L1.25,10 M10,1.25 L9.54,1.33 L9.11,1.52 L8.71,1.83 L8.35,2.21 L7.71,3.19 L7.22,4.29 L6.86,5.36 L6.64,6.25 L13.38,6.25 L13.15,5.36 L12.79,4.29 L12.3,3.19 L11.66,2.21 L11.3,1.83 L10.9,1.52 L10.48,1.33 L10,1.25 M7.15,1.74 L6.35,2.06 L5.58,2.46 L4.18,3.49 L3,4.76 L2.1,6.25 L5.36,6.25 L5.62,5.08 L6.01,3.9 L6.51,2.78 L7.15,1.74 M2.1,13.75 L3,15.25 L4.18,16.53 L5.58,17.55 L6.35,17.95 L7.15,18.28 L6.51,17.24 L6.01,16.11 L5.62,14.94 L5.36,13.75 M12.86,18.28 L13.68,17.95 L14.44,17.55 L15.84,16.53 L17.01,15.25 L17.91,13.75 L14.65,13.75 L14.38,14.94 L14,16.11 L13.5,17.24 L12.86,18.28"/>
                                     <TextBlock Text="翻译模式" FontSize="14" FontWeight="SemiBold"/>
                                 </StackPanel>
-                                <TextBlock Text="选择翻译引擎，OCR 识别后的文字将被翻译为目标语言" FontSize="11"
+                                <TextBlock Text="识别出的文字会按所选模式译为目标语言" FontSize="11"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="模式" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="TranslationModeCbo" Grid.Column="1" SelectionChanged="OnTranslationModeChanged">
@@ -495,14 +548,14 @@
                                      不注册就一条都翻不动，而紧邻的说明恰好写着那家免密钥端点在国内超时。 -->
                                 <StackPanel x:Name="FreeModePanel" Spacing="8">
                                     <TextBlock x:Name="FreeModeHint" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                               Text="本档开箱即可用：不填任何密钥，按 Edge → 必应 → MyMemory → Google 的顺序依次尝试免费公共端点（2026-10-23 国内实测前三条各 0.5–1.4 秒出整句译文，Google 在本机超时）。「LLM 翻译 / 视觉翻译」两档里自定义 LLM 排在它们之前。" TextWrapping="Wrap"/>
+                                               Text="无需密钥：按 Edge → 必应 → MyMemory → Google 依次尝试免费公共端点。" TextWrapping="Wrap"/>
                                     <CheckBox x:Name="FreeEndpointsChk" Content="使用免费公共翻译端点（识别到的文字会发给第三方）"/>
                                     <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
-                                               Text="代价要说清，这条默认开着不是隐瞒：① 截图里的文字（可能含 token、账号、聊天记录）会发到微软 / MyMemory 的服务器；② 除 MyMemory 明写允许匿名调用外，其余几家都是各家网页与浏览器前端的自用接口，不是给我们用的公开 API，页面一改版就可能静默断掉；③ 各家限制不同——Edge 免凭据、必应要先抓页面凭据且约 1 小时过期、MyMemory 单条 500 字符且匿名档 5000 字符每自然日（一整屏文字就能用完）。不想外发就取消勾选，然后填下面的凭据，否则本档将无法翻译。"/>
-                                    <Grid ColumnDefinitions="100,*"><TextBlock Text="有道 AppID" VerticalAlignment="Center"/><TextBox x:Name="YoudaoKeyTxt" Grid.Column="1" PlaceholderText="可选：填了就优先走官方 API（更快更稳，留空则直接走上面的免费端点）"/></Grid>
-                                    <Grid ColumnDefinitions="100,*"><TextBlock Text="有道密钥" VerticalAlignment="Center"/><TextBox x:Name="YoudaoSecretTxt" Grid.Column="1" PlaceholderText="AppSecret — 仅本机 DPAPI 加密存储，不写进 settings.json"/></Grid>
+                                               Text="截图里的文字会发给微软 / MyMemory 等第三方，这些端点也可能随时失效。不想外发就取消勾选，并填下面的凭据。"/>
+                                    <Grid ColumnDefinitions="100,*"><TextBlock Text="有道 AppID" VerticalAlignment="Center"/><TextBox x:Name="YoudaoKeyTxt" Grid.Column="1" PlaceholderText="可选：填了优先走官方 API（更快更稳）"/></Grid>
+                                    <Grid ColumnDefinitions="100,*"><TextBlock Text="有道密钥" VerticalAlignment="Center"/><TextBox x:Name="YoudaoSecretTxt" Grid.Column="1" PlaceholderText="仅在本机加密保存，不会上传"/></Grid>
                                     <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
-                                               Text="凭据从哪来（可选，不是必需）：登录 ai.youdao.com → 控制台创建应用 → 复制「应用ID / 应用密钥」。官方文档写明新用户注册即赠 50 元体验金（常见语种 48 元/百万字符 ⇒ 约 104 万字符），先扣体验金、用完才扣余额；本程序未实测到账时效与是否需要完善实名信息。"/>
+                                               Text="登录 ai.youdao.com 创建应用，复制 AppID 与密钥。"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
@@ -595,7 +648,7 @@
                                     <TextBlock Text="字体名称" VerticalAlignment="Center"/>
                                     <TextBox x:Name="FontCustomTxt" Grid.Column="1" PlaceholderText="输入系统已安装的字体名称" TextChanged="OnFontCustomTextChanged"/>
                                 </Grid>
-                                <TextBlock x:Name="FontDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="界面字体仅影响应用外观，不影响截图像素。选择后立即生效；该字体未安装时界面会回落到默认字体。"/>
+                                <TextBlock x:Name="FontDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。"/>
                             </StackPanel>
                         </Border>
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
@@ -619,7 +672,7 @@
                                        · 四角位置 = 应用内浮层（自绘窗口，不进通知中心）
                                        · Windows 自带通知 = 系统渲染、进通知中心、位置固定右下角 -->
                                 <TextBlock x:Name="ToastPositionHintTxt"
-                                           Text="推荐使用前四项（应用内浮层）：可控、肯定可见，且支持打开文件夹/文件/复制路径。「Windows 自带通知」依赖系统登记本应用，非打包运行时可能不显示；此时会自动回退为应用内浮层。"
+                                           Text="前四项是应用内浮层，始终可见；「Windows 自带通知」不可用时自动回退为浮层。"
                                            FontSize="11"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap"
@@ -639,7 +692,7 @@
                                 <CheckBox x:Name="PngFallbackChk" Content="编码失败时改存为 PNG" IsChecked="True" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
                                 <TextBlock x:Name="PngFallbackHint" FontSize="11"
                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
-                                           Text="勾上：某一格式的编码器这次失败时，这张图改存成 PNG 并弹提示（格式变了、像素无损，比丢图好）。关掉：失败就明确报错，产物仍然是你选的格式——按后缀或格式名接下游流程时建议关掉。同一容器内的后端切换（如 AVIF 硬件失败转软件）不算换格式，不受这个开关影响。"/>
+                                           Text="开：编码失败时改存为 PNG 并提示（格式变了，像素无损）。关：失败直接报错，产物仍是所选格式。"/>
                                 <!-- ═══ 日志详细度（2026-09-20 接线）═══
                                      CoreLog 的档位决定 Debug/Trace 进不进日志文件。
                                      档位模型早就有了，但【没有任何入口】⇒ ApplyDetailLevel 零调用方，
@@ -655,7 +708,7 @@
                                 </Grid>
                                 <TextBlock x:Name="LogVerbosityHint" FontSize="11"
                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
-                                           Text="日志写在应用目录 log/ 下按日轮转；换档只影响之后写入的行。诊断档以上量很大，排查完建议调回『简』。任何档位都不会记录截图里的文字内容、图像字节或 API 密钥。"/>
+                                           Text="档位越高记录越细，只影响之后写入的行；任何档位都不记录截图文字、图像字节或密钥。"/>
                             </StackPanel>
                         </Border>
                         <!-- ═══ 第三方许可（合规入口，2026-09-20）═══
@@ -684,7 +737,7 @@
                         <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="12">
                                 <TextBlock x:Name="PrivacyTitle" Text="隐私政策" FontSize="14" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="PrivacyDescTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="截图与文字识别均在本机完成。仅在你使用翻译功能时会向第三方发送内容——视觉翻译会上传整张截图，请阅读详情。"/>
+                                <TextBlock x:Name="PrivacyDescTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="截图与文字识别均在本机完成；只有翻译会把内容发往第三方，视觉翻译发送整张截图。"/>
                                 <Button x:Name="OpenPrivacyBtn" Content="查看隐私政策" Click="OnOpenPrivacyPolicy"
                                         HorizontalAlignment="Left" Height="36" Padding="14,0"/>
                             </StackPanel>

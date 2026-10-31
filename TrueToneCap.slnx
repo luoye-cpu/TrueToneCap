@@ -15,11 +15,7 @@
     <Project Path="src/TrueToneCap.Tools/TrueToneCap.Tools.csproj" />
   </Folder>
 
-  <!-- VS-Cap 侧车的跨语言像素对撞件（上游 PR #1）。
-       它只 link 一份 VSCapFrame.cs、不引用 App，所以能独立构建；
-       进解决方案是为了让它跟着 CI 一起被编译，不再当"没人跑的孤儿工程"。 -->
-  <Folder Name="/tests/">
-    <Project Path="tests/VSCapInterop/VSCapInterop.csproj" />
-  </Folder>
+  <!-- VS-Cap（Qt 侧车）与它的跨语言像素对撞件已于 2026-10-27 归档：产品只剩一条选区路
+       （HdrCaptureWindow）。富文本/撤销/贴图三条能力已并入主程序，见 docs/vscap-mode.md。 -->
 
 </Solution>

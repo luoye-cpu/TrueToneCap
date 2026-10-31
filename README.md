@@ -239,10 +239,11 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 > （`NvEncoderNative.cs` 的偏移表与 GUID 段、`ManagedTiffEncoder.cs`、`MftEncoderNative.cs` 等），
 > 完整叙述另见 `docs/reviews/pipeline-review/*.md` 与 git 历史。
 
-### 上游 PR #1 — VS-Cap 模式（2026-10-11 提交，2026-10-16 合入）
+### 上游 PR #1 — VS-Cap 模式（2026-10-11 提交，2026-10-16 合入，2026-10-27 归档）
 
-- 新增可选 VS-Cap 模式（默认关闭）：区域截图交给 Qt 侧车做选区与编辑，另加剪贴板贴图按钮与 `Ctrl+Alt+T`。
-- 侧车源码在 `src/TrueToneCap.VSCap/`，构建入口 `scripts/BuildVSCap.ps1`；接入记录与验证边界见 [docs/vscap-mode.md](docs/vscap-mode.md)。
+- 归档原因与"能力并入主程序"的落点见 [docs/vscap-mode.md](docs/vscap-mode.md)：
+  富文本文字（字体/字号/加粗/斜体 + 再编辑/拖动）、统一撤销栈、置顶贴图窗已并入主程序；
+  Qt 侧车、`BuildVSCap.ps1` 与「VS-Cap 模式」开关已从产品移除（源码在 git 历史里）。
 
 ### v0.3.6-beta
 

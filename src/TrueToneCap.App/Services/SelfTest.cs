@@ -235,7 +235,7 @@ public static class SelfTest
         sb.AppendLine("说明：分类=Unknown 时源精度放行（多试一次 Float16），但输出声明一律不放开；");
         sb.AppendLine("      拼接的 HDR 源只接受逐屏有明确证据的屏，且 HDR 档优先于广色域档。");
 
-        var displays = TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplays();
+        var displays = TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplaysUncached();
         sb.AppendLine($"枚举到活跃显示器 {displays.Count} 块");
 
         var src = TrueToneCap.Core.Capture.DisplayEnumerator.SelectHdrSourceDisplay(displays, state.acm);
@@ -923,7 +923,7 @@ public static class SelfTest
             // ── 1. 先问能力（与 CanDeliverExtendedRange 同一判据来源：DXGI + ACM）──
             // 能力不足时直接 SKIP，【不发起捕获】：无 GPU / 无桌面的会话（CI）在这里就被挡住，
             // 不会白付 Float16 首帧超时。这与 §28 的负缓存同源，只是这里连试都不必试。
-            var displays = TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplays();
+            var displays = TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplaysUncached();
             bool acm = CapabilityService.DetectDisplayState().acm;
             var target = displays.FirstOrDefault(d => d.IsHdr)
                          ?? displays.FirstOrDefault(d => d.SupportsHdr)
@@ -1312,8 +1312,9 @@ public static class SelfTest
         Expect("越界", "QualityGainMap", "99", F(oob.QualityGainMap), "1.00");
         Expect("越界", "QualityJpegLi", "0.1", F(oob.QualityJpegLi), "1.00");
         Expect("越界", "QualityJpegXl", "9", F(oob.QualityJpegXl), "1.00");
-        // 这条是整张表最容易读反的一格：CRF 区间是 0–63，越界**不钳到 63**，而是交还默认 15
-        Expect("越界", "QualityAvif", "999", F(oob.QualityAvif), "15.00");
+        // 这条是整张表最容易读反的一格：CRF 区间是 0–63，越界**不钳到 63**，而是交还默认 20
+        //（2026-10-27 用户口径：默认 20 = 视觉无损档上沿；旧默认 15 已作废）
+        Expect("越界", "QualityAvif", "999", F(oob.QualityAvif), "20.00");
         Expect("越界", "QualityWebp", "3", F(oob.QualityWebp), "90.00");
         Expect("越界", "QualityTiff", "0", F(oob.QualityTiff), "100.00");
         Expect("越界", "FormatIndex", "99", oob.FormatIndex.ToString(), "0");   // 落点 = PNG

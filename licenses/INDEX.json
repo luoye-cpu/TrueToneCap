@@ -504,33 +504,16 @@
       "sha256": "f51de042e41c9c0553f38db255eb32a6caadfb1256b44205da5f00de612c7804",
       "obligationNote": "Apache-2 第 4 条：随包分发 zxing.dll 须保留许可副本（本文件）；改动需带显著声明（当前未改动，仅重打包）。落盘文本头部注明署名与来源，正文为上游 COPYING 原文。"
     },
-{
-      "file": "vs-cap-MIT.txt",
-      "project": "VS-Cap (VS-Renderer-GUI src/cap)",
-      "version": "1.0.10 (pinned upstream commit 7042772)",
+    {
+      "file": "libdeflate-MIT.txt",
+      "project": "libdeflate — 随包分发的可选无损压缩 DLL（deflate.dll，PNG/TIFF Smallest 档高熵内容）",
+      "version": "1.26（上游 commit 2b7cdc5，2026-10-31 本机构建）",
       "spdx": "MIT",
-      "shippedIn": [
-        "data/vscap/ttc-vscap.exe"
-      ],
+      "shippedIn": ["deflate.dll"],
       "sourceKind": "local-tree",
-      "sourcePathOrUrl": "src/TrueToneCap.VSCap/upstream/LICENSE（逐 blob 与上游 7042772 对撞相等）",
-      "obligationNote": "MIT：随包保留版权与许可声明即可。侧车源码的修改版整体在 src/TrueToneCap.VSCap/（upstream/ 为逐字副本，适配层在其外），构成源码可得。",
-      "sha256": "b57b5fb52a405837e0bdbf0ce33265f3621acaa0f5bdda70ce09a3aa718154a2"
-    },
-{
-      "file": "qt-LGPL-3.0.txt",
-      "project": "Qt 6 (Qt6Core / Qt6Gui / Qt6Widgets)",
-      "version": "6.8（CMakeLists 的最低要求；实际版本 = 构建机所装，未在仓内固定）",
-      "spdx": "LGPL-3.0-only",
-      "shippedIn": [
-        "data/vscap/Qt6Core.dll",
-        "data/vscap/Qt6Gui.dll",
-        "data/vscap/Qt6Widgets.dll"
-      ],
-      "sourceKind": "local-tree",
-      "sourcePathOrUrl": "src/TrueToneCap.VSCap/upstream/Qt-LGPL-3.0.txt",
-      "obligationNote": "LGPL-3.0：侧车经 windeployqt 动态链接 Qt（见 scripts/BuildVSCap.ps1），不静态并入 ⇒ 本仓 Apache-2.0 代码不被传染。随包义务 = 许可全文（本文件 + data/vscap/ 内的副本）+ 允许用户替换 Qt 组件：绿色包下 data/vscap/ 目录内 DLL 可直接替换；MSIX 安装目录只读，替换需改用绿色包或自行重链接。同目录的 Qt-GPL-3.0.txt 是 Qt 的另一可选条款，本仓按 LGPL 分发，不据其主张权利。",
-      "sha256": "ea7d049c7705dc13afc202dd18e1827f3484f8212fd3fa7b82fc4a0c363432c9"
+      "sourcePathOrUrl": "C:\\PLAN\\libdeflate-bench\\COPYING",
+      "sha256": "41b60f2caab6bffdd5ba360687bd23ca653c0a1235c00380ecffc939b4cd8d75",
+      "obligationNote": "MIT：Copyright 2016 Eric Biggers / 2024 Google LLC。二进制再分发须随包保留版权声明与许可全文（本文件）。DLL 为自编译件，未静态链入任何第三方库，故本条即全部义务。"
     }
   ],
   "notLocated": [

@@ -160,7 +160,46 @@ public static partial class DisplayEnumerator
 
     // ────── DXGI 枚举 ──────
 
+    // ═══ 2026-10-29（A3）：同一拍内的重复枚举合并成一次 ═══
+    // 实测单次 1.3~6.8ms（中位 1.76ms，单屏机；含 DXGI 工厂 + QueryDisplayConfig + 逐屏 EDID 注册表读），
+    // 而一次选区截图会走 2~3 次：MainWindow 自己一次、CapabilityService.DetectDisplayState 一次、
+    // 能力探测再一次。缓存 500ms 只合并"同一拍里的这几下"，跨拍不指望它获益。
+    // 失效点与 ICC 缓存、WGC 会话放在同一处（MainWindow.HandleDisplayChangeAsync）——
+    // 那三级本来就靠 WM_DISPLAYCHANGE / WM_SETTINGCHANGE 感知 HDR/ACM 变化，本缓存没有引入
+    // 新的"靠什么感知变化"假设。TTL 只是兜底：万一某类变更没发消息，最多陈旧 500ms。
+    // ⚠ 诊断/自检走 EnumerateDisplaysUncached()：它们常刚刚改过显示状态，必须读到当下值。
+    private static readonly object s_cacheLock = new();
+    private static IReadOnlyList<DisplayInfo>? s_cache;
+    private static long s_cacheTick;
+    private const long CacheTtlMs = 500;
+
     public static IReadOnlyList<DisplayInfo> EnumerateDisplays()
+    {
+        lock (s_cacheLock)
+        {
+            if (s_cache is not null && Environment.TickCount64 - s_cacheTick < CacheTtlMs)
+                return s_cache;
+        }
+
+        var fresh = EnumerateDisplaysCore();
+        lock (s_cacheLock)
+        {
+            s_cache = fresh;
+            s_cacheTick = Environment.TickCount64;   // 用填表时刻：枚举本身耗时不吃掉 TTL
+        }
+        return fresh;
+    }
+
+    /// <summary>绕过缓存枚举。诊断/自检专用（它们刚刚改过显示状态，必须读到当下值）。</summary>
+    public static IReadOnlyList<DisplayInfo> EnumerateDisplaysUncached() => EnumerateDisplaysCore();
+
+    /// <summary>清空枚举缓存。与 ICC 缓存、WGC 会话一起在显示器/系统设置变更时调用。</summary>
+    public static void InvalidateCache()
+    {
+        lock (s_cacheLock) { s_cache = null; s_cacheTick = 0; }
+    }
+
+    private static IReadOnlyList<DisplayInfo> EnumerateDisplaysCore()
     {
         var displays = new List<DisplayInfo>();
 

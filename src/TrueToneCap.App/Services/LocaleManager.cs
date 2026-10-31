@@ -45,29 +45,17 @@ public static class LocaleManager
     public static string EncoderBackend => s_lang == AppLanguage.Chinese ? "编码后端" : "Backend";
     public static string ChromaSampling => s_lang == AppLanguage.Chinese ? "色度采样" : "Chroma";
 
-    // ═══ 压缩强度三档（2026-10-07 用户口径）═══
-    // 三档名按【用户视角的结果】命名（体积/均衡/速度），不按底层参数名 ——
-    // 四家参数的方向与量纲都不同（avifenc 越小越慢、cjxl 越大越慢、cwebp 越大越慢、NVENC P 越大越快），
-    // 照参数名翻译必然误导。
-    public static string CompressionEffort => s_lang == AppLanguage.Chinese ? "压缩强度" : "Compression";
-    public static string EffortSmallest => s_lang == AppLanguage.Chinese ? "最小体积（最慢）" : "Smallest file (slowest)";
-    public static string EffortBalanced => s_lang == AppLanguage.Chinese ? "均衡（推荐）" : "Balanced (recommended)";
-    public static string EffortFastest => s_lang == AppLanguage.Chinese ? "最快" : "Fastest";
-    // ═══ 压缩强度三档的说明文案 ═══
-    // ⚠ 一律经 Tr() 查表，不许在这里写第二份英文：
-    //   本仓有一条判据「同一个中文只许有一种英文说法」，因为显示点各写一份英文时，
-    //   切语言后"后写入的那份说了算"，另一份就变成永远不生效的死文案。
-    //   我自己第一次就这么写了（属性里手写英文 + 表里另写一份），当场被那条判据抓住。
-    public static string EffortDescJxl => Tr("三档只改变编码耗时（cjxl 的 effort），与上方的质量设置无关。实测 4K 截图：最小体积约 0.4~0.9 秒、均衡约 0.3~0.8 秒、最快约 0.3~0.6 秒。⚠ 本格式的档位主要影响速度而非体积：更高的 effort 对部分内容更小、对另一部分反而更大，因此最高档停在 e7，不提供更慢的档位。");
-    public static string EffortDescAvif => Tr("只改变编码耗时，不影响质量设置。软件编码器（libaom）差异很大：实测 4K 下最小体积约 7.1 秒 / 93.7 KB、均衡约 0.3 秒 / 123.4 KB、最快约 0.1 秒 / 148.8 KB。最小体积档会同时启用 libaom 的 tune=ssim 以求更小。硬件编码（NVENC）三档都很快，差异小得多。");
-    public static string EffortDescWebp => Tr("只改变编码耗时，不影响质量设置。WebP 的档位差异比 JPEG XL / AVIF 小：实测 4K 下三档约 0.4 / 0.7 / 1.0 秒，体积相差约两成。");
+    // 压缩强度档位的文案只有一处事实源：下拉项写在 MainWindow.xaml，逐 Tag 的英文改写走
+    // MainWindow.Localization.cs 的 Tr("<中文>") 查下面的对照表。档位名按【用户视角的结果】排,
+    // 不按底层参数名（avifenc 越小越慢、cjxl 越大越慢、cwebp 越大越慢、NVENC P 越大越快、
+    // zlib 越大越慢、cjpegli 是个布尔开关）—— 映射本身见 CompressionEffortMap。
     public static string AvifPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
     public static string JxlPngSuffix => s_lang == AppLanguage.Chinese ? "额外添加 .png 后缀来提高兼容性" : "Add .png suffix for compatibility";
     // 2026-09-26：GainMap 并入 JPEG LI ⇒ 独立卡片的标题（GainMapOptions）已删，
     // 开关本身的名字是 GainMapToggle，说明仍是 GainMapDesc（挂在开关下方）。
     public static string GainMapToggle => s_lang == AppLanguage.Chinese
         ? "附带增益图（输出 Ultra HDR 照片）" : "Attach gain map (Ultra HDR output)";
-    public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。这条口径不只管增益图：JPEG 与 WebP 两族格式的默认目标同样是 Rec.709，只有你亲手选 Rec.2020 才产出 Rec.2020。打开此开关时 HDR 输出锁定为开。" : "The base image is always SDR - that is the structure of Ultra HDR: the HDR lives in the gain map, not in the base image declaration. The Target gamut above picks the primaries shared by base and gain map: Rec.709 (default) or Rec.2020 (only an explicit choice does that; Follow display resolving to a wide gamut does not). This rule is not just about the gain map: plain JPEG and WebP also default to Rec.709, and only your explicit pick of Rec.2020 produces Rec.2020. While this is on, HDR output is locked to on.";
+    public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "底图恒为 SDR，HDR 在增益图里。「目标色域」决定底图与增益图的原色；打开此开关时 HDR 输出锁定为开。" : "The base image is always SDR; the HDR lives in the gain map. Target gamut sets the primaries for base and gain map; with this on, HDR output is locked on.";
     public static string GainMapModeLabel => s_lang == AppLanguage.Chinese ? "增益图模式" : "Gain Map Mode";
 
     // ═══ 2026-09-19：WebP 的「色度采样」下拉已撤掉，改为一句静态说明 ═══
@@ -75,21 +63,28 @@ public static class LocaleManager
     //   ffprobe 恒 yuv420p —— NativeWebPEncoder 没有色度形参，而有损 WebP 的格式定义就是 4:2:0
     //   （无损为 RGB）。所以这条文案说的是"为什么没有选项"，不是选项标签。
     public static string WebPChromaNote => s_lang == AppLanguage.Chinese
-        ? "有损 WebP 恒 4:2:0（格式定义）；无损为 RGB。本格式无色度可选，也没有对应设置项。"
-        : "Lossy WebP is always 4:2:0 (by format definition); lossless WebP is RGB. This format offers no chroma setting.";
+        ? "有损恒为 4:2:0，无损为 RGB；本格式没有色度选项。"
+        : "Lossy is always 4:2:0, lossless is RGB; this format has no chroma option.";
 
     // ═══ 2026-09-19：PNG / TIFF / JPEG XL 三张位深卡片共用的实话（§4.3 双路径策略）═══
     //   编码行为按既定决策不改（下拉是真生效的），但"升位深不产生信息"必须出现在界面上。
+    //   2026-10-30：JXL 单独一条 —— cjxl 没有独立位深参数，10/16-bit 同装 16-bit 容器，
+    //   只差 sBIT 标注；共用的短句会把这条区别抹掉。
     public static string BitDepthSourceNote => s_lang == AppLanguage.Chinese
-        ? "8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。"
-        : "An 8-bit screenshot source is never given more bit depth (upscaling adds no information); high bit depth is only meaningful for Float16/HDR sources.";
+        ? "8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。"
+        : "An 8-bit source gains no bit depth; high bit depth only matters for Float16/HDR sources.";
+
+    /// <summary>JPEG XL 专用：多一句"10/16-bit 同装 16-bit 容器，只差 sBIT"。</summary>
+    public static string BitDepthJxlNote => s_lang == AppLanguage.Chinese
+        ? "8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。10-bit 与 16-bit 都用 16-bit 容器，差别只在 sBIT 标注。"
+        : "An 8-bit source gains no bit depth; high bit depth only matters for Float16/HDR sources. 10-bit and 16-bit both use a 16-bit container and differ only in the sBIT tag.";
 
     // ── 色彩页 ──
     public static string PageColor => s_lang == AppLanguage.Chinese ? "色彩设置" : "Color Settings";
     public static string HdrOutput => s_lang == AppLanguage.Chinese ? "HDR 输出" : "HDR Output";
     public static string IccBaking => s_lang == AppLanguage.Chinese ? "ICC 色彩管理" : "ICC Color Mgmt";
     public static string ColorSpace => s_lang == AppLanguage.Chinese ? "色彩空间" : "Color Space";
-    public static string IccStrategy => s_lang == AppLanguage.Chinese ? "这里选的是【目标色域】：像素搬去哪儿、容器就声明成什么，是同一个值。对增益图（JPEG 卡片里的开关）而言，它选的就是【底图】的色彩空间。至于某个格式靠什么通道把声明交给查看器（ICC / 代码点 / 什么都不写），下面「色域映射」按当前格式说。" : "This selects the TARGET COLOUR SPACE: where pixels are moved to and what the container declares are the same value. For the gain map (the switch inside the JPEG card) it selects the BASE image colour space. Which channel each format uses to carry that declaration (ICC / code points / nothing) is shown per format under Gamut Mapping.";
+    public static string IccStrategy => s_lang == AppLanguage.Chinese ? "目标色域同时决定像素与容器声明。" : "Target gamut sets both the pixels and the container declaration.";
 
     // ── 截图页 ──
     public static string PageCapture => s_lang == AppLanguage.Chinese ? "截图与录制" : "Capture & Record";
@@ -133,13 +128,8 @@ public static class LocaleManager
     public static string LogVerbosityDiagnose => s_lang == AppLanguage.Chinese ? "诊断" : "Diagnostic";
     public static string LogVerbosityFull => s_lang == AppLanguage.Chinese ? "全" : "Full";
     public static string LogVerbosityHint => s_lang == AppLanguage.Chinese
-        ? "简＝只记操作与降级；诊断＝再加每拍快照、回退原因与耗时；全＝逐帧逐子进程，仅排障时用。"
-          + "日志写在应用目录 log/ 下按日轮转；换档只影响之后写入的行，诊断档以上量很大，排查完建议调回『简』。"
-          + "任何档位都不会记录截图里的文字内容、图像字节或 API 密钥。"
-        : "Basic = actions and fallbacks only; Diagnostic = adds per-tick snapshots, fallback reasons and timings; "
-          + "Full = per frame and per subprocess, for debugging only. Logs rotate daily under <app dir>/log/. "
-          + "A level change only affects lines written afterwards; switch back to Basic when you are done. "
-          + "No level ever records recognized text, image bytes or API keys.";
+        ? "档位越高记录越细，只影响之后写入的行；任何档位都不记录截图文字、图像字节或密钥。"
+        : "Higher tiers log more detail and only affect lines written afterwards; no tier records screenshot text, image bytes or keys.";
 
     // ── Toast 通知 ──
     public static string ToastTitle => s_lang == AppLanguage.Chinese ? "通知" : "Notifications";
@@ -159,7 +149,7 @@ public static class LocaleManager
     public static string FontDefault => s_lang == AppLanguage.Chinese ? "默认 (微软雅黑)" : "Default (Microsoft YaHei)";
     public static string FontCustom => s_lang == AppLanguage.Chinese ? "自定义..." : "Custom...";
     public static string FontCustomPlaceholder => s_lang == AppLanguage.Chinese ? "输入系统已安装的字体名称" : "Enter installed font name";
-    public static string FontDesc => s_lang == AppLanguage.Chinese ? "界面字体仅影响应用外观，不影响截图像素。选择后立即生效；该字体未安装时界面会回落到默认字体。" : "Font only affects UI appearance, not captured pixels. Applies immediately; if the font is not installed the UI falls back to the default.";
+    public static string FontDesc => s_lang == AppLanguage.Chinese ? "界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。" : "The interface font affects appearance only, never captured pixels; if it is not installed, the default is used.";
 
     // ── 状态栏 ──
     public static string Ready => s_lang == AppLanguage.Chinese ? "就绪" : "Ready";
@@ -196,30 +186,29 @@ public static class LocaleManager
             ["色彩与 HDR"] = "Colour & HDR",
             ["目标色域"] = "Target gamut",
             ["检测中..."] = "Detecting…",
-            ["分段 Reinhard — 广色域自动感知缩限到目标色域，确保色彩准确。"] =
-                "Segmented Reinhard — wide gamut is perceptually compressed into the target gamut so colours stay accurate.",
-            ["自动模式优先使用实测可用的硬件加速；硬件编码器受色度/位深限制，不满足时会自动降级并提示。"] =
-                "Auto prefers hardware encoders that were actually measured usable; hardware paths are limited by chroma/bit depth and fall back with a notice.",
+            ["广色域自动缩限到目标色域。"] = "Wide gamut is clamped into the target gamut.",
+            ["自动优先硬件编码器；色度或位深不满足时自动降级并提示。"] =
+                "Auto prefers hardware encoders and falls back with a notice when chroma or bit depth is unsupported.",
             ["AVIF 位深"] = "AVIF bit depth",
             ["位深"] = "Bit depth",
-            ["位深按所选编码器能力生效（软件 ≤12-bit、NVENC ≤10-bit、QSV 8-bit），不支持的档位已隐藏；HDR 至少 10-bit，软件编码器（libaom）在 HDR 下还可选 12-bit。8-bit 兼容性最广；>8-bit 仅在源为 Float16（HDR/高级颜色采集）时保留真精度，普通 8-bit 截图恒输出 8-bit。"] =
-                "Bit depth follows the selected encoder (software ≤12-bit, NVENC ≤10-bit, QSV 8-bit); unsupported values are hidden. HDR needs at least 10-bit, and libaom also offers 12-bit under HDR. 8-bit has the widest compatibility; above 8-bit keeps real precision only when the source is Float16 (HDR / advanced-colour capture) — ordinary 8-bit screenshots always export 8-bit.",
+            ["上限取决于编码器：软件 ≤12-bit，NVENC ≤10-bit，QSV 8-bit；HDR 至少 10-bit。8-bit 源恒输出 8-bit。"] =
+                "The cap follows the encoder: software ≤12-bit, NVENC ≤10-bit, QSV 8-bit; HDR needs at least 10-bit. An 8-bit source always exports 8-bit.",
             ["JPEG 选项"] = "JPEG options",
             // ── 换格式保底开关（2026-09-29 用户口径：接上保底 + 触发必须告知 + 设置里给开关）──
             // 界面里这两串中文是 XAML 写死的，靠这张表被扫描接管；漏一条就是英文界面下的中文残留。
             ["编码失败时改存为 PNG"] = "Fall back to PNG when an encoder fails",
-            ["勾上：某一格式的编码器这次失败时，这张图改存成 PNG 并弹提示（格式变了、像素无损，比丢图好）。关掉：失败就明确报错，产物仍然是你选的格式——按后缀或格式名接下游流程时建议关掉。同一容器内的后端切换（如 AVIF 硬件失败转软件）不算换格式，不受这个开关影响。"] =
-                "On: if an encoder fails, this shot is saved as PNG with a notice (the format changes, pixels stay lossless — better than losing it). Off: failures are reported as errors and the file stays in the format you picked — turn this off if downstream steps key off the extension or format name. Switching encoders inside the same container (e.g. AVIF hardware falling back to software) is not a format change and is unaffected.",
-            ["采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小（截图里的文字边缘最容易看出差别）。增益图开与不开共用这一项。"] =
-                "Higher subsampling means more accurate colour and larger files: 4:4:4 keeps chroma, 4:2:0 is smallest (text edges in screenshots show the difference first). Shared by the gain-map switch, on or off.",
-            ["底图恒为 SDR —— 这是 Ultra HDR 的结构，HDR 在增益图里，不在底图的声明里。上面「目标色域」决定底图与增益图共用哪套原色：Rec.709（默认）或 Rec.2020（只有亲手选才会，「跟随显示器」解析成广色域不触发）。这条口径不只管增益图：JPEG 与 WebP 两族格式的默认目标同样是 Rec.709，只有你亲手选 Rec.2020 才产出 Rec.2020。打开此开关时 HDR 输出锁定为开。"] =
-                "The base image is always SDR - that is the structure of Ultra HDR: the HDR lives in the gain map, not in the base image declaration. The Target gamut above picks the primaries shared by base and gain map: Rec.709 (default) or Rec.2020 (only an explicit choice does that; Follow display resolving to a wide gamut does not). This rule is not just about the gain map: plain JPEG and WebP also default to Rec.709, and only your explicit pick of Rec.2020 produces Rec.2020. While this is on, HDR output is locked to on.",
+            ["开：编码失败时改存为 PNG 并提示（格式变了，像素无损）。关：失败直接报错，产物仍是所选格式。"] =
+                "On: a failed encode is saved as PNG with a notice (the format changes, pixels stay lossless). Off: the failure is reported and the output stays in the chosen format.",
+            ["采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小。"] =
+                "More chroma means more accurate colour and larger files: 4:4:4 keeps full chroma, 4:2:0 is smallest.",
+            ["底图恒为 SDR，HDR 在增益图里。「目标色域」决定底图与增益图的原色；打开此开关时 HDR 输出锁定为开。"] =
+                "The base image is always SDR; the HDR lives in the gain map. Target gamut sets the primaries for base and gain map; with this on, HDR output is locked on.",
             ["PNG 选项"] = "PNG options",
             ["JPEG XL 选项"] = "JPEG XL options",
-            ["本格式没有 4:2:2：cjxl 只能整幅 1x1 或 2x2 降采样（不是只减色度），逐轴子采样仅在转码 JPEG 时可用 ⇒ 想要 4:2:2 请改用 JPEG 或 AVIF。"] =
-                "This format has no 4:2:2: cjxl can only box-downsample the whole image (1x1 or 2x2), not the chroma alone; per-axis subsampling exists only when transcoding JPEG ⇒ use JPEG or AVIF for 4:2:2.",
-            ["8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。cjxl 没有独立的位深参数，位深由输入容器决定 ⇒ 10-bit 与 16-bit 都装在 16-bit 容器里，差别在 sBIT 标注与量化步长。"] =
-                "An 8-bit screenshot source is never up-scaled (that adds no information); high bit depth matters only for Float16/HDR sources. cjxl has no separate bit-depth parameter — the input container decides, so 10-bit and 16-bit both live in a 16-bit container and differ in the sBIT annotation and quantisation step.",
+            ["本格式只有 4:4:4 与 4:2:0；需要 4:2:2 请改用 JPEG 或 AVIF。"] =
+                "This format offers only 4:4:4 and 4:2:0; use JPEG or AVIF for 4:2:2.",
+            ["8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。10-bit 与 16-bit 都用 16-bit 容器，差别在 sBIT 标注。"] =
+                "An 8-bit source gains no bit depth; high bit depth only matters for Float16/HDR sources. 10-bit and 16-bit both use a 16-bit container and differ only in the sBIT annotation.",
             ["WebP 选项"] = "WebP options",
             ["TIFF 选项"] = "TIFF options",
             ["无感截图快捷键"] = "Silent capture hotkey",
@@ -229,27 +218,27 @@ public static class LocaleManager
             ["覆盖遮罩颜色"] = "Overlay scrim colour",
             ["选区边框颜色"] = "Selection border colour",
             ["OCR 文字识别"] = "OCR",
-            ["框选后在覆盖层点「识字 / 翻译」提取图中文字（不自动触发）。中文、英文最准；日文需字高 ≥24px；韩文不支持，会自动改走系统 OCR 兜底"] =
-                "After a region selection, press Read / Translate in the overlay to extract text (never automatic). Best for Chinese and English; Japanese needs glyphs ≥24px; Korean is unsupported and falls back to Windows OCR",
+            ["框选后点「识字 / 翻译」提取文字，不会自动触发；中英文最准。"] =
+                "After a region selection, click Read / Translate in the overlay; it never runs automatically and is most accurate for Chinese and English.",
             ["识别语言"] = "Recognition language",
             ["翻译模式"] = "Translation mode",
-            ["选择翻译引擎，OCR 识别后的文字将被翻译为目标语言"] =
-                "Pick the translation engine; OCR text is translated into the target language",
+            ["识别出的文字会按所选模式译为目标语言"] =
+                "Recognised text is translated into the target language in the selected mode",
             ["模式"] = "Mode",
-            ["本档开箱即可用：不填任何密钥，按 Edge → 必应 → MyMemory → Google 的顺序依次尝试免费公共端点（2026-10-23 国内实测前三条各 0.5–1.4 秒出整句译文，Google 在本机超时）。「LLM 翻译 / 视觉翻译」两档里自定义 LLM 排在它们之前。"] =
-                "This mode works out of the box: with no key entered it tries the free public endpoints in order — Edge → Bing → MyMemory → Google (measured 2026-10-23 from a mainland-China network: each of the first three returns a full sentence in 0.5–1.4 s; Google timed out here). In the LLM / Vision modes the custom LLM runs before them.",
+            ["无需密钥：按 Edge → 必应 → MyMemory → Google 依次尝试免费公共端点。"] =
+                "No key needed: free public endpoints are tried in order — Edge → Bing → MyMemory → Google.",
             ["使用免费公共翻译端点（识别到的文字会发给第三方）"] =
                 "Use free public translation endpoints (recognized text is sent to third parties)",
-            ["代价要说清，这条默认开着不是隐瞒：① 截图里的文字（可能含 token、账号、聊天记录）会发到微软 / MyMemory 的服务器；② 除 MyMemory 明写允许匿名调用外，其余几家都是各家网页与浏览器前端的自用接口，不是给我们用的公开 API，页面一改版就可能静默断掉；③ 各家限制不同——Edge 免凭据、必应要先抓页面凭据且约 1 小时过期、MyMemory 单条 500 字符且匿名档 5000 字符每自然日（一整屏文字就能用完）。不想外发就取消勾选，然后填下面的凭据，否则本档将无法翻译。"] =
-                "The costs, stated plainly — this stays on by default and that is not a concealment: ① text from your screenshots (which may contain tokens, account names or chat history) is sent to Microsoft / MyMemory servers; ② apart from MyMemory, which explicitly permits anonymous calls, the others are each vendor's own web- and browser-frontend endpoints rather than public APIs meant for us, and they can break silently whenever a page changes; ③ the limits differ — Edge needs no credentials, Bing first scrapes page credentials that expire in about an hour, MyMemory allows 500 characters per request and 5000 characters per calendar day anonymously (one full screen of text uses it up). To keep text on this machine, untick this and fill in a credential below — otherwise this mode cannot translate.",
+            ["截图里的文字会发给微软 / MyMemory 等第三方，这些端点也可能随时失效。不想外发就取消勾选，并填下面的凭据。"] =
+                "Text from your screenshots goes to third parties such as Microsoft / MyMemory, and these endpoints may stop working at any time. To keep text local, untick this and fill in a credential below.",
             ["有道 AppID"] = "Youdao AppID",
-            ["可选：填了就优先走官方 API（更快更稳，留空则直接走上面的免费端点）"] =
-                "Optional: with it filled the official API runs first (faster and steadier); leave empty to go straight to the free endpoints above",
+            ["可选：填了优先走官方 API（更快更稳）"] =
+                "Optional: the official API is used first when filled (faster, steadier)",
             ["有道密钥"] = "Youdao secret",
-            ["AppSecret — 仅本机 DPAPI 加密存储，不写进 settings.json"] =
-                "AppSecret — stored only on this machine via DPAPI, never written to settings.json",
-            ["凭据从哪来（可选，不是必需）：登录 ai.youdao.com → 控制台创建应用 → 复制「应用ID / 应用密钥」。官方文档写明新用户注册即赠 50 元体验金（常见语种 48 元/百万字符 ⇒ 约 104 万字符），先扣体验金、用完才扣余额；本程序未实测到账时效与是否需要完善实名信息。"] =
-                "Where the credentials come from (optional — not required): sign in at ai.youdao.com → create an app in the console → copy the App ID / App secret. Official docs state new registrations receive ¥50 trial credit (common language pairs cost ¥48 per million characters ≈ 1.04 M characters), spent before any balance; this app has not measured credit timing or identity-verification requirements.",
+            ["仅在本机加密保存，不会上传"] =
+                "Encrypted and stored on this device; never uploaded",
+            ["登录 ai.youdao.com 创建应用，复制 AppID 与密钥。"] =
+                "Sign in at ai.youdao.com, create an app, then copy the App ID and secret.",
             ["LLM 配置"] = "LLM settings",
             ["OCR 识别文字后，通过 LLM API 翻译为高质量译文"] =
                 "After OCR, translate the text through an LLM API for higher-quality output",
@@ -257,11 +246,11 @@ public static class LocaleManager
             ["提示词"] = "Prompt",
             ["留空使用默认翻译提示词..."] = "Leave empty for the default translation prompt…",
             ["字体名称"] = "Font name",
-            ["推荐使用前四项（应用内浮层）：可控、肯定可见，且支持打开文件夹/文件/复制路径。「Windows 自带通知」依赖系统登记本应用，非打包运行时可能不显示；此时会自动回退为应用内浮层。"] =
-                "The first four (in-app overlays) are recommended: controllable, always visible, and they offer open-folder / open-file / copy-path. “Windows native notifications” relies on the app being registered with the system and may not appear when running unpacked; it then falls back to an in-app overlay.",
+            ["前四项是应用内浮层，始终可见；「Windows 自带通知」不可用时自动回退为浮层。"] =
+                "The first four are in-app overlays and always visible; Windows notifications fall back to an overlay when unavailable.",
             ["启用界面过渡动画（更流畅）"] = "Enable UI transition animations",
-            ["日志写在应用目录 log/ 下按日轮转；换档只影响之后写入的行。诊断档以上量很大，排查完建议调回『简』。任何档位都不会记录截图里的文字内容、图像字节或 API 密钥。"] =
-                "Logs are written under the app directory in log/, rotated daily; changing the level only affects lines written afterwards. Diagnostic and above are very verbose — switch back to Brief when you are done. No level ever records the text inside a screenshot, image bytes, or API keys.",
+            ["档位越高记录越细，只影响之后写入的行；任何档位都不记录截图文字、图像字节或密钥。"] =
+                "Higher tiers log more detail and only affect lines written afterwards; no tier records screenshot text, image bytes or keys.",
             // 这三条的英文以 ThirdPartyNoticesWindow 的 CardTitleText/CardDescText/CardButtonText
             // 为准（那份一直在界面上生效，表里原先写的 "licences" 是第二份真相且已被它压掉）：
             // 表改成与实机显示一致 ⇒ 英文措辞只有一处说了算（判据的歧义锁扫全部 App 源码）。
@@ -275,8 +264,8 @@ public static class LocaleManager
             // CardTitleText / CardDescText / CardButtonText 与窗口内静态文字为准，
             // 表里与实机显示保持一致 ⇒ 英文措辞只有一处说了算。
             ["隐私政策"] = "Privacy policy",
-            ["截图与文字识别均在本机完成。仅在你使用翻译功能时会向第三方发送内容——视觉翻译会上传整张截图，请阅读详情。"] =
-                "Screenshots and OCR run entirely on this device. Content is sent to third parties only when you use translation — Vision translation uploads the whole screenshot.",
+            ["截图与文字识别均在本机完成；只有翻译会把内容发往第三方，视觉翻译发送整张截图。"] =
+                "Screenshots and OCR run entirely on this device; content is sent to third parties only by translation, and Vision translation sends the whole screenshot.",
             ["查看隐私政策"] = "View privacy policy",
             // 窗口内静态文字（PrivacyPolicyWindow.xaml 的头/脚/降级面）
             ["本应用的数据处理方式（只读展示）"] = "How this app handles your data (read only).",
@@ -305,7 +294,7 @@ public static class LocaleManager
             ["启用文件归档"] = "Enable Archive",
             ["归档方式"] = "Archive Mode",
             ["HDR 输出"] = "HDR Output",
-            ["这里选的是【目标色域】：像素搬去哪儿、容器就声明成什么，是同一个值。对增益图（JPEG 卡片里的开关）而言，它选的就是【底图】的色彩空间。至于某个格式靠什么通道把声明交给查看器（ICC / 代码点 / 什么都不写），下面「色域映射」按当前格式说。"] = "This selects the TARGET COLOUR SPACE: where pixels are moved to and what the container declares are the same value. For the gain map (the switch inside the JPEG card) it selects the BASE image colour space. Which channel each format uses to carry that declaration (ICC / code points / nothing) is shown per format under Gamut Mapping.",
+            ["目标色域同时决定像素与容器声明。"] = "Target gamut sets both the pixels and the container declaration.",
             ["色域映射"] = "Gamut Mapping",
             ["显示器色域"] = "Display Gamut",
             ["→ 映射到"] = "→ Map to",
@@ -317,18 +306,23 @@ public static class LocaleManager
             //   去 ZhToEn 表里做精确查找（CorePipelineTests 的 XAML 中文覆盖判据），
             //   差一个全角括号就会报"未翻译"。改 XAML 文案时必须同步改这里。
             ["压缩强度"] = "Compression",
-            ["最小体积（最慢）"] = "Smallest file (slowest)",
-            ["均衡（推荐）"] = "Balanced (recommended)",
-            ["最快"] = "Fastest",
-            ["三档只改变编码耗时（cjxl 的 effort），与上方的质量设置无关。实测 4K 截图：最小体积约 0.4~0.9 秒、均衡约 0.3~0.8 秒、最快约 0.3~0.6 秒。⚠ 本格式的档位主要影响速度而非体积：更高的 effort 对部分内容更小、对另一部分反而更大，因此最高档停在 e7，不提供更慢的档位。"] = "Only encoding time changes (cjxl effort); the quality setting above is unaffected. Measured at 4K: about 0.4-0.9 s / 0.3-0.8 s / 0.3-0.6 s for smallest / balanced / fastest. Note: these tiers mainly affect speed, not size - higher effort produces smaller files for some content and larger for others, so the top tier stops at e7 and no slower tier is offered.",
-            ["只改变编码耗时，不影响质量设置。软件编码器（libaom）差异很大：实测 4K 下最小体积约 7.1 秒 / 93.7 KB、均衡约 0.3 秒 / 123.4 KB、最快约 0.1 秒 / 148.8 KB。最小体积档会同时启用 libaom 的 tune=ssim 以求更小。硬件编码（NVENC）三档都很快，差异小得多。"] = "Only encoding time changes; the quality setting is unaffected. The software encoder (libaom) differs a lot: measured at 4K about 7.1 s / 93.7 KB, 0.3 s / 123.4 KB, 0.1 s / 148.8 KB for smallest / balanced / fastest. The smallest-file tier also enables libaom's tune=ssim for extra density. Hardware (NVENC) is fast in all three tiers, with far smaller differences.",
-            ["只改变编码耗时，不影响质量设置。WebP 的档位差异比 JPEG XL / AVIF 小：实测 4K 下三档约 0.4 / 0.7 / 1.0 秒，体积相差约两成。"] = "Only encoding time changes; the quality setting is unaffected. WebP's tiers differ less than JPEG XL / AVIF: measured at 4K about 0.4 / 0.7 / 1.0 s, with roughly a 20% size spread.",
-            ["只改变编码耗时，不影响质量设置。实测 4K 截图：最小体积档约 0.16~0.28 秒、均衡约 0.10~0.17 秒；最小体积档体积小约 2%~5%（它改用 XYB 色彩空间，同样的观感质量下码率更低）。最快档与均衡档的产物相同（本格式没有更快的档位可用）。"] = "Only encoding time changes; the quality setting is unaffected. Measured at 4K: about 0.16-0.28 s for smallest, 0.10-0.17 s for balanced; the smallest-file tier is 2-5% smaller (it switches to the XYB colour space, which needs fewer bits at the same perceived quality). The fastest tier produces the same output as balanced (this format has no faster setting available).",
+            // 档位显示名（2026-10-29 用户定名）：两档格式用「均衡 / 快速」，三档格式用「极高 / 均衡 / 快速」。
+            // ⚠ 名字里不含参数深度：两档格式的「均衡」其实就是拉满那一档（见下面各条说明）。
+            ["极高"] = "Maximum",
+            ["均衡"] = "Balanced",
+            ["快速"] = "Fast",
+            ["只影响编码耗时与文件体积，不影响质量。软件路改 avifenc 的 speed，硬件路改 NVENC 的 preset。"] = "Only encoding time and file size change; quality is untouched. The software path changes avifenc's speed, the hardware path NVENC's preset.",
+            ["只影响压缩耗时，不影响质量。档位越高越慢，体积不一定更小。"] = "Only compression time changes; quality is untouched. Higher tiers are slower, and not necessarily smaller.",
+            ["只影响压缩耗时与体积，不影响质量。均衡=-m 6，快速=-m 5。"] = "Only compression time and size change; quality is untouched. Balanced = -m 6, Fast = -m 5.",
+            ["均衡开 XYB 色彩空间，快速不开；两档质量相同。"] = "Balanced turns on the XYB colour space, Fast does not; both tiers keep the same quality.",
+            ["无损：只影响压缩耗时与文件体积，像素不变。均衡=压缩最强，快速=更快。"] = "Lossless: only compression time and file size change, pixels stay identical. Balanced = strongest compression, Fast = quicker.",
             ["额外添加 .png 后缀来提高兼容性"] = "Add .png suffix for compatibility",
             ["附带增益图（输出 Ultra HDR 照片）"] = "Attach gain map (Ultra HDR output)",
             ["增益图模式"] = "Gain Map Mode",
-            ["8-bit 截图源不会升位深（升位深不产生信息）；高位深仅对 Float16/HDR 源有意义。"] = "An 8-bit screenshot source is never given more bit depth (upscaling adds no information); high bit depth is only meaningful for Float16/HDR sources.",
-            ["有损 WebP 恒 4:2:0（格式定义）；无损为 RGB。本格式无色度可选，也没有对应设置项。"] = "Lossy WebP is always 4:2:0 (by format definition); lossless WebP is RGB. This format offers no chroma setting.",
+            ["灰度增益：只编码亮度差，体积最小，适合文字与图标。"] = "Gray gain: encodes luminance only, smallest files, best for text and icons.",
+            ["RGB 增益：三通道独立编码，色彩更准，适合彩色截图。"] = "RGB gain: encodes each channel separately, more accurate colour, best for colour screenshots.",
+            ["8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。"] = "An 8-bit source gains no bit depth; high bit depth only matters for Float16/HDR sources.",
+            ["有损恒为 4:2:0，无损为 RGB；本格式没有色度选项。"] = "Lossy is always 4:2:0, lossless is RGB; this format has no chroma option.",
             ["截图与录制"] = "Capture",
             ["截图"] = "Screenshot",
             ["快捷键"] = "Hotkey",
@@ -351,7 +345,7 @@ public static class LocaleManager
             ["界面字体"] = "Interface Font",
             ["字体"] = "Font",
             ["输入系统已安装的字体名称"] = "Enter installed font name",
-            ["界面字体仅影响应用外观，不影响截图像素。选择后立即生效；该字体未安装时界面会回落到默认字体。"] = "Font only affects UI appearance, not captured pixels. Applies immediately; if the font is not installed the UI falls back to the default.",
+            ["界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。"] = "The interface font affects appearance only, never captured pixels; if it is not installed, the default is used.",
             ["通知"] = "Notifications",
             ["截图后提示"] = "Toast on capture",
             ["无感截图后提示"] = "Toast on silent capture",
@@ -361,8 +355,6 @@ public static class LocaleManager
             ["开机自动启动"] = "Start with Windows",
             ["关闭时最小化到托盘"] = "Minimize to tray on close",
             ["日志详细度"] = "Log verbosity",
-            ["VS-Cap 模式（当前屏幕选区、编辑与贴图）"] = "VS-Cap Mode (on-screen selection, editing and pinning)",
-            ["贴图剪贴板图片（Ctrl+Alt+T）"] = "Pin Clipboard Image (Ctrl+Alt+T)",
             ["就绪"] = "Ready",
             // ── 以下 67 条来自五个副窗口（标注 / OCR 预览 / 选区覆盖层 / 截图缩略图 toast / 第三方许可）：
             //    原先一条英文都没有，英文模式下整窗留中文（2026-09-26，交接 §55）。
@@ -404,6 +396,11 @@ public static class LocaleManager
             ["复制全部文字"] = "Copy all text",
             ["复制全部"] = "Copy all",
             ["保存截图"] = "Save screenshot",
+            ["保存原图"] = "Save original",
+            ["保存当前"] = "Save current view",
+            ["保存选区原图（不含文字覆盖层）"] = "Save the original region without any text overlay",
+            ["保存当前画面：译文模式会把译文画进图里，原文模式等于原图（格式跟随主窗口）"] =
+                "Save what you see: in translation mode the text is baked into the image; in original mode it equals the original (format follows the main window)",
             ["关闭 (Esc)"] = "Close (Esc)",
             ["关闭"] = "Close",
             ["显示 / 关闭文字覆盖层"] = "Show / hide the text overlay",
@@ -416,8 +413,15 @@ public static class LocaleManager
             ["保存截图到文件并复制 (Enter)"] = "Save screenshot to file and copy (Enter)",
             ["标注选区（矩形/箭头/马赛克等）"] = "Annotate the selection (rectangle / arrow / mosaic …)",
             ["标注"] = "Annotate",
-            ["复制图像到剪贴板"] = "Copy image to clipboard",
             ["识别图中文字 (OCR)"] = "Recognise text in the image (OCR)",
+            // ── 贴图（2026-10-27 合并上游 PR #1 的置顶贴图窗）──
+            ["贴图"] = "Pin",
+            ["贴图到屏幕（滚轮缩放、右键菜单）"] = "Pin the image on screen (wheel to zoom, right-click menu)",
+            ["保存为 PNG"] = "Save as PNG",
+            ["保存为 AVIF"] = "Save as AVIF",
+            ["隐藏工具栏"] = "Hide toolbar",
+            ["显示工具栏"] = "Show toolbar",
+            ["销毁"] = "Dismiss",
             ["识字"] = "OCR",
             ["翻译图中文字"] = "Translate text in the image",
             // ── 二维码识别（2026-10-26）：工具栏新按钮 + 结果窗（QrResultWindow）──
@@ -468,10 +472,10 @@ public static class LocaleManager
         // ── 2026-10-03 英文界面补完 · 第一批：落地页 Format 提示（实机取证 ui-en.png）──
             ["✅ 无损格式，支持 HDR (cICP Rec.2100 PQ) + 广色域 ICC。截图首选。"] = "✅ Lossless; supports HDR (cICP Rec.2100 PQ) + wide-gamut ICC. Recommended for screenshots.",
             ["✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。目标色域就是【底图】的色彩空间：Rec.709 或显式 Rec.2020（三件一起搬，底图本身仍是 SDR）。"] = "✅ Ultra HDR (ISO 21496-1): SDR viewers show the base image, HDR viewers restore the full dynamic range. The target gamut IS the base image's colour space - Rec.709 or explicit Rec.2020 (all three travel together; the base image stays SDR).",
-            ["✅ Google jpegli 编码，butteraugli 距离控制质量。8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709 —— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020。Rec.2020 目标靠 ICC 声明（实测产物带 APP2/ICC），Rec.709 目标则【什么都不写】（靠 JFIF 默认）。"] = "✅ Encoded by Google jpegli, quality driven by butteraugli distance. 8-bit, and the container has no HDR channel; the default target gamut is Rec.709 — Follow display resolving to a wide gamut does not change that, and only an explicit pick of Rec.2020 outputs Rec.2020. A Rec.2020 target relies on the ICC declaration (measured output carries APP2/ICC), while a Rec.709 target writes [nothing at all] (falling back to the JFIF default).",
-            ["✅ 新一代格式，Modular 模式对截图极优。支持 HDR (Rec.2100 PQ) + 广色域。16-bit 走 16-bit PNG 中转（cjxl 无 -b 参数，sBIT=16 声明实际精度）。"] = "✅ New-generation format; Modular mode is excellent for screenshots. Supports HDR (Rec.2100 PQ) + wide gamut. 16-bit goes through a 16-bit PNG hand-off (cjxl has no -b flag; sBIT=16 declares the real precision).",
-            ["✅ 先进格式，支持 HDR（PQ）与广色域 SDR（Rec.2020 原色 + sRGB 传输，colr(nclx) 与 ICC 双标记）。NVENC 可硬件加速（AV1 仅 4:2:0），软件编码器支持 4:4:4 与 12-bit。位深与色度按所选编码器实际能力生效，不支持的组合已隐藏。"] = "✅ Advanced format supporting HDR (PQ) and wide-gamut SDR (Rec.2020 primaries + sRGB transfer, dual-marked by colr(nclx) and ICC). NVENC can hardware-accelerate it (AV1 is 4:2:0 only); the software encoders support 4:4:4 and 12-bit. Bit depth and chroma follow the selected encoder's real capability - unsupported combinations are hidden.",
-            ["⚠ 仅 8-bit、容器没有 HDR 通道；默认目标色域是 Rec.709（不写声明）—— 「跟随显示器」即便解析成广色域也不改变这一点，只有亲手选 Rec.2020 才会输出 Rec.2020（靠 ICC 声明）。适合简单分享场景。"] = "⚠ 8-bit only, and the container has no HDR channel; the default target gamut is Rec.709 (no declaration written) — Follow display resolving to a wide gamut does not change that, and only an explicit pick of Rec.2020 outputs Rec.2020 (via the ICC declaration). Suited to casual sharing.",
+            ["✅ 8-bit，容器没有 HDR 通道；质量由 butteraugli 距离控制。默认目标 Rec.709，显式选 Rec.2020 才输出 Rec.2020。"] = "✅ 8-bit, and the container has no HDR channel; quality is driven by the butteraugli distance. The default target is Rec.709 — Rec.2020 is written only when you pick it explicitly.",
+            ["✅ Modular 模式对截图最优，支持 HDR 与广色域；16-bit 声明真实精度。"] = "✅ Modular mode is best for screenshots, with HDR and wide-gamut support; 16-bit declares the real precision.",
+            ["✅ 支持 HDR（PQ）与广色域；NVENC 硬件加速仅 4:2:0，软件可 4:4:4 与 12-bit。位深与色度按所选编码器生效。"] = "✅ Supports HDR (PQ) and wide gamut; NVENC acceleration is 4:2:0 only, software allows 4:4:4 and 12-bit. Bit depth and chroma follow the selected encoder.",
+            ["⚠ 仅 8-bit，容器没有 HDR 通道；默认目标 Rec.709，显式选 Rec.2020 才输出 Rec.2020。适合简单分享。"] = "⚠ 8-bit only, and the container has no HDR channel; the default target is Rec.709 and Rec.2020 is written only when you pick it explicitly. Suited to casual sharing.",
             ["✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"] = "✅ Lossless TIFF, supports 16-bit HDR + embedded ICC. Suited to archiving.",
             ["✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 "] = "✅ Ultra HDR (ISO 21496-1). Encoding reference = system SDR white point ",
             [" nits。兼容查看器（Chrome/照片）自动对齐；若查看器固定 203 nits，请手动把参考白度调到 "] = " nits. Compatible viewers (Chrome / Photos) align automatically; if yours is fixed at 203 nits, set the reference white manually to ",
@@ -530,7 +534,7 @@ public static class LocaleManager
             ["EDID 未读到原色（不猜）"] = "primaries not read from EDID (not guessed)",
             ["WGC Float16 → 色域矩阵 → PQ ST.2084。"] = "WGC Float16 -> gamut matrix -> PQ ST.2084.",
             ["WGC Float16 → 分段 Reinhard 出 SDR 底图，另算一张增益图；HDR 在增益图里，不在容器声明里。"] = "WGC Float16 -> piecewise Reinhard into the SDR base image, plus a separate gain map; the HDR lives in the gain map, not in the container declaration.",
-            ["WGC Float16 捕获完整广色域 → 3×3 矩阵搬到目标 → 分段 Reinhard → SDR 输出。"] = "WGC Float16 captures the full wide gamut -> 3x3 matrix to the target -> piecewise Reinhard -> SDR output.",
+            ["广色域源按目标色域映射后，色调映射为 SDR。"] = "The wide-gamut source is mapped into the target gamut, then tone-mapped to SDR.",
             ["→ HDR 直通（容器写 PQ）"] = "-> HDR passthrough (container writes PQ)",
             ["→ 增益图（SDR 底图 + gain map）"] = "-> gain map (SDR base + gain map)",
             ["→ 直通（同色域）"] = "-> passthrough (same gamut)",
@@ -556,7 +560,7 @@ public static class LocaleManager
             ["⚠ HDR 硬件支持但未开启（Windows 显示设置中未开启 HDR）"] = "⚠ HDR is supported by the hardware but not enabled (not turned on in Windows display settings)",
             [" | ACM 已启用（系统管理显示器色彩）"] = " | ACM enabled (the system manages display colour)",
             ["ACM 已启用 — 像素会映射到所选目标色域（Rec.709 / Rec.2020）。"] = "ACM enabled - pixels are mapped to the selected target gamut (Rec.709 / Rec.2020).",
-            ["未检测到校色 ICC；目标色域即像素被搬进、容器被声明成的那一套原色（逐格式的声明通道见下方「色域映射」）"] = "No calibrated ICC profile detected; the target gamut is the primaries the pixels are moved into and the container declares (per-format declaration channels are in the Gamut Mapping card below)",
+            ["未检测到校色 ICC；目标色域即像素与容器声明所用的原色。"] = "No calibrated ICC profile detected; the target gamut is the primaries used for both the pixels and the container declaration",
             ["✅ HDR 已启用（{0}-bit）"] = "✅ HDR enabled ({0}-bit)",
             [" | SDR 白点 {0} nits"] = " | SDR paper white {0} nits",
             [" | 峰值 {0} nits"] = " | peak {0} nits",
@@ -600,7 +604,7 @@ public static class LocaleManager
             ["无码点"] = "no code point",
             ["未知格式：给不出声明通道。"] = "Unknown format: no declaration channel to give.",
         // ── 2026-10-03 第五批附：OCR 语言提示（R2 收尾）
-            ["ℹ PP-OCRv6 是单模型统一字典（18708 字），不随语言切换。实测中文/英文最准，日文需字高 ≥24px，韩文不支持（会自动改走 Windows OCR 兜底，需系统装韩文语言包）。"] = "ℹ PP-OCRv6 is a single model with one shared dictionary (18,708 glyphs) and does not follow the language setting. Measured best on Chinese/English; Japanese needs glyph height >= 24px; Korean is unsupported (it automatically falls back to Windows OCR, which requires the Korean language pack installed).",
+            ["ℹ PP-OCRv6 是单模型、不随语言切换；中英文最准，日文需字高 ≥24px，韩文自动改走系统 OCR。"] = "ℹ PP-OCRv6 is a single model and does not follow the language setting; best on Chinese/English, Japanese needs glyph height ≥24px, Korean falls back to Windows OCR.",
         };
 
     /// <summary>这条中文有没有英文对照（= 是不是"界面写死、等着被翻译"的那批）。</summary>
