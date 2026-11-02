@@ -45,10 +45,16 @@
          声明的 MSB3884 是 RuleSet 相关的空引用警告，由空值本身引发。
          此处统一移除空值声明并静态压制该警告，等价于原行为但不再误导。 -->
     <NoWarn>$(NoWarn);MSB3884</NoWarn>
-    <!-- ── 版本 (由 Publish.ps1 / CI 通过 -p:Version= 覆盖) ── -->
-    <Version Condition="'$(Version)' == ''">0.3.7-beta</Version>
-    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">0.3.7.0</AssemblyVersion>
-    <FileVersion Condition="'$(FileVersion)' == ''">0.3.7.0</FileVersion>
+    <!-- ── 版本 (由 Publish.ps1 / CI 通过 -p:Version= 覆盖) ──
+         ⚠ 这里必须与 CHANGELOG 顶部那条【已收口】的版本号同步。
+         2026-11-02 修正：v0.3.8-beta / v0.3.9-beta 两次发布都没改这三行，于是从本目录
+         直接构建出来的 exe 自报 0.3.7-beta，而 `git describe` 已是 v0.3.9-beta-32-g…，
+         绿色包的目录名又写着 v0.3.10-beta —— 三个坐标互不相同，用户装的到底是哪一版
+         无法只凭产物判断（发布前实机审查记为 P3-7）。
+         历史 release 提交（v0.3.4 ~ v0.3.7）本来就在提交里 bump 这三行，那是正确做法。 -->
+    <Version Condition="'$(Version)' == ''">0.3.10-beta</Version>
+    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">0.3.10.0</AssemblyVersion>
+    <FileVersion Condition="'$(FileVersion)' == ''">0.3.10.0</FileVersion>
 
     <!-- ── 包元数据 (合规补齐 2026-09-20) ──
          PackageLicenseExpression 用 SPDX 标识而非 PackageLicenseFile: 仓库根 LICENSE 全文

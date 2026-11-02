@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # TrueToneCap 一键校验（构建 + 测试）
 #
@@ -1366,6 +1366,35 @@ if ((Test-Path -LiteralPath $baselinePath) -and -not $baselineJustWritten) {
     $baselineFail = $true
 }
 
+# ═══ [2.5/2] 无损容器外部裁判（2026-11-01 交接审查补挂）══════════════════
+# Test_LosslessShapesAndExternalFixtures 落盘的夹具（%TEMP%\TrueToneCap_EncTest）按测试注释
+# 约定要交给 PIL/tifffile 独立裁判 —— 但 scripts/precision/tiff_png_referee.py 此前并不在
+# 仓库里，"max|Δ|=0"只能算历史运行结论（见 docs/reviews/repo-governance/handoff-audit-2026-11-01.md）。
+# 挂在测试套件【之后】、未覆盖台账【之前】：夹具由本轮 --encoding-tests 刚落盘，判的是新鲜产物；
+# 裁判自己处理夹具缺失 / numpy+tifffile+PIL 依赖缺失（退出码 3=SKIP ⇒ 进下面台账逐条点名），绝不冒充通过。
+$refereeFail = $false
+if ($SkipPrecision) {
+    $script:GateGaps += "[2.5/2] 无损容器外部裁判未判（-SkipPrecision 连带跳过）"
+} elseif (-not $pyExe) {
+    $script:GateGaps += "[2.5/2] 无损容器外部裁判未判（本机没有可用的 python）"
+} else {
+    Write-Host "[2.5/2] 无损容器外部裁判（PIL / tifffile 独立读回）..."
+    $ref = Invoke-PrecisionPython -Exe $pyExe -Pre $pyPre -Params @((Join-Path $RepoRoot "scripts\precision\tiff_png_referee.py"))
+    if ($ref.Code -eq 0) {
+        Write-Host "     ✅ 通过"
+    } elseif ($ref.Code -eq 3) {
+        Write-Host "     ⚠️ 跳过 (SKIP) —— 夹具或 python 依赖缺失，这一层本轮未判" -ForegroundColor Yellow
+        $why = ($ref.Text -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 3) -join "`n"
+        if ($why) { Write-Host $why -ForegroundColor Yellow }
+        $script:GateGaps += "[2.5/2] tiff_png_referee.py 跳过 ⇒ 无损容器外部裁判本轮未判"
+    } else {
+        Write-Host "     ❌ 判据不通过 (退出码 $($ref.Code))" -ForegroundColor Red
+        $tail = ($ref.Text -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 12) -join "`n"
+        if ($tail) { Write-Host $tail -ForegroundColor DarkGray }
+        $refereeFail = $true
+    }
+}
+
 if ($script:GateGaps.Count -gt 0) {
     Write-Host "─────────────── 本轮判据未覆盖（不是通过，是没判）───────────────" -ForegroundColor Yellow
     foreach ($g in $script:GateGaps) { Write-Host "  ⏭  $g" -ForegroundColor Yellow }
@@ -1373,7 +1402,7 @@ if ($script:GateGaps.Count -gt 0) {
     Write-Host "══════════════════════════════════════════════════"
 }
 
-if ($failedSuites.Count -eq 0 -and -not $baselineFail) {
+if ($failedSuites.Count -eq 0 -and -not $baselineFail -and -not $refereeFail) {
     # 结论行必须带上"未判"的条数：只报 ✅ 的话，上面那串 ⏭ 台账在滚屏里等于没写，
     # 换机器的人会把"没判"读成"判过且通过"（本仓 §11.6 立的那条：汇总数要与点名条数相等）。
     $gapTail = if ($script:GateGaps.Count -gt 0) { "｜另有 $($script:GateGaps.Count) 处未判（见上⏭清单，这些格子本轮无结论）" } else { "｜无未判格子" }
@@ -1383,8 +1412,10 @@ if ($failedSuites.Count -eq 0 -and -not $baselineFail) {
     exit 0
 }
 
-if ($failedSuites.Count -eq 0 -and $baselineFail) {
+if ($failedSuites.Count -eq 0 -and $baselineFail -and -not $refereeFail) {
     Write-Host "  ❌ 套件全绿，但【断言数量对不上基线】⇒ 这一轮不作数（有判据被删或被静默跳过）" -ForegroundColor Red
+} elseif ($failedSuites.Count -eq 0 -and $refereeFail) {
+    Write-Host "  ❌ 套件全绿，但【无损容器外部裁判不通过】⇒ 这一轮不作数（像素/端序/338 契约被外部读者判红）" -ForegroundColor Red
 } else {
     Write-Host "  ❌ $($failedSuites.Count)/$($results.Count) 个套件失败 — 共 $totalPassed 断言通过 ($([math]::Round($sw.Elapsed.TotalSeconds, 1))s)"
 }

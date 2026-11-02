@@ -462,6 +462,62 @@ public static partial class SdrSemanticsProbe
                         double.IsNaN(controlMean) ? -999 : controlMean));
                 }
 
+                // ═══ 5b. 彩色补丁：回答「字节此刻在哪个色域」══════════════════════════
+                // 灰阶那一轮只能回答「有没有被亮度抬升」，回答不了色域（中性灰在色域矩阵下逐值不变）。
+                // 这里用高饱和色块补上那个盲点：authored 纯红若真是 authored sRGB 字节，读回就该贴 authored；
+                // 若字节其实已被 ACM 搬到面板色域，读回会明显偏离 authored。
+                Say2("");
+                Say2("  ── 彩色补丁（色域判别；灰阶测不到这一维）──");
+                Say2("  chip     authored       实测R     实测G     实测B   最大|Δ|  判读");
+                var chipVerdicts = new List<(ColorChip Chip, ChipGamutVerdict Verdict)>();
+                foreach (var chip in ColorChips)
+                {
+                    // ⚠ COLORREF 是 0x00bbggrr（**低字节 = R**），不是 0x00rrggbb。
+                    //   这里写成 (R<<16)|(G<<8)|B 会把 R/B 对调 —— 灰阶补丁三字节相同，
+                    //   所以旧代码从没暴露过这个坑；彩色补丁一上就现形
+                    //   （2026-11-02 审查轮实测：red(192,0,0) 被画成蓝、blue 被画成红）。
+                    SetPatchColor((uint)((chip.B << 16) | (chip.G << 8) | chip.R));
+                    InvalidateRect(hwnd, 0, false);
+                    UpdateWindow(hwnd);
+                    Pump(hwnd, SettleMs);
+
+                    var mOpt2 = MeasureStable(wgc, cfg, report, hwnd, sample);
+                    if (mOpt2 is null || mOpt2.Value.SdrMissing)
+                    {
+                        Say2($"  {chip.Name,-6} {chip.R,3},{chip.G,3},{chip.B,3}   —— 8-bit 帧缺失 ⇒ 本枚不判");
+                        continue;
+                    }
+                    var m2 = mOpt2.Value;
+                    if (!m2.Stable)
+                        Say2($"  {chip.Name,-6} {chip.R,3},{chip.G,3},{chip.B,3}   ★ 复读 {m2.Tries} 次不稳定 ⇒ 本枚不判");
+                    double worst = Math.Max(Math.Abs(m2.MeanR8 - chip.R),
+                                   Math.Max(Math.Abs(m2.MeanG8 - chip.G), Math.Abs(m2.MeanB8 - chip.B)));
+                    var v2 = m2.Stable ? JudgeChip(chip, m2.MeanR8, m2.MeanG8, m2.MeanB8) : ChipGamutVerdict.Unknown;
+                    Say2($"  {chip.Name,-6} {chip.R,3},{chip.G,3},{chip.B,3}  {m2.MeanR8,9:0.00} {m2.MeanG8,9:0.00} {m2.MeanB8,9:0.00}  {worst,7:0.00}  {v2}");
+                    if (m2.Stable) chipVerdicts.Add((chip, v2));
+                }
+
+                // 汇总：三枚都贴 authored ⇒ 字节确是 sRGB；任一被搬动 ⇒ 字节在面板色域；否则不判
+                var gamutConclusion = ChipGamutVerdict.Unknown;
+                string gamutWhy;
+                int authoredN = chipVerdicts.Count(c => c.Verdict == ChipGamutVerdict.ByteIsAuthoredSrgb);
+                int movedN = chipVerdicts.Count(c => c.Verdict == ChipGamutVerdict.ByteIsPanelGamut);
+                if (chipVerdicts.Count == 0) gamutWhy = "一枚可用补丁都没有 ⇒ 色域这一维【没判】";
+                else if (movedN > 0)
+                {
+                    gamutConclusion = ChipGamutVerdict.ByteIsPanelGamut;
+                    gamutWhy = $"{movedN}/{chipVerdicts.Count} 枚饱和块被搬动（>{ChipMovedMin:0} 码）⇒ 8-bit 字节已在面板色域";
+                }
+                else if (authoredN == chipVerdicts.Count)
+                {
+                    gamutConclusion = ChipGamutVerdict.ByteIsAuthoredSrgb;
+                    gamutWhy = $"全部 {authoredN} 枚饱和块都贴 authored（≤{ChipTolerance:0} 码）⇒ 8-bit 字节仍是 authored sRGB";
+                }
+                else gamutWhy = $"{authoredN} 枚贴 authored、{chipVerdicts.Count - authoredN - movedN} 枚落在灰带 ⇒ 不判";
+                Say2("");
+                Say2($"  色域结论 = {gamutConclusion} | {gamutWhy}");
+                Console.WriteLine($"[sdr-semantics-probe] 色域={gamutConclusion} ({authoredN}/{chipVerdicts.Count} 贴 authored, {movedN} 被搬动)");
+
                 try { wgc.Dispose(); } catch { }
                 if (s_paintErrors > 0)
                     Say2($"  ⚠ 补丁窗口绘制失败 {s_paintErrors} 次 ⇒ 屏幕上可能根本没有画出血色，" +
@@ -480,8 +536,18 @@ public static partial class SdrSemanticsProbe
                                   $"mean8/authored={verdict.EightBitRatio:0.000} " +
                                   $"float/linear={verdict.FloatRatio:0.000} k={verdict.SdrWhiteScale:0.000}");
 
+                // ── 6b. 灰阶结论与色域结论的交叉裁决（两者测的是不同维度，冲突才有意义）──
+                if (gamutConclusion == ChipGamutVerdict.ByteIsPanelGamut
+                    && verdict.EightBit == EightBitSemantics.AuthoredSrgb)
+                {
+                    Say2("");
+                    Say2("  ⚠ 两个维度冲突：灰阶说「字节是 authored sRGB」，彩色块说「字节已被搬进面板色域」。");
+                    Say2("     灰阶那一维中性灰在色域矩阵下逐值不变 ⇒ 它对色域问题【必然空转】，");
+                    Say2("     所以以彩色块为准 ⇒ CapturePipelineService.cs:143-144 的 sRGB 短路前提不成立。");
+                }
+
                 swAll.Stop();
-                Say2($"  耗时 = {swAll.ElapsedMilliseconds}ms（{Grays.Length} 次换色与捕获）");
+                Say2($"  耗时 = {swAll.ElapsedMilliseconds}ms（{Grays.Length + ColorChips.Length} 次换色与捕获）");
                 bool decisive = verdict.SelfCheckPassed && verdict.EightBit is not EightBitSemantics.Unknown;
                 if (!decisive)
                     Say2("  ★ 本轮【没判】到 8-bit 语义 ⇒ 退出码 1。这不等于「兜底层没有过曝」，也不等于「字节有问题」。");
@@ -504,7 +570,8 @@ public static partial class SdrSemanticsProbe
     }
 
     private readonly record struct PatchMeasure(double Mean8, double Std8, double FloatMean,
-        bool HasFloat, bool SdrMissing, int MissPixels, bool Stable, int Tries);
+        bool HasFloat, bool SdrMissing, int MissPixels, bool Stable, int Tries,
+        double MeanR8 = double.NaN, double MeanG8 = double.NaN, double MeanB8 = double.NaN);
 
     /// <summary>
     /// 复读直到【连续两帧同区读数一致】—— 这是"两帧落在同一张画面上"的唯一可机器检验的替身。
@@ -530,7 +597,8 @@ public static partial class SdrSemanticsProbe
                         cap.HdrPixels is not null, SdrMissing: true, 0, false, i);
                 var s = SampleRect(cap.SdrPixels, cap.HdrPixels, cap.Width, cap.Height, sample);
                 cur = new PatchMeasure(s.Mean, s.Std, s.FloatMean,
-                    cap.HdrPixels is not null, SdrMissing: false, s.MissPixels, false, i);
+                    cap.HdrPixels is not null, SdrMissing: false, s.MissPixels, false, i,
+                    s.MeanR8, s.MeanG8, s.MeanB8);
             }
             finally { cap.Dispose(); }
 
@@ -594,13 +662,21 @@ public static partial class SdrSemanticsProbe
 
     internal readonly record struct RectI(int X, int Y, int W, int H);
 
-    internal readonly record struct SampleStats(double Mean, double Std, double FloatMean, int Pixels, int MissPixels);
+    internal readonly record struct SampleStats(double Mean, double Std, double FloatMean, int Pixels, int MissPixels,
+        double MeanR8 = 0, double MeanG8 = 0, double MeanB8 = 0);
 
     /// <summary>区域内灰度（三通道平均）统计；float 帧同样取三通道平均 —— 中性灰下通道顺序不影响结果。
-    /// 对 A/B 也开放：两台仪器必须用同一把尺子量同一块像素。</summary>
+    /// 对 A/B 也开放：两台仪器必须用同一把尺子量同一块像素。
+    /// <para>═══ 2026-11-02 审查轮：补逐通道均值（MeanR8/G8/B8）═══
+    /// 原实现只回三通道平均，那对<b>中性灰</b>够用 —— 灰在 sRGB→P3 矩阵下逐值不变，
+    /// 所以"灰度均值 == authored"根本分辨不了"字节在哪个色域"（2026-10-30 那次
+    /// "8-bit 会话=authored sRGB(bit-exact)"的结论正是栽在这里：它只能否证亮度抬升，
+    /// 不能否证色域转换）。补通道值后，同一把尺子就能回答色域问题 —— 见 <see cref="ColorChips"/>。</para>
+    /// </summary>
     internal static SampleStats SampleRect(byte[] sdr, float[]? hdr, int w, int h, RectI r)
     {
         double sum = 0, sumSq = 0, fSum = 0;
+        double sr = 0, sg = 0, sb = 0;
         int n = 0, fN = 0, miss = 0;
         int x1 = r.X + r.W, y1 = r.Y + r.H;
         for (int y = r.Y; y < y1; y++)
@@ -611,8 +687,10 @@ public static partial class SdrSemanticsProbe
                 if (x < 0 || x >= w) { miss++; continue; }
                 int i = (y * w + x) * 4;
                 if (i + 3 >= sdr.Length) { miss++; continue; }
-                double gray = (sdr[i] + sdr[i + 1] + sdr[i + 2]) / 3.0;
+                double b = sdr[i], g = sdr[i + 1], rr = sdr[i + 2];
+                double gray = (rr + g + b) / 3.0;
                 sum += gray; sumSq += gray * gray; n++;
+                sr += rr; sg += g; sb += b;
                 if (hdr is not null && i + 3 < hdr.Length)
                 {
                     fSum += (hdr[i] + hdr[i + 1] + hdr[i + 2]) / 3.0;
@@ -622,6 +700,52 @@ public static partial class SdrSemanticsProbe
         }
         double mean = n > 0 ? sum / n : double.NaN;
         double std = n > 1 ? Math.Sqrt(Math.Max(0.0, sumSq / n - mean * mean)) : double.MaxValue;
-        return new SampleStats(mean, std, fN > 0 ? fSum / fN : 0.0, n, miss);
+        return new SampleStats(mean, std, fN > 0 ? fSum / fN : 0.0, n, miss,
+            n > 0 ? sr / n : double.NaN, n > 0 ? sg / n : double.NaN, n > 0 ? sb / n : double.NaN);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  彩色补丁：回答"字节此刻在哪个色域"（2026-11-02 审查轮补）
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // 为什么非要有这一档：灰阶补丁只能回答"字节有没有被亮度抬升过"，回答不了"字节在哪个色域"。
+    // 因为中性灰 (v,v,v) 在 sRGB→P3 / sRGB→BT.2020 的 3×3 矩阵下逐值不变（行和恒为 1），
+    // 所以"灰度均值 == authored"这个判据对色域问题【必然空转】—— 2026-10-30 那次
+    // "8-bit 会话 = authored sRGB (bit-exact)" 的结论就是在这个盲点上得出的：
+    // 它否证了"双重提亮"，却被当成"也证明了色域是 sRGB"，而后者根本没测。
+    //
+    // 高饱和色块才能分辨：authored 纯红 (255,0,0) 若字节真是 authored sRGB，
+    // 8-bit 会话读回就该接近 (255,0,0)；若字节其实已被 ACM 映射到面板色域（本机 DisplayP3），
+    // 读回会明显偏离 authored（P3 原色更饱和 ⇒ 同一 authored 红在 P3 里 R 更低、G/B 非零）。
+    //
+    // 判据口径（互斥三档）：
+    //   · 三块全部 |Δ| ≤ ChipTolerance ⇒ ByteIsAuthoredSrgb（字节就是 authored sRGB）
+    //   · 任一饱和块偏差 > ChipMovedMin ⇒ ByteIsPanelGamut（字节已被搬到面板色域）
+    //   · 其余 ⇒ Unknown（不硬掰）
+    internal readonly record struct ColorChip(string Name, byte R, byte G, byte B);
+
+    /// <summary>3 枚高饱和补丁：纯红 / 纯绿 / 纯蓝。中段亮度避免钳位退化（255 在 HDR 会话里会顶到纸白）。</summary>
+    internal static readonly ColorChip[] ColorChips =
+    [
+        new("red",   192,   0,   0),
+        new("green",   0, 192,   0),
+        new("blue",    0,   0, 192),
+    ];
+
+    internal const double ChipTolerance = 2.0;    // 逐通道 |实测 − authored| ≤ 此值 ⇒ 认为字节仍是 authored
+    internal const double ChipMovedMin = 8.0;     // 任一通道偏差 > 此值 ⇒ 认为字节已被色域映射搬动
+
+    internal enum ChipGamutVerdict { Unknown, ByteIsAuthoredSrgb, ByteIsPanelGamut }
+
+    /// <summary>读一枚彩色补丁的三通道实测值，判定字节是否还在 authored sRGB。</summary>
+    internal static ChipGamutVerdict JudgeChip(in ColorChip chip, double meanR, double meanG, double meanB)
+    {
+        double dr = Math.Abs(meanR - chip.R);
+        double dg = Math.Abs(meanG - chip.G);
+        double db = Math.Abs(meanB - chip.B);
+        double worst = Math.Max(dr, Math.Max(dg, db));
+        if (worst <= ChipTolerance) return ChipGamutVerdict.ByteIsAuthoredSrgb;
+        if (worst > ChipMovedMin) return ChipGamutVerdict.ByteIsPanelGamut;
+        return ChipGamutVerdict.Unknown;
     }
 }

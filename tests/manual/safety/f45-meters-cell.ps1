@@ -15,6 +15,13 @@
 #
 # 用法（pwsh 7；MSYS bash 下 taskkill 的 /F 会被吃掉，所以杀进程在本脚本内部用 PowerShell 做）：
 #   pwsh -NoProfile -File tests/manual/safety/f45-meters-cell.ps1 -IdleSec 45
+#
+# 2026-11-01 修订（交接审查）：静置臂加前提守卫 —— 光标钉角哨兵（GetCursorPos 对账物理干扰）、
+# 静置中每 4s 确认预览窗存活、结束后裁决"选区完成/提前退出"即判测量失效不出数；
+# 摘录补 [Meter/F4] 结算行，读数区新增渲染段（RenderCore）vs 整进程 CPU 两口径对照。
+# 背景：2026-10-31 14:17 轮静置期间一颗脚本外鼠标 Up 触发"单击选窗"，预览窗 5s 即关，
+# 21 帧全是窗生命周期帧，旧脚本照常算出"0.447 帧/s"——分子分母错配（详见
+# docs/reviews/repo-governance/handoff-audit-2026-11-01.md）。
 param(
     [string]$Exe = 'C:\PLAN\TrueToneCap\src\TrueToneCap.App\bin\x64\Release\net11.0-windows10.0.26100.0\win-x64\TrueToneCap.exe',
     [int]$IdleSec = 45,
@@ -66,6 +73,8 @@ public static class F45
 {
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint f, UIntPtr e);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    public struct POINT { public int X; public int Y; }
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
     public static void LeftDown() { mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); }
     public static void LeftUp()   { mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero); }
@@ -158,17 +167,39 @@ try {
         Say @("保存腿：墙钟 ${idleWall}s，进程 CPU 增量 $([math]::Round($cpuDeltaMs,1))ms；完成行 $(if ($doneLine) { $doneLine } else { '★ 90s 内没有 ⇒ 未判' })")
     } else {
         # 静置开始：只采 CPU 时间增量与墙钟；期间一次输入都不发
+        # 2026-11-01 前提守卫：10-31 14:17 那轮静置期间一颗脚本外的鼠标 Up 落进预览窗，走"单击选窗"
+        # 路径 ⇒ 选区意外完成、预览窗静置开始 5s 就关了，21 帧全是【窗生命周期】的帧，
+        # "21 帧 ÷ 47s = 0.447 帧/s" 分子分母错配 —— 静置臂必须先证前提（窗活着、无选区、光标没动），
+        # 前提塌了就宣布测量失效，绝不照常出数。
+        $null = [F45]::SetCursorPos(10, 10); Start-Sleep -Milliseconds 200
+        $cur0 = New-Object F45+POINT
+        $null = [F45]::GetCursorPos([ref]$cur0)
         $p0 = Get-Process -Id $proc.Id
         $cpu0 = $p0.TotalProcessorTime; $wall0 = Get-Date
-        Say @("② 静置 ${IdleSec}s 起（$($wall0.ToString('HH:mm:ss.fff'))），期间零输入、零截屏")
-        $sampled = 0
-        for ($i = 0; $i -lt $IdleSec * 4; $i++) { Start-Sleep -Milliseconds 250; $sampled++ }
+        Say @("② 静置 ${IdleSec}s 起（$($wall0.ToString('HH:mm:ss.fff'))），期间零输入、零截屏；光标钉在 (10,10)（结束对账物理干扰）")
+        $sampled = 0; $idleBroken = $null
+        for ($i = 0; $i -lt $IdleSec * 4; $i++) {
+            Start-Sleep -Milliseconds 250; $sampled++
+            # 每 4s 确认预览窗还活着：提前消失 = 前提失效，立刻停表，别把空进程的账算进静置
+            if ($i % 16 -eq 15) {
+                if (-not (Find-Preview $proc.Id)) {
+                    $idleBroken = "预览窗在静置第 $([math]::Round($i / 4.0, 1))s 提前消失"
+                    break
+                }
+            }
+        }
         $wall1 = Get-Date
+        $cur1 = New-Object F45+POINT
+        $null = [F45]::GetCursorPos([ref]$cur1)
+        if ($cur1.X -ne $cur0.X -or $cur1.Y -ne $cur0.Y) {
+            if (-not $idleBroken) { $idleBroken = "光标在静置期间被外部移到 ($($cur1.X),$($cur1.Y))（物理输入干扰嫌疑）" }
+            Say @("★ 光标在静置期间从 ($($cur0.X),$($cur0.Y)) 移到 ($($cur1.X),$($cur1.Y)) —— 存在脚本外物理输入")
+        }
         $p1 = Get-Process -Id $proc.Id
         $p1.Refresh(); $p0.Refresh()   # 性能计数器不 Refresh 会读到同一份快照（13:26 那一臂读到 0ms 就是这个原因）
         $cpuDeltaMs = ($p1.TotalProcessorTime - $cpu0).TotalMilliseconds
         $idleWall = [math]::Round(($wall1 - $wall0).TotalSeconds, 2)
-        Say @("② 静置结束：墙钟 ${idleWall}s，进程 CPU 增量 $([math]::Round($cpuDeltaMs, 1))ms（采样 $sampled 拍，只读不写）")
+        Say @("② 静置结束：墙钟 ${idleWall}s，进程 CPU 增量 $([math]::Round($cpuDeltaMs, 1))ms（采样 $sampled 拍，只读不写）$(if ($idleBroken) { " ⇒ ★ $idleBroken" })")
     }
     [F45]::Tap(0x1B)   # Esc：让预览窗自己走关闭路径（结算行/渲染循环退出行都在这条路上）
     Say @('③ 已发一发 Esc（唯一一次其它注入），等 3s')
@@ -186,10 +217,11 @@ try {
     $sessions = @($t | Where-Object { $_ -match '会话启动: |空闲超时|所有会话已' })
     $initLines = @($t | Where-Object { $_ -match '窗口初始化 |窗口构造|首帧 UploadFrame|首帧合成 ' })
     $winClose = @($t | Where-Object { $_ -match '窗口关闭 ' })
+    $meterLines = @($t | Where-Object { $_ -match '\[Meter/F4\]' })   # 2026-11-01：结算行含渲染段口径的静置帧账，摘出来做两口径对照
     $sdrWindow = @($t | Where-Object { $_ -match 'SDR 回读窗口|整帧回读|兜底|选区回读' })
     $saveLines = @($t | Where-Object { $_ -match '选区完成|开始编码|编码完成|HDR 编码启动|编码设置|选区截图启动|WGC 捕获完成|复制' })
     Say @(('── ' + $(if ($Select) { '选区/保存这一臂' } else { '静置这一臂' }) + '的仪表行（原样，含时间戳）──'))
-    foreach ($l in @($frameLines + $exitLine + $detect + $sessions + $initLines + $winClose + $sdrWindow + $saveLines)) { Say @("  $l") }
+    foreach ($l in @($frameLines + $exitLine + $meterLines + $detect + $sessions + $initLines + $winClose + $sdrWindow + $saveLines)) { Say @("  $l") }
     if ($Select) {
         $m = [regex]'选区完成[^0-9]*(\d+)\D+(\d+)'
         $s0 = @($saveLines | Where-Object { $_ -match '选区完成' } | Select-Object -First 1)
@@ -205,9 +237,43 @@ try {
     if ($frameLines) { $m2 = [regex]'渲染帧 #(\d+)'; $s = [string]$frameLines[-1]; if ($m2.IsMatch($s)) { $frameFloor = [int]$m2.Match($s).Groups[1].Value } }
     if ($nFrames -eq 0 -and $frameFloor -gt 0) { $nFrames = $frameFloor; Say @("读数：渲染循环退出行缺席 ⇒ 帧数取最后一条帧号行的下界 $frameFloor") }
     if (-not $Select) {
-        Say @("读数：静置 ${idleWall}s 内渲染帧数=$nFrames ⇒ 平摊 $([math]::Round($nFrames / [math]::Max($idleWall, 0.001), 3)) 帧/s（每 3s 醒一次的话应≈$([math]::Round($idleWall / 3, 1)) 帧）")
-        $wakes = [math]::Max([int][math]::Round($idleWall / 3), 1)
-        Say @("读数：同一区间进程 CPU 增量 $([math]::Round($cpuDeltaMs, 1))ms ÷ $wakes 次静置节拍 ⇒ 每次 ≈$([math]::Round($cpuDeltaMs / $wakes, 2))ms（【估算·口径=整进程】含 WGC 回调线程与 UI 线程，不等于 RenderCore 单帧）")
+        # 2026-11-01 前提裁决：静置臂里"选区完成"一行都不许出现（零输入不该有选区动作）；
+        # 渲染循环退出/窗口关闭必须晚于静置结束（Esc 是静置结束后唯一合法的关闭路径）。
+        # 任一违反 ⇒ 本轮静置测量失效，帧率/每拍 CPU 不出数 —— 2026-10-31 14:17 轮正是
+        # 预览窗提前关闭仍照常出数（"21 帧 ÷ 47s"），把窗生命周期帧当成静置帧。
+        $premMissing = $null
+        if ($idleBroken) { $premMissing = $idleBroken }
+        $selDone = @($t | Where-Object { $_ -match '选区完成' })
+        if (-not $premMissing -and $selDone) { $premMissing = "静置期间出现选区完成行：$($selDone[0])" }
+        if (-not $premMissing) {
+            foreach ($ln in @($exitLine + $winClose)) {
+                if ("$ln" -match '^(\d\d:\d\d:\d\d\.\d\d\d)') {
+                    $ts = [datetime]::ParseExact($Matches[1], 'HH:mm:ss.fff', $null)
+                    if ($ts -lt $wall1.AddSeconds(-1)) { $premMissing = "渲染循环退出/窗口关闭早于静置结束（$($Matches[1]) < $($wall1.ToString('HH:mm:ss.fff')))"; break }
+                }
+            }
+        }
+        if ($premMissing) {
+            Say @("★ 静置测量失效：$premMissing")
+            Say @("★ 本轮【帧数/帧率/每拍 CPU 不出数】—— 预览窗未活满静置段，分母分子错配；请排除物理干扰后重跑")
+            $rc = 1
+        } else {
+            Say @("读数：静置 ${idleWall}s 内渲染帧数=$nFrames ⇒ 平摊 $([math]::Round($nFrames / [math]::Max($idleWall, 0.001), 3)) 帧/s（每 3s 醒一次的话应≈$([math]::Round($idleWall / 3, 1)) 帧）")
+            $wakes = [math]::Max([int][math]::Round($idleWall / 3), 1)
+            Say @("读数：同一区间进程 CPU 增量 $([math]::Round($cpuDeltaMs, 1))ms ÷ $wakes 次静置节拍 ⇒ 每次 ≈$([math]::Round($cpuDeltaMs / $wakes, 2))ms（【估算·口径=整进程】含 WGC 回调线程与 UI 线程，不等于 RenderCore 单帧）")
+            # 2026-11-01 两口径对照：[Meter/F4] 结算行里是渲染线程自己圈的静置帧账（RenderCore 口径），
+            # 与上面的整进程 CPU 差值 = WGC 回调线程 + UI 线程 + EnumWindows 检测 —— 交接文档要的
+            # "RenderCore vs 进程总开销分离"就落在这两行并列上。
+            $meterLine = @($meterLines | Select-Object -First 1)
+            if ($meterLine) {
+                $idleFrames = 0; $idleSumMs = 0.0
+                if ("$meterLine" -match '静置帧 (\d+) 帧') { $idleFrames = [int]$Matches[1] }
+                if ("$meterLine" -match '静置帧 \d+ 帧（合计 ([\d.]+)ms') { $idleSumMs = [double]$Matches[1] }
+                Say @("读数（两口径对照）：静置帧=$idleFrames 帧、渲染段合计 ${idleSumMs}ms（RenderCore 口径，摘自 [Meter/F4]） vs 进程 CPU 增量 $([math]::Round($cpuDeltaMs, 1))ms（整进程口径；差值=WGC 回调线程+UI 线程+检测）")
+            } else {
+                Say @("读数：日志里没有 [Meter/F4] 结算行 ⇒ 渲染段口径未量（需 LogVerbosity=Diagnose 且走 Esc 正常关闭）")
+            }
+        }
     }
     if ($frameLines.Count -ge 2) {
         $rx = [regex]'(\d\d:\d\d:\d\d\.\d\d\d).*渲染帧 #(\d+)'
@@ -244,7 +310,8 @@ try {
             Where-Object { $_.LastWriteTime -gt $runStart } | Sort-Object LastWriteTime | Select-Object -Last 1)
         if ($art) { Say @("探针本轮读数文件：$($art[0].FullName)") } else { Say @('（本轮没有新的 frame_handoff* 文件——探针只写 stdout/日志，属预期）') }
     }
-    $rc = 0
+    # RC 已在前提裁决段定值（失效=1）；走到这里且无人置 1 ⇒ 全部判完
+    if ($rc -ne 1) { $rc = 0 }
 } catch {
     Say @("★ 异常：$($_.Exception.Message)")
     $rc = 1

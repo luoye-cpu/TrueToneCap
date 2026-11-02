@@ -52,10 +52,40 @@ public static class EncoderCrashSentinel
     /// </summary>
     private static readonly ConcurrentDictionary<string, int> s_armCounts = new(StringComparer.OrdinalIgnoreCase);
 
-    private static string SentinelDir =>
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TrueToneCap");
+    /// <summary>哨兵根目录。<b>生产口径恒为 %LOCALAPPDATA%\TrueToneCap</b>；
+    /// 允许测试经 <see cref="UseTestDir"/> 换到一个可写目录（默认 null = 生产路径）。
+    /// <para>═══ 2026-11-02 审查轮：为什么要有这个注入点 ═══
+    /// 哨兵的四条核心契约（写入 / 在途≠残留 / 读后即消费 / 后端归属隔离）只有真读写一次文件才判得动。
+    /// 这几个用例原先直写 %LOCALAPPDATA%，在受限执行环境（CI 容器 / 只读 AppData / MDM 锁定 /
+    /// 沙箱令牌）里被拒。此前的处置是"整组 Skip"，但那等于<b>永久放弃这 15 条契约的验证</b> ——
+    /// 受限环境恰恰是最需要它们的地方（部署在托管机器上时硬件编码会真崩）。
+    /// 注入点让测试把目录换到可写处，<b>四条契约照原样真跑</b>，而不是找理由绕开。
+    /// ⚠ 只对测试可见（internal + InternalsVisibleTo），生产路径一个字都没变。</para></summary>
+    private static string? s_testDir;
+
+    /// <summary>仅供测试：把哨兵目录换到指定可写目录；传 null 恢复生产路径。</summary>
+    internal static void UseTestDir(string? dir)
+    {
+        lock (s_lock)
+        {
+            s_testDir = dir;
+        }
+        DeleteAllSentinels();   // 换目录时清空，免得两轮用例互相看到对方的残留
+    }
+
+    private static string SentinelDir
+    {
+        get
+        {
+            lock (s_lock)
+            {
+                if (s_testDir is not null) return s_testDir;
+            }
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "TrueToneCap");
+        }
+    }
 
     /// <summary>指定后端的哨兵文件路径（2026-09-18：文件名含后端名，各后端互不覆盖）。
     /// <para>internal 而不是 private：用例要能就地伪造一份"别的进程留下的"哨兵文件，

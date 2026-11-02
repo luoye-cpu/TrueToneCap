@@ -290,6 +290,46 @@ public static class CorePipelineTests
     // ═══════════════════════════════════════
 
     /// <summary>
+    /// 哨兵用例的<b>共同前置：把哨兵目录换到可写处，四条契约照原样真跑</b>。
+    /// <para>═══ 2026-11-02 审查轮：受限环境下原先整条套件当场崩 ═══
+    /// 这几个用例都要真读写哨兵文件（含伪造"别的进程留下的"残留）。生产路径恒为
+    /// <c>%LOCALAPPDATA%\TrueToneCap</c>，在受限执行环境（CI 容器 / 只读 AppData / MDM 锁定 /
+    /// 沙箱令牌）里会被拒。原实现直接 <c>File.WriteAllText</c> ⇒ <c>UnauthorizedAccessException</c>
+    /// 逃出 <c>RunAll</c> ⇒ <b>进程当场终止</b>，于是同套件后面 190 余个用例一条都没跑
+    /// （实测：1807 断言的套件在第一个用例就死，总断言从 2438 掉到 631）。</para>
+    /// <para><b>为什么是"换目录"而不是"跳过"</b>：跳过等于永久放弃这 15 条契约的验证，
+    /// 而受限环境恰恰最需要它们（托管机器上硬件编码真会崩）。注入点让四条契约（写入 /
+    /// 在途≠残留 / 读后即消费 / 后端归属隔离）<b>一条不少地真跑</b>。
+    /// 仅当连仓库内可写目录都建不起来时才退化为逐条 <see cref="Skip"/> 并点名，
+    /// 绝不用"判 true"伪装通过（仓内 <see cref="Skip"/> 的纪律）。</para>
+    /// </summary>
+    static bool SentinelPrecondition(string[] cases)
+    {
+        // 落在测试进程自己的可写区（%TEMP% 已被调用方按需重定向到工作区；不可写时下面的自检会失败）
+        var dir = Path.Combine(Path.GetTempPath(), "ttc-sentinel-test");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            EncoderCrashSentinel.UseTestDir(dir);
+            // 立刻自检：真的能写才算前置成立（不只信 CreateDirectory 的返回值）
+            var probe = EncoderCrashSentinel.SentinelPathFor("__writetest");
+            Directory.CreateDirectory(Path.GetDirectoryName(probe)!);
+            File.WriteAllText(probe, "probe");
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            foreach (var name in cases)
+                Skip(name, $"哨兵目录连可写注入点都建不起来（{ex.GetType().Name}: {ex.Message}）⇒ 本轮未判");
+            return false;
+        }
+    }
+
+    /// <summary>哨兵用例收尾：恢复生产路径（绝不留下"测试把用户哨兵目录改了"的副作用）。</summary>
+    static void SentinelCleanup() => EncoderCrashSentinel.UseTestDir(null);
+
+    /// <summary>
     /// 说明：这两条用例会读写 %LOCALAPPDATA%\TrueToneCap\encoder-crash.&lt;backend&gt;.sentinel，
     /// 结束时均主动 ClearAll 复原（ClearAll 也会忘掉本会话的"已消费"记 ⇒ 用例之间不互相污染）。
     /// 若用户此前确有崩溃残留，会被用例清除 —— 影响仅为"重新启用一次硬件编码"，属无害副作用。
@@ -300,6 +340,7 @@ public static class CorePipelineTests
     /// </summary>
     static void Test_EncoderCrashSentinel_ArmDisarm()
     {
+        if (!SentinelPrecondition(["EncoderCrashSentinel Arm/Disarm（初始未阻塞 / 在途不算残留 / Disarm 解除 / 残留判崩溃）"])) return;
         try
         {
             EncoderCrashSentinel.ClearAll();
@@ -324,6 +365,7 @@ public static class CorePipelineTests
         finally
         {
             EncoderCrashSentinel.ClearAll();
+            SentinelCleanup();
         }
     }
 
@@ -339,6 +381,7 @@ public static class CorePipelineTests
 
     static void Test_EncoderCrashSentinel_BackendScoped()
     {
+        if (!SentinelPrecondition(["EncoderCrashSentinel 后端隔离（同名后端识别 / 其它后端不牵连）"])) return;
         try
         {
             EncoderCrashSentinel.ClearAll();
@@ -352,6 +395,7 @@ public static class CorePipelineTests
         finally
         {
             EncoderCrashSentinel.ClearAll();
+            SentinelCleanup();
         }
     }
 
@@ -367,6 +411,7 @@ public static class CorePipelineTests
     /// </summary>
     static void Test_EncoderCrashSentinel_ConcurrentArm()
     {
+        if (!SentinelPrecondition(["EncoderCrashSentinel 并发 Arm（在途≠残留 / 先返回者不拆保护 / 读后即消费 / 归属校验）"])) return;
         try
         {
             EncoderCrashSentinel.ClearAll();
@@ -416,6 +461,7 @@ public static class CorePipelineTests
         finally
         {
             EncoderCrashSentinel.ClearAll();
+            SentinelCleanup();   // 恢复生产哨兵目录（测试注入点不留在进程里）
         }
     }
 

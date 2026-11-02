@@ -785,7 +785,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// <param name="primarySize">主图 (Base) 完整大小（含 XMP/MPF 段），对齐 libultrahdr。</param>
     private static byte[] BuildMpf(int mpfOffset, int mpfSize, int primarySize = 0)
     {
-        // MPF APP2 数据布局 (相对数据起始):
+        // MPF APP2 数据布局 (相对 APP2 载荷起始):
         //   offset 0:  "MPF\0" (4)
         //   offset 4:  TIFF header "MM" + 42 + offset_to_IFD(8) (8)
         //   offset 12: IFD entry count (2) = 3
@@ -796,6 +796,18 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         //   offset 54: Image Data Entry 0 (16)
         //   offset 70: Image Data Entry 1 (16)
         //   offset 86: 总长度
+        //
+        // ═══ 2026-11-02 修复（P1）：MPEntry 的 value 必须相对【TIFF 头】而不是相对 APP2 载荷 ═══
+        // CIPA DC-007 规定 MP 属性的所有 offset 都以 TIFF 头（本文件的 "MM"）为基准。
+        // 上面布局表里的 54 是相对 APP2 载荷起始量的；换算到 TIFF 头基准就是 54 − 4 = 50
+        // （"MPF\0" 占 4 字节）。
+        // 原实现直接写 54 ⇒ 读者按 TIFF 头基准去 IFD 后面 54 字节处找 Individual Image Data，
+        // 落到了正确的 16 字节结构【之后 4 字节】，读出的 attr/size/offset 全部错位
+        // （实测读到 attr=0x00005170、size=0、offset=0）⇒ ffmpeg/libavformat 直接拒读整个文件：
+        //   [jpeg_mpf] error decoding EXIF data: Invalid data found when processing input
+        // 只改这一个常数（其余字节一字不动）⇒ ffprobe 立刻 rc=0 并解出 mjpeg,640,480,yuvj444p。
+        // 增益图数据本身一直是正确的（libultrahdr -P / WIC / PIL 都能读到完整 hdrgm 元数据），
+        // 坏的只是这张 MPF 表的定位。
         var ms = new MemoryStream(86);
         var bw = new BinaryWriter(ms);
 
@@ -826,8 +838,10 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         bw.Write((byte)0xB0); bw.Write((byte)0x02); // tag
         bw.Write((byte)0x00); bw.Write((byte)0x07); // type: UNDEFINED
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x20); // count = 32 (2 entries * 16 bytes)
-        // value 指向 IFD 后的数据区 (相对 MPF 数据起始 = 54)
-        int entryOffset = 54;
+        // value = Individual Image Data 列表的偏移，基准是 TIFF 头（"MM"）。
+        // APP2 载荷里 "MPF\0" 占 4 字节 ⇒ TIFF 头基准 = 载荷基准 − 4：
+        //   载荷基准 54（next IFD 之后的第一个 Image Data Entry）⇒ TIFF 头基准 50。
+        const int entryOffset = 50;
         bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)0x00); bw.Write((byte)entryOffset);
 
         // Next IFD offset = 0 (no more IFDs)
