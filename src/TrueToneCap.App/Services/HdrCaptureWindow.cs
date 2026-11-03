@@ -346,6 +346,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private static partial nint SetWindowLongPtrW(nint hWnd, int nIndex, nint dwNewLong);
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint hwnd);
+    // ═══ 2026-11-02（多屏跟随 P1-7）：逐屏 DPI 的"窗口在哪块屏"查询 ═══
+    // 覆盖层横跨虚拟桌面，GetDpiForWindow 只给最大重叠屏一个值；chrome（工具条/手柄）
+    // 总在选区起点附近，按窗口左上角所在屏查 MDT_EFFECTIVE_DPI 才是正确的系数。
+    [LibraryImport("user32.dll")]
+    private static partial nint MonitorFromWindow(nint hwnd, uint flags);
     // 选区起点预热时窗口还没建、拿不到 HWND，只能按显示器查 DPI（Win8.1+ / shcore.dll）。
     // 0 = MDT_EFFECTIVE_DPI，与 GetDpiForWindow 返回的是同一把尺（不相同时键会对不上，预热就白烘）。
     [LibraryImport("shcore.dll")]
@@ -780,7 +785,22 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
             // ── DPI 缩放：全屏 CPU 渲染的 UI（工具栏/手柄/文字）按物理像素绘制，
             // 4K 200% 缩放下必须放大，否则 UI 过小无法操作 ──
+            // ═══ 2026-11-02（多屏跟随 P1-7）═══
+            // 原先只问 GetDpiForWindow：覆盖层横跨整个虚拟桌面，Win32 对跨越窗口返回的
+            // 是"最大重叠屏"的 DPI ⇒ 混合 DPI 下另一块屏上的工具条/手柄按错屏的系数画。
+            // 工具条/手柄总是出现在【选区起点】附近 ⇒ 查逐屏 DPI
+            // （GetDpiForMonitor 与图集预热 :1499 同一把尺 MDT_EFFECTIVE_DPI，键才能对上），
+            // 查不到再退 GetDpiForWindow。选区坐标本身不吃这个系数（物理像素直通），只影响 chrome。
+            // ⚠ 措辞更正（审查轮 R3）：MonitorFromWindow(MONITOR_DEFAULTTONEAREST) 返回与窗口
+            //   矩形【相交面积最大】的屏，不是"左上角所在屏" —— 跨屏选区下取最大重叠屏，行为合理。
             uint dpi = GetDpiForWindow(_hwnd);
+            try
+            {
+                int hrPerMon = GetDpiForMonitor(MonitorFromWindow(_hwnd, 2 /* MONITOR_DEFAULTTONEAREST */),
+                    0 /* MDT_EFFECTIVE_DPI */, out uint dpiMon, out _);
+                if (hrPerMon == 0 && dpiMon > 0) dpi = dpiMon;
+            }
+            catch { /* 逐屏查询失败维持 GetDpiForWindow 的值 */ }
             _uiScale = dpi > 0 ? dpi / 96.0 : 1.0;
             _handleSize = Math.Max(8, (int)Math.Round(8 * _uiScale));
             _handleHit = Math.Max(12, (int)Math.Round(12 * _uiScale));

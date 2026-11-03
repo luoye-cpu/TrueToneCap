@@ -701,6 +701,7 @@ public static class LocaleManager
     public static string AnimGif => "GIF";
     public static string AnimApng => "APNG";
     public static string AnimAvif => s_lang == AppLanguage.Chinese ? "动画 AVIF" : "Animated AVIF";
+    public static string AnimWebp => s_lang == AppLanguage.Chinese ? "动画 WebP" : "Animated WebP";
 
     // ── 帧率 ──
     public static string Fps10 => "10 fps";

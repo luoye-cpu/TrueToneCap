@@ -464,6 +464,26 @@ public sealed class SettingsService
         ClampTo(s.QualityTiff,     v => s.QualityTiff = v,     100, 100, dft.QualityTiff);
         ClampTo(s.RecordQuality,   v => s.RecordQuality = v,   0,   100, dft.RecordQuality);
 
+        // ── 录制动图（2026-11-02 D 流第 2 步：三个假控件 + ffmpeg 手动路径落盘后的收口）──
+        // 离散值域与 MainWindow.xaml 动图录制卡的 ComboBoxItem Tag 表一字不差
+        //（GIF/APNG/AVIF/WebP、10/15/20/30、15/30/60/120），对撞判据在 CorePipelineTests。
+        // int 轴没有 FitTag 那样的现成通道：值域只有四格，is-pattern 直写；
+        // 默认照旧从 CreateDefaults() 取，不写字面量（本函数顶部那条纪律）。
+        s.RecordFps = s.RecordFps is 10 or 15 or 20 or 30 ? s.RecordFps : dft.RecordFps;
+        s.MaxDurationSeconds = s.MaxDurationSeconds is 15 or 30 or 60 or 120 ? s.MaxDurationSeconds : dft.MaxDurationSeconds;
+        // AnimFormat 与 UI Tag 逐字一致是持久化契约（AppSettingsData.AnimFormat 注释），
+        // 走 FitTag 让大小写变体（"gif"/"webp"）改写成 Tag 拼法而不是回落默认。
+        // ⚠ 空串要先落默认：FitTag 对空串放行（既有纪律"空值交下游按默认处理"），
+        // 但本字段的下游是 SetComboByTag —— 会为空串补一项并选中，保存时 ?? "WebP" 又
+        // 因空串非 null 把 "" 原样写回 ⇒ 永久循环（审查轮 R1 专项）。新字段不做这个洞。
+        if (string.IsNullOrEmpty(s.AnimFormat)) s.AnimFormat = dft.AnimFormat;
+        FitTag(s.AnimFormat, v => s.AnimFormat = v, dft.AnimFormat, "GIF", "APNG", "AVIF", "WebP");
+        // ffmpeg 手动路径只做字符级清洗，刻意【不做存在性判据】：
+        // 路径可能暂时不可达（网络盘未挂载、U 盘没插），存在性由 FfmpegLocator 每次解析时判，
+        // 设置归一化不越权替它做决定。清洗范围（审查轮 R1-P2-5）：首尾空白、成对双/单引号、
+        // 从 PATH 串复制时带上的尾随分号。
+        s.FfmpegPath = s.FfmpegPath?.Trim().Trim('"').Trim('\'').Trim().TrimEnd(';').Trim() ?? "";
+
         // ── 索引类：越界会让 ComboBox 选中项静默漂移 ──
         // 上界取自 Core 的 FormatOrder（顺序就是持久化契约），不写死数字：
         // 2026-09-26 摘掉 GainMap 那一项后这里若仍写 6，就会放过"索引指向不存在的格式"。

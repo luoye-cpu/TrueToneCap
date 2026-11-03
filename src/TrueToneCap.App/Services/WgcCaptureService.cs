@@ -2462,8 +2462,9 @@ public sealed partial class WgcCaptureService : IDisposable
             catch (Exception ex)
             {
                 // 任一步失败都只影响 HDR，SDR 结果不受影响（下面仍会正常拼接）
-                // 异常不记进软冷却账（多为瞬时，且已有日志），见 NoteHdrAttemptOutcome 的说明
-                Log($"[WGC] HDR 源({hdrSource.Name})建立失败，本次按全 SDR 输出: {ex.Message}");
+                // 异常不记进软冷却账（多为瞬时，见 NoteHdrAttemptOutcome 的说明）
+                // ═══ 2026-11-02（P3-10）：Brief 档可见（整图 HDR 放弃的原因要能追溯）═══
+                LogInfo($"[WGC] HDR 源({hdrSource.Name})建立失败，本次按全 SDR 输出: {ex.Message}");
                 hdrSrcPixels = null;
             }
         }
@@ -2476,17 +2477,38 @@ public sealed partial class WgcCaptureService : IDisposable
         // GetSdrWhiteLevel() nits（常见 160~300，本项目默认按 200）。
         // 若不乘这个系数，SDR 显示器那部分会比 HDR 源区域**明显偏暗** ——
         // 这才是"亮度基准不一致"的真正来源，不能靠"放弃整图 HDR"来回避。
+        // ═══ 2026-11-02（多屏同源 P2-9）：白点逐屏查 ═══
+        // Windows 允许逐屏设置 SDR 亮度，系统级单值是"第一条成功路径"——哪块屏胜出不确定。
+        // 逐屏失败的那块回退系统级单值（保持旧行为，不因新查询失败而变得更错）。
         int sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
+        var sdrScaleByDisplay = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in displaysArr)
+        {
+            int per = DisplayEnumerator.GetSdrWhiteLevelForMonitor(d.Name);
+            sdrScaleByDisplay[d.Name] = per > 0 ? per : sdrWhiteNits;
+        }
+        int distinctNits = sdrScaleByDisplay.Values.Distinct().Count();
+        if (distinctNits > 1)
+            LogInfo($"[WGC] 逐屏 SDR 白点: {string.Join(", ", sdrScaleByDisplay.Select(kv => $"{kv.Key}={kv.Value}nits"))}（查询失败的那块已回退系统级单值 —— 这条是『第二块屏偏亮/偏暗』的唯一线索，须在 Brief 档可见）");
         float sdrScale = sdrWhiteNits > 0 ? sdrWhiteNits / TrueToneCap.Core.PixelOps.NominalSdrReferenceWhiteNits : 1f;
         if (sdrScale != 1f)
             Log($"[WGC] SDR 内容亮度对齐: {sdrWhiteNits} nits → 缩放 ×{sdrScale:F2}");
 
+        // ═══ 2026-11-03（审查轮）：逐屏会话登记，供返回处聚合降级警告 ═══
+        // 静态 s_lastItemDegradation 是单槽：A 屏回退置位后，B 屏的 CreateItemForMonitor
+        // 入口清零照样把它抹掉（审查轮 R3-P1-1 证实"入口清一次"没有改变任何交织的结局）。
+        // 而每个会话在 Start() 里、于【自己屏幕】的 item 创建之后捕获过一次静态值
+        // ⇒ 会话级警告才是逐屏真账，返回处从这里取，静态值只作兜底。
+        var stitchSessions = new System.Collections.Concurrent.ConcurrentBag<(string Name, PooledSession Session)>();
         Parallel.ForEach(displaysArr, display =>
         {
             var session = GetOrCreateSdrSession(display.MonitorHandle);
+            stitchSessions.Add((display.Name, session));
             if (!session.HasFrame && !session.WaitForFirstFrame(config.FrameTimeoutMs))
             {
-                Log($"[WGC] 显示器 {display.Name} 首帧超时，跳过");
+                // ═══ 2026-11-02（P3-10）：Brief 档可见 ═══
+                // SDR 画布零初始化 ⇒ 这块屏在产物里是纯黑，用户必须能在默认日志档看到原因。
+                LogInfo($"[WGC] 显示器 {display.Name} 首帧超时 ⇒ 拼接图该屏区域为黑（HDR 侧计入放弃条件）");
                 if (fullHdr is not null) Interlocked.Increment(ref hdrFillFailures);
                 return;
             }
@@ -2530,13 +2552,19 @@ public sealed partial class WgcCaptureService : IDisposable
                 try
                 {
                     var scrgb = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(pixels, session.Width, session.Height);
-                    // 对齐亮度基准（见 sdrScale 计算处）：只缩放 RGB，alpha 不参与
-                    if (sdrScale != 1f)
+                    // ═══ 2026-11-02（多屏同源 P2-9）：亮度基准按【这一块屏自己】的 SDR 白点 ═══
+                    // 原先统一乘系统级单值（GetSdrWhiteLevel 第一条成功路径）⇒ 白点不同的
+                    // 第二块屏系统性偏亮/偏暗。现在逐屏查（查不到回退系统级单值，再回退 1）。
+                    float scaleThis = sdrScaleByDisplay.TryGetValue(display.Name, out var perMon) && perMon > 0
+                        ? perMon / TrueToneCap.Core.PixelOps.NominalSdrReferenceWhiteNits
+                        : sdrScale;
+                    if (scaleThis != 1f)
                     {
+                        // 只缩放 RGB，alpha 不参与
                         for (int i = 0; i < scrgb.Length; i++)
                         {
                             if ((i & 3) == 3) continue;   // alpha 通道
-                            scrgb[i] *= sdrScale;
+                            scrgb[i] *= scaleThis;
                         }
                     }
                     // 与 SDR 同理：会话可能是全桌面，此时源需带显示器偏移
@@ -2544,7 +2572,8 @@ public sealed partial class WgcCaptureService : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Log($"[WGC] 显示器 {display.Name} SDR→scRGB 上转换失败: {ex.Message}");
+                    // ═══ 2026-11-02（P3-10）：Brief 档可见（SDR 输出不受影响，但 HDR 侧要放弃整图）═══
+                    LogInfo($"[WGC] 显示器 {display.Name} SDR→scRGB 上转换失败: {ex.Message}");
                     Interlocked.Increment(ref hdrFillFailures);
                 }
             }
@@ -2585,6 +2614,21 @@ public sealed partial class WgcCaptureService : IDisposable
         sw.Stop();
         Log($"[WGC] CaptureAllMonitors 完成: {vw}x{vh} {sw.ElapsedMilliseconds}ms (HDR={fullHdr is not null})");
 
+        // ═══ 2026-11-02（多屏同源 P0-1）：拼接结果补齐元数据，与单屏路径同形状 ═══
+        // 原先这里只填像素与尺寸 ⇒ 下游 DecisionFor(captureResult,…) 拿到 SourceDisplay=null，
+        // 编码保存时只能按光标屏猜（实机复现：选区在 SDR 副屏、光标在 HDR 主屏，产物被声明成
+        // Rec.2020+PQ 的假 HDR）。现在把"拼接色彩基准屏"作为 SourceDisplay 随结果带走，
+        // ICC 与单屏路径同一来源（GetDisplayIccProfile）。SourceDisplay 仍可能是 null
+        // （SelectHdrSourceDisplay 选不出有证据的源）——下游对 null 已有 Unknown 兜底，不猜光标屏。
+        DisplayInfo? basisDisplay = hdrSource ?? displaysArr.FirstOrDefault(d => d.IsPrimary) ?? displaysArr.FirstOrDefault();
+        byte[]? basisIcc = null;
+        if (basisDisplay is not null)
+        {
+            try { basisIcc = ColorProfileProvider.GetDisplayIccProfile(basisDisplay.MonitorHandle); }
+            catch { /* ICC 拿不到与单屏路径同样不致命：决定按屏幕分类走，容器声明有标准 ICC 兜底 */ }
+        }
+        LogInfo($"[WGC] 拼接元数据: 基准屏={basisDisplay?.Name ?? "(无)"} ICC={(basisIcc is null ? "无" : $"{basisIcc.Length}B")}");
+
         // ═══ 2026-09-19：多屏分支同样要登记闲置回收（原来只有单屏路径有，这里直接 return）═══
         // 不这么做的后果：每屏一条 SDR 会话 + 一条 Float16 会话，连同各自的 staging 纹理、
         // GPU 纹理缓存与 float 写入缓冲会一直常驻（双 4K 约 132MB×2 起步），截完图也永远不释放。
@@ -2605,7 +2649,12 @@ public sealed partial class WgcCaptureService : IDisposable
             Width = vw,
             Height = vh,
             CaptureTimeMs = sw.ElapsedMilliseconds,
-            DegradationWarning = s_lastItemDegradation // 传播降级警告 (任一会话回退到壁纸)
+            IccProfile = basisIcc,          // ═══ 2026-11-02 多屏同源 P0-1（原先缺：下游只能按光标屏猜）
+            SourceDisplay = basisDisplay,   // ═══ 同上：拼接的色彩基准屏随结果带走
+            DegradationWarning =
+                stitchSessions.Select(s => s.Session.DegradationWarning)
+                    .FirstOrDefault(w => !string.IsNullOrEmpty(w))   // ═══ 2026-11-03 审查轮：逐屏会话聚合（见循环上方注释）
+                    ?? s_lastItemDegradation                         // 兜底：静态槽（单屏路径语义）
         };
     }
 
@@ -2808,13 +2857,21 @@ public sealed partial class WgcCaptureService : IDisposable
         // 实测值打印在单测 --unit-tests 的 ℹ️ 行里；探针取证见 publish/probe-wgc-iid.ps1。
         var itemGuid = new Guid(WgcItemClassIid);
 
+        // ═══ 2026-11-02（P3-10）：本屏建会话开始 —— 本屏的降级账清零一次 ═══
+        // 竞态背景：多屏拼接在 Parallel 里逐屏建会话，静态 s_lastItemDegradation 是
+        // "A 屏回退置位 → B 屏成功清零"的共享单槽，:2608 读到的可能是 null ⇒ 警告丢失。
+        // 修法：本函数对【这一块屏】只清这一次（函数入口），此后即便后续方法成功也
+        // 不再清别的屏刚写下的警告 —— 各屏的"成功"不该抹掉别的屏的"降级"。
+        // 静态槽仍是"最后一次降级"的形状（多屏下任一屏回退 ⇒ 至少有一条警告能到出参）。
+        s_lastItemDegradation = null;
+
         // 方法0: CsWinRT As<> 扩展（按 hmonitor 精确定位目标显示器）
         try
         {
             var interop = GraphicsCaptureItem.As<IGraphicsCaptureItemInterop>();
             int hr = interop.CreateForMonitor(hmonitor, itemGuid, out var ptr);
             LogInfo($"[WGC] 方法0(CsWinRT CreateForMonitor) 0x{hmonitor:X}: hr=0x{hr:X8}");
-            if (hr >= 0 && ptr != 0) { s_lastItemDegradation = null; return MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr); }
+            if (hr >= 0 && ptr != 0) return MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr);
         }
         catch (Exception ex) { LogInfo($"[WGC] 方法0: {ex.Message}"); }
 
@@ -2836,7 +2893,7 @@ public sealed partial class WgcCaptureService : IDisposable
                         try
                         {
                             hr = VtblCall4(interopPtr, hmonitor, itemGuid, out var itemPtr);
-                            if (hr >= 0 && itemPtr != 0) { s_lastItemDegradation = null; return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemPtr); }
+                            if (hr >= 0 && itemPtr != 0) return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemPtr);
                         }
                         finally { Marshal.Release(interopPtr); }
                     }
@@ -2859,7 +2916,6 @@ public sealed partial class WgcCaptureService : IDisposable
             var item = CreateItemFromDisplayId(hmonitor);
             if (item is not null)
             {
-                s_lastItemDegradation = null;
                 return item;
             }
         }

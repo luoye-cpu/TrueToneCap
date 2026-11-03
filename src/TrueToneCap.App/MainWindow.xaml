@@ -69,64 +69,11 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- 色彩与 HDR (原色彩管理页, 2026-08-08 合并) -->
-                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="12">
-                                <TextBlock Text="色彩与 HDR" FontSize="14" FontWeight="SemiBold"/>
-                                <StackPanel Spacing="4">
-                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="HDR 输出" VerticalAlignment="Center"/><ToggleSwitch x:Name="HdrSwitch" Grid.Column="1" Toggled="OnHdrToggled"/></Grid>
-                                    <TextBlock x:Name="HdrHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
-                                </StackPanel>
-                                <StackPanel Spacing="4">
-                                    <!-- 2026-09-22：ICC 烘焙开关已删除 —— 色彩管理不可关，默认把像素映射进
-                                         标准色域（sRGB / BT.2020）。原来那个开关会带来"像素不动、容器却按
-                                         请求声明"的一类产物，且它同时是 8-bit GPU 直通的闸门，留着两处语义都要解释。
-                                         这行只剩一句状态说明（IccHintTxt 在下方，文案见 UpdateIccHint）。 -->
-                                    <TextBlock x:Name="IccHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
-                                </StackPanel>
-                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="ColorSpaceLabel" Text="目标色域" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="ColorCbo" Grid.Column="1" SelectionChanged="OnColorSpaceChanged">
-                                        <!-- 2026-09-19 产品决定：可选目标色域只留两档（+跟随显示器）。
-                                             2026-09-27 用户口径：显示名一律写成 Rec.709 / Rec.2020 ——
-                                             "sRGB / BT.2020 / 非 sRGB" 这类混着叫的说法在增益图这类
-                                             "底图恒 SDR" 的形态上描述不清（同一份文件里底图被叫 BT.2020、
-                                             查看器读到的却是 primaries=9 + SDR 传递函数）。
-                                             ⚠ Tag 保持 "sRGB"/"BT2020" 不动：Tag 是 legacyTags 迁移与
-                                             SetComboByTag 的匹配键，改 Tag 等于再造一次裸索引事故。
-                                             Display P3 / DCI-P3 / Adobe RGB 从界面移除，但 Core 保留其矩阵与
-                                             ICC 能力（检测到的原生色域、降级声明、判据样张都还要用）。
-                                             ⚠ 项序就是持久化契约：AppSettingsData.ColorSpaceIndex 存的是【索引】，
-                                             这里增删或换序必须同步 MainWindow.Settings.cs 的迁移表，
-                                             否则老配置的索引会静默指向另一个色域。 -->
-                                        <ComboBoxItem Tag="System" IsSelected="True">跟随显示器</ComboBoxItem><ComboBoxItem Tag="sRGB">Rec.709</ComboBoxItem>
-                                        <ComboBoxItem Tag="BT2020">Rec.2020</ComboBoxItem>
-                                    </ComboBox>
-                                </Grid>
-                                <TextBlock x:Name="IccStrategyHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
-                                    Text="目标色域同时决定像素与容器声明。"/>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- 色域映射 -->
-                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="12">
-                                <TextBlock x:Name="GamutMapTitle" Text="色域映射" FontSize="14" FontWeight="SemiBold"/>
-                                <Grid ColumnDefinitions="120,*">
-                                    <TextBlock x:Name="SourceGamutLabel" Text="显示器色域" VerticalAlignment="Center"/>
-                                    <TextBlock x:Name="SourceGamutTxt" Grid.Column="1" VerticalAlignment="Center"
-                                        Text="检测中..." FontWeight="SemiBold"
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                </Grid>
-                                <Grid ColumnDefinitions="120,*">
-                                    <TextBlock x:Name="MappingArrow" Text="→ 映射到" VerticalAlignment="Center" FontWeight="SemiBold"/>
-                                    <TextBlock x:Name="TargetGamutTxt" Grid.Column="1" VerticalAlignment="Center"
-                                        Text="Rec.709" FontWeight="SemiBold"/>
-                                </Grid>
-                                <TextBlock x:Name="GamutMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
-                                    Text="广色域自动缩限到目标色域。"/>
-                            </StackPanel>
-                        </Border>
-
+                        <!-- ═══ 格式专属选项（2026-11-02 用户口径：从页面最下面移到「基础输出」正下方）═══
+                             顺序即阅读顺序：先选格式 → 紧跟就是该格式的旋钮 → 最后才是色彩/HDR 这类全局项。
+                             这 7 张卡在 XAML 里都是 Visibility="Collapsed"，由 MainWindow.xaml.cs 的
+                             RefreshFormatPanel 按当前格式点亮（门禁 Test_Xaml_CollapsedCards_HaveVisibilityOwner
+                             盯着"每个 Collapsed 控件都必须有代码点亮它"，挪位置不影响那条锁）。 -->
                         <!-- AVIF 专属选项 -->
                         <Border x:Name="AvifOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
                             <StackPanel Spacing="12">
@@ -415,6 +362,70 @@
                                     Text="无损：只影响压缩耗时与文件体积，像素不变。均衡=压缩最强，快速=更快。"/>
                             </StackPanel>
                         </Border>
+
+                        <!-- 色彩与 HDR（原色彩管理页，2026-08-08 合并）
+                             2026-11-02 用户口径：全局项下沉到本页末尾，格式专属选项紧跟「基础输出」；
+                             色域映射也不再是独立卡片，并为本卡下半段（见卡内注释）。 -->
+                        <Border Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="12">
+                                <TextBlock Text="色彩与 HDR" FontSize="14" FontWeight="SemiBold"/>
+                                <StackPanel Spacing="4">
+                                    <Grid ColumnDefinitions="140,*"><TextBlock Text="HDR 输出" VerticalAlignment="Center"/><ToggleSwitch x:Name="HdrSwitch" Grid.Column="1" Toggled="OnHdrToggled"/></Grid>
+                                    <TextBlock x:Name="HdrHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="140,0,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <StackPanel Spacing="4">
+                                    <!-- 2026-09-22：ICC 烘焙开关已删除 —— 色彩管理不可关，默认把像素映射进
+                                         标准色域（sRGB / BT.2020）。原来那个开关会带来"像素不动、容器却按
+                                         请求声明"的一类产物，且它同时是 8-bit GPU 直通的闸门，留着两处语义都要解释。
+                                         这行只剩一句状态说明（IccHintTxt 在下方，文案见 UpdateIccHint）。 -->
+                                    <TextBlock x:Name="IccHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="ColorSpaceLabel" Text="目标色域" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="ColorCbo" Grid.Column="1" SelectionChanged="OnColorSpaceChanged">
+                                        <!-- 2026-09-19 产品决定：可选目标色域只留两档（+跟随显示器）。
+                                             2026-09-27 用户口径：显示名一律写成 Rec.709 / Rec.2020 ——
+                                             "sRGB / BT.2020 / 非 sRGB" 这类混着叫的说法在增益图这类
+                                             "底图恒 SDR" 的形态上描述不清（同一份文件里底图被叫 BT.2020、
+                                             查看器读到的却是 primaries=9 + SDR 传递函数）。
+                                             ⚠ Tag 保持 "sRGB"/"BT2020" 不动：Tag 是 legacyTags 迁移与
+                                             SetComboByTag 的匹配键，改 Tag 等于再造一次裸索引事故。
+                                             Display P3 / DCI-P3 / Adobe RGB 从界面移除，但 Core 保留其矩阵与
+                                             ICC 能力（检测到的原生色域、降级声明、判据样张都还要用）。
+                                             ⚠ 项序就是持久化契约：AppSettingsData.ColorSpaceIndex 存的是【索引】，
+                                             这里增删或换序必须同步 MainWindow.Settings.cs 的迁移表，
+                                             否则老配置的索引会静默指向另一个色域。 -->
+                                        <ComboBoxItem Tag="System" IsSelected="True">跟随显示器</ComboBoxItem><ComboBoxItem Tag="sRGB">Rec.709</ComboBoxItem>
+                                        <ComboBoxItem Tag="BT2020">Rec.2020</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock x:Name="IccStrategyHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
+                                    Text="目标色域同时决定像素与容器声明。"/>
+                                <!-- ═══ 色域映射（2026-11-02 用户口径：不再是独立卡片，并进本卡的下半段）═══
+                                     本卡因此分成两段，但两段读的是同一件事，只是时态不同：
+                                       上半段 = 【你要什么】：HDR 输出、目标色域两个设置项；
+                                       下半段 = 【现在落到哪】：这块屏的色域、实际映射到的目标、一句管线说明。
+                                     并卡之后渲染点仍然只有一处（RefreshColorMappingUi，见 MainWindow.ColorManagement.cs），
+                                     三行文字各只有一个写入点、零个读取点，与并卡之前逐字相同 —— 合并的是版面不是逻辑。
+                                     ⚠ 分隔线用本文件已在用的 CardStrokeColorDefaultBrush，不引入没人用过的主题资源：
+                                        主窗会被运行期窗构造探针真建一次，一个解析不到的 ThemeResource 就是启动期异常。 -->
+                                <Border Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" Margin="0,4,0,0"/>
+                                <TextBlock x:Name="GamutMapTitle" Text="色域映射" FontSize="12" FontWeight="SemiBold"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="SourceGamutLabel" Text="显示器色域" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="SourceGamutTxt" Grid.Column="1" VerticalAlignment="Center"
+                                        Text="检测中..." FontWeight="SemiBold"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                </Grid>
+                                <Grid ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="MappingArrow" Text="→ 映射到" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                    <TextBlock x:Name="TargetGamutTxt" Grid.Column="1" VerticalAlignment="Center"
+                                        Text="Rec.709" FontWeight="SemiBold"/>
+                                </Grid>
+                                <TextBlock x:Name="GamutMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="32,0,0,0" TextWrapping="Wrap"
+                                    Text="广色域自动缩限到目标色域。"/>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
 
                     <!-- ── 截图与录制 ── -->
@@ -465,13 +476,13 @@
                                 <TextBlock Text="动图录制" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*,60"><TextBlock Text="快捷键" VerticalAlignment="Center"/><TextBox x:Name="RecordHotkeyTxt" Grid.Column="1" PlaceholderText="Ctrl+Shift+G" KeyDown="OnHotkeyRecordKeyDown"/><Button x:Name="RecordBtn" Grid.Column="2" Content="录制" Click="OnRecordHotkeyClick" Width="54" Margin="4,0,0,0"/></Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="格式" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="AnimFormatCbo" Grid.Column="1"><ComboBoxItem Tag="GIF">GIF</ComboBoxItem><ComboBoxItem Tag="APNG">APNG</ComboBoxItem><ComboBoxItem Tag="AVIF">动画 AVIF</ComboBoxItem></ComboBox>
+                                    <ComboBox x:Name="AnimFormatCbo" Grid.Column="1" SelectionChanged="OnAnimFormatChanged"><ComboBoxItem Tag="GIF">GIF</ComboBoxItem><ComboBoxItem Tag="APNG">APNG</ComboBoxItem><ComboBoxItem Tag="AVIF">动画 AVIF</ComboBoxItem><ComboBoxItem Tag="WebP">动画 WebP</ComboBoxItem></ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="帧率" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="RecordFpsCbo" Grid.Column="1"><ComboBoxItem Tag="10">10 fps</ComboBoxItem><ComboBoxItem Tag="15" IsSelected="True">15 fps</ComboBoxItem><ComboBoxItem Tag="20">20 fps</ComboBoxItem><ComboBoxItem Tag="30">30 fps</ComboBoxItem></ComboBox>
+                                    <ComboBox x:Name="RecordFpsCbo" Grid.Column="1" SelectionChanged="OnRecordFpsChanged"><ComboBoxItem Tag="10">10 fps</ComboBoxItem><ComboBoxItem Tag="15" IsSelected="True">15 fps</ComboBoxItem><ComboBoxItem Tag="20">20 fps</ComboBoxItem><ComboBoxItem Tag="30">30 fps</ComboBoxItem></ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="最大时长" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="MaxDurationCbo" Grid.Column="1"><ComboBoxItem Tag="15">15 秒</ComboBoxItem><ComboBoxItem Tag="30" IsSelected="True">30 秒</ComboBoxItem><ComboBoxItem Tag="60">60 秒</ComboBoxItem><ComboBoxItem Tag="120">120 秒</ComboBoxItem></ComboBox>
+                                    <ComboBox x:Name="MaxDurationCbo" Grid.Column="1" SelectionChanged="OnMaxDurationChanged"><ComboBoxItem Tag="15">15 秒</ComboBoxItem><ComboBoxItem Tag="30" IsSelected="True">30 秒</ComboBoxItem><ComboBoxItem Tag="60">60 秒</ComboBoxItem><ComboBoxItem Tag="120">120 秒</ComboBoxItem></ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1" Minimum="0" Maximum="100" ValueChanged="OnRecordQualityChanged"/></Grid>
                             </StackPanel>

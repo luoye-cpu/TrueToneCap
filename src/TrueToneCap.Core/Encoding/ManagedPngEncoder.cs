@@ -51,13 +51,17 @@ public static class ManagedPngEncoder
     }
 
     /// <summary>快速编码 8-bit PNG（Filter=None + Fastest 压缩）。用于临时中间文件。</summary>
-    public static void EncodeFast(byte[] bgra, int w, int h, string path, byte[]? iccProfile = null)
+    /// <param name="cicp">可选 CICP 4 字节 [primaries, transfer, matrix, range]（2026-11-02：动图
+    /// 中间帧也带声明 —— 像素已被 PreparePixelsWithIcc 烘焙到目标色域，中间文件不该"裸奔"）。</param>
+    public static void EncodeFast(byte[] bgra, int w, int h, string path,
+        byte[]? iccProfile = null, byte[]? cicp = null)
     {
-        AtomicFileWriter.Write(path, fs => EncodeFast(bgra, w, h, fs, iccProfile));
+        AtomicFileWriter.Write(path, fs => EncodeFast(bgra, w, h, fs, iccProfile, cicp));
     }
 
     /// <summary>快速编码 8-bit PNG 到 Stream（Filter=None + Fastest 压缩）。用于 stdin 管道传输。</summary>
-    public static void EncodeFast(byte[] bgra, int w, int h, Stream output, byte[]? iccProfile = null)
+    public static void EncodeFast(byte[] bgra, int w, int h, Stream output,
+        byte[]? iccProfile = null, byte[]? cicp = null)
     {
         int rowBytes = w * 4;
         output.Write(PngSignature);
@@ -68,6 +72,9 @@ public static class ManagedPngEncoder
         ihdr[8] = 8; ihdr[9] = 6; // 8-bit RGBA
         WriteChunk(output, "IHDR"u8, ihdr);
 
+        // chunk 顺序与 Encode 保持同一约定：cICP 在前、iCCP 在后（两者都在 IDAT 之前的保留区）
+        if (cicp is { Length: 4 })
+            WriteChunk(output, "cICP"u8, cicp);
         if (FormatHelper.IsEmbeddableIcc(iccProfile))
             WriteChunk(output, "iCCP"u8, BuildIccpChunk(iccProfile));
 

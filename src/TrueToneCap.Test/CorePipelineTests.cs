@@ -278,6 +278,8 @@ public static class CorePipelineTests
         Test_Av1SequenceHeader_Parse();
         Test_Nvenc_Argb10PrecisionProbe();
         Test_FormatHelper_Bgra8ToBgra16BE();
+        Test_RecordingActivation_Wiring();              // 2026-11-02 D 流：录制激活的接线/兜底/声明形态锁
+        Test_AnimatedContainerColor_Surgery();          // 2026-11-02 D 流：WebP ICCP / PNG cICP 容器手术（真跑）
 
         Console.WriteLine($"\n══════════════════════════════════════");
         TestSummary.Report("--unit-tests", _passed, _failed, 0, null, _skipped);
@@ -1692,12 +1694,17 @@ public static class CorePipelineTests
         Assert("读侧要真的参与决定浮层：出现 if (!_settings.ShowPreview …) 这种判断",
             Regex.IsMatch(src, @"if\s*\(\s*!\s*_settings\.ShowPreview"),
             "只有赋值没有判断 ⇒ 用户取消勾选后右下角照样弹，这就是 F4 原本的形状");
-        // 关掉预览不等于什么都不提示：必须退回系统通知，否则会把 ToastOnCapture 的语义一起吃掉
+        // 关掉预览不等于什么都不提示：必须退回系统通知，否则会把 ToastOnCapture 的语义一起吃掉。
+        // 2026-11-03 审查轮：退回改成 ShowHonestSuccess 本地函数（录制产物不再谎称"已复制到剪贴板"），
+        // 判据锁两级：退回分支确实调它 + 它体内仍有 ToastService 出口（录制走 ShowToast 系统通知，
+        // 截图仍走 ShowCaptureSuccess）——两级缺一，任一侧"静默吞掉"都抓得住。
         int at = src.IndexOf("if (!_settings.ShowPreview", StringComparison.Ordinal);
+        int honest = src.IndexOf("void ShowHonestSuccess", StringComparison.Ordinal);
         Assert("退回分支取的是系统通知那条路（不是静默吞掉提示）",
-            at >= 0 && src.Substring(at, Math.Min(260, src.Length - at))
-                .Contains("ToastService.ShowCaptureSuccess", StringComparison.Ordinal),
-            "关掉浮层却什么都不发 ⇒ 顺手改坏了另一个开关的语义");
+            at >= 0 && src.Substring(at, Math.Min(300, src.Length - at)).Contains("ShowHonestSuccess(")
+            && honest >= 0
+            && src.Substring(honest, Math.Min(500, src.Length - honest)).Contains("ToastService."),
+            "关掉浮层却什么都不发 ⇒ 顺手改坏了另一个开关的语义；或诚实标题的分流丢了");
     }
 
     /// <summary>数模板里 {0}/{1}… 这类占位符的个数（<c>{</c> 紧跟数字才算）。</summary>
@@ -3291,8 +3298,9 @@ public static class CorePipelineTests
             frameLoop.Success && frameLoop.Value.Contains("ManagedPngEncoder.EncodeFast("),
             frameLoop.Success ? "循环里没找到 EncodeFast" : "没匹配到中间帧循环（改形的话本判据就瞎了）");
         Assert("ffmpeg 不可用时的单帧回退仍是全量 Encode（那是产物，不是中转）",
-            a.Contains("ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 8)"),
-            "4K 单帧实测 448~536ms vs 55~63ms；把回退也改成 Fastest 会白丢压缩率");
+            a.Contains("ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 16,"),
+            "4K 单帧实测 448~536ms vs 55~63ms；把回退也改成 Fastest 会白丢压缩率。"
+            + "2026-11-02 用户拍板回退走 16-bit（录制源是 8-bit SDR 池，升位深不是增精度，sBIT 照实标 8）");
 
         // ── A2：8-bit 扫描线必须与 16-bit 一样分带并行，且不许留 h 次行分配 ──
         // 判据先把【8-bit 那一个方法体】切出来再判，不用"签名往后找 2600 字符"那种窗口：
@@ -3324,6 +3332,316 @@ public static class CorePipelineTests
         Assert("SecretStore.Set 在值未变时短路（每次存设置原本会白做两次 DPAPI + 两次写盘）",
             Regex.IsMatch(s, @"public static void Set\(string key, string value\)[\s\S]{0,320}?"
                 + @"if \(dict\.TryGetValue\(key, out var current\) && current == value\) return;"));
+    }
+
+    /// <summary>
+    /// 录制激活的接线形态锁（2026-11-02 D 流第 8 步）。
+    /// <para>引擎（<c>AnimationRecorder</c>）从 2026-10-02 起就是完整可用但整车没接电的状态
+    /// （台账 §4.1：全仓 <c>new AnimationRecorder(</c> 零处）。本判据把"接电"的每个必经点钉住：
+    /// 实例化入口、热键注册、设置三件套的回显/保存/收口、ffmpeg 解析器、假选项的显式分支
+    /// （不许再让枚举值静默掉进 webp 兜底）、回退 16-bit、声明通道、到点自动收尾。
+    /// 源码形态锁 —— 单测环境起不了 WinUI 主窗，"真录得出动图"由实机验证负责（台账第 9 步）。</para>
+    /// </summary>
+    static void Test_RecordingActivation_Wiring()
+    {
+        var mw = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        var mwSettings = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Settings.cs"));
+        var mwLoc = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.Localization.cs"));
+        var winXaml = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"));
+        var data = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "AppSettingsData.cs"));
+        var svc = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SettingsService.cs"));
+        var locator = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "FfmpegLocator.cs"));
+        var localeMgr = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LocaleManager.cs"));
+        var anim = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "AnimationRecorder.cs"));
+        var arch = FindRepoFile(Path.Combine("docs", "architecture-design.md"));
+        if (mw is null || mwSettings is null || mwLoc is null || winXaml is null || data is null
+            || svc is null || locator is null || localeMgr is null || anim is null || arch is null)
+        {
+            Assert("录制接线判据的十个源文件可读", false, "缺文件");
+            return;
+        }
+        string m = File.ReadAllText(mw), ms = File.ReadAllText(mwSettings), ml = File.ReadAllText(mwLoc);
+        string x = File.ReadAllText(winXaml), d = File.ReadAllText(data), s = File.ReadAllText(svc);
+        string f = File.ReadAllText(locator), lm = File.ReadAllText(localeMgr);
+        // a 去注释行再判：引擎注释里要写"2026-11-02 之前 AnimatedAVIF 掉进 _ => ("webp"…"这段历史，
+        // 反向判据（旧兜底形态已死）若读进注释就会永红 —— 判的是代码，不是回忆。
+        string a = string.Join("\n", File.ReadAllLines(anim)
+            .Where(l => !l.TrimStart().StartsWith("//")));
+        string archText = File.ReadAllText(arch);
+
+        // ── ① 引擎接电：唯一的实例化点在录制入口 ──
+        // 计数用去注释文本（与引擎文件同一理由：注释里引历史字符串会误红，审查轮 R2-P3）
+        string mCode = string.Join("\n", File.ReadAllLines(mw).Where(l => !l.TrimStart().StartsWith("//")));
+        Assert("new AnimationRecorder( 恰好出现一次（MainWindow 的录制入口）",
+            Regex.Matches(mCode, Regex.Escape("new AnimationRecorder(")).Count == 1,
+            "零处=没接电，多处=有人绕过入口自己造实例");
+        Assert("ToggleRecording 有 Interlocked 防重入（照 _isCapturing 的纪律）",
+            m.Contains("Interlocked.CompareExchange(ref _recordingBusy, 1, 0)"));
+        Assert("录制与截图两把闸分开（录制不许卡住截图主线）",
+            m.Contains("private volatile int _recordingBusy;") && m.Contains("private volatile int _isCapturing;"));
+
+        // ── ② 热键：启动注册 + 改键重注册，两处都在 ──
+        Assert("录制热键启动时注册（RegisterNamed this,\"record\"）",
+            Regex.Matches(m, Regex.Escape("RegisterNamed(this, \"record\"")).Count >= 2,
+            "启动一处 + 键位录入回调一处，少一处就是半断点");
+        Assert("改键分支不再是只存盘（RecordHotkeyTxt 分支里有重注册）",
+            Regex.IsMatch(m, @"recordedBox == RecordHotkeyTxt[\s\S]{0,200}RegisterNamed\(this, ""record"""));
+
+        // ── ③ 会话预建：TryGetLatestFrame 对空池恒 null，开始前必须有人建 (hmon, SDR) 会话 ──
+        Assert("录制开始前预建 SDR 会话（CaptureMonitorAsync + PreferHdr=false）",
+            m.Contains("new WgcCaptureConfig { TargetMonitor = hmon, PreferHdr = false }"));
+        Assert("ffmpeg 先解析后录制：缺席时明确告知而不是录完静默退化",
+            m.Contains("FfmpegLocator.Resolve(_settings.FfmpegPath)") && m.Contains("未找到 ffmpeg")
+            // 解析结果必须真流进 RecordingConfig —— 否则引擎退回裸名 PATH 查找而本判据照样绿
+            //（审查轮 R2-P2-4）：
+            && m.Contains("FfmpegPath = ffmpeg,"));
+        Assert("ShowSaveToast 的 recording 分支真的被走到（不可达分支收口）",
+            m.Contains("ShowSaveToast(e.OutputFile, (long)(e.ElapsedSeconds * 1000), \"recording\")"));
+
+        // ── ④ 设置三件套：字段、回显、保存、收口四层都在 ──
+        Assert("AppSettingsData 有四个新字段且默认值落定",
+            d.Contains("public string AnimFormat { get; set; } = \"WebP\";")
+            && d.Contains("public int RecordFps { get; set; } = 15;")
+            && d.Contains("public int MaxDurationSeconds { get; set; } = 30;")
+            && d.Contains("public string FfmpegPath { get; set; } = \"\";"));
+        Assert("回显走 SetComboByTag（AnimFormat/RecordFps/MaxDuration 三行）",
+            ms.Contains("SetComboByTag(AnimFormatCbo, _settings.AnimFormat)")
+            && ms.Contains("SetComboByTag(RecordFpsCbo, _settings.RecordFps.ToString())")
+            && ms.Contains("SetComboByTag(MaxDurationCbo, _settings.MaxDurationSeconds.ToString())"));
+        Assert("保存从 Tag 落回设置（读 Tag 不读显示文字 —— Tag 才是持久化契约）",
+            ms.Contains("_settings.AnimFormat = (AnimFormatCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? \"WebP\";"));
+        Assert("SaveSettings 不碰 FfmpegPath（无 UI 的字段不许被兜底抹掉手改值）",
+            !ms.Contains("_settings.FfmpegPath ="));
+        Assert("Normalize 收口：fps/时长离散值域 + AnimFormat 走 FitTag + FfmpegPath 只洗字符不判存在",
+            s.Contains("s.RecordFps is 10 or 15 or 20 or 30")
+            && s.Contains("s.MaxDurationSeconds is 15 or 30 or 60 or 120")
+            && s.Contains("FitTag(s.AnimFormat, v => s.AnimFormat = v, dft.AnimFormat, \"GIF\", \"APNG\", \"AVIF\", \"WebP\")")
+            // 审查轮 R1-P2-5 后清洗链扩到 单引号/尾随分号；空串 AnimFormat 先落默认（专项洞）
+            && s.Contains("s.FfmpegPath?.Trim().Trim('\"').Trim('\\'').Trim().TrimEnd(';').Trim()")
+            && s.Contains("if (string.IsNullOrEmpty(s.AnimFormat)) s.AnimFormat = dft.AnimFormat;"));
+
+        // ── ⑤ XAML：WebP 项 + 三个 SelectionChanged ──
+        Assert("AnimFormatCbo 有 Tag=WebP 项（设置默认档此前在下拉里根本不存在）",
+            x.Contains("<ComboBoxItem Tag=\"WebP\">动画 WebP</ComboBoxItem>"));
+        Assert("三个下拉都挂了 SelectionChanged",
+            x.Contains("SelectionChanged=\"OnAnimFormatChanged\"")
+            && x.Contains("SelectionChanged=\"OnRecordFpsChanged\"")
+            && x.Contains("SelectionChanged=\"OnMaxDurationChanged\""));
+        Assert("WebP 项有本地化（SetComboItemText + LocaleManager.AnimWebp）",
+            ml.Contains("SetComboItemText(AnimFormatCbo, \"WebP\", LocaleManager.AnimWebp)")
+            && lm.Contains("AnimWebp"));
+
+        // ── ⑥ FfmpegLocator：解析顺序 + 探测 + 永不抛 ──
+        Assert("FfmpegLocator 有 Resolve/Invalidate 两个出口",
+            f.Contains("public static (string? Path, string Source) Resolve(string configuredPath)")
+            && f.Contains("public static void Invalidate()"));
+        Assert("解析顺序：设置指定 → PATH → 常见位置（文本序锁）",
+            // 先验三段各自存在：IndexOf=-1 会让后面的不等式空洞为真（审查轮 R2-P2-4）
+            f.Contains("return (candidate, \"设置指定\");")
+            && f.Contains("return (candidate, \"PATH\");")
+            && f.Contains("return (candidate, \"常见位置\");")
+            && f.IndexOf("return (candidate, \"设置指定\");", StringComparison.Ordinal)
+                < f.IndexOf("return (candidate, \"PATH\");", StringComparison.Ordinal)
+            && f.IndexOf("return (candidate, \"PATH\");", StringComparison.Ordinal)
+                < f.IndexOf("return (candidate, \"常见位置\");", StringComparison.Ordinal));
+        Assert("探测实跑 -version 且带超时（文件存在不等于能跑）",
+            f.Contains("\"-hide_banner -version\"") && f.Contains("ProbeTimeoutMs"));
+        Assert("探测异常不打断调用方（Resolve 整体 catch 按找不到处理）",
+            Regex.IsMatch(f, @"catch \(Exception ex\)[\s\S]{0,200}探测异常"));
+
+        // ── ⑦ 引擎：假选项锁 + 声明 + 回退 16-bit + 自动收尾 ──
+        Assert("AnimatedAVIF 有显式 avif 分支（不再静默编出 WebP）",
+            a.Contains("AnimationFormat.AnimatedAVIF => (\"avif\", \".avif\")")
+            && a.Contains("\"avif\" =>") && a.Contains("-still-picture 0"));
+        Assert("两处 switch 的 _ => 兜底都是显式抛错（不许枚举值掉进错误分支）",
+            a.Contains("_ => throw new InvalidOperationException($\"未知的动图格式:")
+            && a.Contains("_ => throw new InvalidOperationException($\"未知的动图 ffmpeg 参数分支:"));
+        Assert("旧兜底形态已死（_ => (\"webp\" 不许再出现）",
+            !a.Contains("_ => (\"webp\"") && !a.Contains("_ => $\"-framerate"));
+        Assert("ffmpeg 文件名来自 locator（不再写死 \"ffmpeg\"）",
+            a.Contains("FileName = string.IsNullOrWhiteSpace(_config.FfmpegPath) ? \"ffmpeg\" : _config.FfmpegPath"));
+        Assert("中间帧带 cICP（EncodeFast cicp: 参数真传了）",
+            a.Contains("ManagedPngEncoder.EncodeFast(bakedPixels, w, h, framePath, cicp: cicp)"));
+        Assert("声明通道按格式分派（WebP ICCP / APNG cICP+iCCP / AVIF nclx flags）",
+            a.Contains("AnimatedContainerColor.TryEmbedWebpIcc(path, icc)")
+            && a.Contains("AnimatedContainerColor.TryEmbedPngDeclaration(path, cicp, icc)")
+            && a.Contains("-color_primaries") && a.Contains("-color_trc iec61966-2-1")
+            && a.Contains("GIF 容器无色彩声明通道"));
+        Assert("回退单帧走 16-bit 且带声明（与 PerfWiring A1 的Encode 判据互补）",
+            a.Contains("ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 16,")
+            && a.Contains("iccProfile: icc, cicp: cicp"));
+        Assert("到最大时长自动收尾（break 后无人编码的旧坑）",
+            Regex.IsMatch(a, @"if \(!ct\.IsCancellationRequested\)\s*\n\s*await StopAndEncodeAsync\(\);"));
+        Assert("回退降级要报给 UI（Completed+ErrorMessage 双载荷）",
+            a.Contains("degradation = ffmpegMissing")
+            && Regex.IsMatch(a, @"if \(degradation is not null\)\s+Report\(degradation\);"));
+
+        // ── ⑧ 文档锁：DropOldest 漂移清掉 + FfmpegLocator 入册 ──
+        Assert("architecture-design.md 不再写 DropOldest（代码 P3 起是 Wait+1s 超时丢帧计数）",
+            !archText.Contains("DropOldest"), archText.Contains("DropOldest") ? "仍有 DropOldest 残留" : "");
+        Assert("architecture-design.md 收录 FfmpegLocator", archText.Contains("FfmpegLocator"));
+    }
+
+    /// <summary>
+    /// 动图容器色彩声明手术的真跑判据（2026-11-02 D 流第 8 步配套）。
+    /// <para><see cref="Test_RecordingActivation_Wiring"/> 钉"调没调"，本判据钉"插进去的结构对不对"：
+    /// WebP 必须落成 VP8X(ICC 位 0x20) → ICCP → 图像数据、RIFF 尺寸自洽、奇数长度补位正确；
+    /// PNG 的 cICP/iCCP 必须插在 IHDR 之后（保留区）、重复调用幂等（不重复插、不动文件）。
+    /// 全部手工 fixture / 真编码产物，不依赖 ffmpeg。</para>
+    /// </summary>
+    static void Test_AnimatedContainerColor_Surgery()
+    {
+        var icc = TrueToneCap.Core.Encoding.IccStore.SRGB;
+        if (icc is not { Length: > 128 })
+        {
+            // 前缀判据失败 = 后面全部没意义，直接收（顺便把 icc 收窄成非空，喂手术入口）
+            Assert("IccStore.SRGB 出得来（前缀判据：本判据后面全靠它）", false, icc?.Length.ToString() ?? "null");
+            return;
+        }
+        Assert("IccStore.SRGB 出得来（前缀判据：本判据后面全靠它）", true);
+
+        var tmp = Path.Combine(Path.GetTempPath(), $"ttc_animcolor_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            // ── WebP：手工最小 RIFF（VP8L 5x3 画布 fixture）→ 嵌 ICC → 逐 chunk 验结构 ──
+            string webpPath = Path.Combine(tmp, "fix.webp");
+            File.WriteAllBytes(webpPath, BuildMinimalWebpFixture(5, 3));
+            var (ok, why) = TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedWebpIcc(webpPath, icc);
+            Assert("WebP 手术成功", ok, why);
+
+            var b = File.ReadAllBytes(webpPath);
+            Assert("RIFF 尺寸自洽（= 总长-8）",
+                b.Length >= 12 && BitConverter.ToUInt32(b, 4) == (uint)(b.Length - 8));
+            // RIFF 布局：type 在 chunk 起始处（与 PNG 的 length-first 相反），FourCcAt 直读
+            Assert("VP8X 是第一个 chunk 且置了 ICC 位 0x20",
+                FourCcAt(b, 12) == "VP8X" && (b[20] & 0x20) != 0);
+            Assert("VP8X 载荷 10 字节、画布 5x3（LE24 各减一）",
+                BitConverter.ToInt32(b, 16) == 10
+                && (b[24] | (b[25] << 8) | (b[26] << 16)) == 4
+                && (b[27] | (b[28] << 8) | (b[29] << 16)) == 2);
+            int iccpOff = 12 + 8 + 10;   // VP8X 载荷 10 字节（偶数，无补位）
+            Assert("ICCP 紧跟 VP8X 且载荷等于原 ICC",
+                FourCcAt(b, iccpOff) == "ICCP"
+                && BitConverter.ToInt32(b, iccpOff + 4) == icc.Length
+                && b.AsSpan(iccpOff + 8, icc.Length).SequenceEqual(icc));
+            int vp8lOff = iccpOff + 8 + icc.Length + (icc.Length & 1);
+            var fixture = BuildMinimalWebpFixture(5, 3);
+            Assert("图像数据 chunk（VP8L）还在且载荷未改动",
+                FourCcAt(b, vp8lOff) == "VP8L"
+                && BitConverter.ToInt32(b, vp8lOff + 4) == fixture.Length - 20
+                && b.AsSpan(vp8lOff + 8, fixture.Length - 20).SequenceEqual(fixture.AsSpan(20)));
+
+            // 奇数长度 ICC：补位后 RIFF 尺寸必须仍自洽（pad 位不算进 chunk 长度）
+            string webpOdd = Path.Combine(tmp, "odd.webp");
+            File.WriteAllBytes(webpOdd, BuildMinimalWebpFixture(5, 3));
+            var oddIcc = icc.Take(701).ToArray();   // 奇数
+            var (okOdd, whyOdd) = TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedWebpIcc(webpOdd, oddIcc);
+            var bo = File.ReadAllBytes(webpOdd);
+            Assert("奇数长度 ICC 嵌入成功且 RIFF 尺寸仍自洽（pad 不计入 chunk 长度）",
+                okOdd && bo.Length >= 12 && BitConverter.ToUInt32(bo, 4) == (uint)(bo.Length - 8), whyOdd);
+
+            // VP8L 兜底路径的高位精度：无 VP8X 时画布从 VP8L 解析 —— 8K 高度（>4096）不许截断
+            //（审查轮 R2-P1-1：解析端掩码 0x03 会把 4320 读成 224，fixture 同坑时这条恒绿是假绿）
+            string webp8k = Path.Combine(tmp, "tall.webp");
+            File.WriteAllBytes(webp8k, BuildMinimalWebpFixture(3840, 4320));
+            var (okTall, whyTall) = TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedWebpIcc(webp8k, icc);
+            Assert("VP8L 兜底解析高 >4096 的画布不截断（3840x4320）",
+                okTall && whyTall.Contains("3840x4320"), whyTall);
+
+            // 负路：非 RIFF 文件必须失败，不许异常外泄
+            string junk = Path.Combine(tmp, "junk.webp");
+            File.WriteAllBytes(junk, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+            var (okJunk, _) = TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedWebpIcc(junk, icc);
+            Assert("非 WebP 输入返回失败而不是抛异常", !okJunk);
+
+            // ── PNG：真编码产物（裸的，不带 cICP）→ 手术插 cICP+iCCP → 位置/幂等 ──
+            string pngPath = Path.Combine(tmp, "real.png");
+            TrueToneCap.Core.Encoding.ManagedPngEncoder.EncodeFast(
+                new byte[8 * 8 * 4], 8, 8, pngPath);
+            long before = new FileInfo(pngPath).Length;
+            var (okPng, whyPng) = TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedPngDeclaration(
+                pngPath, [9, 16, 0, 1], icc);
+            Assert("PNG 手术成功（cICP+iCCP 插到 IHDR 之后）", okPng, whyPng);
+            var pb = File.ReadAllBytes(pngPath);
+            Assert("cICP 就在 IHDR 之后且内容正确（9/16/0/1）",
+                ChunkTypeAt(pb, 8 + 12 + 13) == "cICP"
+                && pb.AsSpan(8 + 12 + 13 + 8, 4).SequenceEqual(new byte[] { 9, 16, 0, 1 }));
+            Assert("iCCP 紧随其后（与 Encode 的 cICP→iCCP 顺序一致）",
+                ChunkTypeAt(pb, 8 + 12 + 13 + 12 + 4) == "iCCP");
+            int iccpChunk = 8 + 12 + 13 + 12 + 4;   // iCCP chunk 起始（length 字段处）
+            // PNG 长度域是大端 —— 小端读的低字节符号会随机红/空（审查轮 R2-P2-3）
+            int iccpLen = (pb[iccpChunk] << 24) | (pb[iccpChunk + 1] << 16) | (pb[iccpChunk + 2] << 8) | pb[iccpChunk + 3];
+            Assert("iCCP 载荷带压缩方法字节 0（漏了 ffmpeg 判 invalid compression，2026-11-03 实机抓过）",
+                iccpLen > 13 && pb[iccpChunk + 8 + 12] == 0x00);
+            Assert("全文件 chunk 链可走到 IEND（PNG 无奇长补位——写成 RIFF 约定会整链错位，实机抓过）",
+                WalksToIend(pb));
+            var (okAgain, whyAgain) = TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedPngDeclaration(
+                pngPath, [9, 16, 0, 1], icc);
+            Assert("重复调用幂等（跳过且不再写盘）",
+                okAgain && whyAgain.Contains("已存在") && new FileInfo(pngPath).Length == pb.Length);
+            _ = before;   // before 只用来证第一次手术确实改了文件（上方 okPng 已覆盖），这里显式消费防未用告警
+
+            // EncodeFast 本身带 cICP 的产物链路（中间帧声明通道）
+            string fastPath = Path.Combine(tmp, "fast.png");
+            TrueToneCap.Core.Encoding.ManagedPngEncoder.EncodeFast(
+                new byte[8 * 8 * 4], 8, 8, fastPath, cicp: [1, 13, 0, 1]);
+            var fb = File.ReadAllBytes(fastPath);
+            Assert("EncodeFast(cicp:) 产物里 cICP 就位（动图中间帧不再裸奔）",
+                ChunkTypeAt(fb, 8 + 12 + 13) == "cICP");
+        }
+        finally
+        {
+            try { Directory.Delete(tmp, true); } catch { }
+        }
+    }
+
+    /// <summary>最小 WebP fixture：RIFF + WEBP + VP8L(签名 0x2F + 14bit 宽-1 + 14bit 高-1，LSB 在前)。</summary>
+    static byte[] BuildMinimalWebpFixture(int w, int h)
+    {
+        int wm1 = w - 1, hm1 = h - 1;
+        byte[] vp8l =
+        [
+            0x2F,
+            (byte)(wm1 & 0xFF),
+            (byte)(((wm1 >> 8) & 0x3F) | ((hm1 & 0x3F) << 6)),
+            (byte)((hm1 >> 2) & 0xFF),
+            (byte)((hm1 >> 10) & 0x0F),   // bit12-13 在这里 —— 掩码 0x03 会把高 >4096 的画布截断（与解析端同一坑）
+            0x00, 0x10, 0x00, 0x00, 0x00,   // 随手凑足载荷，手术只认头部
+        ];
+        using var ms = new MemoryStream();
+        ms.Write("RIFF"u8);
+        ms.Write([0, 0, 0, 0]);
+        ms.Write("WEBP"u8);
+        ms.Write(System.Text.Encoding.ASCII.GetBytes("VP8L"));
+        ms.Write(BitConverter.GetBytes(vp8l.Length));       // RIFF chunk 尺寸 = LE32
+        ms.Write(vp8l);
+        if ((vp8l.Length & 1) != 0) ms.Write([0]);
+        var bytes = ms.ToArray();
+        BitConverter.GetBytes((uint)(bytes.Length - 8)).CopyTo(bytes, 4);
+        return bytes;
+    }
+
+    /// <summary>PNG chunk 类型（length-first：type 在 chunk 起始 +4 处）。</summary>
+    static string ChunkTypeAt(byte[] b, int off) =>
+        System.Text.Encoding.ASCII.GetString(b, off + 4, 4);
+
+    /// <summary>RIFF chunk 类型（type-first：type 就在 chunk 起始处）。</summary>
+    static string FourCcAt(byte[] b, int off) =>
+        System.Text.Encoding.ASCII.GetString(b, off, 4);
+
+    /// <summary>按 PNG 布局（length+type+data+crc，无补位）走到 IEND 或文件尾。</summary>
+    static bool WalksToIend(byte[] b)
+    {
+        int i = 8;
+        while (i + 8 <= b.Length)
+        {
+            int len = (b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3];
+            if (len < 0 || i + 12 + (long)len > b.Length) return false;
+            if (System.Text.Encoding.ASCII.GetString(b, i + 4, 4) == "IEND") return true;
+            i += 12 + len;
+        }
+        return false;
     }
 
     /// <summary>
@@ -9922,7 +10240,9 @@ public static class CorePipelineTests
         // ① 调用方不得再用输出意图去决定源精度
         Assert("捕获分派不再用 `PreferHdr = hdrOutput || …`（输出意图≠源精度）",
             !mw.Contains("PreferHdr = hdrOutput"), "应恒请求高精度，由服务侧按能力降级");
-        Assert("三条捕获路径都显式 PreferHdr = true", CountOf(mw, "PreferHdr = true") >= 3,
+        // ═══ 2026-11-02：OnCaptureNow（死处理器，零调用者）已删除 ⇒ 活入口剩两处
+        //（无感截图 + 选区拼接）。历史计数 3 是含死入口的读数，删除行为留在 diff 里。
+        Assert("全部活捕获入口都显式 PreferHdr = true", CountOf(mw, "PreferHdr = true") >= 2,
             $"实际 {CountOf(mw, "PreferHdr = true")} 处");
 
         // ② 能力判定存在，且能力负缓存只由它写入（瞬时启动失败不得污染 —— 2026-09-15 的坑）
@@ -10110,6 +10430,99 @@ public static class CorePipelineTests
                 && st.Contains("CapturePipelineService.PreparePixelsWithIcc")
                 && st.Contains("ReadPngColorChunks(path)"));
         }
+
+        // ═══ 2026-11-02（多屏同源 P0-5）：跨屏选区的色彩决定真值表 ═══
+        // 实机复现（双屏 HDR 主屏 + SDR 副屏）：选区在副屏、光标在主屏时，
+        // 旧链按光标屏建决定 ⇒ 副屏 SDR 内容被声明成 Rec.2020+PQ（产物 cICP 9/16/0 假 HDR）。
+        // BuildForRegion = 按选区∩屏幕矩形的覆盖屏算决定；真值表直接调 Core 纯函数。
+        // 屏位置要能被选区命中 ⇒ Disp 需要坐标参数，这里就地构造一个带坐标的工厂。
+        static TrueToneCap.Core.Capture.DisplayInfo Pos(
+                int x, int w, bool isHdr = false, bool edidKnown = false, bool edidWide = false,
+                bool acAnswered = false, int acMode = ModeUnknown, bool primary = false)
+            => new TrueToneCap.Core.Capture.DisplayInfo
+            {
+                X = x, Y = 0, Width = w, Height = 1000, IsPrimary = primary,
+                IsHdr = isHdr,
+                AdvancedColorInfoAvailable = acAnswered, AdvancedColorActiveMode = acMode,
+                BitsPerColor = isHdr ? 10 : 8,
+                NativeGamutKnown = edidKnown, NativeGamutWide = edidWide,
+            };
+        var hdrMain = Pos(0, 3840, isHdr: true, primary: true);                    // HDR 主屏 @(0,0)
+        var sdrSide = Pos(3840, 2560, acAnswered: true, acMode: 0,
+                          edidKnown: true, edidWide: false);                       // 确证窄色域副屏 @(3840,0)
+        var wideSide = Pos(3840, 2560, acAnswered: true, acMode: 1,
+                           edidKnown: true, edidWide: true);                       // 确证广色域 SDR 副屏
+
+        // 单屏覆盖 ⇒ 与单屏 Build 完全同一形状
+        var dSide = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, sdrSide }, 4000, 100, 500, 500, "System", true, true, OutputFormat.PNG);
+        Assert("★ 选区只在窄色域副屏 ⇒ 目标收口 sRGB + HDR 压掉（光标在哪都一样）",
+            dSide.ScreenClass == DEnum.DisplayColorClass.NarrowSdr
+            && dSide.TargetTag == "sRGB" && !dSide.HdrOutput && dSide.HdrClamped,
+            $"实得 {dSide.Describe()}");
+        var dMain = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, sdrSide }, 100, 100, 500, 500, "System", true, true, OutputFormat.PNG);
+        Assert("选区只在 HDR 主屏 ⇒ Hdr 档放行（行为与单屏 Build 逐位相同）",
+            dMain.ScreenClass == DEnum.DisplayColorClass.Hdr && dMain.TargetTag == "BT2020" && dMain.HdrOutput);
+
+        // 跨屏覆盖 ⇒ 最弱屏钳制
+        var dCross = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, sdrSide }, 3000, 100, 2000, 500, "System", true, true, OutputFormat.PNG);
+        Assert("★ 跨屏选区（HDR 主 + 确证窄副）⇒ 声明收口 sRGB + SDR（假 HDR 是今天实锤过的产物）",
+            dCross.TargetTag == "sRGB" && !dCross.HdrOutput
+            && dCross.Source!.MonitorHandle == hdrMain.MonitorHandle,
+            $"实得 {dCross.Describe()}");
+        var dCrossWide = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, wideSide }, 3000, 100, 2000, 500, "System", true, true, OutputFormat.PNG);
+        // ⚠ 主源屏=交集面积最大的那块（wideSide 1160px 宽 > hdrMain 840px）⇒ 分类跟主源屏走。
+        //   跨屏的关键语义在声明侧：非全 Hdr ⇒ PQ 压掉；确证宽的副屏 ⇒ 目标不收口（没有窄屏）。
+        Assert("跨屏选区（HDR 主 + 确证广色域 SDR 副）⇒ HDR 压掉（非全 Hdr 档不放 PQ），目标不收口",
+            !dCrossWide.HdrOutput && dCrossWide.TargetTag == "sRGB" && !dCrossWide.GamutClamped,
+            $"实得 {dCrossWide.Describe()}");
+        var dCrossExplicit = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, sdrSide }, 3000, 100, 2000, 500, "BT2020", true, true, OutputFormat.PNG);
+        Assert("跨屏选区 + 用户显式要 Rec.2020 + 含窄屏 ⇒ 显式目标也被收口并亮 GamutClamped（窄屏内容装不进 2020 声明）",
+            dCrossExplicit.TargetTag == "sRGB" && dCrossExplicit.GamutClamped
+            && dCrossExplicit.Evidence.Contains("跨屏选区覆盖"),
+            $"实得 {dCrossExplicit.Describe()} 证据={dCrossExplicit.Evidence}");
+
+        // ★ 跨屏压 HDR 的标记（2026-11-02 审查轮补的半句）：primary 恰好是 Hdr 档时，
+        //   Build 不知道"是另一块窄屏把 PQ 拖垮的" ⇒ HdrClamped 必须由 BuildForRegion 自己亮。
+        var dCrossHdr = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, sdrSide }, 3000, 100, 1500, 500, "System", true, true, OutputFormat.PNG);
+        Assert("跨屏选区（primary=HDR 档 + 窄副屏）⇒ HDR 压掉必须亮 HdrClamped（Build 只看主源屏，看不见另一半）",
+            !dCrossHdr.HdrOutput && dCrossHdr.HdrClamped
+            && dCrossHdr.Evidence.Contains("覆盖屏未全部处于 HDR 档"),
+            $"实得 {dCrossHdr.Describe()} 证据={dCrossHdr.Evidence}");
+
+        // 悬空选区 ⇒ Unknown 语义（不猜光标屏）
+        var dVoid = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, sdrSide }, 99999, 99999, 10, 10, "System", true, true, OutputFormat.PNG);
+        Assert("选区不与任何屏相交 ⇒ Unknown（放行源精度、不授权声明、不编造屏）",
+            dVoid.ScreenClass == DEnum.DisplayColorClass.Unknown && !dVoid.HdrOutput);
+        var dEmpty = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            Array.Empty<TrueToneCap.Core.Capture.DisplayInfo>(), 0, 0, 100, 100, "System", true, true, OutputFormat.PNG);
+        Assert("空显示器列表 ⇒ 同样 Unknown（不是 NarrowSdr 也不是崩）",
+            dEmpty.ScreenClass == DEnum.DisplayColorClass.Unknown);
+
+        // 交集为 1 像素也算覆盖（边缘窄屏内容足以让声明失实）
+        var dEdge = TrueToneCap.Core.Capture.ColorDecision.BuildForRegion(
+            new[] { hdrMain, sdrSide }, 3839, 100, 2, 500, "System", true, true, OutputFormat.PNG);
+        Assert("跨屏边界 1 像素重叠 ⇒ 仍按跨屏最弱屏钳制（不是按面积大的一侧放过）",
+            dEdge.TargetTag == "sRGB" && !dEdge.HdrOutput);
+
+        // ═══ 多屏拼接结果必须带元数据（结构锁，防回归成"只填像素"）═══
+        var wgcAll = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"))!);
+        var mwMulti = CodeOnly(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"))!);
+        Assert("拼接返回的 CaptureResult 必须填 SourceDisplay（下游决定不再退光标屏猜）",
+            wgcAll.Contains("SourceDisplay = basisDisplay"));
+        Assert("拼接返回的 CaptureResult 必须填 IccProfile（与单屏路径同形状）",
+            wgcAll.Contains("IccProfile = basisIcc"));
+        Assert("选区动作用 BuildForRegion 按覆盖屏算决定（EncodeAndSaveHdrAsync 的光标屏兜底只留给无源入口）",
+            mwMulti.Contains("ColorDecision.BuildForRegion(\n                        displays")
+            && mwMulti.Contains("regionDecision ?? ColorDecision.Build("));
+        Assert("EncodeAndSaveHdrAsync 签名带 regionDecision（选区入口必传，null 才落光标屏）",
+            mwMulti.Contains("byte[]? iccProfile = null, ColorDecision? regionDecision = null"));
     }
 
     /// <summary>
@@ -10856,10 +11269,10 @@ public static class CorePipelineTests
         Assert("shader 画文字背景（CPU 合成画了，预览不画就是两幅图）",
             hlsl.Contains("float4 bg = AnnoLayers[i * 16 + 4];"));
 
-        Assert("主工具条有「贴图」动作，且贴图走同一份合成像素 + 强制格式的另存",
+        Assert("主工具条有「贴图」动作，且贴图走同一份合成像素 + 强制格式的另存（2026-11-02 起带选区决定）",
             mw.Contains("case MainToolbarAction.Pin:") && mw.Contains("Services.PinWindow.Show(")
-            && mw.Contains("EncodeAndSaveAsync(px, pw, ph, OutputFormat.PNG)")
-            && mw.Contains("EncodeAndSaveAsync(px, pw, ph, OutputFormat.AVIF)"));
+            && mw.Contains("EncodeAndSaveAsync(px, pw, ph, OutputFormat.PNG, regionDecision)")
+            && mw.Contains("EncodeAndSaveAsync(px, pw, ph, OutputFormat.AVIF, regionDecision)"));
         Assert("贴图窗：置顶 + 滚轮 1.2 倍步进 + 右键菜单 + 可隐藏工具栏",
             pin.Contains("WS_EX_TOPMOST") && pin.Contains("Math.Pow(1.2, delta / 120.0)")
             && pin.Contains("TrackPopupMenuEx") && pin.Contains("_barVisible"));
@@ -11998,8 +12411,10 @@ public static class CorePipelineTests
         Assert("没有把 actualHdr 当编码场景传进 BuildEncodingSettings",
             !code.Contains("BuildEncodingSettings(format, actualHdr"));
         int sceneCalls = CountOfStatic(code, "BuildEncodingSettings(format, hdrScenario");
-        Assert($"Float16 三处入口都改传 hdrScenario（实得 {sceneCalls}）", sceneCalls >= 3,
-            "无感截图 / 选区 HDR / OnCaptureNow 各一处，少一处就是漏改");
+        // ═══ 2026-11-02：OnCaptureNow（死处理器，零调用者）已删除 ⇒ 活入口剩两处
+        //（无感截图 + 选区 HDR）。历史读数 3 含死入口，删除行为留在 diff 里。
+        Assert($"Float16 活入口都改传 hdrScenario（实得 {sceneCalls}）", sceneCalls >= 2,
+            "无感截图 / 选区 HDR 各一处，少一处就是漏改");
         Assert("hdrScenario 仍保留 GainMap 例外（增益图要有原始 HDR 帧）",
             code.Contains("hdrOutput || format == OutputFormat.JPEG_GAINMAP"));
         Assert("S11 位深策略未回退成补偿式写法（不再手动置 HdrOutput=false）",

@@ -522,11 +522,13 @@ scRGB float[] → LinearToPQ (ST.2084) → ushort[] PQ16 → RGBA16→BGRA16 →
 | 组件 | 机制 |
 |------|------|
 | 共享 WgcCaptureService | 不创建独立 D3D11 设备 |
-| 有界 Channel | 30 帧上限, DropOldest 防 OOM |
+| 有界 Channel | 30 帧上限，FullMode.Wait 背压 + 1s 写超时丢帧计数（2026-10 P3 改造；静默丢旧帧会让时间戳不连续，故不再使用丢弃式缓冲，历史表述以代码为准） |
 | PeriodicTimer | 精确帧定时，替代 Thread.Sleep |
 | 帧差异检测 | 5000 点采样，阈值过滤静态帧 |
 | ICC 色彩管理 | 每帧写入前经 CapturePipelineService.PreparePixelsWithIcc |
-| ffmpeg 进程 | 编码 Animated WebP / APNG / AVIF / GIF |
+| ffmpeg 进程 | 编码 Animated WebP / APNG / AVIF / GIF；可执行文件由 FfmpegLocator 解析（设置指定 → PATH → 常见位置，探测缓存、永不抛异常） |
+| 最大时长 | RecordLoop 到点自动调 StopAndEncodeAsync（2026-11-02 激活时补上；旧代码 break 后无人编码） |
+| 热键/入口 | MainWindow.ToggleRecording（RegisterNamed "record"，Ctrl+Shift+G 默认 + fallback）；开始前 CaptureMonitorAsync 预建 SDR 会话（TryGetLatestFrame 对空池恒 null） |
 
 ### 8.2 数据流
 
@@ -775,12 +777,29 @@ ACM（Auto Color Management）启用时，系统已接管显示器色彩管理�
 
 ## 7. 动图录制
 
-`AnimationRecorder`：
+`AnimationRecorder`（2026-11-02 激活：热键 Ctrl+Shift+G → MainWindow.ToggleRecording → 引擎）：
 - 共享 `WgcCaptureService`（不创建独立设备）
-- 有界 `Channel`（≤30 帧，DropOldest）防 OOM
+- 有界 `Channel`（≤30 帧，FullMode.Wait 背压 + 1s 写超时丢帧计数）防 OOM
 - `PeriodicTimer` 精确帧定时
 - 帧差异检测（采样 5000 点，阈值过滤）
-- 输出：Animated WebP / APNG / AVIF / GIF（Magick.NET）
+- 输出：Animated WebP / APNG / AVIF / GIF（ffmpeg 子进程；可执行文件由 `FfmpegLocator` 解析：
+  设置指定 → PATH → 常见位置，实跑 `-version` 探测并缓存；缺席时录制入口直接拒绝并给出可执行指引）
+- ffmpeg 缺席/失败回退：首帧单张 PNG（16-bit 容器 + sBIT=8 照实声明实际精度 + cICP/iCCP），
+  Toast 明说降级（2026-11-02 用户拍板）
+
+**动图色彩声明矩阵**（2026-11-03 本机 ffmpeg git-2026-10-27 实测，见台账 §11）：
+
+| 容器 | 声明通道 | 实现位置 |
+|------|---------|---------|
+| AVIF | colr(nclx)：ffmpeg `-color_primaries/-color_trc iec61966-2-1/-colorspace rgb/-color_range pc`（muxer 会持久化；实测不写 prof(ICC) box、不搬 PNG iCCP） | AnimationRecorder colorFlags |
+| WebP | ICCP chunk：ffmpeg muxer 不搬 ICC（实测）⇒ 编码后 RIFF 手术插入 VP8X(ICC 位 0x20)+ICCP | `AnimatedContainerColor.TryEmbedWebpIcc` |
+| APNG | cICP + iCCP chunk：ffmpeg apng muxer 零声明 ⇒ 编码后 PNG 手术插入 IHDR 之后 | `AnimatedContainerColor.TryEmbedPngDeclaration` |
+| GIF | 无通道（格式限制），日志声明"像素已烘焙到目标色域" | AnimationRecorder |
+| 中间 PNG 帧 | cICP（`EncodeFast(cicp:)`），喂 ffmpeg 的中转不再裸奔 | `ManagedPngEncoder.EncodeFast` |
+
+码点与 ICC 一律从本次录制的 `ColorDecision.TargetTag` 导出（`FormatHelper.BuildSdrCicp` +
+`IccStore` 标准 profile）——声明与像素同源；AdobeRGB 无 H.273 primaries 码点 ⇒ nclx/cICP
+不下发、不冒充（与单帧 AVIF 同口径），ICC 通道照常。
 
 ---
 

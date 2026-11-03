@@ -446,6 +446,99 @@ public static partial class DisplayEnumerator
         catch { return 0; }
     }
 
+    // ═════════════════════════════════════════════════════════════════════════════
+    //  逐屏 SDR 白点（2026-11-02，多屏同源 P2-9）
+    // ═════════════════════════════════════════════════════════════════════════════
+    // Windows 允许逐屏设置 SDR 内容亮度，而 GetSdrWhiteLevel() 是"第一条成功路径即返回"
+    // 的系统级单值 ⇒ 多屏拼接把同一系数乘给所有非 HDR 源屏，白点不同的第二块屏会
+    // 系统性偏亮/偏暗。白点查询本来就是按 target LUID/id 发的，缺的只是"把目标路径
+    // 对到具体某块屏"的那半步 —— 与 QueryAdvancedColorByDeviceName 同一落屏机制。
+    // ⚠ 源侧 GDI 设备名走 QuerySourceGdiDeviceName（裸偏移，与既有活代码同一套）；
+    //   不为这条新路径另造结构体 marshaling —— 刚在 P4-11 删掉的就是那种与裸偏移
+    //   矛盾的第二份布局真相。
+
+    /// <summary>
+    /// 查【指定这块屏】的 SDR 白点亮度 (nits)。失败返回 0（调用方回退系统级单值或默认值）。
+    /// <para>落屏机制与 <see cref="QueryAdvancedColorByDeviceName"/> 相同：按活跃路径取
+    /// 源侧 GDI 设备名，与调用方给的 <paramref name="gdiDeviceName"/>（即 DisplayInfo.Name）
+    /// 匹配后对目标查 DISPLAYCONFIG_SDR_WHITE_LEVEL。</para>
+    /// </summary>
+    public static int GetSdrWhiteLevelForMonitor(string gdiDeviceName)
+    {
+        if (string.IsNullOrWhiteSpace(gdiDeviceName)) return 0;
+        try
+        {
+            uint nPaths = 0, nModes = 0;
+            if (GetDisplayConfigBufferSizes(QDC_DATABASE_CURRENT, out nPaths, out nModes) != 0 || nPaths == 0)
+                return 0;
+
+            int modesCount = nModes == 0 ? 1 : (int)nModes;
+            var paths = Marshal.AllocHGlobal((int)(nPaths * DC_PATH_INFO_SIZE));
+            var modes = Marshal.AllocHGlobal(modesCount * DC_MODE_INFO_SIZE);
+            try
+            {
+                uint actualPaths = nPaths, actualModes = nModes;
+                if (QueryDisplayConfig(QDC_DATABASE_CURRENT, ref actualPaths, paths,
+                        ref actualModes, modes, out _) != 0)
+                    return 0;
+
+                for (uint i = 0; i < actualPaths; i++)
+                {
+                    var p = paths + (int)(i * DC_PATH_INFO_SIZE);
+                    uint srcStatus = (uint)Marshal.ReadInt32(p, DC_SRC_STATUS);
+                    uint tgtStatus = (uint)Marshal.ReadInt32(p, DC_TGT_STATUS);
+                    int targetAvailable = Marshal.ReadInt32(p, DC_TGT_AVAILABLE);
+                    if ((srcStatus & DISPLAYCONFIG_SOURCE_IN_USE) == 0 ||
+                        (tgtStatus & DISPLAYCONFIG_TARGET_IN_USE) == 0 ||
+                        targetAvailable == 0)
+                        continue;
+
+                    var srcAdapter = ReadLuid(p, 0);
+                    uint srcId = (uint)Marshal.ReadInt32(p, DC_SRC_ID);
+                    string gdi = QuerySourceGdiDeviceName(srcAdapter, srcId);
+                    if (!string.Equals(gdi, gdiDeviceName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var tgtAdapter = ReadLuid(p, DC_TGT_ADAPTER);
+                    uint tgtId = (uint)Marshal.ReadInt32(p, DC_TGT_ID);
+                    return QuerySdrWhiteLevelForTarget(tgtAdapter, tgtId);
+                }
+                return 0;
+            }
+            finally { Marshal.FreeHGlobal(paths); Marshal.FreeHGlobal(modes); }
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>对指定 target 查 SDR 白点（裸偏移填 header，同 GetSdrWhiteLevel 的换算）。</summary>
+    private static int QuerySdrWhiteLevelForTarget(LUID tgtAdapter, uint tgtId)
+    {
+        var whiteLevel = new DISPLAYCONFIG_SDR_WHITE_LEVEL
+        {
+            header = new DISPLAYCONFIG_DEVICE_INFO_HEADER
+            {
+                Type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+                Size = (uint)Marshal.SizeOf<DISPLAYCONFIG_SDR_WHITE_LEVEL>(),
+                AdapterId = tgtAdapter,
+                Id = tgtId
+            }
+        };
+        IntPtr req = Marshal.AllocHGlobal(Marshal.SizeOf<DISPLAYCONFIG_SDR_WHITE_LEVEL>());
+        try
+        {
+            Marshal.StructureToPtr(whiteLevel, req, false);
+            if (DisplayConfigGetDeviceInfo(req) == 0)
+            {
+                var result = Marshal.PtrToStructure<DISPLAYCONFIG_SDR_WHITE_LEVEL>(req);
+                int nits = (int)Math.Round(result.SDRWhiteLevel / 1000.0 * 80.0);
+                return nits > 0 ? nits : 0;
+            }
+            return 0;
+        }
+        catch { return 0; }
+        finally { Marshal.FreeHGlobal(req); }
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     //  逐显示器"高级颜色"能力 (2026-09-19)
     //  DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO[_2] + QueryDisplayConfig
@@ -785,7 +878,15 @@ public static partial class DisplayEnumerator
         finally { Marshal.FreeHGlobal(packet); }
     }
 
-    // ── DISPLAYCONFIG 结构 (参考 wingdi.h 精确定义, 使用固定 Size 强制布局) ──
+    // ── DISPLAYCONFIG 结构 ──
+    // ═══ 2026-11-02（P4-11）：删除死结构体 DISPLAYCONFIG_VIDEO_SIGNAL_INFO /
+    // DISPLAYCONFIG_PATH_TARGET_INFO(Size=76) / DISPLAYCONFIG_PATH_SOURCE_INFO(Size=20) /
+    // DISPLAYCONFIG_PATH_INFO(Size=100) / DISPLAYCONFIG_MODE_INFO ═══
+    // 五个结构体全仓零 P/Invoke 使用（QueryDisplayConfig 走 IntPtr + 裸偏移，见
+    // DC_PATH_INFO_SIZE=72 那一套），且它们的字段序/大小（76/100）与活代码的裸偏移
+    // 常量（72 步长、target@20/id@28/available@60/status@64）**互相矛盾**——
+    // 谁哪天把它们改成结构体 marshaling 就会全错。删掉，给活代码那套裸偏移让路；
+    // 真要回到结构体 marshaling，按 wingdi.h 重写并同步改 DC_* 常量，两处必须一致。
     [StructLayout(LayoutKind.Sequential)]
     private struct DISPLAYCONFIG_RATIONAL
     {
@@ -798,83 +899,6 @@ public static partial class DisplayEnumerator
     {
         public uint cx;
         public uint cy;
-    }
-
-    // DISPLAYCONFIG_VIDEO_SIGNAL_INFO = 32 字节
-    [StructLayout(LayoutKind.Sequential)]
-    private struct DISPLAYCONFIG_VIDEO_SIGNAL_INFO
-    {
-        public ulong pixelRate;
-        public DISPLAYCONFIG_RATIONAL hSyncFreq;
-        public DISPLAYCONFIG_RATIONAL vSyncFreq;
-        public DISPLAYCONFIG_2DREGION activeSize;
-        public DISPLAYCONFIG_2DREGION totalSize;
-        public uint videoStandard;
-        public uint scanLineOrdering;
-    }
-
-    // DISPLAYCONFIG_PATH_TARGET_INFO 实际布局 (76 字节):
-    // adapterId(8) + id(4) + modeInfoIdx(4) + statusFlags(4) + targetSize(8)
-    // + refreshRate(8) + scanLineOrdering(8) + outputTechnology(4) + rotation(4)
-    // + scaling(4) + targetAdapterId(8) + targetId(4) + sourceInfo(4) + flags(4)
-    [StructLayout(LayoutKind.Sequential, Size = 76)]
-    private struct DISPLAYCONFIG_PATH_TARGET_INFO
-    {
-        public LUID adapterId;
-        public uint id;
-        public uint modeInfoIdx;
-        public uint statusFlags;
-        public DISPLAYCONFIG_2DREGION targetSize;
-        public DISPLAYCONFIG_RATIONAL refreshRate;
-        public DISPLAYCONFIG_RATIONAL scanLineOrdering;
-        public uint outputTechnology;
-        public uint rotation;
-        public uint scaling;
-        public LUID targetAdapterId;
-        public uint targetId;
-        public uint sourceInfo;
-        public uint flags;
-    }
-
-    // DISPLAYCONFIG_PATH_SOURCE_INFO = 20 字节
-    [StructLayout(LayoutKind.Sequential, Size = 20)]
-    private struct DISPLAYCONFIG_PATH_SOURCE_INFO
-    {
-        public LUID adapterId;
-        public uint id;
-        public uint modeInfoIdx;
-        public uint statusFlags;
-    }
-
-    // DISPLAYCONFIG_PATH_INFO = 20 + 76 + 4 = 100
-    [StructLayout(LayoutKind.Sequential, Size = 100)]
-    private struct DISPLAYCONFIG_PATH_INFO
-    {
-        public DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo;
-        public DISPLAYCONFIG_PATH_TARGET_INFO targetInfo;
-        public uint flags;
-    }
-
-    // DISPLAYCONFIG_MODE_INFO = 64 字节: infoType(4) + id(4) + adapterId(8) + union(48)
-// 注意: 不能用 byte[] 字段 (会变成引用), 用固定连续字段
-    [StructLayout(LayoutKind.Sequential, Size = 64)]
-    private struct DISPLAYCONFIG_MODE_INFO
-    {
-        public uint infoType;
-        public uint id;
-        public LUID adapterId;
-        public uint _union0;
-        public uint _union1;
-        public uint _union2;
-        public uint _union3;
-        public uint _union4;
-        public uint _union5;
-        public uint _union6;
-        public uint _union7;
-        public uint _union8;
-        public uint _union9;
-        public uint _union10;
-        public uint _union11;
     }
 
     private static bool IsMonitorPrimary(nint hMonitor)
@@ -1110,6 +1134,124 @@ public sealed class ColorDecision
         // 两种"目标被收成 sRGB"必须能分开读：上面那句是"屏幕证据不给"，
         // 这句是"这个格式的默认档就是 Rec.709"（屏可能完全授权，是格式口径收的，见 Rec709Defaulted）。
         (Rec709Defaulted ? " [格式默认档收为Rec.709]" : "");
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    //  跨屏选区的色彩决定（2026-11-02，多屏同源 P0-2）
+    // ═════════════════════════════════════════════════════════════════════════════
+    // 实机复现（双屏：HDR 主屏 + SDR 副屏）：选区拉在副屏、保存时光标已回主屏 ⇒
+    // EncodeAndSaveHdrAsync 按【光标屏】建决定 ⇒ 副屏的 SDR 桌面内容被声明成
+    // Rec.2020+PQ（产物 cICP 9/16/0 + 16-bit 容器）—— 像素与声明分属两屏。
+    //
+    // 修法不是"把光标屏换成另一块屏"，而是让决定跟随【选区实际覆盖的屏】：
+    //   · 选区只落在一块屏 ⇒ 该屏就是源屏，走既有 Build（单屏语义原样）；
+    //   · 选区跨多块屏 ⇒ 一张图只能有一个声明，取【最弱屏】钳制：
+    //     覆盖屏里任一确证窄色域 ⇒ 声明收口 sRGB+SDR（像素照常拼接输出）；
+    //     HDR 只有覆盖屏【全部】处于 Hdr 档才放行。
+    //     理由：拼接画布里非 HDR 源屏的区域是 SDR×白点上转换，声明 PQ 就是假 HDR
+    //     （与"半张 HDR 比全 SDR 更糟"是同一条产品判断，见 WgcCaptureService 拼接完整性闸）。
+
+    /// <summary>选区矩形与显示器矩形的交集面积（虚拟桌面坐标；不相交为 0，负坐标天然正确）。</summary>
+    private static long IntersectionArea(DisplayInfo d, int x, int y, int w, int h)
+    {
+        long ix = Math.Min(d.X + d.Width, x + (long)w) - Math.Max(d.X, x);
+        long iy = Math.Min(d.Y + d.Height, y + (long)h) - Math.Max(d.Y, y);
+        return (ix > 0 && iy > 0) ? ix * iy : 0;
+    }
+
+    /// <summary>
+    /// 按选区实际覆盖的屏构造色彩决定。像素在哪几块屏上，声明就按哪几块屏算 —— 不再猜光标。
+    /// <para><b>用法纪律</b>：<paramref name="selX"/>… 是【虚拟桌面坐标】（选区上报的原样矩形，
+    /// 不是拼接画布内偏移）。调用方手里没有选区矩形时不要硬造 —— 用 <see cref="Build"/> 按
+    /// captureResult.SourceDisplay 走，那是单屏语义。</para>
+    /// <para>覆盖判定按【交集面积最大】的屏定"主源屏"（决定.Source / Evidence 用它）；
+    /// 钳制按【全部覆盖屏】里最弱的一档（含交集为 1 像素也算覆盖 —— 边缘上 1 像素的
+    /// 窄色域内容也足以让整张图的声明失实）。全交集为 0（选区悬空/坐标异常）⇒ 退回
+    /// Unknown 语义：Build(null,…) 放行源精度、不授权声明，与"无从得知"同一取向。</para>
+    /// </summary>
+    public static ColorDecision BuildForRegion(
+        IReadOnlyList<DisplayInfo> displays, int selX, int selY, int selW, int selH,
+        string? requestedTag, bool hdrOutput, bool systemAcm, OutputFormat? format = null)
+    {
+        // 求覆盖屏：交集 > 0 的都算覆盖（面积最大的做主源屏）。
+        DisplayInfo? primary = null;
+        long bestArea = 0;
+        var covered = new List<DisplayInfo>();
+        foreach (var d in displays)
+        {
+            long area = IntersectionArea(d, selX, selY, selW, selH);
+            if (area <= 0) continue;
+            covered.Add(d);
+            if (area > bestArea) { bestArea = area; primary = d; }
+        }
+
+        // 没有覆盖屏 ⇒ 不能编造一块屏。退回"证据缺失"（Unknown），不猜光标屏。
+        if (covered.Count == 0 || primary is null)
+            return Build(null, requestedTag, hdrOutput, systemAcm, format);
+
+        // 单屏覆盖 ⇒ 与单屏路径完全同一形状（Build 里既有钳制/格式口径/源色域逻辑全复用）。
+        if (covered.Count == 1)
+            return Build(primary, requestedTag, hdrOutput, systemAcm, format);
+
+        // 跨屏覆盖 ⇒ 最弱屏钳制。逐屏分类一次（SelectHdrSourceDisplay 同款输入）。
+        var classes = new List<DisplayEnumerator.DisplayColorClass>(covered.Count);
+        foreach (var d in covered)
+            classes.Add(DisplayEnumerator.ClassifyDisplayColor(d, systemAcm));
+
+        bool anyNarrow = classes.Contains(DisplayEnumerator.DisplayColorClass.NarrowSdr);
+        bool allHdr = classes.All(c => c == DisplayEnumerator.DisplayColorClass.Hdr);
+
+        // ① HDR 声称：覆盖屏没有全部处于 Hdr 档 ⇒ 压掉（与 Build 的 CanClaimHdr 同语义，
+        //    但跨屏的"证据"是全部覆盖屏，不是主源屏一块）。
+        //    ⚠ 压掉动作由这里做（hdr=false 传给 Build）⇒ Build 的 HdrClamped 不会亮
+        //    （它只在"开关开着 && primary 屏不授权"那格置位，而 primary 可能恰好是 Hdr 档）。
+        //    跨屏压 HDR 的标记由本函数自己补（见返回处），与跨屏收口同一手法。
+        bool hdr = hdrOutput && allHdr;
+        bool crossHdrClamped = hdrOutput && !allHdr;
+
+        // ② 广色域声明：任一覆盖屏确证窄色域 ⇒ 目标收口 sRGB（在 Build 之前把下拉目标改写）。
+        //    ⚠ 这里不能像单屏那样指望 Build 的屏幕钳制格替我们置 GamutClamped：
+        //    Build 只看主源屏一块的分类，而跨屏的"窄屏"可能在另一块上（主源屏按面积选，
+        //    完全可能是宽的那块）。改写成 sRGB 后 Build 看到的是"用户要 sRGB"，钳制格不会命中
+        //    ⇒ 标记/文案必须由本函数自己补：返回前把 GamutClamped 置位并附上覆盖屏证据，
+        //    UI 文案"屏幕证据不给"的语义恰好吻合（跨屏钳制正是屏幕证据不给）。
+        //    没有窄屏时维持用户下拉原样交给 Build。
+        string? effectiveTag = requestedTag;
+        bool crossClamped = false;
+        if (anyNarrow && !string.IsNullOrWhiteSpace(requestedTag) && requestedTag != "System")
+        {
+            effectiveTag = "sRGB";
+            crossClamped = true;
+        }
+
+        var decision = Build(primary, effectiveTag, hdr, systemAcm, format);
+        if (!crossClamped && !crossHdrClamped) return decision;
+
+        // 用"覆盖屏全名单"重写证据行：Build 附带的 Evidence 只描述主源屏一块，
+        // 读日志的人需要看到"钳制是因为覆盖屏里还有谁"。
+        var coveredNames = string.Join(" + ", covered.Select(c => c.Name));
+        // 两条跨屏收口各写一句：GamutClamped/HdrClamped 是两件独立的事
+        //（覆盖屏含窄屏 / 覆盖屏未全 Hdr），共用一条会让"为什么"少一半。
+        var crossEvidence = $"跨屏选区覆盖 [{coveredNames}] ⇒ "
+            + (crossClamped ? "最弱屏钳制目标色域；" : "")
+            + (crossHdrClamped ? "覆盖屏未全部处于 HDR 档 ⇒ 不写 PQ；" : "");
+        return new ColorDecision
+        {
+            Source = decision.Source,
+            SystemAcm = decision.SystemAcm,
+            ScreenClass = decision.ScreenClass,
+            SourceTag = decision.SourceTag,
+            TargetTag = decision.TargetTag,
+            HdrOutput = decision.HdrOutput,
+            GamutClamped = crossClamped,             // ★ 跨屏收口的标记（Build 不知道的半句）
+            Rec709Defaulted = decision.Rec709Defaulted,
+            // ★ 跨屏压 HDR 的标记：Build 只看主源屏一块的分类，primary 恰好是 Hdr 档时
+            //   它不知道"其实是另一块窄屏把 PQ 拖垮的"——这一半也由本函数补。
+            HdrClamped = decision.HdrClamped || crossHdrClamped,
+            RequestedTag = decision.RequestedTag,
+            ExplicitWideTarget = decision.ExplicitWideTarget && !anyNarrow,
+            Evidence = crossEvidence + decision.Evidence,
+        };
+    }
 }
 
 

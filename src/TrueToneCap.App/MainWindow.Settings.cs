@@ -171,6 +171,12 @@ public sealed partial class MainWindow : Window
         //   （有损 WebP 恒 4:2:0 是格式定义、无损为 RGB，编码器也没有色度形参，
         //    回显一个不可能生效的值等于继续撒谎）。详见 AppSettingsData 同日期注释。
         RecordQualitySld.Value = _settings.RecordQuality;
+        // 动图录制三件套回显（2026-11-02 D 流第 4 步）。Tag 契约见 AppSettingsData.AnimFormat 注释；
+        // SetComboByTag 大小写不敏感、未命中补项 —— Normalize 已把 AnimFormat 收口成 Tag 拼法，
+        // 正常路径到不了补项分支（补项 = 白名单与 XAML 漂移的可见警报，Warn 会说）。
+        if (AnimFormatCbo is not null) SetComboByTag(AnimFormatCbo, _settings.AnimFormat);
+        if (RecordFpsCbo is not null) SetComboByTag(RecordFpsCbo, _settings.RecordFps.ToString());
+        if (MaxDurationCbo is not null) SetComboByTag(MaxDurationCbo, _settings.MaxDurationSeconds.ToString());
         if (ArchiveChk is not null) ArchiveChk.IsChecked = _settings.ArchiveEnabled;
         if (ArchiveModeCbo is not null) { SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode); ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed; }
         long m2 = swApply.ElapsedMilliseconds;   // ↑ 编码选项：AVIF 编码器/位深/色度/归档
@@ -380,6 +386,13 @@ public sealed partial class MainWindow : Window
             //   留着等于在设置模型里维持一份与真实码流无关的假配置。理由见 AppSettingsData。
             //   （ChromaGainMap 当天曾一并删除，随后用户定为"默认 420、可手动 444"⇒ 已恢复为真设置。）
             _settings.RecordQuality = RecordQualitySld.Value;
+            // 动图录制三件套（2026-11-02 D 流第 4 步）：从控件 Tag 落回设置，形状照 BitDepth 系
+            // 的 int.TryParse 模板。兜底值必须与 AppSettingsData 默认一致（下拉未回填那一瞬保存的就是它）。
+            _settings.AnimFormat = (AnimFormatCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "WebP";
+            _settings.RecordFps = int.TryParse((RecordFpsCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var recordFps) ? recordFps : 15;
+            _settings.MaxDurationSeconds = int.TryParse((MaxDurationCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var maxDuration) ? maxDuration : 30;
+            // FfmpegPath 无界面（本台账拍板：手动路径走 settings.json 编辑，见 D 流第 4 步），
+            // 这里刻意不写 —— 写兜底会把用户手改的路径抹掉。
             // （原 AnimAvifBackendIndex 硬编码赋值已删除：该字段于 2026-09-15 清理，
             //   它无 UI、无消费方，写 0 只是制造"录制 AVIF 后端可配置"的假象）
             _settings.ArchiveEnabled = ArchiveChk?.IsChecked == true;

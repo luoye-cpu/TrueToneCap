@@ -168,8 +168,11 @@ public static class ToastService
     /// 统一通知入口：按用户设置的"通知位置"决定走应用内浮层还是 Windows 系统通知。
     /// </summary>
     /// <param name="tone">语义（决定图标与配色；Warning 用于降级，不是绿色对勾）。</param>
+    /// <param name="captureScreenWorkArea">通知应落在的屏的工作区（虚拟桌面物理坐标，可 null）。
+    /// 2026-11-02（多屏跟随 P1-6）：截图链路传截图屏 ⇒ 气泡跟着截图走；
+    /// null = 非截图上下文（OCR/翻译/录制等），维持默认落位屏的旧行为。</param>
     public static void ShowToast(string title, string body, ToastTone tone = ToastTone.Success,
-        ToastChannel channel = ToastChannel.Overlay)
+        ToastChannel channel = ToastChannel.Overlay, (int Left, int Top, int Right, int Bottom)? captureScreenWorkArea = null)
     {
         string position = "BottomRight";
         try { position = PositionProvider?.Invoke() ?? "BottomRight"; } catch { }
@@ -204,7 +207,11 @@ public static class ToastService
             {
                 try
                 {
-                    var toast = new SilentCaptureToast(position);
+                    // 2026-11-02（多屏跟随 P1-6）：有截图屏上下文 ⇒ 气泡按它定位
+                    SilentCaptureToast.RECT? twa = captureScreenWorkArea is { } wa
+                        ? new SilentCaptureToast.RECT { Left = wa.Left, Top = wa.Top, Right = wa.Right, Bottom = wa.Bottom }
+                        : null;
+                    var toast = new SilentCaptureToast(position, twa);
                     toast.SetContent(title, body, tone);
                     toast.Activate();
                 }

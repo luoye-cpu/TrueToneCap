@@ -274,6 +274,22 @@ public sealed class AppSettingsData
     //   应连同 UI 与消费方一起实现，而不是留一个没人读的字段。
     public double RecordQuality { get; set; } = 80;
 
+    // ═══ 2026-11-02（录制激活）：动图录制卡片的三个"曾经纯摆设"控件落盘 ═══
+    // （原状见台账 §54.4：三控件连设置字段都没有，只被 Localization 改显示文字。）
+    // Tag 值即持久化契约：GIF / APNG / AVIF / WebP —— 与 UI ComboBoxItem 的 Tag 逐字一致，
+    // 老文件缺键时反序列化落到默认 "WebP"。
+    public string AnimFormat { get; set; } = "WebP";
+    public int RecordFps { get; set; } = 15;
+    public int MaxDurationSeconds { get; set; } = 30;
+
+    /// <summary>ffmpeg 可执行文件的【手动指定路径】（录制动图用）。
+    /// <para>空/空白 = 自动解析（依次：本机设置过的缓存 → PATH → 常见安装位置）；
+    /// 非空 = 优先用它，指向的文件不存在或跑不起来时回退自动解析并在日志里说明。</para>
+    /// <para>为什么要有这一格：录制走外部 ffmpeg 进程，它是全应用唯一的 PATH 强依赖 ——
+    /// 便携版用户、Scoop/自定义安装者、多版本共存者的 PATH 未必有它；给一个显式入口
+    /// 比让用户改系统 PATH 温和得多。解析与缓存机制见 <c>FfmpegLocator</c>。</para></summary>
+    public string FfmpegPath { get; set; } = "";
+
     // ── 归档 ──
     public bool ArchiveEnabled { get; set; }
     public string ArchiveMode { get; set; } = "Month";

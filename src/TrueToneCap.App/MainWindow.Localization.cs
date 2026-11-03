@@ -151,6 +151,7 @@ public sealed partial class MainWindow : Window
         SetComboItemText(AnimFormatCbo, "GIF", LocaleManager.AnimGif);
         SetComboItemText(AnimFormatCbo, "APNG", LocaleManager.AnimApng);
         SetComboItemText(AnimFormatCbo, "AVIF", LocaleManager.AnimAvif);
+        SetComboItemText(AnimFormatCbo, "WebP", LocaleManager.AnimWebp);   // 2026-11-02：录制激活补上默认档（此前 Tag 表没有 WebP）
 
         SetComboItemText(RecordFpsCbo, "10", "10 fps");    // FPS values are universal
         SetComboItemText(RecordFpsCbo, "15", "15 fps");

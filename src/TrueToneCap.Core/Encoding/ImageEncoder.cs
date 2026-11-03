@@ -128,6 +128,15 @@ public sealed class HdrFrameData
     public float[] Pixels { get; init; } = [];
     public int Width { get; init; }
     public int Height { get; init; }
+    /// <summary>
+    /// ⚠ 死通道（2026-11-02 核实）：Core 编码器【零读取】此字段 —— HDR 直通时
+    /// ICC 由 <c>CapturePipelineService.EncodeHdrFrameAsync</c> 在 <c>settings.IccProfile</c> 上
+    /// 统一裁定（TIFF=目标标准 ICC，其余=目标代码点声明，见 :781-791），SDR 分派走
+    /// <c>FormatEncoders.PrepareSdrLinearFloat</c> 的标准 ICC 兜底。捕获侧的"显示器 ICC"
+    /// 从来没有真正抵达过 HDR 产物。保留属性只为不破坏既有构造点（三条入口都在赋 null 或
+    /// captureResult.IccProfile），别再往这里寄托"把源屏 ICC 嵌进 HDR 产物"的期望 ——
+    /// 那条路要么在管线层接，要么删掉这个属性。
+    /// </summary>
     public byte[]? IccProfile { get; init; }
     public ImageMetadata? Metadata { get; init; }
 

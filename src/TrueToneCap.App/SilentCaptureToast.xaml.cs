@@ -43,6 +43,15 @@ public sealed partial class SilentCaptureToast : Window
     private Microsoft.UI.WindowId _windowId;
     private string _position = "BottomRight";
 
+    // ═══ 2026-11-02（多屏跟随 P1-6）：通知落在截图发生的那块屏 ═══
+    // 原先窗口停在 WinUI 默认落位屏（多屏下≈主屏），PlaceAt 再按"它自己所在的屏"排位 ⇒
+    // 光标在副屏截图时气泡出现在主屏。改为构造时传入截图屏的工作区（虚拟桌面物理坐标），
+    // PlaceAt 优先用它；null = 调用方没给（老调用点），维持旧行为不回归。
+    private RECT? _targetWorkArea;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
+
     private const int GWL_EXSTYLE = -20;
     private const int GWL_STYLE = -16;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -71,7 +80,10 @@ public sealed partial class SilentCaptureToast : Window
 
     /// <summary>创建 Toast 通知窗口。</summary>
     /// <param name="position">通知位置: BottomRight / TopRight / TopLeft / BottomLeft / WindowsNotify</param>
-    public SilentCaptureToast(string position = "BottomRight")
+    /// <param name="targetWorkArea">通知应落在的屏的工作区（虚拟桌面物理坐标）。
+    /// 传 null = 调用方没有屏幕上下文（维持默认落位的旧行为）。
+    /// 2026-11-02（多屏跟随 P1-6）：截图链路全部传截图屏，气泡跟着截图走。</param>
+    public SilentCaptureToast(string position = "BottomRight", RECT? targetWorkArea = null)
     {
         InitializeComponent();
         MainWindow.HookLocaleSweep(this.Content as Microsoft.UI.Xaml.FrameworkElement);
@@ -123,6 +135,7 @@ public sealed partial class SilentCaptureToast : Window
         _appWindow = appWindow;
         _windowId = windowId;
         _position = position;
+        _targetWorkArea = targetWorkArea;
 
         // 入列并定位（槽位 = 当前在列表中的序号）
         lock (s_active)
@@ -230,21 +243,35 @@ public sealed partial class SilentCaptureToast : Window
         try
         {
             if (_appWindow is null) return;
-            var da = DisplayArea.GetFromWindowId(_windowId, DisplayAreaFallback.Primary);
-            if (da is null) return;
-            var wa = da.WorkArea;
+            // ═══ 2026-11-02（多屏跟随 P1-6）═══
+            // 有截图屏上下文 ⇒ 直接按它定位（不再问"窗口自己在哪块屏"——
+            // 那个答案在窗口还没 Move 过时就是默认落位屏，多屏下≈主屏）。
+            // 没有上下文（老调用点）⇒ 维持旧行为：按窗口当前 DisplayArea 排位。
+            int waX, waY, waW, waH;
+            if (_targetWorkArea is { } twa)
+            {
+                waX = twa.Left; waY = twa.Top;
+                waW = twa.Right - twa.Left; waH = twa.Bottom - twa.Top;
+            }
+            else
+            {
+                var da = DisplayArea.GetFromWindowId(_windowId, DisplayAreaFallback.Primary);
+                if (da is null) return;
+                var wa = da.WorkArea;
+                waX = wa.X; waY = wa.Y; waW = wa.Width; waH = wa.Height;
+            }
 
             int offset = slot * (ToastH + Gap);
             int x = _position switch
             {
-                "TopLeft" => wa.X + Margin,
-                "BottomLeft" => wa.X + Margin,
-                _ => wa.X + wa.Width - ToastW - Margin,          // BottomRight / TopRight / WindowsNotify
+                "TopLeft" => waX + Margin,
+                "BottomLeft" => waX + Margin,
+                _ => waX + waW - ToastW - Margin,          // BottomRight / TopRight / WindowsNotify
             };
             int y = _position switch
             {
-                "TopRight" or "TopLeft" => wa.Y + Margin + offset,             // 自上而下排
-                _ => wa.Y + wa.Height - ToastH - Margin - offset,              // 自下而上排
+                "TopRight" or "TopLeft" => waY + Margin + offset,             // 自上而下排
+                _ => waY + waH - ToastH - Margin - offset,                    // 自下而上排
             };
             _appWindow.Move(new PointInt32(x, y));
         }

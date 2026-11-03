@@ -38,6 +38,9 @@ public sealed partial class MainWindow : Window
     // （详见交接 §54.1：7 个可见项里 5 个"点谁都不是谁"）。
     private readonly List<OutputFormat> _formats;
     private volatile int _isCapturing; // 0=idle, 1=busy (防重入, 仅保护捕获阶段)
+    // ═══ 2026-11-02（D 流第 6 步）动图录制 ═══
+    private volatile int _recordingBusy;      // 0=空闲 1=切换中（热键防重入；与 _isCapturing 分开 —— 录制读 SDR 池不排 s_captureLock，与截图并发安全）
+    private AnimationRecorder? _recorder;     // 当前录制会话：toggle 之间持有，完成/失败/新开时 Dispose
     /// <summary>
     /// 当前这一拍截图的日志关联 ID（2026-09-21 接 OpId 时加）。
     /// <para>存成字段而不是只靠 <c>AsyncLocal</c>：热键按下 → 选区 → 用户点保存/OCR/翻译，
@@ -377,6 +380,12 @@ public sealed partial class MainWindow : Window
         HotkeyManager.RegisterNamed(this, "silent", _settings.SilentHotkey,
             () => DispatcherQueue.TryEnqueue(() => SilentCapture()),
             ["Ctrl+Alt+Q", "Alt+Shift+Q"]);
+
+        // 注册录制动图热键（2026-11-02 D 流第 6 步：录制激活）。照 silent 的形状：
+        // 回调必须 TryEnqueue（WM_HOTKEY 在窗口过程线程触发）；fallback 挡默认键被占的场面。
+        HotkeyManager.RegisterNamed(this, "record", _settings.RecordHotkey,
+            () => DispatcherQueue.TryEnqueue(() => ToggleRecording()),
+            ["Ctrl+Alt+G", "Alt+Shift+G"]);
 
         // ── 子类化窗口过程以处理托盘消息 ──
         SubclassWindowForTray(hwnd);
@@ -1206,6 +1215,29 @@ public sealed partial class MainWindow : Window
         ScheduleSettingsSave();
     }
 
+    // ── 动图录制三件套（2026-11-02 D 流第 4 步）：读 Tag 不读显示文字 ——
+    //    Localization.SetComboItemText 只改 Content，Tag 才是持久化契约。──
+    private void OnAnimFormatChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.AnimFormat = (AnimFormatCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "WebP";
+        AppServices.Settings.SaveQuiet();
+    }
+
+    private void OnRecordFpsChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.RecordFps = int.TryParse((RecordFpsCbo.SelectedItem as ComboBoxItem)?.Tag as string, out var fps) ? fps : 15;
+        AppServices.Settings.SaveQuiet();
+    }
+
+    private void OnMaxDurationChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.MaxDurationSeconds = int.TryParse((MaxDurationCbo.SelectedItem as ComboBoxItem)?.Tag as string, out var sec) ? sec : 30;
+        AppServices.Settings.SaveQuiet();
+    }
+
     private void OnTargetLangChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_uiReady) return;
@@ -1476,10 +1508,10 @@ public sealed partial class MainWindow : Window
     // ── 编码辅助（仅在最终保存/复制时触发）──
 
     private Task EncodeAndSaveAsync(byte[] bgra, int w, int h) => EncodeAndSaveAsync(bgra, w, h, null);
-
     /// <param name="forceFormat">非 null = 不看当前格式下拉框，按指定格式落盘（贴图窗的「保存为 PNG / AVIF」走这条）。
     /// 其余设置（质量/色域/HDR）仍取 UI 快照 —— 贴图只是"另存一份"，不该悄悄换掉用户的编码参数。</param>
-    private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h, OutputFormat? forceFormat)
+    private async Task EncodeAndSaveAsync(byte[] bgra, int w, int h, OutputFormat? forceFormat,
+        ColorDecision? regionDecision = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -1500,7 +1532,7 @@ public sealed partial class MainWindow : Window
         LogService.Info("MainWindow", $"开始截图流程: {w}x{h} 格式={ui.Format}"
             + (_settings.GainMapEnabled ? "（JPEG + 增益图）" : ""));
         // 记录本次编码任务供后续等待 (自包含, 不引用外层闭包并发的字段)
-        var task = ExecuteEncodeSaveAsync(bgra, w, h, sw, ct, ui);
+        var task = ExecuteEncodeSaveAsync(bgra, w, h, sw, ct, ui, regionDecision);
         _captureTask = task;
 
         // ═══ 2026-08-25 P1 优化: 慢编码进度提示 ═══
@@ -1528,7 +1560,8 @@ public sealed partial class MainWindow : Window
 
     /// <summary>实际编码执行体 (P2-6 拆分, 便于 _captureTask 跟踪)。</summary>
     private async Task ExecuteEncodeSaveAsync(byte[] bgra, int w, int h,
-        System.Diagnostics.Stopwatch sw, CancellationToken ct, EncodingUiState ui)
+        System.Diagnostics.Stopwatch sw, CancellationToken ct, EncodingUiState ui,
+        ColorDecision? regionDecision = null)
     {
         try
         {
@@ -1548,8 +1581,10 @@ public sealed partial class MainWindow : Window
             // EncodeAndSaveAsync 恒走 SDR 路径并把容器位深钳到 8（CPS:429/442）。原先把 UI 的 hdrOutput
             // 当编码场景传进去，于是 AVIF 白跑一遍 HDR 协商（位深被钉 10、QSV 被改写 avifenc 并弹
             // "硬件不支持 HDR"提示），随后又被钳回 8 —— 提示与日志都在描述一次并未发生的 HDR 编码。
-            // 本入口的像素没有"来自哪块屏"的信息（粘贴/预览/区域合成）⇒ 按光标屏决定，全窗口只此一处。
-            var decision = DecisionForCursorScreen(ui, hdrOutput: false);
+            // ═══ 2026-11-02（多屏同源 P0-3）：选区保存/贴图由调用方按【选区覆盖的屏】给决定 ═══
+            // 本入口像素没有来源信息的场景只剩粘贴/剪贴板另存 —— 那时才退回光标屏。
+            // （注释原句"全窗口只此一处"由此才真正成立。）
+            var decision = regionDecision ?? DecisionForCursorScreen(ui, hdrOutput: false);
             var settings = BuildEncodingSettings(format, hdrOutput: false, null, ui, decision);
 
             // 委托给 CapturePipelineService 执行色域映射 + 编码
@@ -1563,7 +1598,8 @@ public sealed partial class MainWindow : Window
             DispatcherQueue.TryEnqueue(async () =>
             {
                 await CopyFileToClipboardAsync(path);
-                ShowSaveToast(path, sw.ElapsedMilliseconds);
+                // 2026-11-02（多屏跟随 P1-6）：气泡落在决定屏（选区覆盖主屏/粘贴=光标屏）
+                ShowSaveToast(path, sw.ElapsedMilliseconds, "capture", decision.Source);
             });
         }
         catch (OperationCanceledException)
@@ -1763,7 +1799,8 @@ public sealed partial class MainWindow : Window
             LogService.Info("SilentCapture", $"无感截图完成: {Path.GetFileName(path)} ({sw.ElapsedMilliseconds}ms)");
             await CopyFileToClipboardAsync(path);
             // 后台编码完成后仍需回到 UI 线程显示 Toast
-            DispatcherQueue.TryEnqueue(() => ShowSaveToast(path, sw.ElapsedMilliseconds, "silent"));
+            // 2026-11-02（多屏跟随 P1-6）：气泡落在被截那块屏
+            DispatcherQueue.TryEnqueue(() => ShowSaveToast(path, sw.ElapsedMilliseconds, "silent", captureResult.SourceDisplay));
         }
         catch (OperationCanceledException)
         {
@@ -1784,12 +1821,199 @@ public sealed partial class MainWindow : Window
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  动图录制（2026-11-02 D 流第 6/7 步：热键启停 + 会话预建）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>录制热键入口：按一下开始，再按一下停止并编码。
+    /// <para>防重入照 <c>_isCapturing</c> 的 Interlocked 纪律，但用独立的
+    /// <c>_recordingBusy</c>，不与截图互斥 —— 录制走 TryGetLatestFrame（不排
+    /// s_captureLock），与并发截图本来就是安全的；把两把闸合一反而会让截图被录制卡住。</para></summary>
+    private void ToggleRecording()
+    {
+        if (Interlocked.CompareExchange(ref _recordingBusy, 1, 0) != 0)
+        {
+            LogService.Warn("Record", "上一条录制指令还在处理，忽略本次触发");
+            return;
+        }
+        _ = ToggleRecordingCoreAsync();
+    }
+
+    private async Task ToggleRecordingCoreAsync()
+    {
+        try
+        {
+            var rec = _recorder;
+            if (rec is { State: RecordingState.Recording })
+            {
+                SetStatus("⏹ 正在停止录制并编码…");
+                // 刻意【不 await】（审查轮 R1-P2-1）：AVIF 4K 的编码预算可达分钟级，
+                // 把它关进 _recordingBusy = 编码期间热键死键。引擎的 StopAndEncodeAsync
+                // 同步把状态翻成 Encoding 后才 Task.Run，这里放手后下一按能走到 Encoding 提示。
+                _ = StopRecordingAsync(rec);
+                return;
+            }
+            if (rec is { State: RecordingState.Encoding })
+            {
+                ToastService.ShowToast("⏳ 正在编码", "上一次录制还在编码，请稍候", ToastTone.Info);
+                return;
+            }
+            // Idle / Completed / Cancelled / Error / null ⇒ 开一场新录制（旧的就地清理）
+            if (rec is not null) CleanupRecorder(rec);
+            await StartRecordingAsync();
+        }
+        catch (Exception ex)
+        {
+            // 审查轮 R1-P1-3：没有这条 catch，StartRecordingAsync 的异常（用户填的非法
+            // 输出目录、WGC COMException…）逃成未观察任务异常 —— 热键按下毫无反应。
+            LogService.Error("Record", $"录制切换失败: {ex.Message}", ex);
+            ToastService.ShowCaptureFailed($"录制切换失败: {ex.Message}");
+        }
+        finally { Interlocked.Exchange(ref _recordingBusy, 0); }
+    }
+
+    /// <summary>停止并等待编码收尾（编码结果经 OnRecorderProgress 回 UI）。异常在此落地，不外逃。</summary>
+    private async Task StopRecordingAsync(AnimationRecorder rec)
+    {
+        try
+        {
+            await rec.StopAndEncodeAsync();
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("Record", $"停止编码失败: {ex.Message}", ex);
+            ToastService.ShowCaptureFailed($"停止编码失败: {ex.Message}");
+            CleanupRecorder(rec);
+        }
+    }
+
+    private async Task StartRecordingAsync()
+    {
+        if (_wgcService is null)
+        {
+            ToastService.ShowCaptureFailed("捕获服务不可用，无法录制");
+            return;
+        }
+
+        // ① 先解析 ffmpeg：缺席就别录 —— 帧录出来也编不成动图，还给用户一个假期待。
+        //    探测是同步子进程等待（最坏 3s/候选），放后台跑，别冻住 UI（审查轮 R1-P1-1）。
+        var (ffmpeg, source) = await Task.Run(() => FfmpegLocator.Resolve(_settings.FfmpegPath));
+        if (ffmpeg is null)
+        {
+            LogService.Warn("Record", $"ffmpeg 解析失败: {source}");
+            ToastService.ShowToast("❌ 未找到 ffmpeg",
+                "请在设置里指定路径，或把 ffmpeg 加入 PATH —— 录制功能不可用",
+                ToastTone.Error, ToastChannel.System);
+            return;
+        }
+
+        // ② 目标屏：跟随光标 —— 与引擎 RecordLoop 的选屏同一把尺（GetMonitorUnderCursor）。
+        //    设置 UI 未暴露 DisplayIndex（恒 0 = 光标屏），不需要别的源。
+        var hmon = DisplayEnumerator.GetMonitorUnderCursor();
+
+        // ③ 会话预建（D 流第 7 步）：TryGetLatestFrame 对空池返回 null ⇒ 开始前必须先把
+        //    (hmonitor, SDR) 会话建起来并让它出首帧，否则前若干 tick 全空、_framesCaptured 恒 0。
+        //    忙时 CaptureMonitorAsync 直接抛（不排队）⇒ 明确告知，不静默。
+        try
+        {
+            using var warmup = await _wgcService.CaptureMonitorAsync(
+                new WgcCaptureConfig { TargetMonitor = hmon, PreferHdr = false });
+        }
+        catch (InvalidOperationException)
+        {
+            ToastService.ShowToast("⏳ 捕获通道忙", "有截图正在进行，录制未开始，请稍后再试", ToastTone.Info);
+            return;
+        }
+
+        // ④ 组配置：全部读设置字段（不读控件 —— 回显/保存链路负责控件↔设置的同源），
+        //    输出目录/前缀与截图同一份；扩展名由引擎按格式补。
+        var dir = string.IsNullOrWhiteSpace(_settings.OutputPath)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "TrueToneCap")
+            : _settings.OutputPath;
+        Directory.CreateDirectory(dir);
+        var fmt = _settings.AnimFormat switch
+        {
+            "GIF" => AnimationFormat.GIF,
+            "APNG" => AnimationFormat.AnimatedPNG,
+            "AVIF" => AnimationFormat.AnimatedAVIF,
+            _ => AnimationFormat.AnimatedWebP,   // Normalize 收口后到不了默认臂；兜 WebP = 设置默认档
+        };
+        var config = new RecordingConfig
+        {
+            FrameRate = _settings.RecordFps,
+            MaxDurationSeconds = _settings.MaxDurationSeconds,
+            OutputFormat = fmt,
+            Quality = (int)Math.Round(_settings.RecordQuality),
+            // 时间戳带毫秒（审查轮 R1-P2-10）：错误秒回后立即重录会同秒同路径，ffmpeg -y 静默覆盖。
+            OutputPath = Path.Combine(dir, $"{_settings.FileNamePrefix}rec_{DateTime.Now:yyyyMMdd_HHmmssfff}"),
+            FfmpegPath = ffmpeg,
+            TargetMonitor = hmon,   // 与预建会话同一块屏（审查轮 R1-P2-4）
+            // ColorSpaceTag 恒默认 "System"（= 跟随显示器）是有意决定：录制跟屏幕走，
+            // 不接截图那个"目标色域"下拉 —— 语义差异写在这里，省得下一个人当漏接（审查轮 R1-P2-3）。
+        };
+        var recorder = new AnimationRecorder(config, _wgcService);
+        recorder.ProgressChanged += OnRecorderProgress;
+        _recorder = recorder;
+        recorder.StartRecording();
+        SetStatus($"🔴 录制中 {_settings.RecordFps}fps · {_settings.AnimFormat} · 再按 {_settings.RecordHotkey} 停止");
+        ToastService.ShowToast("🔴 录制开始",
+            $"再按 {_settings.RecordHotkey} 停止（最长 {_settings.MaxDurationSeconds} 秒）",
+            ToastTone.Info);
+    }
+
+    /// <summary>录制事件收尾。事件从引擎的后台线程来，一律 TryEnqueue 回 UI 线程。
+    /// 清理只认「事件源 == 当前 _recorder」—— 引擎 finally 里那次同状态补报因此天然幂等；
+    /// 新录制开起来之后迟到的旧事件也不会误伤新会话。</summary>
+    private void OnRecorderProgress(object? sender, RecordingProgressEventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (sender is not AnimationRecorder rec || !ReferenceEquals(rec, _recorder)) return;
+            switch (e.State)
+            {
+                case RecordingState.Completed:
+                    if (e.OutputFile is not null)
+                    {
+                        if (e.ErrorMessage is not null)
+                            ToastService.ShowCaptureDegraded(e.ErrorMessage);
+                        ShowSaveToast(e.OutputFile, (long)(e.ElapsedSeconds * 1000), "recording");
+                        SetStatus("✅ 录制完成");
+                    }
+                    else
+                    {
+                        ToastService.ShowCaptureFailed("录制完成但未产出文件");
+                        SetStatus("❌ 录制失败");
+                    }
+                    CleanupRecorder(rec);
+                    break;
+                case RecordingState.Error:
+                    ToastService.ShowCaptureFailed($"录制失败: {e.ErrorMessage ?? "未知错误"}");
+                    SetStatus("❌ 录制失败");
+                    CleanupRecorder(rec);
+                    break;
+                case RecordingState.Cancelled:
+                    CleanupRecorder(rec);
+                    break;
+            }
+        });
+    }
+
+    private void CleanupRecorder(AnimationRecorder rec)
+    {
+        rec.ProgressChanged -= OnRecorderProgress;
+        rec.Dispose();
+        if (ReferenceEquals(rec, _recorder)) _recorder = null;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  统一保存提示（右下角 Toast）
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>显示保存成功提示（截图/录制/无感截图统一使用）。</summary>
     /// <param name="mode">capture=截图, silent=无感截图, recording=动图录制</param>
-    private void ShowSaveToast(string filePath, long elapsedMs, string mode = "capture")
+    /// <param name="captureMonitor">截图发生的那块屏（2026-11-02 多屏跟随 P1-6）。
+    /// 非空 ⇒ 浮层落在那块屏；null = 调用点没有屏幕上下文，维持默认落位。</param>
+    private void ShowSaveToast(string filePath, long elapsedMs, string mode = "capture",
+        DisplayInfo? captureMonitor = null)
     {
         // 根据模式检查是否启用提示
         bool enabled = mode switch
@@ -1802,6 +2026,17 @@ public sealed partial class MainWindow : Window
 
         var position = _settings.ToastPosition;
 
+        // 录制产物不是截图、也没进剪贴板（审查轮 R1-P1-4）：下面三条走系统通知的路径
+        // 原样调 ShowCaptureSuccess 会对录制弹"✅ 截图已保存…已复制到剪贴板"的双重谎言。
+        void ShowHonestSuccess(string fp, long ms)
+        {
+            if (mode == "recording")
+                ToastService.ShowToast("🎬 录制已保存",
+                    $"{Path.GetFileName(fp)}\n时长 {ms}ms", ToastTone.Success, ToastChannel.System);
+            else
+                ToastService.ShowCaptureSuccess(fp, ms);
+        }
+
         // 「截图后右下角缩略图预览」这个开关过去【没有任何消费者】：取消勾选之后，
         // 右下角那块带「打开文件夹」按钮的自定义浮层照样弹 —— 界面写着它管这件事，实际没人读它。
         // 它管的就是下面这段自定义浮层，所以关掉时退回 Windows 自带通知：
@@ -1809,22 +2044,28 @@ public sealed partial class MainWindow : Window
         // ToastOnCapture 的语义一起吃掉，那是另一个开关。）
         if (!_settings.ShowPreview && position != "WindowsNotify")
         {
-            ToastService.ShowCaptureSuccess(filePath, elapsedMs);
+            ShowHonestSuccess(filePath, elapsedMs);
             return;
         }
 
         // Windows 自带通知：不创建自定义窗口，直接走 Windows 通知
         if (position == "WindowsNotify")
         {
-            ToastService.ShowCaptureSuccess(filePath, elapsedMs);
+            ShowHonestSuccess(filePath, elapsedMs);
             return;
         }
 
         try
         {
-            var toast = new SilentCaptureToast(position);
+            // ═══ 2026-11-02（多屏跟随 P1-6）：气泡落在截图屏的工作区 ═══
+            // 工作区用 Win32 取（GetMonitorInfo 的 RcWork），与 WinUI 的逻辑坐标在同一口径
+            // （进程 PerMonitorV2，AppWindow.Move 吃物理像素）。取不到 ⇒ 传 null 走旧行为。
+            SilentCaptureToast.RECT? twa = GetMonitorWorkArea(captureMonitor);
+            var toast = new SilentCaptureToast(position, twa);
             // 传入 filePath：浮层会显示"打开文件夹"（在资源管理器中选中该文件）
-            toast.SetContent("✅ 已保存并复制到剪贴板",
+            // 2026-11-02（D 流第 6 步）：录制产物只是落盘，没进剪贴板 —— 标题按模式说真话，
+            // 否则动图完成浮层会撒谎。这处也是 "recording" 分支从不可达变可达的一部分。
+            toast.SetContent(mode == "recording" ? "🎬 录制已保存" : "✅ 已保存并复制到剪贴板",
                 $"{Path.GetFileName(filePath)}  ({elapsedMs}ms)",
                 ToastTone.Success, filePath);
             toast.Activate();
@@ -1836,8 +2077,46 @@ public sealed partial class MainWindow : Window
         }
 
         // 自定义 toast 创建失败 → 回退系统通知 (备用)
-        ToastService.ShowCaptureSuccess(filePath, elapsedMs);
+        ShowHonestSuccess(filePath, elapsedMs);
     }
+
+    /// <summary>
+    /// 取一块屏的工作区（虚拟桌面物理坐标），供 Toast 浮层定位。
+    /// 2026-11-02（多屏跟随 P1-6）：屏为 null / 查询失败 ⇒ 返回 null，调用方回退默认落位。
+    /// ⚠ PinWindow/ColorProfileProvider 各有自己的 MONITORINFO 结构定义 —— 本仓的惯例是
+    ///   每个消费点就地声明最小形状，这里跟随该惯例，不做跨文件合并。
+    /// </summary>
+    private static SilentCaptureToast.RECT? GetMonitorWorkArea(DisplayInfo? monitor)
+    {
+        if (monitor is null) return null;
+        try
+        {
+            var info = new MonitorInfoLite { cbSize = (uint)Marshal.SizeOf<MonitorInfoLite>() };
+            if (!GetMonitorInfoWorkArea(monitor.MonitorHandle, ref info)) return null;
+            return new SilentCaptureToast.RECT
+            {
+                Left = info.rcWork.Left, Top = info.rcWork.Top,
+                Right = info.rcWork.Right, Bottom = info.rcWork.Bottom,
+            };
+        }
+        catch { return null; }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfoLite
+    {
+        public uint cbSize;
+        public RectLite rcMonitor;
+        public RectLite rcWork;
+        public uint dwFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RectLite { public int Left, Top, Right, Bottom; }
+
+    [LibraryImport("user32.dll", EntryPoint = "GetMonitorInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetMonitorInfoWorkArea(nint hMonitor, ref MonitorInfoLite info);
 
     /// <summary>将已保存的输出文件复制到剪贴板（直接复制文件，非路径字符串）。</summary>
     private async Task CopyFileToClipboardAsync(string filePath)
@@ -1902,7 +2181,8 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async Task EncodeAndCopyAsync(byte[] bgra, int w, int h)
+    private async Task EncodeAndCopyAsync(byte[] bgra, int w, int h,
+        OutputFormat? forceFormat = null, ColorDecision? regionDecision = null)
     {
         try
         {
@@ -1913,11 +2193,13 @@ public sealed partial class MainWindow : Window
             // 仅输出到临时目录, 然后复制该完整文件。剪贴板得到与最终输出完全一致的成品。
             // UI 线程：采集快照（统一入口，避免散落的控件读取）
             var ui = CaptureEncodingUiState();
+            if (forceFormat is { } forcedCopy) ui = ui with { Format = forcedCopy };
             var colorSpaceTag = ui.ColorSpaceTag;
 
             // 用与正式保存相同的设置构建 (含 System→实际色域的 ACM 感知解析)
-            // 剪贴板入口同样"复用完整保存管线"⇒ 也要给一份决定；这里无源屏信息 ⇒ 光标屏（与旧行为一致）。
-            var decision = DecisionForCursorScreen(ui, ui.HdrEnabled);
+            // ═══ 2026-11-02（多屏同源 P0-3）：选区复制由调用方按覆盖屏给决定；
+            //     真正无源信息的入口（无）才落到光标屏兜底。═══
+            var decision = regionDecision ?? DecisionForCursorScreen(ui, ui.HdrEnabled);
             var settings = BuildEncodingSettings(ui.Format, ui.HdrEnabled, null, ui, decision);
 
             // 输出到临时目录 (不写入用户正式输出目录)
@@ -2006,8 +2288,10 @@ public sealed partial class MainWindow : Window
         ToastService.ShowCaptureFailed(LocaleManager.Tr("提取区域失败"));
     }
 
-    /// <summary>打开独立标注窗口（HDR 路径的"标注"动作：SDR 预览 + 标注 + 保存/复制）。</summary>
-    private void OpenAnnotationWindow(byte[] regionPixels, int w, int h)
+    /// <summary>打开独立标注窗口（HDR 路径的"标注"动作：SDR 预览 + 标注 + 保存/复制）。
+    /// <para>2026-11-02（多屏同源 P0-3）：像素来源是选区 ⇒ 选区决定随像素一起交给窗口，
+    /// 窗口里的保存/复制按同一份决定走（否则从标注窗出去的产物又退回光标屏语义）。</para></summary>
+    private void OpenAnnotationWindow(byte[] regionPixels, int w, int h, ColorDecision? regionDecision)
     {
         try
         {
@@ -2015,11 +2299,11 @@ public sealed partial class MainWindow : Window
             _activeAnnotationWindow = annoWindow;
             annoWindow.OnSaveRequested = async (pixels, pw, ph) =>
             {
-                await EncodeAndSaveAsync(pixels, pw, ph);
+                await EncodeAndSaveAsync(pixels, pw, ph, null, regionDecision);
             };
             annoWindow.OnCopyRequested = async (pixels, pw, ph) =>
             {
-                await EncodeAndCopyAsync(pixels, pw, ph);
+                await EncodeAndCopyAsync(pixels, pw, ph, null, regionDecision);
             };
             annoWindow.Closed += (_, _) => _activeAnnotationWindow = null;
             annoWindow.Activate();
@@ -2091,7 +2375,7 @@ public sealed partial class MainWindow : Window
     /// 而 captureResult.GpuTexture 是整块桌面纹理, NVENC 按区域 w/h 编码会取纹理
     /// 左上角相同尺寸区域 → 内容错误。区域裁剪后纹理一律不可用, 走 CPU 像素路径。</summary>
     private async Task EncodeAndSaveHdrAsync(float[] hdrPixels, int w, int h,
-        byte[]? iccProfile = null)
+        byte[]? iccProfile = null, ColorDecision? regionDecision = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         LogService.Info("MainWindow", $"HDR 编码启动: {w}x{h} 格式={CurrentFormat()}");
@@ -2110,19 +2394,20 @@ public sealed partial class MainWindow : Window
             // UI 线程：采集快照（统一入口，避免散落的控件读取）
             var ui = CaptureEncodingUiState();
             var format = ui.Format;
-            var cursorMonitor = DisplayEnumerator.GetMonitorUnderCursor();
-            var meta = MetadataCollector.Collect(DisplayEnumerator.FindDisplayByMonitor(cursorMonitor));
             var hdrOutput = ui.HdrEnabled;
             var colorSpaceTag = ui.ColorSpaceTag;
             // D-2（同 ExecuteSilentEncodeAsync）：本入口的源恒为 Float16 ⇒ 编码场景只由用户开关与格式决定，
             // 不能把"有浮点像素"当"要输出 HDR"传，否则 HDR 关时 AVIF 位深被 HDR 协商钉成 10。
             bool hdrScenario = hdrOutput || format == OutputFormat.JPEG_GAINMAP;
-            // 本入口的源是"内存里的一块 Float16"，没有 CaptureResult ⇒ 只能按光标屏决定（同旧行为）。
-            // 格式必须传：本入口是"把内存里那一帧重新编码成 format"，容器口径（JPEG 家族/WebP 的
-            // Rec.709 默认档）与下面 BuildEncodingSettings 收的是同一个 format。
-            var decision = ColorDecision.Build(
-                DisplayEnumerator.FindDisplayByMonitor(cursorMonitor),
+            // ═══ 2026-11-02（多屏同源 P0-3）：选区入口的决定由调用方按【选区覆盖的屏】给 ═══
+            // regionDecision 非空 ⇒ 直接用（BuildForRegion 的产出，覆盖屏最弱档钳制）；
+            // 为 null 才退回光标屏 —— 那是"内存里的一块 Float16"没有来源信息的旧语义，
+            // 现在只剩粘贴/剪贴板另存等真正无源信息的入口会走那条路。
+            var decision = regionDecision ?? ColorDecision.Build(
+                DisplayEnumerator.FindDisplayByMonitor(DisplayEnumerator.GetMonitorUnderCursor()),
                 colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected, format);
+            // 元数据跟着决定走：决定屏 = 拼接基准屏/选区覆盖主屏（2026-11-02 多屏同源）
+            var meta = MetadataCollector.Collect(decision.Source);
             var settings = BuildEncodingSettings(format, hdrScenario, meta, ui, decision);
             // 注入调用方带进来的 ICC（色彩管理不可关 ⇒ 不再有"仅烘焙开启时"这个条件）
             settings.IccProfile ??= iccProfile;
@@ -2150,7 +2435,8 @@ public sealed partial class MainWindow : Window
                 DispatcherQueue.TryEnqueue(async () =>
                 {
                     await CopyFileToClipboardAsync(path);
-                    ShowSaveToast(path, sw.ElapsedMilliseconds);
+                    // 2026-11-02（多屏跟随 P1-6）：气泡落在决定屏（选区覆盖主屏）
+                    ShowSaveToast(path, sw.ElapsedMilliseconds, "capture", decision.Source);
                 });
             }
             else
@@ -2174,7 +2460,8 @@ public sealed partial class MainWindow : Window
                 DispatcherQueue.TryEnqueue(async () =>
                 {
                     await CopyFileToClipboardAsync(path);
-                    ShowSaveToast(path, sw.ElapsedMilliseconds);
+                    // 2026-11-02（多屏跟随 P1-6）：气泡落在决定屏（选区覆盖主屏）
+                    ShowSaveToast(path, sw.ElapsedMilliseconds, "capture", decision.Source);
                 });
             }
         }
@@ -2249,7 +2536,7 @@ public sealed partial class MainWindow : Window
             int vh = displays.Count > 0 ? displays.Max(d => d.Y + d.Height) - vy : 1080;
 
             // WGC 多显示器拼接捕获（SDR 用于预览; 2026-08-16 P2-8 修复: 加 PreferHdr,
-            // 使选区路径与 SilentCapture/OnCaptureNow 一致 — 单显示器时能获得 HDR/广色域帧)
+            // 使选区路径与 SilentCapture 一致 — 单显示器时能获得 HDR/广色域帧)
             //
             // 诊断开关 TTC_FORCE_SDR=1 必须在这里就求值：它决定这一拍要不要冻共享槽。
             // 置 true 时预览只吃 SDR 帧 ⇒ HDR 槽用不上；SDR 槽冻出来也没人按矩形回读
@@ -2532,6 +2819,20 @@ public sealed partial class MainWindow : Window
                                 $"选区 SDR 回读 {rw}x{rh}@{rx - vx},{ry - vy} {swS.ElapsedMilliseconds}ms", LogCategory.Capture);
                     }
 
+                    // ═══ 2026-11-02（多屏同源 P0-3）：选区的色彩决定按【选区覆盖的屏】算 ═══
+                    // 选区矩形 (rx,ry,rw,rh) 是虚拟桌面坐标（HdrCaptureWindow 上报时已加 _winX/_winY），
+                    // displays 是本次启动时的逐屏枚举 —— 两者都在作用域里，这里只算一次给各出口共用。
+                    // 实机复现（见 BuildForRegion 注释）：选区在 SDR 副屏、光标在 HDR 主屏时，
+                    // 原先按光标屏建决定 ⇒ 副屏 SDR 内容被声明成 Rec.2020+PQ 假 HDR。
+                    // ⚠ UI 快照必须在这里采：本方法从热键/UIA 触发起就没采过 ui（CaptureEncodingUiState
+                    //   的既有调用点都在别的入口），而 BuildForRegion 要读用户下拉/HDR 开关/ACM。
+                    EncodingUiState regionUi = CaptureEncodingUiState();
+                    ColorDecision regionDecision = ColorDecision.BuildForRegion(
+                        displays, rx, ry, rw, rh, regionUi.ColorSpaceTag, regionUi.HdrEnabled,
+                        regionUi.Settings.AcmeDetected, regionUi.Format);
+                    LogService.Info("MainWindow",
+                        $"选区决定(按覆盖屏): {regionDecision.Describe()} 覆盖矩形=({rx},{ry}) {rw}x{rh}");
+
                     switch (action)
                     {
                         case MainToolbarAction.Save:
@@ -2539,35 +2840,35 @@ public sealed partial class MainWindow : Window
                             // 2026-08-11 A方案: 窗口内联标注后, 有标注层时输出带标注的 SDR 图像
                             if (hdrWnd.AnnoManager.LayerCount == 0 && hdrRegion is not null)
                                 // ═══ 2026-08-16 P1-3: 选区像素不带桌面纹理 (区域≠纹理内容) ═══
-                                await EncodeAndSaveHdrAsync(hdrRegion, rw, rh, captureResult.IccProfile);
+                                await EncodeAndSaveHdrAsync(hdrRegion, rw, rh, captureResult.IccProfile, regionDecision);
                             else if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx1)
-                                await EncodeAndSaveAsync(outPx1, rw, rh);
+                                await EncodeAndSaveAsync(outPx1, rw, rh, null, regionDecision);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Annotate:
                             // 2026-08-11 A方案: 标注已在窗口内内联完成, 此分支为兼容兜底
                             LogService.Info("MainWindow", "HDR 选区标注（窗口内联，兜底打开独立窗口）");
                             if (sdrRegion is not null)
-                                OpenAnnotationWindow(sdrRegion, rw, rh);
+                                OpenAnnotationWindow(sdrRegion, rw, rh, regionDecision);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Copy:
                             LogService.Info("MainWindow", "HDR 选区复制到剪贴板");
                             if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx2)
-                                await EncodeAndCopyAsync(outPx2, rw, rh);
+                                await EncodeAndCopyAsync(outPx2, rw, rh, null, regionDecision);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Ocr:
                             LogService.Info("MainWindow", "HDR 选区 OCR 识别");
                             // 与保存/复制共用同一份合成结果：识字不许绕过标注去读原始桌面像素
                             if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx3)
-                                await CaptureAndOcrFromPixelsAsync(outPx3, rw, rh);
+                                await CaptureAndOcrFromPixelsAsync(outPx3, rw, rh, regionDecision);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Translate:
                             LogService.Info("MainWindow", "HDR 选区翻译");
                             if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx4)
-                                await CaptureAndTranslateFromPixelsAsync(outPx4, rw, rh);
+                                await CaptureAndTranslateFromPixelsAsync(outPx4, rw, rh, regionDecision);
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                         case MainToolbarAction.Qr:
@@ -2576,7 +2877,7 @@ public sealed partial class MainWindow : Window
                             LogService.Info("MainWindow", "HDR 选区二维码识别（区域照常落盘+剪贴板）");
                             if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx5)
                             {
-                                var qrSaveTask = EncodeAndSaveAsync(outPx5, rw, rh);
+                                var qrSaveTask = EncodeAndSaveAsync(outPx5, rw, rh, null, regionDecision);
                                 await CaptureAndQrFromPixelsAsync(outPx5, rw, rh);
                                 await qrSaveTask;
                             }
@@ -2585,12 +2886,13 @@ public sealed partial class MainWindow : Window
                         case MainToolbarAction.Pin:
                             // 贴图窗吃的是同一份合成像素（标注/马赛克不会被绕过）；
                             // 之后的保存/复制仍走主窗口的编码管线 ⇒ 格式/色域/质量与正常保存一致。
+                            // 贴图后的保存/复制带着选区决定走（2026-11-02 多屏同源）：像素来源还是那块选区。
                             LogService.Info("MainWindow", "HDR 选区贴图");
                             if (await ComposeAnnotatedSdrAsync(hdrWnd, sdrRegion, rw, rh) is { } outPx6)
                                 Services.PinWindow.Show(outPx6, rw, rh,
-                                    (px, pw, ph) => EncodeAndSaveAsync(px, pw, ph, OutputFormat.PNG),
-                                    (px, pw, ph) => EncodeAndSaveAsync(px, pw, ph, OutputFormat.AVIF),
-                                    (px, pw, ph) => EncodeAndCopyAsync(px, pw, ph));
+                                    (px, pw, ph) => EncodeAndSaveAsync(px, pw, ph, OutputFormat.PNG, regionDecision),
+                                    (px, pw, ph) => EncodeAndSaveAsync(px, pw, ph, OutputFormat.AVIF, regionDecision),
+                                    (px, pw, ph) => EncodeAndCopyAsync(px, pw, ph, null, regionDecision));
                             else ReportEmptyRegion(hdrWnd, action, rw, rh);
                             break;
                     }
@@ -2640,7 +2942,8 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async Task CaptureAndOcrFromPixelsAsync(byte[] pixels, int w, int h)
+    private async Task CaptureAndOcrFromPixelsAsync(byte[] pixels, int w, int h,
+        ColorDecision? regionDecision = null)
     {
         LogService.Info("MainWindow", $"OCR 识别启动: {w}x{h} 语言={_settings.OcrLanguage}");
         StatusTxt.Text = "📝 文字提取中...";
@@ -2675,7 +2978,7 @@ public sealed partial class MainWindow : Window
             // 托管侧连一行日志都没有（台账 §70）。这里接住它，至少让失败可见。
             try
             {
-                OpenOcrPreviewWindow(pixels, w, h, result, autoTranslate: false);
+                OpenOcrPreviewWindow(pixels, w, h, result, autoTranslate: false, regionDecision);
                 StatusTxt.Text = "📝 已打开文字预览窗口";
             }
             catch (Exception ex)
@@ -2685,7 +2988,8 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { LogService.Error("MainWindow", $"OCR 失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
     }
 
-    private async Task CaptureAndTranslateFromPixelsAsync(byte[] pixels, int w, int h)
+    private async Task CaptureAndTranslateFromPixelsAsync(byte[] pixels, int w, int h,
+        ColorDecision? regionDecision = null)
     {
         LogService.Info("MainWindow", $"翻译启动: {w}x{h} 语言={_settings.OcrLanguage}");
         StatusTxt.Text = "🌐 识别并翻译中...";
@@ -2718,7 +3022,7 @@ public sealed partial class MainWindow : Window
             // 与识字那路同一条纪律：回调体不受外层 try/catch 保护，逃出去就是原生 fail-fast（台账 §70）。
             try
             {
-                OpenOcrPreviewWindow(pixels, w, h, ocrResult, autoTranslate: true);
+                OpenOcrPreviewWindow(pixels, w, h, ocrResult, autoTranslate: true, regionDecision);
                 StatusTxt.Text = "🌐 已打开翻译预览窗口";
             }
             catch (Exception ex)
@@ -2728,8 +3032,11 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { LogService.Error("MainWindow", $"翻译识别失败: {ex.Message}", ex); StatusTxt.Text = $"❌ {ex.Message}"; }
     }
 
-    /// <summary>打开 OCR/翻译独立预览窗口（截图 + 文字点对点覆盖）。</summary>
-    private void OpenOcrPreviewWindow(byte[] pixels, int w, int h, OcrResult ocr, bool autoTranslate)
+    /// <summary>打开 OCR/翻译独立预览窗口（截图 + 文字点对点覆盖）。
+    /// <para>2026-11-02（多屏同源 P0-3）：像素来自选区 ⇒ regionDecision 随链传递，
+    /// 预览窗里的"另存为"按选区覆盖屏算声明，不退回光标屏。</para></summary>
+    private void OpenOcrPreviewWindow(byte[] pixels, int w, int h, OcrResult ocr, bool autoTranslate,
+        ColorDecision? regionDecision = null)
     {
         var cfg = new LlmConfig
         {
@@ -2757,7 +3064,7 @@ public sealed partial class MainWindow : Window
             CaptureOpId = _captureOpId,
             SaveHandler = async (pixels, w, h) =>
             {
-                await EncodeAndSaveAsync(pixels, w, h);
+                await EncodeAndSaveAsync(pixels, w, h, null, regionDecision);
             }
         };
         // ═══ 2026-08-16 P3-20 修复: 登记 OCR 预览窗口, 应用退出时强制关闭 ═══
@@ -2819,158 +3126,6 @@ public sealed partial class MainWindow : Window
 
     private void OnCaptureBtn(object sender, RoutedEventArgs e) => StartSelectionCapture();
 
-    /// <summary>"捕获现在" — WGC 单显示器全屏捕获。</summary>
-    private async void OnCaptureNow(object sender, RoutedEventArgs e)
-    {
-        // ═══ 2026-08-25 发布版修复: 防重入拦截不再静默 ═══
-        if (Interlocked.CompareExchange(ref _isCapturing, 1, 0) != 0)
-        {
-            LogService.Warn("MainWindow", "快速捕获已在进行中，忽略重复触发");
-            ToastService.ShowCaptureFailed("上一次截图仍在处理中，请稍候");
-            return;
-        }
-        LogService.Info("MainWindow", "快速捕获启动 (单显示器全屏)");
-        _captureCts?.Cancel();
-        if (_captureTask is not null)
-        {
-            try { await _captureTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { /* 旧任务超时不阻塞 */ }
-        }
-        _captureCts?.Dispose();
-        _captureCts = new CancellationTokenSource();
-        var ct = _captureCts.Token;
-        StatusTxt.Text = "📷 WGC 截图中...";
-        CaptureBtn.IsEnabled = false;
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-
-        try
-        {
-            if (_wgcService is null)
-            {
-                StatusTxt.Text = "❌ 捕获服务未初始化";
-                return;
-            }
-
-            // UI 线程：采集快照（await 之后若回到非 UI 线程也能安全使用）
-            var ui = CaptureEncodingUiState();
-            var format = ui.Format;
-            var hdrOutput = ui.HdrEnabled;
-
-            // ── WGC 单显示器捕获 ──
-            // 源精度不在此决定：PreferHdr 恒 true，由服务侧的逐屏能力判定给不给得出 >8-bit，
-            // 实际拿到什么精度的帧由下面的"HDR/SDR 帧捕获成功"报 —— 这里只报用户意图。
-            LogService.Info("MainWindow", $"WGC 单显示器捕获: HDR输出={hdrOutput} 源精度=按显示器能力判定");
-            var captureResult = await _wgcService.CaptureMonitorAsync(new WgcCaptureConfig
-            {
-                PreferHdr = true,   // 2026-09-19：源精度由能力决定，不由输出意图决定（§4.3 修正）
-                FrameTimeoutMs = 3000
-            });
-
-            // ═══ P0: 捕获降级给用户明确提示 ═══
-            if (!string.IsNullOrEmpty(captureResult.DegradationWarning))
-            {
-                LogService.Warn("MainWindow", captureResult.DegradationWarning);
-                ToastService.ShowCaptureDegraded(captureResult.DegradationWarning);
-            }
-
-            string fullPath;
-            bool actualHdr;
-            try
-            {
-            ct.ThrowIfCancellationRequested();
-            actualHdr = captureResult.IsHdr;
-            int fw = captureResult.Width, fh = captureResult.Height;
-            var meta = captureResult.SourceDisplay is not null
-                ? MetadataCollector.Collect(captureResult.SourceDisplay)
-                : null;
-            var colorSpaceTag = ui.ColorSpaceTag;
-
-            if (actualHdr && captureResult.HdrPixels is not null)
-            {
-                LogService.Info("MainWindow", $"HDR 帧捕获: {fw}x{fh}");
-                // D-2（同 ExecuteSilentEncodeAsync）：源精度事实 ≠ 编码场景。传 hdrScenario，
-                // 否则 HDR 关时 AVIF 的容器位深会被 HDR 协商无条件钉成 10-bit。
-                bool hdrScenario = hdrOutput || format == OutputFormat.JPEG_GAINMAP;
-                var decision = DecisionFor(captureResult, colorSpaceTag, hdrScenario, ui.Settings.AcmeDetected, format);
-                var settings = BuildEncodingSettings(format, hdrScenario, meta, ui, decision);
-                settings.IccProfile ??= captureResult.IccProfile;
-
-                // ═══ 2026-08-10 修复: GainMap 格式只要有 HDR 帧就走主路径 ═══
-                // (与 SilentCapture 一致: GainMap 需要原始 HDR 帧生成增益图)
-                if (hdrScenario)
-                {
-                    // HDR 直通编码
-                    LogService.Info("MainWindow", $"HDR 直通编码: {format}");
-                    fullPath = await AppServices.Pipeline.EncodeHdrFrameAsync(
-                        new HdrFrameData
-                        {
-                            Pixels = captureResult.HdrPixels,
-                            Width = fw, Height = fh,
-                            IccProfile = captureResult.IccProfile,
-                            Metadata = meta,
-                            GpuTexture = captureResult.GpuTexture
-                        }, settings, ct);
-                }
-                else
-                {
-                    // Float16 scRGB 源 + SDR 目标 → 委托编码器 SDR 分派（§11 位深策略），
-                    // 与无感截图路径一致。派生像素不带 GPU 纹理。
-                    // 不再需要手动 settings.HdrOutput = false（D-2 后传进去的就是 hdrScenario=false）。
-                    LogService.Info("MainWindow", $"Float16 广色域 SDR 转换: 色域={colorSpaceTag}");
-                    fullPath = await AppServices.Pipeline.EncodeHdrFrameAsync(
-                        new HdrFrameData
-                        {
-                            Pixels = captureResult.HdrPixels,
-                            Width = fw, Height = fh,
-                            IccProfile = settings.IccProfile,
-                            Metadata = meta,
-                            GpuTexture = null // 派生 SDR 像素不带 GPU 纹理
-                        }, settings, ct);
-                }
-            }
-            else
-            {
-                var sdrPixels = captureResult.SdrPixels ?? captureResult.GetDisplayPixels();
-                if (sdrPixels is null) throw new InvalidOperationException("无法获取显示像素");
-                LogService.Info("MainWindow", $"SDR 帧捕获: {fw}x{fh}");
-
-                var decision = DecisionFor(captureResult, colorSpaceTag, false, ui.Settings.AcmeDetected, format);
-                var settings = BuildEncodingSettings(format, false, meta, ui, decision);
-                settings.IccProfile ??= captureResult.IccProfile;
-                // 纹理直通交给管线判：要搬色就必须过 CPU 矩阵（P1-2 那条"烘焙开启就禁直通"的规则
-                // 现在由 ColorDecision.NeedsMapping 精确表达，不再靠一个 UI 布尔顺带决定）
-                fullPath = await AppServices.Pipeline.EncodeAndSaveAsync(
-                    sdrPixels, fw, fh, settings, decision, ct, captureResult.GpuTexture);
-            }
-            }
-            finally
-            {
-                // ═══ 2026-08-16 P1-1 修复: 释放 GPU 纹理引用 ═══
-                captureResult.Dispose();
-            }
-
-            sw.Stop();
-            await CopyFileToClipboardAsync(fullPath);
-            string status = actualHdr
-                ? $"✅ HDR 已保存 ({sw.ElapsedMilliseconds}ms)"
-                : $"✅ 已保存 ({sw.ElapsedMilliseconds}ms)";
-            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = status);
-            ShowSaveToast(fullPath, sw.ElapsedMilliseconds);
-        }
-        catch (OperationCanceledException)
-        {
-            LogService.Warn("MainWindow", "快速捕获已取消");
-            sw.Stop();
-            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = "⚠ 操作已取消");
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("MainWindow", $"快速捕获失败: {ex.Message}", ex);
-            sw.Stop();
-            DispatcherQueue.TryEnqueue(() => StatusTxt.Text = $"❌ {ex.Message}");
-            ToastService.ShowCaptureFailed(ex.Message);
-        }
-        finally { CaptureBtn.IsEnabled = true; Interlocked.Exchange(ref _isCapturing, 0); }
-    }
 
     /// <summary>编码所需的 UI 状态快照。
     /// <para>
@@ -3514,6 +3669,9 @@ public sealed partial class MainWindow : Window
         else if (recordedBox == RecordHotkeyTxt)
         {
             _settings.RecordHotkey = result;
+            // 2026-11-02（D 流第 6 步）：录制热键激活后与 silent 同权 —— 改键立即重注册，
+            // 不再是"只存盘、要重启才生效"的半断点。
+            try { HotkeyManager.RegisterNamed(this, "record", result, () => DispatcherQueue.TryEnqueue(() => ToggleRecording()), ["Ctrl+Alt+G", "Alt+Shift+G"]); } catch { }
         }
         else if (recordedBox == SilentHotkeyTxt)
         {
@@ -3572,6 +3730,12 @@ public sealed partial class MainWindow : Window
         _activeAnnotationWindow = null;
         _activeOcrPreview = null;
         _activeQrWindow = null;
+
+        // ═══ 2026-11-03（审查轮 R1-P2-2）：退出时终止录制会话 ═══
+        // 不做这步，录制/编码线程在 shutdown 后继续跑，可能留下孤儿 ffmpeg 进程与 %TEMP% 帧目录。
+        try { _recorder?.Cancel(); } catch { }
+        try { _recorder?.Dispose(); } catch { }
+        _recorder = null;
 
         // ═══ 2026-08-16 P2-6 修复: 退出时取消在途编码并短等完成 (防截断文件) ═══
         // ═══ 2026-08-25 发布版修复: 等待全部后台编码任务 (旧任务不再被 Cancel) ═══
