@@ -6,7 +6,7 @@
      ⚠️ 三条最容易踩的规则，写在这里避免下次重犯：
        1) Identity/@Publisher 必须与 Partner Center「查看应用标识详细信息」给出的值【逐字一致】
           （含大小写与空格）。不一致会直接导致上传失败，且报错不指向这里。
-          当前值是占位符 —— 上架前必须替换。
+          当前值 = 2026-11-04 用户从 Partner Center「应用标识」页取回的真实标识。
        2) Identity/@Version 的**第四段必须为 0**（官方规定该段留给商店使用）。
           ⚠️ 2026-10-26 实测：该值【不随】dotnet build 的 -p:Version 覆盖（传 0.3.10-beta
           仍产出 0.3.7.0 的包）—— 出包前必须手动把这里改成与发布版本一致（x.y.z.0 形态）。
@@ -25,7 +25,7 @@
 
   <Identity
     Name="TrueToneCap"
-    Publisher="CN=PLACEHOLDER-REPLACE-WITH-PARTNER-CENTER-IDENTITY"
+    Publisher="CN=301BF257-514D-402F-B9D2-1C698A29F2F9"
     Version="0.3.11.0"
     ProcessorArchitecture="x64" />
 

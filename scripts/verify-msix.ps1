@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # scripts/verify-msix.ps1 — 解包核对 MSIX 内容（打包后的独立门禁）
 #
@@ -164,9 +164,14 @@ if (-not (Test-Path $manifestPath)) {
         else { Fail "包身份版本 $($id.Version) ≠ exe FileVersion $fv —— 清单 Identity/@Version 没跟上发布版本，须手动同步" }
     }
 
-    # Publisher 占位符未替换 => 上架必失败
+    # Publisher 必须是 Partner Center 的真实标识（2026-11-04 起已有：CN=301BF257-…）。
+    # 占位符 => 上传必失败；换成硬钉真实值 —— 防止将来误改回旧值或手滑多一个空格。
     if ($id.Publisher -match 'PLACEHOLDER') {
-        Write-Host "   ⚠️  Publisher 仍是占位符 —— 上架前必须替换为 Partner Center 的标识（本机/侧载可忽略）" -ForegroundColor Yellow
+        Fail "Publisher 仍是占位符 —— 必须替换为 Partner Center「应用标识」页给出的 CN=…（逐字一致）"
+    } elseif ($id.Publisher -ne 'CN=301BF257-514D-402F-B9D2-1C698A29F2F9') {
+        Write-Host "   ⚠️  Publisher 与 Partner Center 已知标识不一致（$($id.Publisher)）—— 若是你有意更换账号请同步更新本判据" -ForegroundColor Yellow
+    } else {
+        Ok "Publisher 与 Partner Center 标识一致（CN=301BF257-…）"
     }
 
     # runFullTrust：桌面应用必需
