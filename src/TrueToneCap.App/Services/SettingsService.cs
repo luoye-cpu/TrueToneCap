@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/SettingsService.cs
 // 设置持久化服务 — 从 MainWindow 提取，负责 JSON 配置的加载/保存

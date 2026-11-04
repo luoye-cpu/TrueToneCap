@@ -1,4 +1,4 @@
-<Window x:Class="TrueToneCap.App.MainWindow"
+﻿<Window x:Class="TrueToneCap.App.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
@@ -72,7 +72,7 @@
                         <!-- ═══ 格式专属选项（2026-11-02 用户口径：从页面最下面移到「基础输出」正下方）═══
                              顺序即阅读顺序：先选格式 → 紧跟就是该格式的旋钮 → 最后才是色彩/HDR 这类全局项。
                              这 7 张卡在 XAML 里都是 Visibility="Collapsed"，由 MainWindow.xaml.cs 的
-                             RefreshFormatPanel 按当前格式点亮（门禁 Test_Xaml_CollapsedCards_HaveVisibilityOwner
+                             UpdateQualityPanel 按当前格式点亮（门禁 Test_Xaml_CollapsedCards_HaveVisibilityOwner
                              盯着"每个 Collapsed 控件都必须有代码点亮它"，挪位置不影响那条锁）。 -->
                         <!-- AVIF 专属选项 -->
                         <Border x:Name="AvifOptionsCard" Padding="16" CornerRadius="8" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Visibility="Collapsed">
@@ -193,8 +193,9 @@
                                      2026-09-26（用户口径）：GainMap 不再是输出格式下拉里的一项，
                                      而是"JPEG LI 的另一个形态"。打开后编码走 JPEG_GAINMAP 那条路，
                                      且 HDR 锁定开启（关掉就没有增益图，这个形态本身不成立）。
-                                     色度刻意【不另设下拉】—— 它就是这个卡片上面那一条 ChromaJpegLiCbo，
-                                     两处各设一个下拉去写同一个字段，就是刚被合并掉的那种分裂。 -->
+                                     色度刻意【不另设下拉】—— 2026-11-04 起增益图底图恒 4:4:4（管线硬编码），
+                                     所以打开开关时上面那条 ChromaJpegLiCbo 会被禁用并说明原因：
+                                     留着能改却改不动产物，就是本仓反复消灭的假配置。 -->
                                 <CheckBox x:Name="GainMapEnableChk" Content="附带增益图（输出 Ultra HDR 照片）"
                                           Checked="OnGainMapToggled" Unchecked="OnGainMapToggled"/>
                                 <TextBlock x:Name="GainMapOptionsDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
@@ -511,7 +512,7 @@
                                     <ComboBox x:Name="MaxDurationCbo" Grid.Column="1" SelectionChanged="OnMaxDurationChanged"><ComboBoxItem Tag="15">15 秒</ComboBoxItem><ComboBoxItem Tag="30" IsSelected="True">30 秒</ComboBoxItem><ComboBoxItem Tag="60">60 秒</ComboBoxItem><ComboBoxItem Tag="120">120 秒</ComboBoxItem></ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock x:Name="FfmpegPathLabel" Text="ffmpeg 路径" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="FfmpegPathTxt" Grid.Column="1" PlaceholderText="留空 = 自动解析（设置指定 → PATH → 常见位置）"/>
+                                    <TextBox x:Name="FfmpegPathTxt" Grid.Column="1" LostFocus="OnFfmpegPathLostFocus" PlaceholderText="留空 = 自动解析（设置指定 → PATH → 常见位置）"/>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1" Minimum="0" Maximum="100" ValueChanged="OnRecordQualityChanged"/></Grid>
                             </StackPanel>
@@ -589,7 +590,7 @@
                                 <StackPanel x:Name="FreeModePanel" Spacing="8">
                                     <TextBlock x:Name="FreeModeHint" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                Text="无需密钥：按 Edge → 必应 → MyMemory → Google 依次尝试免费公共端点。" TextWrapping="Wrap"/>
-                                    <CheckBox x:Name="FreeEndpointsChk" Content="使用免费公共翻译端点（识别到的文字会发给第三方）"/>
+                                    <CheckBox x:Name="FreeEndpointsChk" Content="使用免费公共翻译端点（识别到的文字会发给第三方）" Checked="OnFreeEndpointsChanged" Unchecked="OnFreeEndpointsChanged"/>
                                     <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap"
                                                Text="截图里的文字会发给微软 / MyMemory 等第三方，这些端点也可能随时失效。不想外发就取消勾选，并填下面的凭据。"/>
                                     <Grid ColumnDefinitions="100,*"><TextBlock Text="有道 AppID" VerticalAlignment="Center"/><TextBox x:Name="YoudaoKeyTxt" Grid.Column="1" PlaceholderText="可选：填了优先走官方 API（更快更稳）"/></Grid>

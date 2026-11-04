@@ -1428,3 +1428,42 @@ LocaleManager.Tr("增益图态底图恒为 4:4:4（…）；"
 
 教训一句话：**新加探针时，先确认这条格式在该轴上"有没有可钉的期望"** —— JPEG LI 的
 HDR 落点是"恒开、由编码器降级"，拿别的格式的 WantHdr 模板套它就会自己造出一条假分叉。
+
+### 24.8 补：接线审查第二轮 —— 子 agent 交回的 7 项发现与处置（2026-11-04）
+
+静态审查（只读子 agent）+ 我独立复核，处置如下：
+
+**已修（4 项，均带判据或变异验证）：**
+- **E-1（高危）**：`AvifHdrModeRow` 可见性在 `UpdateQualityPanelCore` 前半段读 `HdrSwitch.IsOn`，
+  早于同方法 else 分支的开关回填 ⇒ 从"JPEG LI+增益图（锁开）"切到 AVIF 会点亮一格
+  "动了没反应"的假配置控件。修法：判断下移到两个分支定稿之后 + 口径统一为 `IsOn && IsEnabled`
+  （SDR-only 屏上只看 IsOn 会点亮被管线夹掉 HDR 的无效格子）。新判据
+  `Test_AvifHdrModeRow_VisibilityReadsFinalHdrState` 按出现次序断言；变异（谓词丢 IsEnabled）三断言齐红。
+- **C-1（高危）**：`FreeEndpointsChk` 零事件、`FfmpegPathTxt`（11-03 新增）无 LostFocus，
+  而"关窗口 = 最小化到托盘"根本不跑全量 SaveSettings ⇒ 改动静默丢失。修法照 `ArchiveChk`/
+  `OnOcrLangChanged` 先例补实时落盘；FfmpegPath 复用 `_ffmpegPathEchoed` 闩（空串是合法值），
+  规整链抽成 `NormalizeFfmpegPathInput` 两个写点共用。新判据
+  `Test_SettingsControls_RealtimeWriteback`（点名层 + 遍历层）；变异（删 XAML 事件）红。
+- **A-1（低）**：UI 内四处 `?? "Auto"` 与写侧 LibAom 不同源（同族 bug 只修了一半）。已改 LibAom；
+  L990 保留 —— 它是遍历 item.Tag 的缺失兜底，走 `Parse` 既有空值契约（有判据钉住回落 Auto）。
+- **G-1**：四处过期注释（ChromaGainMap"唯一事实源"口径、`Test_AvifChroma_DefaultIs420` 旧名、
+  `RefreshFormatPanel` 幽灵方法名、XAML/回显区"管线对 JPEG_GAINMAP 也读 ChromaJpegLi"）全部修正。
+
+**复核后否决（1 项，教训比修复值钱）：**
+- **B-1**：子 agent 声称"改默认必须 +1 SettingsRevision 并点名，否则老文件用户永远停在 420/Auto"。
+  **推演否决**：2 号盖章发生在 2026-09-25，当时默认就是 420/Auto ⇒ 盖章后第一次 Save 的
+  差集剪枝就把这两个"等于当时默认"的老键剪掉了，此后缺键回落**当前**默认 ⇒ 老用户自动拿到
+  444/LibAom。反而：①+1 会让所有 revision=2 文件重跑 2 号迁移（质量档/色域无差别重置）；
+  ②任何"见 420 就改 444"的迁移都会覆盖**显式选过 420** 的用户 —— 盘上 420 无法区分
+  "整份写回替用户记的"与"用户真选的"。整条链由
+  `Test_AvifDefaults_RecastIsHandledByDifferentialSave` 真跑 SettingsDiffPruner 钉住（含反面）。
+
+**记档待办（3 条判据盲区，本轮不动手）：**
+- **C-2/C-3**：SaveSettings 不写 6 个 Effort*（全靠实时处理器，"撤销/重置"类功能会漏）；
+  遍历判据的单行正则抓不到 `if (…) _settings.X = … ?? "Y";` 跨行形态，且
+  `defaults.TryGetValue` 交集比对对"兜底字段名拼错"静默放行。
+- **F-2**：代码里拼接的动态中文（`$"…"`/`+`，如 :785 增益图锁开提示、fmtHdrWarn 两条）
+  全仓 0 条英译对照，XAML+Tr 双锁结构上看不见；本轮的禁用说明做对了，紧邻的锁开提示没做。
+- **F-3**：AVIF HDR 承载文案"XAML 表 + LocaleManager 运行时属性"两份真相，改一侧即分叉。
+
+unit 1925 → 1949（+24，其中本轮新增 5 条判据、多条带变异）。

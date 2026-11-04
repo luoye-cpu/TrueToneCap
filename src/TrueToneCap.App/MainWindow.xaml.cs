@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -598,7 +598,7 @@ public sealed partial class MainWindow : Window
     {
         // Auto 模式：本机任一硬件 AV1 编码器可用即视为走硬件；手动模式按所选种类判断。
         var kind = AvifEncoderCapabilities.Parse(
-            (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto");
+            (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "LibAom");
         // ═══ 2026-09-19（用户决定）：Auto 现在【按色度过滤】⇒ 必须问解析结果 ═══
         // 请求 422/444 时 Auto 会选 libaom（硬件给不出广色度），此时仍是软件编码。
         // 这里走 PickAvailableKind 而不是自己写"色度==420 且有硬件"——
@@ -747,12 +747,12 @@ public sealed partial class MainWindow : Window
         // 元数据方式行已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，不做用户抉择）
         if (GainMapHintTxt is not null) GainMapHintTxt.Visibility = showGm ? Visibility.Visible : Visibility.Collapsed;
 
-        // 2026-11-03：AVIF 的「HDR 承载方式」只在 AVIF + HDR 打开时才有意义 ——
-        // HDR 关着时这一格无论选哪档都不生效，显示出来就是"动了没反应"的那种控件。
-        if (AvifHdrModeRow is not null)
-            AvifHdrModeRow.Visibility = isAvif && HdrSwitch.IsOn ? Visibility.Visible : Visibility.Collapsed;
-        if (AvifHdrModeHintTxt is not null)
-            AvifHdrModeHintTxt.Visibility = isAvif && HdrSwitch.IsOn ? Visibility.Visible : Visibility.Collapsed;
+        // ⚠ 2026-11-04 接线审查（E-1）：「HDR 承载方式」这一格的可见性【已下移】到本方法
+        //   后半段 gainMapOn/else 定稿 HDR 开关之后。原先写在这里读到的是【上一形态】留下的
+        //   HdrSwitch.IsOn —— 从"JPEG LI + 增益图（HDR 被锁成开）"切到 AVIF 时，这一句看到
+        //   IsOn=true 就把格子点亮，随后 else 分支才把开关回填成用户真正设置的关，
+        //   而程序赋值不会触发 OnHdrToggled 重算 ⇒ 留下一格"动了没反应"的假配置控件。
+        //   这正是下面注释原本要避免的形态，只是判断排错了时机。
 
         // ═══ 2026-09-27：这里曾经加过"当前格式没有 HDR 通道 ⇒ 把 Rec.2020 那一档禁选" ═══
         // 撤掉了，因为实测把前提打掉了：JPEG LI 与 WebP 确实【没有】HDR 通道（SupportsHdr=false，
@@ -811,6 +811,20 @@ public sealed partial class MainWindow : Window
                     "采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小。");
             }
         }
+
+        // ═══ 「HDR 承载方式」可见性：必须排在 gainMapOn/else 定稿 HDR 开关【之后】═══
+        // 2026-11-04 接线审查（E-1）修：原先这一段在开关回填之前就执行，读到的是上一形态的
+        // IsOn ⇒ "JPEG LI+增益图（锁开）→ 切 AVIF"会点亮这格而开关随后变关，且程序赋值不触发
+        // OnHdrToggled 重算，于是留下一格"动了没反应"的假配置控件。
+        // 口径同时统一成 IsOn && IsEnabled（与本方法 :700/:801 及 UpdateAvifOptionAvailability
+        // 用的 `hdr = IsOn && IsEnabled` 同一把尺）：SDR-only 屏上盘里 HdrEnabled=true 时，
+        // 开关虽显示"开"却被禁用、管线会把 HDR 夹掉（ColorDecision 的 HdrClamped），
+        // 只看 IsOn 就会点亮一个对产物毫无影响的格子。
+        bool hdrEffective = HdrSwitch.IsOn && HdrSwitch.IsEnabled;
+        if (AvifHdrModeRow is not null)
+            AvifHdrModeRow.Visibility = isAvif && hdrEffective ? Visibility.Visible : Visibility.Collapsed;
+        if (AvifHdrModeHintTxt is not null)
+            AvifHdrModeHintTxt.Visibility = isAvif && hdrEffective ? Visibility.Visible : Visibility.Collapsed;
 
         // ═══ 色彩页那张卡跟着面板一起刷：HDR 开关刚被上面的格式联动改过（禁用/锁定），
         // 卡片读的正是编码路径用的同一个谓词，晚一步刷新就会显示"HDR 直通"而产物是 SDR。
@@ -957,7 +971,7 @@ public sealed partial class MainWindow : Window
             if (AvifCodecCbo is not null)
             {
                 AvifCodecCbo.IsEnabled = true;
-                string curEncTag = (AvifCodecCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto";
+                string curEncTag = (AvifCodecCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "LibAom";
                 // ═══ 2026-09-17 修复：旧记录在用户改选后必须作废 ═══
                 // 旧实现只在"当前项是硬件"时写入 _avifEncoderHiddenByHdr，永不清除。
                 // 于是用户在 HDR 下改选 Auto / libaom（它们支持 HDR）后，字段里仍是旧的硬件名；
@@ -985,7 +999,7 @@ public sealed partial class MainWindow : Window
 
             // 编码器可能刚被改选 ⇒ 必须重新读一次 kind
             var kind = AvifEncoderCapabilities.Parse(
-                (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto");
+                (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "LibAom");
 
             // ── ② 色度：按能力暴露 ──
             if (AvifChromaCbo is not null)
@@ -1119,7 +1133,7 @@ public sealed partial class MainWindow : Window
         if (_formats[FormatCbo.SelectedIndex] != OutputFormat.AVIF) return;
 
         var kind = AvifEncoderCapabilities.Parse(
-            (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto");
+            (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "LibAom");
         if (AvifEncoderProbe.IsMeasured(kind)) return;
         if (!_capsProbing.TryAdd(kind, true)) return;   // 已有在途探测
 
@@ -1240,6 +1254,43 @@ public sealed partial class MainWindow : Window
         AppServices.Settings.SaveQuiet();
         // 承载方式换了 ⇒ "这一格式能不能 HDR、以什么形状 HDR" 的答案变了，色彩卡片必须跟着说真话
         RefreshColorMappingUi();
+    }
+
+    /// <summary>
+    /// ffmpeg 路径格失焦即时落盘（2026-11-04 接线审查 C-1）。
+    /// <para>本程序按"开机自启 + 最小化到托盘"常驻数天，而全量 <c>SaveSettings()</c> 只在托盘
+    /// 【退出】那条路径上跑 ⇒ 只靠退出保存的格子在崩溃/注销/直接关机时静默丢失，界面却显示已改
+    /// （与 <c>OnOcrLangChanged</c> 注释记的是同一件事）。本轮新增这一格时漏了实时回写，补上。</para>
+    /// <para>⚠ 复用 <c>_ffmpegPathEchoed</c> 闩：回显没成功（<c>ApplySettingsToUI</c> 前半段抛异常）
+    /// 时这一格是空的，而空串在本格是【合法值】（=自动解析），不判闩就会把 settings.json 里手改的
+    /// 路径静默清掉 —— 与 SaveSettings 里那条守卫同一个理由。</para>
+    /// </summary>
+    private void OnFfmpegPathLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (!_uiReady || !_ffmpegPathEchoed) return;
+        _settings.FfmpegPath = NormalizeFfmpegPathInput(FfmpegPathTxt.Text);
+        AppServices.Settings.SaveQuiet();
+    }
+
+    /// <summary>
+    /// ffmpeg 路径输入的规整（去首尾空白 / 包裹引号 / 尾分号）。
+    /// <para>抽成一份是因为它现在有两个写点（失焦即时落盘 + 全量 SaveSettings）——
+    /// 两处各写一遍规整，改一处漏一处就会让"退出保存"和"失焦保存"落进不同的值。</para>
+    /// </summary>
+    internal static string NormalizeFfmpegPathInput(string? raw) =>
+        (raw ?? "").Trim().Trim('"').Trim('\'').Trim().TrimEnd(';').Trim();
+
+    /// <summary>
+    /// 免费公共翻译端点开关即时落盘（2026-11-04 接线审查 C-1）：手法同 <c>OnArchiveChanged</c>，
+    /// <c>!_uiReady</c> 挡住 <c>ApplySettingsToUI</c> 回显期的程序赋值。这一格是普通 bool、
+    /// 不涉密钥删除语义 ⇒ 幂等 <c>SaveQuiet</c> 安全。（它此前只有全量保存的写点，
+    /// 而"关窗口 = 最小化到托盘"根本不跑全量保存。）
+    /// </summary>
+    private void OnFreeEndpointsChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_uiReady) return;
+        _settings.AllowUnofficialTranslateEndpoints = FreeEndpointsChk.IsChecked == true;
+        AppServices.Settings.SaveQuiet();
     }
 
     private void OnArchiveChanged(object sender, RoutedEventArgs e)

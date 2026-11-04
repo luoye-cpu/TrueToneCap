@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Models/AppSettingsData.cs
 // 应用设置数据模型 — 独立文件，支持 JSON 序列化（AOT 兼容）
@@ -40,6 +40,19 @@ public sealed class AppSettingsData
     /// ⇒ 1 号迁移对它唯一的受众（2026-09-24 之前那份全量序列化文件）一次都没跑过。
     /// 于是那批文件里既有旧端点值、又顶着"已迁移"的章，光看内容无法与真正迁移过的文件区分，
     /// 只能把 1 号作废、按 2 号重发一次（受影响的只有 0.3.4/0.3.5-beta 期间写过盘的文件）。
+    /// <para>⚠ 2026-11-04 刻意<b>不</b>提到 3（尽管本轮改了 <c>ChromaAvif</c> 420→444、
+    /// <c>AvifEncoder</c> Auto→LibAom，字面上违反上面那句纪律）。两条理由，均已取证：
+    /// ① <b>+1 会造灾</b>：<c>MigrateStaleDefaults</c> 的入口是 <c>revision &lt; current</c>，
+    /// 提到 3 会让<b>所有</b> revision=2 的正常文件重跑 2 号迁移，把全量用户刚挑过的
+    /// 质量档/色域无差别清成默认。
+    /// ② <b>差集序列化已经自动交还了这两格</b>：2 号盖章发生在 2026-09-25，而<b>当时</b>
+    /// <c>ChromaAvif</c> 的默认就是 420、<c>AvifEncoder</c> 的默认就是 Auto ⇒ 盖章后第一次
+    /// <c>Save()</c> 的剪枝就把这两个"等于当时默认"的老键剪掉了，此后读盘缺键 ⇒ 回落
+    /// <b>当前</b>代码默认 ⇒ 老用户自动拿到 444/LibAom。整条链由
+    /// <c>Test_AvifDefaults_RecastIsHandledByDifferentialSave</c> 真跑一遍钉住（不是只读注释）。
+    /// 唯一残留人群是"2 号之后从未再保存过"的老文件，而盘上的 <c>"ChromaAvif":"420"</c>
+    /// <b>无法区分</b>"整份写回替用户记下的默认"与"用户显式选了 420" ⇒ 任何迁移都会覆盖后者的选择。
+    /// 何况停在 420/Auto 不是错件（Auto+420 是自洽的硬件路径、产物正常），只是没享受新默认。</para>
     /// </remarks>
     public const int CurrentSettingsRevision = 2;
 
@@ -320,12 +333,14 @@ public sealed class AppSettingsData
     //   该字段在保存时被硬编码写 "444"、且无任何读取方，属冗余。
     public string ChromaJpegLi { get; set; } = "420";
     public string ChromaJpegXl { get; set; } = "444";
-    // ═══ 2026-09-19（用户决定）：GainMap 色度默认 4:2:0，最高允许手动选 4:4:4 ═══
-    // 上一版这个字段确实存在过，但【主路径从不读它】（JpegGainMapEncoder 把 base 硬编码成 444，
-    // 只有两条降级旁路读）⇒ 同格式因走哪条路而色度不同，字段本身是假配置，故当日被删（交接 §27）。
-    // 现在主路径已改为读 settings.ChromaSubsampling ⇒ 这个字段是【唯一事实源】且真的生效：
-    //   · 4:2:0 = Ultra HDR base 最兼容、最省的默认档（普通查看器按普通 JPEG 读它）；
-    //   · 4:4:4 = 手动选择，色度不砍、体积更大。增益图平面恒按灰度/444 编，不受此开关影响。
+    // ═══ 2026-11-04 现状：这个字段【只剩迁移价值】，管线已不再读它 ═══
+    // 演变史：2026-09-19 用户定为"默认 4:2:0、可手动 4:4:4"；2026-11-04 用户口径改成
+    // "增益图底图恒 4:4:4"（底图会被查看器乘增益放大还原，色度误差一并放大 ⇒ 精度优先于体积），
+    // 管线对 JPEG_GAINMAP 直接硬编码 "444"（见 CapturePipelineService 的 switch），
+    // JPEG LI 普通照片档则读 ChromaJpegLi。
+    // ⇒ ChromaGainMap 现在唯一的读者是 SettingsService 的一次性迁移：
+    //   它保留 420 是为了让迁移能判断"用户是否改过这一格"，默认值【刻意不跟着改】
+    //   （漂了就会让迁移误判、把用户没碰过的文件当成改过）。判据钉住这一点。
     public string ChromaGainMap { get; set; } = "420";
     // ── AVIF 色度默认值：这一处已经来回改过三次，动手前请读完 ──
     //   2026-09-17 → 420：当时是为了让 Auto 选到硬件（硬件只支持 420）。
@@ -335,7 +350,7 @@ public sealed class AppSettingsData
     //     即"Auto 选一个不必降级的编码器"，不再是"用最快的编码器然后提示降级"。
     //     所以这次改默认值的同时，也消掉了"默认设置却恒降级"的那次取舍；
     //     要 444 的用户在下拉里明选即可（会走 libaom，慢但色度不砍）。
-    //   ⚠ 必须与 XAML 的 AvifChromaCbo IsSelected 项同源，由 Test_AvifChroma_DefaultIs420 双向钉住
+    //   ⚠ 必须与 XAML 的 AvifChromaCbo IsSelected 项同源，由 Test_AvifChroma_DefaultIs444 双向钉住
     //     （只改一处会出现"设置里 420、界面显示 444"或反之）。
     // ═══ 2026-11-04 用户口径：默认 4:4:4（原 4:2:0）═══
     // 本应用产出的是截图，内容以文字/UI 为主，而 4:2:0 只保留一半色度分辨率。

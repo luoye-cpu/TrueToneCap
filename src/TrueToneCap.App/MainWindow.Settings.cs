@@ -184,9 +184,11 @@ public sealed partial class MainWindow : Window
         if (BdTiffCbo is not null) SetComboByTag(BdTiffCbo, _settings.BitDepthTiff.ToString());
         if (ChromaJpegXlCbo is not null) SetComboByTag(ChromaJpegXlCbo, _settings.ChromaJpegXl);
         if (ChromaJpegLiCbo is not null) SetComboByTag(ChromaJpegLiCbo, _settings.ChromaJpegLi);
-        // 2026-09-26：GainMapChromaCbo 已随合并删除 —— 增益图态的色度就是 ChromaJpegLiCbo 那一条，
-        // 管线对 JPEG_GAINMAP 也改读 ChromaJpegLi。ChromaGainMap 只剩历史值，界面不再显示它
-        //（回显一个用户看不见的字段 = 制造"改了没反应"的错觉）。增益图模式的下拉在下方回显。
+        // 2026-09-26：GainMapChromaCbo 已随合并删除 —— 增益图不再另设色度下拉。
+        // 2026-11-04 更新：增益图底图恒 4:4:4（管线硬编码），ChromaJpegLiCbo 只服务普通
+        // JPEG LI 照片档，开启增益图时它会被禁用并说明原因（见 UpdateQualityPanelCore）。
+        // ChromaGainMap 只剩迁移用的历史值，界面不再显示它（回显一个用户看不见的字段
+        // = 制造"改了没反应"的错觉）。增益图模式的下拉在下方回显。
         // 2026-09-19：原此处回显 ChromaWebPCbo 一并删除 —— WebP 的色度下拉已从界面撤掉
         //   （有损 WebP 恒 4:2:0 是格式定义、无损为 RGB，编码器也没有色度形参，
         //    回显一个不可能生效的值等于继续撒谎）。详见 AppSettingsData 同日期注释。
@@ -447,8 +449,7 @@ public sealed partial class MainWindow : Window
             //   这一格怕"回显根本没跑 ⇒ 空的控件被当成用户意图"。未回显 ⇒ 不写，
             //   否则手改在 settings.json 里的路径会被静默清掉（空串在这格是合法值，清得掉）。
             if (FfmpegPathTxt is not null && _ffmpegPathEchoed)
-                _settings.FfmpegPath = (FfmpegPathTxt.Text ?? "")
-                    .Trim().Trim('"').Trim('\'').Trim().TrimEnd(';').Trim();
+                _settings.FfmpegPath = NormalizeFfmpegPathInput(FfmpegPathTxt.Text);
             _settings.ArchiveEnabled = ArchiveChk?.IsChecked == true;
             _settings.ArchiveMode = (ArchiveModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
             _settings.FirstRun = false;

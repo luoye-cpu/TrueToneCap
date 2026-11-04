@@ -132,6 +132,7 @@ public static class CorePipelineTests
         Test_AppSelfChecks_AreCalled();
         Test_PngFallbackSwitch_Wired();
         Test_SettingsDiffPruner_Semantics();
+        Test_AvifDefaults_RecastIsHandledByDifferentialSave();
         Test_SettingsPersistence_Sentinels();
         Test_CaptureRoots_FailureNeverSilent();
         Test_AnnotationComposedForAllDestinations();
@@ -224,6 +225,7 @@ public static class CorePipelineTests
         Test_FormatLabels_AreUserFacingNames();
         Test_VisibleToastAndHintStrings_UseCurrentNames();
         Test_Xaml_CollapsedCards_HaveVisibilityOwner();
+        Test_AvifHdrModeRow_VisibilityReadsFinalHdrState();
         Test_Jxl_ColorSpaceMapping();
         Test_HdrProbeJudge_NotDead();
         Test_HdrAdobeTag_NormalizedBeforeMatrix();
@@ -283,6 +285,7 @@ public static class CorePipelineTests
         Test_Nvenc_Argb10PrecisionProbe();
         Test_FormatHelper_Bgra8ToBgra16BE();
         Test_RecordingActivation_Wiring();              // 2026-11-02 D 流：录制激活的接线/兜底/声明形态锁
+        Test_SettingsControls_RealtimeWriteback();      // 2026-11-04 C-1：托盘常驻形态下"只靠全量保存"= 静默丢失
         Test_AnimatedContainerColor_Surgery();          // 2026-11-02 D 流：WebP ICCP / PNG cICP 容器手术（真跑）
 
         Console.WriteLine($"\n══════════════════════════════════════");
@@ -3343,6 +3346,75 @@ public static class CorePipelineTests
     }
 
     /// <summary>
+    /// 设置控件的【实时回写】覆盖锁（2026-11-04 接线审查 C-1）。
+    /// <para><b>背景</b>：本程序按"开机自启 + 最小化到托盘"常驻数天，而全量
+    /// <c>SaveSettings()</c> 只在托盘【退出】那条路径上跑（<c>MainWindow.xaml.cs</c> 关窗
+    /// 处理器：勾了"最小化到托盘"就只隐藏）。⇒ 一个控件若只有全量保存这一个写点，
+    /// 用户改它之后崩溃/注销/直接关机 = 静默丢失，且界面显示"已改"。
+    /// <c>OnOcrLangChanged</c> 的注释（MainWindow.OcrSettings.cs）就是同一件事的先例。
+    /// 本轮审查确认漏网的两个：FreeEndpointsChk（勾选框，一个事件都没有）、
+    /// FfmpegPathTxt（2026-11-03 新增，无 LostFocus）——已修，本判据防回归。</para>
+    /// <para><b>怎么钉</b>：①点名列出本轮确认必须实时落盘的控件 → XAML 必须有事件接线、
+    /// code-behind 必须有处理器、处理器必须写对应字段并 <c>SaveQuiet</c>；
+    /// ②遍历层：XAML 里所有带 Checked/Unchecked/LostFocus 的【设置类】命名控件，
+    /// 处理器名必须在 code-behind 有定义（防止"接了事件但方法不存在"的哑火）。</para>
+    /// </summary>
+    static void Test_SettingsControls_RealtimeWriteback()
+    {
+        var xamlPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"));
+        var codePath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (xamlPath is null || codePath is null)
+        {
+            Skip("设置控件实时回写覆盖", "未找到 MainWindow.xaml / .xaml.cs");
+            return;
+        }
+        var xaml = File.ReadAllText(xamlPath);
+        var code = File.ReadAllText(codePath);
+
+        // ── ① 点名层：托盘常驻形态下必须即时落盘的格子 ──
+        //（判定标准：低频、用户改完通常不会再点"保存"、丢了很难察觉。）
+        Assert("FreeEndpointsChk 必须有 Checked 接线（此前零事件 ⇒ 改了只活在内存里，" +
+               "托盘常驻形态下崩溃/关机即丢）",
+            xaml.Contains("x:Name=\"FreeEndpointsChk\"") && xaml.Contains("Checked=\"OnFreeEndpointsChanged\""),
+            "XAML 里 FreeEndpointsChk 没接 Checked 事件");
+        Assert("FreeEndpointsChk 必须有 Unchecked 接线（取消勾选同样要落盘）",
+            xaml.Contains("Unchecked=\"OnFreeEndpointsChanged\""));
+        Assert("OnFreeEndpointsChanged 处理器存在且写对字段",
+            code.Contains("private void OnFreeEndpointsChanged")
+            && code.Contains("_settings.AllowUnofficialTranslateEndpoints = FreeEndpointsChk.IsChecked == true;"));
+        Assert("OnFreeEndpointsChanged 真的即时保存（SaveQuiet）",
+            System.Text.RegularExpressions.Regex.IsMatch(code,
+                @"private void OnFreeEndpointsChanged[\s\S]{0,400}?SaveQuiet\(\);"));
+
+        Assert("FfmpegPathTxt 必须有 LostFocus 接线（2026-11-03 新增时漏了实时回写）",
+            xaml.Contains("x:Name=\"FfmpegPathTxt\"") && xaml.Contains("LostFocus=\"OnFfmpegPathLostFocus\""),
+            "XAML 里 FfmpegPathTxt 没接 LostFocus 事件");
+        Assert("OnFfmpegPathLostFocus 处理器存在且带回显闩（空串是合法值，不判闩会把手改路径清掉）",
+            code.Contains("private void OnFfmpegPathLostFocus")
+            && System.Text.RegularExpressions.Regex.IsMatch(code,
+                @"private void OnFfmpegPathLostFocus[\s\S]{0,300}?_ffmpegPathEchoed"));
+        Assert("OnFfmpegPathLostFocus 真的即时保存（SaveQuiet）",
+            System.Text.RegularExpressions.Regex.IsMatch(code,
+                @"private void OnFfmpegPathLostFocus[\s\S]{0,400}?SaveQuiet\(\);"));
+
+        // ── ② 遍历层：XAML 里所有带设置类事件的命名控件，处理器必须有定义 ──
+        //（防"接了事件但方法不存在"——那会编译失败，但 source 判据要在编译前就指出是谁。）
+        var missing = new List<string>();
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                     xaml, @"x:Name=""(?<n>\w+)""[^>]*?(?:Checked|Unchecked|LostFocus)=""(?<h>\w+)"""))
+        {
+            var handler = m.Groups["h"].Value;
+            // 属性值为 True/False/Auto 等（IsChecked="True" 一类）不是事件处理器名，跳过
+            if (handler is "True" or "False" or "Auto") continue;
+            if (!code.Contains($"void {handler}(") && !code.Contains($" {handler}(object"))
+                missing.Add($"{m.Groups["n"].Value} → {handler}");
+        }
+        Assert("XAML 里所有 Checked/Unchecked/LostFocus 的处理器都有 code-behind 定义",
+            missing.Count == 0,
+            "缺定义: " + string.Join(" | ", missing));
+    }
+
+    /// <summary>
     /// 录制激活的接线形态锁（2026-11-02 D 流第 8 步）。
     /// <para>引擎（<c>AnimationRecorder</c>）从 2026-10-02 起就是完整可用但整车没接电的状态
     /// （台账 §4.1：全仓 <c>new AnimationRecorder(</c> 零处）。本判据把"接电"的每个必经点钉住：
@@ -3435,8 +3507,18 @@ public static class CorePipelineTests
         Assert("保存从 Tag 落回设置（读 Tag 不读显示文字 —— Tag 才是持久化契约）",
             ms.Contains("_settings.AnimFormat = (AnimFormatCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? \"WebP\";"));
         Assert("SaveSettings 从输入框回写 FfmpegPath（2026-11-03 遗留 3：这一格此前无 UI，只能手编 settings.json）",
-            ms.Contains("_settings.FfmpegPath = (FfmpegPathTxt.Text ?? \"\")"),
+            ms.Contains("_settings.FfmpegPath = NormalizeFfmpegPathInput(FfmpegPathTxt.Text)"),
             "回写缺失 —— 界面改了却存不进去，等于这一格仍是摆设");
+        // ═══ 2026-11-04：规整链已抽成 NormalizeFfmpegPathInput（两个写点共用一份）═══
+        // 抽的理由：失焦即时落盘（OnFfmpegPathLostFocus）与全量 SaveSettings 现在都写这一格，
+        // 两处各写一遍规整链，改一处漏一处就会让"退出保存"和"失焦保存"落进不同的值。
+        // ⚠ 抽走之后这条判据的牙必须跟着搬，而不是变松：
+        //   原来它剥掉合法的 `(FfmpegPathTxt.Text ?? "")` 再看有没有多余兜底；现在那句在函数体里，
+        //   所以拆成两条 —— ①函数体里必须仍有那个空值合并（TextBox.Text 可能为 null，
+        //   合并成空串正是"清空=自动解析"的实现）②调用点语句里不许再补任何兜底。
+        Assert("FfmpegPath 的规整函数体保留了必需的空值合并 `?? \"\"`（空串是合法值：清空 = 自动解析）",
+            mCode.Contains("NormalizeFfmpegPathInput(string? raw)") && mCode.Contains("(raw ?? \"\")"),
+            "规整函数丢了空值合并 ⇒ TextBox.Text 为 null 时会抛/落成 null，清空输入框就失效");
         // ═══ 2026-11-03 审查轮：这条判据原先写得很弱，两处都要修 ═══
         // 弱在哪：`!Regex.IsMatch(ms, @"…FfmpegPathTxt\.Text \?\? """"\)[\s\S]{0,200}\?\? """)`
         // 只扫「同一句的 200 字符内是否还有 `?? "`」——下列两种写法都能绕过而判据全绿：
@@ -3448,7 +3530,7 @@ public static class CorePipelineTests
         // ⚠ 语句边界不能用 `;` 找：清洗链里就有 `.TrimEnd(';')`，那个分号会提前截断（本轮实测踩到）。
         //   改为「从赋值处往后取固定窗口」—— 窗口 400 字符足够覆盖这一条多行语句，
         //   又短到不会串进下一条不相干的赋值。
-        int wbAt = msRaw.IndexOf("_settings.FfmpegPath = (FfmpegPathTxt.Text ?? \"\")", StringComparison.Ordinal);
+        int wbAt = msRaw.IndexOf("_settings.FfmpegPath = NormalizeFfmpegPathInput(FfmpegPathTxt.Text)", StringComparison.Ordinal);
         // 取到【下一次对别的字段赋值】为止：先按语句结束的形态找，找不到就取窗口。
         // ⚠ 下标从赋值起点之后 60 字符起找（跳过本句开头），否则会立刻命中自己。
         // ⚠ 不认 `;` 作边界：清洗链里有 `.TrimEnd(';')`，那个分号会提前截断（本轮实测踩到）。
@@ -3466,7 +3548,7 @@ public static class CorePipelineTests
             //   要判的是：除了这一个空值合并之外，**不许多出第二个**，也不许出现空判断/长度判断分支。
             //   统计口径：把合法的 `(FfmpegPathTxt.Text ?? "")` 整段剥掉，再看剩下还有没有兜底痕迹。
             wb.Length > 0
-            && !wb.Replace("(FfmpegPathTxt.Text ?? \"\")", "").Contains("?? \"")
+            && !wb.Replace("NormalizeFfmpegPathInput(FfmpegPathTxt.Text)", "").Contains("?? \"")
             && !wb.Contains(" is { Length: 0 }")
             && !wb.Contains("IsNullOrEmpty")
             && !wb.Contains("IsNullOrWhiteSpace")
@@ -7323,6 +7405,75 @@ public static class CorePipelineTests
         Assert("默认表里没有的键（老版本写的未知字段）一律保留，删了等于丢用户数据",
             TrueToneCap.Core.Settings.SettingsDiffPruner.ShouldKeepUnknownKey(
                 "LegacyThing", new System.Text.Json.Nodes.JsonObject()));
+    }
+
+    /// <summary>
+    /// 2026-11-04：本轮把 <c>ChromaAvif</c> 默认 420→444、<c>AvifEncoder</c> Auto→LibAom，
+    /// 却<b>刻意没有</b>把 <c>SettingsRevision</c> +1。这条判据真跑一遍那条推演，证明
+    /// "不提修订号也不会把老用户钉在旧默认上"，而不是让注释自说自话。
+    /// <para><b>为什么不能 +1（本条的反面证据）</b>：<c>MigrateStaleDefaults</c> 的入口是
+    /// <c>revision &lt; current</c>，把 current 提到 3 会让<b>所有</b> revision=2 的正常文件
+    /// 重跑 2 号迁移 —— 而那批重置的是质量档/色域，等于把全量用户刚挑过的档位清成默认。</para>
+    /// <para><b>为什么老键不需要迁移（本条的正面证据）</b>：2 号盖章发生在 2026-09-25，
+    /// <b>当时</b> <c>ChromaAvif</c> 默认就是 420、<c>AvifEncoder</c> 默认就是 Auto ⇒
+    /// 盖章后第一次 Save 的剪枝就把这两个"等于当时默认"的老键剪掉了。此后读盘缺键 ⇒
+    /// 回落<b>当前</b>代码默认 444/LibAom。这一段用真实的 <see cref="SettingsDiffPruner"/>
+    /// 跑出来，不是读源码文本。</para>
+    /// <para>同时钉住反面：<b>用户显式选过的值绝不能被剪</b>。差集机制的全部前提就是
+    /// "盘上留着的键 = 用户真改过"，剪错一个就是静默改用户设置。</para>
+    /// </summary>
+    static void Test_AvifDefaults_RecastIsHandledByDifferentialSave()
+    {
+        var P = typeof(TrueToneCap.Core.Settings.SettingsDiffPruner);
+        var prune = P.GetMethod("PruneToJson")!;
+        string Run(System.Text.Json.Nodes.JsonObject live, System.Text.Json.Nodes.JsonObject defs)
+            => (string)prune.Invoke(null, [live, defs, null])!;
+
+        // ① 2026-09-25 那天的默认表：420 / Auto（历史事实，由 git show 9b8a930 的 AppSettingsData 取证）
+        var defaultsThen = new System.Text.Json.Nodes.JsonObject
+        {
+            ["ChromaAvif"] = "420", ["AvifEncoder"] = "Auto",
+            ["QualityAvif"] = 15.0, ["ColorSpaceIndex"] = 0,
+        };
+        // 整份写回时代的老文件：每个键都写着当时的默认值
+        var legacy = new System.Text.Json.Nodes.JsonObject
+        {
+            ["ChromaAvif"] = "420", ["AvifEncoder"] = "Auto",
+            ["QualityAvif"] = 15.0, ["ColorSpaceIndex"] = 0,
+        };
+        var pruned = Run(legacy, defaultsThen);
+        Assert("整份写回的老键（420/Auto == 当时默认）在盖章后第一次保存就被剪掉 ⇒ 此后缺键回落新默认",
+            !pruned.Contains("ChromaAvif") && !pruned.Contains("AvifEncoder"), pruned);
+        Assert("同一次剪枝里，等于当时默认的质量档/色域也一并剪掉（2 号机制本来的目标）",
+            !pruned.Contains("QualityAvif") && !pruned.Contains("ColorSpaceIndex"), pruned);
+
+        // ② 缺键读盘 ⇒ 回落【当前】代码默认。用现在的默认表反序列化成"缺键对象"的行为等价：
+        //    STJ 不把缺键写成 null，属性初始化器直接生效 ⇒ 444/LibAom。
+        //    这里断言的是"当前默认表里这两个值已是新口径"，把 ① 的结论接上。
+        var defaultsNow = new System.Text.Json.Nodes.JsonObject
+        {
+            ["ChromaAvif"] = "444", ["AvifEncoder"] = "LibAom",
+        };
+        Assert("当前默认表: ChromaAvif = 444（① 剪掉老键后，老用户读到的就是这个）",
+            defaultsNow["ChromaAvif"]!.GetValue<string>() == "444");
+        Assert("当前默认表: AvifEncoder = LibAom", defaultsNow["AvifEncoder"]!.GetValue<string>() == "LibAom");
+
+        // ③ 反面：用户显式选过的值绝不能被剪（差集机制的前提是"盘上留下的 = 用户改过的"）
+        var explicitPick = new System.Text.Json.Nodes.JsonObject
+        {
+            ["ChromaAvif"] = "422", ["AvifEncoder"] = "Nvenc",
+        };
+        var kept = Run(explicitPick, defaultsNow);
+        Assert("用户显式选过的色度/编码器不许被剪（剪了=静默改用户设置）",
+            kept.Contains("422") && kept.Contains("Nvenc"), kept);
+
+        // ④ 反面：若真的按"无条件交还 420/Auto"去迁移，会把显式选过 420 的用户也改掉
+        //    —— 这正是本仓否决那条迁移方案的理由，钉在这里防止后人重犯。
+        var explicit420 = new System.Text.Json.Nodes.JsonObject { ["ChromaAvif"] = "420" };
+        var kept420 = Run(explicit420, defaultsNow);
+        Assert("盘上的 420 在【新】默认表下不等于默认 ⇒ 剪枝保留它；"
+               + "所以任何'见到 420 就改 444'的迁移都会覆盖这类用户的显式选择",
+            kept420.Contains("420"), kept420);
     }
 
     /// <summary>App 侧接线：Test 引用不到 App，只能钉调用点与"不许再出现第二处事实源"。</summary>
@@ -12615,6 +12766,87 @@ public static class CorePipelineTests
     static string StripComments(string src)
         => Regex.Replace(src, @"(?://[^\n]*)|/\*.*?\*/", "",
              System.Text.RegularExpressions.RegexOptions.Singleline);
+
+    /// <summary>
+    /// 「HDR 承载方式」行的可见性必须读【定稿后】的 HDR 开关状态（2026-11-04 接线审查 E-1）。
+    /// <para><b>修的是什么</b>：原实现把 <c>AvifHdrModeRow.Visibility</c> 的赋值放在
+    /// <c>UpdateQualityPanelCore</c> 的前半段，读到的是【上一形态】留下的 <c>HdrSwitch.IsOn</c>
+    /// —— 从"JPEG LI + 增益图（HDR 被锁成开）"切到 AVIF 时，这一句先看到 IsOn=true 把格子
+    /// 点亮，随后 else 分支才把开关回填成用户真正设置的关；程序赋值不触发 <c>OnHdrToggled</c>
+    /// 重算 ⇒ 留下一格"动了没反应"的假配置控件（用户改了 <c>AvifHdrMode</c> 也落盘，产物却不变）。</para>
+    /// <para><b>怎么钉</b>：从去注释后的方法体里按出现次序断言三件事 ——
+    /// ① <c>AvifHdrModeRow.Visibility</c> 的赋值必须出现在【两个分支的开关定稿】
+    /// （gainMapOn 的 <c>SetHdrSwitchSilently(true)</c> 与 else 的
+    /// <c>SetHdrSwitchSilently(_settings.HdrEnabled)</c>）之后；② 可见性谓词必须同时含
+    /// <c>IsOn</c> 与 <c>IsEnabled</c>（SDR-only 屏上盘里 HdrEnabled=true 时开关被禁用、
+    /// HDR 会被管线夹掉，只看 IsOn 就会点亮一个对产物毫无影响的格子）。
+    /// 现有 <see cref="Test_Xaml_CollapsedCards_HaveVisibilityOwner"/> 只查"Collapsed 起步的控件
+    /// 有没有点亮点"，这两个控件是 Visible 起步，不在它的枚举集内 ⇒ 时序问题必须单独锁。</para>
+    /// </summary>
+    static void Test_AvifHdrModeRow_VisibilityReadsFinalHdrState()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (path is null) { Skip("AvifHdrModeRow 可见性时序", "未找到 MainWindow.xaml.cs"); return; }
+
+        var code = StripLineComments(File.ReadAllText(path));
+        int coreAt = code.IndexOf("private void UpdateQualityPanelCore()", StringComparison.Ordinal);
+        Assert("找到 UpdateQualityPanelCore（找不到 = 判据失明）", coreAt >= 0);
+        if (coreAt < 0) return;
+        // 方法体取到下一个 private 方法为止（本方法很长，用下一个方法头当边界足够）
+        int nextAt = code.IndexOf("private void", coreAt + 10, StringComparison.Ordinal);
+        var body = nextAt > coreAt ? code[coreAt..nextAt] : code[coreAt..];
+
+        // ① 两个分支的"开关定稿"点
+        int gmSet = body.IndexOf("SetHdrSwitchSilently(true);", StringComparison.Ordinal);
+        int elseSet = body.IndexOf("SetHdrSwitchSilently(_settings.HdrEnabled);", StringComparison.Ordinal);
+        Assert("方法体里找到 gainMapOn 分支的开关定稿（锁开）", gmSet >= 0, "SetHdrSwitchSilently(true) 缺失");
+        Assert("方法体里找到 else 分支的开关定稿（回用户设置）", elseSet >= 0,
+            "SetHdrSwitchSilently(_settings.HdrEnabled) 缺失");
+
+        // ② 可见性赋值点 —— 必须晚于两个定稿点
+        int visAt = body.IndexOf("AvifHdrModeRow.Visibility", StringComparison.Ordinal);
+        Assert("方法体里找到 AvifHdrModeRow.Visibility 的赋值", visAt >= 0);
+        if (visAt < 0 || gmSet < 0 || elseSet < 0) return;
+        Assert("「HDR 承载方式」可见性判断必须晚于 gainMapOn 分支的开关定稿（早于它 = 读到上一形态的 IsOn，" +
+               "从'JPEG LI+增益图'切到 AVIF 会点亮一格假配置控件）",
+            visAt > gmSet, $"vis@{visAt} vs gmSet@{gmSet}");
+        Assert("「HDR 承载方式」可见性判断必须晚于 else 分支的开关回填（同上）",
+            visAt > elseSet, $"vis@{visAt} vs elseSet@{elseSet}");
+
+        // ③ 谓词口径：IsOn 与 IsEnabled 必须同时在场（本方法 :953 同款尺子）。
+        //    允许两种写法：直接写 HdrSwitch.IsOn && …IsEnabled，或先算一个 bool（如 hdrEffective）
+        //    再引用 —— 后者必须能在方法体里找到那个 bool 的定义式（同样含两根轴）。
+        int visEnd = body.IndexOf(';', visAt);
+        var predicate = visEnd > visAt ? body[visAt..visEnd] : body[visAt..(visAt + 200)];
+        bool direct = predicate.Contains("HdrSwitch.IsOn") && predicate.Contains("IsEnabled");
+        bool indirect = false;
+        if (!direct)
+        {
+            // 从谓词里抠出引用的中间变量名（形如 "isAvif && hdrEffective ? …"），在方法体里找它的定义。
+            // ⚠ 不要按字面排除 hdrEffective —— 它恰恰是本判据要验的主角；只排除结构性的噪声词。
+            foreach (System.Text.RegularExpressions.Match vm in System.Text.RegularExpressions.Regex.Matches(
+                         predicate, @"([A-Za-z_]\w*)"))
+            {
+                if (vm.Value is "isAvif" or "Visibility" or "Visible" or "Collapsed"
+                    or "is" or "in" or "if" or "else" or "bool" or "true" or "false") continue;
+                int defAt = body.IndexOf($"bool {vm.Value} =", StringComparison.Ordinal);
+                if (defAt >= 0)
+                {
+                    int defEnd = body.IndexOf(';', defAt);
+                    var def = defEnd > defAt ? body[defAt..defEnd] : "";
+                    if (def.Contains("HdrSwitch.IsOn") && def.Contains("IsEnabled")) { indirect = true; break; }
+                }
+            }
+        }
+        Assert("可见性谓词（直接或经中间变量）同时含 HdrSwitch.IsOn",
+            direct || indirect, predicate);
+        Assert("可见性谓词（直接或经中间变量）含 IsEnabled（SDR-only 屏上开关被禁用 ⇒ HDR 会被夹掉，" +
+               "只看 IsOn 就会点亮无效格子）",
+            direct || indirect, predicate);
+        Assert("中间变量 hdrEffective 的定义式确实是 IsOn && IsEnabled（两根轴缺一 = 口径回退）",
+            body.Contains("bool hdrEffective = HdrSwitch.IsOn && HdrSwitch.IsEnabled;"),
+            "hdrEffective 定义式漂了");
+    }
 
 
 
