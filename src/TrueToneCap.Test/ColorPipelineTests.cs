@@ -74,6 +74,7 @@ public static class ColorPipelineTests
         EncodedPng_HdrCicp_Bt2020Pq();
         EncodedPng_HdrCicp_10BitSbit();
         EncodedJpeg_GainMapMarker();
+        EncodedAvif_GainMapContainer();   // 2026-11-03：AVIF 增益图档容器结构 + 默认 PQ 档未变
         EncodedAvif_ColorProperties();
 
         // ─── 6. 色调映射单调性 ───
@@ -933,55 +934,430 @@ public static class ColorPipelineTests
         // 现在本用例内也逐条读回，使 --color-tests 单独跑时这条不是空承诺。
         // 判据来自段布局标准本身（T.81 的 marker/长度、CTA-2048 的 XMP+MPF、ISO 21496-1 的
         // 增益图侧元数据），不是自家 JpegGainMapEncoder 的写入代码：
-        //   Base   : SOI … APP1(hdrgm XMP) … APP2(MPF) … SOS … EOI
-        //   GainMap: 第二个 SOI 之后紧跟 APP2(urn:iso:std:iso:ts:21496:-1)
+        //   Base   : SOI … APP2(MPF) … SOS … EOI
+        //   GainMap: SOI 后 [APP2(urn:iso:std:iso:ts:21496:-1)]
+        // ═══ 2026-11-03 二次收口：恒写 ISO 21496-1，元数据【不做用户抉择】═══
+        // 上午的三档下拉整体退役（用户口径："JPEG 应该只产出 ISO 标准的这一种"）。
+        // 正反两向都必须钉：正向 = ISO 段恒在；反向 = 任何一侧出现 hdrgm XMP 都是回归
+        // （说明有人把退役的双写路径接回来了）。"恒 ISO"与"恒无 XMP"是一枚硬币的两面。
         var bgra = GeneratePattern(32, 32);
-        string path = Path.Combine(OutDir, "gainmap_test.jpg");
-        if (File.Exists(path)) File.Delete(path);
+        var hdr = PixelOps.BgraToScrgbLinearFast(bgra, 32, 32);
+        {
+            string tag = "Iso";
+            string path = Path.Combine(OutDir, $"gainmap_test_{tag}.jpg");
+            if (File.Exists(path)) File.Delete(path);
+            try
+            {
+                var encoder = EncoderFactory.Create(OutputFormat.JPEG_GAINMAP);
+                // GainMap 质量 = butteraugli distance (0.5-3.0), 用 1.0 (90 是百分比语义, 非法)
+                var settings = new EncodingSettings
+                {
+                    Format = OutputFormat.JPEG_GAINMAP, Quality = 1.0f, HdrOutput = true,
+                    GainMapMode = GainMapMode.Rgb,
+                    OutputBitDepth = 8,
+                };
+                var hdrFrame = new HdrFrameData { Pixels = hdr, Width = 32, Height = 32 };
+                encoder.EncodeAsync(hdrFrame, settings, path).GetAwaiter().GetResult();
+                Assert($"JPEG Gain Map [{tag}]: 文件已创建", File.Exists(path) && new FileInfo(path).Length > 0);
+                if (!File.Exists(path)) return;
+
+                var bytes = File.ReadAllBytes(path);
+                int secondSoi = -1;
+                for (int i = 2; i + 1 < bytes.Length; i++)
+                    if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8) { secondSoi = i; break; }
+                Assert($"JPEG Gain Map [{tag}]: 含第二个 SOI（Base + 增益图 = 双 SOI）",
+                    secondSoi > 0, secondSoi < 0 ? "全文只有一个 SOI ⇒ 没有增益图" : $"SOI@{secondSoi}");
+                if (secondSoi < 0) return;
+
+                // ① 正向：增益图侧的 ISO 21496-1 二进制元数据恒在
+                var iso = FindJpegAppPayload(bytes, secondSoi, bytes.Length, 0xE2, "urn:iso:std:iso:ts:21496:-1");
+                Assert("JPEG Gain Map [Iso]: 增益图侧 ISO 21496-1 段恒存在（恒写标准，不做用户抉择）",
+                    iso is not null, iso is null ? "未找到" : $"找到 {iso.Length}B");
+
+                // ② Base 侧的 MPF（CIPA DC-007）—— 恒存在：它定位增益图
+                Assert("JPEG Gain Map [Iso]: Base 内含 MPF APP2 段",
+                    FindJpegAppPayload(bytes, 0, secondSoi, 0xE2, "MPF") is not null);
+
+                // ③ 反向：退役的 hdrgm XMP 双写路径不许回来 —— 任何一侧出现都是回归
+                var xmp = FindJpegAppPayload(bytes, 0, secondSoi, 0xE1, "hdrgm");
+                Assert("JPEG Gain Map [Iso]: Base 侧无 APP1 XMP（双写已退役，出现即回归）",
+                    xmp is null, xmp is null ? "未找到（正确）" : $"找到 {xmp.Length}B");
+                var secXmp = FindJpegAppPayload(bytes, secondSoi, bytes.Length, 0xE1, "hdrgm");
+                Assert("JPEG Gain Map [Iso]: 次图侧无 APP1 XMP（双写已退役，出现即回归）",
+                    secXmp is null, secXmp is null ? "未找到（正确）" : $"找到 {secXmp.Length}B");
+            }
+            catch (Exception ex)
+            {
+                Skip("JPEG Gain Map 编码 [Iso]", $"依赖 Native lib，本机不可用: {ex.GetType().Name}");
+            }
+        }
+    }
+
+    static void EncodedAvif_GainMapContainer()
+    {
+        // ═══ 2026-11-03：AVIF 的「增益图」承载档（新增开关的第二档）═══
+        // 结构判据来自 ISO/IEC 14496-12（box 布局 / iinf / iref dimg / grpl altr / iloc）与
+        // ISO/IEC 21496-1（tmap 载荷 = u8 version + GainMapMetadata），不是自家写出器的实现细节：
+        //   期望形状（与 libavif 自家增益图产物同构）：
+        //     ftyp 兼容品牌含 tmap
+        //     iinf 3 个 item：1=av01(底图) 2=tmap 3=av01(增益图)
+        //     iref dimg: 2 -> [1, 3]
+        //     grpl altr: tmap + 底图   ← 缺它 avifdec 报 "Gain map: Absent"
+        //     iloc: item2 的 extent 长 = 1 + 21 + 3×40 = 142（3 通道声明）
+        //   并且 tmap 载荷 flags 的 bit7（multi-channel）必须为 1 —— 与本实现"恒交付 3 平面"成套。
+        // ★ 同时钉住【默认档没变】：同一帧用默认 Pq 档编，产物里不许出现 tmap 品牌/dimg/altr ——
+        //   这条是"新增开关没有悄悄改变老用户产物"的牙。
+        var bgra = GeneratePattern(32, 32);
+        var hdr = PixelOps.BgraToScrgbLinearFast(bgra, 32, 32);
+
+        string gmPath = Path.Combine(OutDir, "avif_gainmap_mode.avif");
+        string pqPath = Path.Combine(OutDir, "avif_hdr_pq_mode.avif");
+        foreach (var p in new[] { gmPath, pqPath }) if (File.Exists(p)) File.Delete(p);
 
         try
         {
-            var encoder = EncoderFactory.Create(OutputFormat.JPEG_GAINMAP);
-            // GainMap 质量 = butteraugli distance (0.5-3.0), 用 1.0 (90 是百分比语义, 非法)
-            var settings = new EncodingSettings
+            EncodingSettings Mk(AvifHdrMode mode) => new()
             {
-                Format = OutputFormat.JPEG_GAINMAP, Quality = 1.0f, HdrOutput = true,
-                GainMapMode = GainMapMode.Rgb,
-                OutputBitDepth = 8,
+                Format = OutputFormat.AVIF, Quality = 40f, HdrOutput = true,
+                // 2026-11-04 用户口径：增益图档底图默认 10-bit（增益层恒 8-bit）
+                ColorSpaceTag = "sRGB", OutputBitDepth = 10, ChromaSubsampling = "444",
+                AvifEncoderKind = AvifEncoderKind.LibAom,   // 增益图档恒走 avifenc；避开硬件分支
+                AvifHdrMode = mode,
             };
-            var hdr = PixelOps.BgraToScrgbLinearFast(bgra, 32, 32);
-            var hdrFrame = new HdrFrameData { Pixels = hdr, Width = 32, Height = 32 };
-            encoder.EncodeAsync(hdrFrame, settings, path).GetAwaiter().GetResult();
-            Assert("JPEG Gain Map: 文件已创建", File.Exists(path) && new FileInfo(path).Length > 0);
-            if (!File.Exists(path)) return;
+            var frame = new HdrFrameData { Pixels = hdr, Width = 32, Height = 32 };
+            EncoderFactory.Create(OutputFormat.AVIF)
+                .EncodeAsync(frame, Mk(AvifHdrMode.GainMap), gmPath).GetAwaiter().GetResult();
+            EncoderFactory.Create(OutputFormat.AVIF)
+                .EncodeAsync(frame, Mk(AvifHdrMode.Pq), pqPath).GetAwaiter().GetResult();
 
-            var bytes = File.ReadAllBytes(path);
-            int secondSoi = -1;
-            for (int i = 2; i + 1 < bytes.Length; i++)
-                if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8) { secondSoi = i; break; }
-            Assert("JPEG Gain Map: 含第二个 SOI（Base + 增益图 = 双 SOI）",
-                secondSoi > 0, secondSoi < 0 ? "全文只有一个 SOI ⇒ 没有增益图" : $"SOI@{secondSoi}");
-            if (secondSoi < 0) return;
+            Assert("AVIF 增益图档: 文件已创建", File.Exists(gmPath) && new FileInfo(gmPath).Length > 0);
+            Assert("AVIF 默认 PQ 档: 文件已创建", File.Exists(pqPath) && new FileInfo(pqPath).Length > 0);
+            if (!File.Exists(gmPath) || !File.Exists(pqPath)) return;
 
-            // ① Base 侧（第二个 SOI 之前）的 XMP：hdrgm 命名空间的版本与增益上限
-            var xmp = FindJpegAppPayload(bytes, 0, secondSoi, 0xE1, "http://ns.adobe.com/xap/1.0/");
-            Assert("JPEG Gain Map: Base 内有 APP1 XMP 段（必须落在第二个 SOI 之前）", xmp is not null);
-            if (xmp is not null)
+            var d = File.ReadAllBytes(gmPath);
+            var boxes = AvifBoxes(d);
+            string types = string.Join(",", boxes.Select(b => b.Type));
+
+            Assert($"AVIF 增益图档: ftyp 兼容品牌含 tmap（实际盒={types}）",
+                FtypBrands(d).Contains("tmap"));
+            Assert("AVIF 增益图档: iinf 是 3 个 item（底图/tmap/增益图）",
+                CountBox(boxes, "infe") == 3, $"infe={CountBox(boxes, "infe")}");
+            Assert("AVIF 增益图档: 含 iref.dimg 派生引用", ContainsBox(boxes, "dimg"));
+            // 2026-11-03 变异验证的教训：只查"有 dimg 盒"抓不住"引用内容被改坏"——
+            //   把 dimg 的 from/count 改错后本判据全绿、avifdec 却报 "Invalid tone mapped image item"。
+            //   所以必须逐字节验引用体：from=2(tmap)、reference_count=2、to=[1(底图),3(增益图)]。
+            Assert("AVIF 增益图档: dimg 引用体 = from 2, count 2, [1, 3]（libavif 强校验的形状）",
+                TryReadDimgBody(d, out int from, out int cnt, out int to1, out int to2)
+                    && from == 2 && cnt == 2 && to1 == 1 && to2 == 3,
+                TryReadDimgBody(d, out var f2, out var c2, out var a2, out var b2)
+                    ? $"实得 from={f2} count={c2} to=[{a2},{b2}]" : "未找到 dimg 引用体");
+            Assert("AVIF 增益图档: 含 grpl.altr 替代组（缺它 avifdec 报 Gain map: Absent）",
+                ContainsBox(boxes, "altr"));
+            Assert("AVIF 增益图档: 底图与增益图属性盒都在（ispe/pixi/av1C 成对）",
+                CountBox(boxes, "ispe") >= 2 && CountBox(boxes, "pixi") >= 2);
+
+            // ═══ 2026-11-04 用户口径：底图 10-bit、增益层 8-bit ═══
+            // 用 pixi 盒的 bits_per_channel 验（AV1 的序列头里也有位深，但要解 OBU；
+            // pixi 是容器层直接声明、且 avifenc 会照实写）⇒ 这比解码流稳。
+            // ⚠ 顺序：ipco 里先底图属性、后增益图属性 ⇒ 第一个 pixi 是底图、第二个是增益层。
+            var pixis = PixiChannelDepths(d);
+            Assert($"AVIF 增益图档: pixi 至少两份（实得 {pixis.Count}）", pixis.Count >= 2);
+            if (pixis.Count >= 2)
             {
-                Assert("JPEG Gain Map: XMP 含 hdrgm:Version", xmp.Contains("hdrgm:Version"));
-                Assert("JPEG Gain Map: XMP 含 hdrgm:GainMapMax", xmp.Contains("hdrgm:GainMapMax"));
+                Assert("AVIF 增益图档: 底图 pixi 声明的位深 = 10（默认 10-bit 底图）",
+                    pixis[0].Length > 0 && pixis[0].All(x => x == 10),
+                    $"实得 [{string.Join(",", pixis[0])}]");
+                Assert("AVIF 增益图档: 增益层 pixi 声明的位深 = 8（增益层恒 8-bit）",
+                    pixis[1].Length > 0 && pixis[1].All(x => x == 8),
+                    $"实得 [{string.Join(",", pixis[1])}]");
             }
-            // ② Base 侧的 MPF（CIPA DC-007）—— 主图靠它把增益图作为衍生图挂上
-            Assert("JPEG Gain Map: Base 内含 MPF APP2 段",
-                FindJpegAppPayload(bytes, 0, secondSoi, 0xE2, "MPF") is not null);
-            // ③ 增益图侧（第二个 SOI 之后）的 ISO 21496-1 二进制元数据
-            Assert("JPEG Gain Map: 增益图侧含 ISO 21496-1 段（必须落在第二个 SOI 之后）",
-                FindJpegAppPayload(bytes, secondSoi, bytes.Length, 0xE2, "urn:iso:std:iso:ts:21496:-1") is not null);
+
+            // tmap 载荷：item2 的 extent 长度必须是 1(version) + 21(头) + 3×40(三通道) = 142
+            var iloc = ReadIlocByteLengths(d);
+            Assert("AVIF 增益图档: iloc 有 3 个 item 的 extent",
+                iloc.Count == 3, $"实得 {iloc.Count} 个");
+            if (iloc.TryGetValue(2, out int tmapLen))
+            {
+                Assert("AVIF 增益图档: tmap 载荷长度 = 1+21+3×40 = 142（3 通道声明）",
+                    tmapLen == 142, $"实得 {tmapLen}B");
+                // flags 在载荷偏移 1+4（version + min_version/writer_version 之后）
+                if (tmapLen > 5 && TryReadTmapFlags(d, iloc, out byte flags))
+                    Assert("AVIF 增益图档: tmap flags bit7=1（声明 3 通道，与交付 3 平面成套）",
+                        (flags & 0x80) != 0, $"flags=0x{flags:X2}");
+            }
+            else Assert("AVIF 增益图档: iloc 含 item2（tmap）", false, "找不到 item2");
+
+            // 反向：sRGB 目标的底图【不嵌 ICC】（cicp 1/13/1 已说全；嵌了就是违背 SDR 路契约、
+            // 也让能力卡"不嵌 ICC"对不上产物）。acsp 是 ICC profile 的 magic，缺席 = 没嵌。
+            Assert("AVIF 增益图档[sRGB 目标]: 底图不嵌 ICC（acsp magic 缺席；审查轮修的默认行为）",
+                !ContainsAscii(d, "acsp"), "产物含 acsp ⇒ sRGB 底图被塞了多余 ICC");
+
+            // ★ 默认档没变：PQ 档产物里不该有任何增益图痕迹
+            var pd = File.ReadAllBytes(pqPath);
+            Assert("AVIF 默认 PQ 档: 不含 tmap 品牌（默认未变 ⇒ 老用户产物形态不变）",
+                !FtypBrands(pd).Contains("tmap"));
+            Assert("AVIF 默认 PQ 档: 不含 dimg/altr（没有派生项结构）",
+                !ContainsAscii(pd, "dimg") && !ContainsAscii(pd, "altr"));
+
+            // ═══ 2026-11-03 审查轮：广色域目标的声明一致性（此前零覆盖，正是本轮修的两处所在）═══
+            // 显式 Rec.2020 + ExplicitWideTarget 才真正把像素搬进 2020（否则 PrepareGainMapColorSpace
+            // 按契约退回 sRGB）。这条钉三件事：底图 nclx = 9/13/9、替代图 nclx = 9/16/9
+            // （matrix 必须跟 primaries 同一来源，不许一边 9 一边 6）、底图嵌 ICC（广色域的唯一依据）。
+            string widePath = Path.Combine(OutDir, "avif_gainmap_bt2020.avif");
+            if (File.Exists(widePath)) File.Delete(widePath);
+            var wideSettings = Mk(AvifHdrMode.GainMap);
+            wideSettings.ColorSpaceTag = "BT2020";
+            wideSettings.ExplicitWideTarget = true;
+            EncoderFactory.Create(OutputFormat.AVIF)
+                .EncodeAsync(frame, wideSettings, widePath).GetAwaiter().GetResult();
+            if (File.Exists(widePath) && new FileInfo(widePath).Length > 0)
+            {
+                var wd = File.ReadAllBytes(widePath);
+                var nclx = NclxOf(wd);
+                Assert("AVIF 增益图档[BT2020]: 底图 nclx = 9/13/9（原色随目标、matrix 跟原色）",
+                    nclx is not null && nclx[0] == 9 && nclx[1] == 13 && nclx[2] == 9,
+                    nclx is null ? "无 colr(nclx)" : $"实得 {nclx[0]}/{nclx[1]}/{nclx[2]}");
+                // ICC 的存在用 acsp 判（ICC profile 的 magic，任何真 profile 必含）——
+                // 不能用 'prof'/'iCCP'：后者是 PNG 的块名，AVIF 里 ICC 是 colr(rICC) 盒。
+                // 2026-11-03 审查轮：本判据首版用 'prof' 侥幸过，但那是撞运气；acsp 才是硬证据。
+                Assert("AVIF 增益图档[BT2020]: 底图嵌 ICC（广色域唯一依据，acsp magic 在）",
+                    ContainsAscii(wd, "acsp"), "没找到 acsp ⇒ 2020 像素没有 ICC 声明通道");
+                var alt = AlternateNclxOf(wd);
+                Assert("AVIF 增益图档[BT2020]: 替代图 nclx = 9/16/9（PQ + 同一 matrix 来源）",
+                    alt is not null && alt[0] == 9 && alt[1] == 16 && alt[2] == 9,
+                    alt is null ? "无替代图 colr" : $"实得 {alt[0]}/{alt[1]}/{alt[2]}");
+            }
+            else Assert("AVIF 增益图档[BT2020]: 文件已创建", false);
+
+            // ═══ 2026-11-04：HDR + 「跟随显示器」也必须是真的 Rec.2020 ═══
+            // 决策层在 HDR 下把目标解析成 BT2020（ColorDecision: hdr ⇒ target=BT2020），但那种
+            // "跟随显示器解析出来的 2020" ExplicitWideTarget=false。增益图路径此前沿用"必须显式
+            // 才搬像素"的门 ⇒ 产物出现三处互相矛盾：容器 nclx 写 9/13/9、内嵌 ICC 却是 sRGB、
+            // 像素也还是 sRGB/709（实测 avifdec: Primaries 9 而 ICC desc="sRGB IEC61966-2.1"）。
+            // 判据用【逐字节相同】而不是查标签：跟随显示器的产物必须与显式 Rec.2020 的产物
+            // 一模一样 —— 两者只差一个布尔，若代码真的走了同一条路，字节就该相同；任何
+            // "声明照写、像素不搬"的退化都会让两边分叉。
+            if (File.Exists(widePath))
+            {
+                string followPath = Path.Combine(OutDir, "avif_gainmap_follow_display.avif");
+                if (File.Exists(followPath)) File.Delete(followPath);
+                var followSettings = Mk(AvifHdrMode.GainMap);
+                followSettings.ColorSpaceTag = "BT2020";     // 决策层解析结果
+                followSettings.ExplicitWideTarget = false;   // 但这只手不是用户的
+                EncoderFactory.Create(OutputFormat.AVIF)
+                    .EncodeAsync(frame, followSettings, followPath).GetAwaiter().GetResult();
+                bool same = File.Exists(followPath)
+                    && File.ReadAllBytes(followPath).AsSpan()
+                        .SequenceEqual(File.ReadAllBytes(widePath));
+                var fn = File.Exists(followPath) ? NclxOf(File.ReadAllBytes(followPath)) : null;
+                Assert("AVIF 增益图档[HDR+跟随显示器]: 与显式 Rec.2020 逐字节相同（不许声明2020却留sRGB像素）",
+                    same,
+                    same ? "逐字节一致"
+                         : (fn is null ? "跟随显示器产物缺失"
+                                       : $"底图 nclx={fn[0]}/{fn[1]}/{fn[2]}，但与显式档不同 ⇒ 像素没搬/Metadata 分叉"));
+            }
         }
         catch (Exception ex)
         {
-            Skip("JPEG Gain Map 编码", $"依赖 Native lib，本机不可用: {ex.GetType().Name}");
+            Skip("AVIF 增益图档容器结构", $"依赖 Native lib，本机不可用: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    // ── 最小 ISOBMFF 盒解析（只为上面那条判据；实现刻意独立于生产侧写出器）──
+    static List<(string Type, int Offset, int Size, int Hdr)> AvifBoxes(byte[] d)
+    {
+        var res = new List<(string, int, int, int)>();
+        void Walk(int start, int end)
+        {
+            int p = start;
+            while (p + 8 <= end)
+            {
+                long sz = ((long)d[p] << 24) | ((long)d[p + 1] << 16) | ((long)d[p + 2] << 8) | d[p + 3];
+                string t = System.Text.Encoding.ASCII.GetString(d, p + 4, 4);
+                int hdr = 8;
+                if (sz == 1)
+                {
+                    if (p + 16 > end) return;
+                    sz = 0; for (int i = 0; i < 8; i++) sz = (sz << 8) | d[p + 8 + i];
+                    hdr = 16;
+                }
+                else if (sz == 0) sz = end - p;
+                if (sz < hdr || p + sz > end) return;
+                res.Add((t, p, (int)sz, hdr));
+                // ⚠ meta 与 iinf/iref/grpl 都是 FullBox：子盒从 version+flags(4B) 之后开始。
+                //   iinf 还多一个 entry_count（v0 = u16，v1+ = u32）—— 漏掉它会把 entry_count
+                //   的低字节当成盒长度，解出来就是一堆乱码类型名（本轮实测踩过）。
+                if (t is "meta") Walk(p + hdr + 4, p + (int)sz);
+                else if (t == "iinf")
+                {
+                    int q = p + hdr + 4;                     // 跳过 version+flags
+                    if (q < p + sz)
+                    {
+                        int v = d[p + hdr];
+                        q += v == 0 ? 2 : 4;                 // 跳过 entry_count
+                        Walk(q, p + (int)sz);
+                    }
+                }
+                else if (t is "iref") Walk(p + hdr + 4, p + (int)sz);   // iref 是 FullBox；altr 在其下
+                else if (t is "iprp" or "ipco" or "grpl") Walk(p + hdr, p + (int)sz);
+                p += (int)sz;
+            }
+        }
+        Walk(0, d.Length);
+        return res;
+    }
+    static int CountBox(List<(string Type, int Offset, int Size, int Hdr)> boxes, string type)
+        => boxes.Count(b => b.Type == type);
+    static bool ContainsBox(List<(string Type, int Offset, int Size, int Hdr)> boxes, string type)
+        => boxes.Any(b => b.Type == type);
+    static bool ContainsAscii(byte[] d, string s)
+    {
+        var pat = System.Text.Encoding.ASCII.GetBytes(s);
+        for (int i = 0; i + pat.Length <= d.Length; i++)
+        {
+            bool m = true;
+            for (int k = 0; k < pat.Length; k++) if (d[i + k] != pat[k]) { m = false; break; }
+            if (m) return true;
+        }
+        return false;
+    }
+    static string FtypBrands(byte[] d)
+    {
+        // ftyp: size(4) 'ftyp'(4) major(4) minor(4) compat...
+        if (d.Length < 16 || System.Text.Encoding.ASCII.GetString(d, 4, 4) != "ftyp") return "";
+        int sz = (d[0] << 24) | (d[1] << 16) | (d[2] << 8) | d[3];
+        if (sz < 16 || sz > d.Length) return "";
+        var sb = new System.Text.StringBuilder();
+        for (int p = 8; p + 4 <= sz; p += 4)
+            sb.Append(System.Text.Encoding.ASCII.GetString(d, p, 4)).Append('|');
+        return sb.ToString();
+    }
+    /// <summary>从 iref.dimg 读引用体（from_item_ID u16 + reference_count u16 + to_item_ID×count u16）。</summary>
+    static bool TryReadDimgBody(byte[] d, out int from, out int count, out int to1, out int to2)
+    {
+        from = count = to1 = to2 = 0;
+        for (int i = 0; i + 8 <= d.Length; i++)
+        {
+            if (d[i + 4] != 'd' || d[i + 5] != 'i' || d[i + 6] != 'm' || d[i + 7] != 'g') continue;
+            int sz = (d[i] << 24) | (d[i + 1] << 16) | (d[i + 2] << 8) | d[i + 3];
+            if (sz < 16 || i + sz > d.Length) return false;
+            int q = i + 8;
+            from = (d[q] << 8) | d[q + 1];
+            count = (d[q + 2] << 8) | d[q + 3];
+            if (count >= 1 && q + 4 + 2 <= i + sz) to1 = (d[q + 4] << 8) | d[q + 5];
+            if (count >= 2 && q + 4 + 4 <= i + sz) to2 = (d[q + 6] << 8) | d[q + 7];
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>读所有 pixi 盒的 bits_per_channel（FullBox：size+type+ver/flags 各 4 字节，然后 num_channels 1 字节 + N 个位深字节）。</summary>
+    static List<int[]> PixiChannelDepths(byte[] d)
+    {
+        var res = new List<int[]>();
+        for (int i = 0; i + 14 <= d.Length; i++)
+        {
+            if (d[i + 4] != 'p' || d[i + 5] != 'i' || d[i + 6] != 'x' || d[i + 7] != 'i') continue;
+            int p = i + 12;                 // 跳过 size(4) + type(4) + version/flags(4)
+            int n = d[p]; p++;
+            if (n <= 0 || n > 8 || p + n > d.Length) continue;
+            var depths = new int[n];
+            for (int k = 0; k < n; k++) depths[k] = d[p + k];
+            res.Add(depths);
+        }
+        return res;
+    }
+
+    /// <summary>读第一个 colr(nclx) 的三个 16-bit 码点（primaries/transfer/matrix）。</summary>
+    static int[]? NclxOf(byte[] d, int skipColrCount = 0)
+    {
+        int seen = 0;
+        for (int i = 0; i + 27 <= d.Length; i++)
+        {
+            if (d[i + 4] != 'c' || d[i + 5] != 'o' || d[i + 6] != 'l' || d[i + 7] != 'r') continue;
+            if (System.Text.Encoding.ASCII.GetString(d, i + 8, 4) != "nclx") continue;
+            if (seen++ < skipColrCount) continue;
+            int p = i + 12;
+            return new[]
+            {
+                (d[p] << 8) | d[p + 1],
+                (d[p + 2] << 8) | d[p + 3],
+                (d[p + 4] << 8) | d[p + 5],
+            };
+        }
+        return null;
+    }
+
+    /// <summary>读 tmap 项追加的那张替代图 colr(nclx)。
+    /// ⚠ 不能按"第一个/第二个"数：ipco 里的顺序是 底图属性 → 增益图属性 → tmap 追加属性，
+    /// 于是 nclx 依次是「底图」「增益图自己」「替代图」——替代图那张【恒为最后一个】。
+    /// （2026-11-03 审查轮：本判据首版取第二个，取到的是增益图的 colr，误报过一次。）</summary>
+    static int[]? AlternateNclxOf(byte[] d)
+    {
+        int[]? last = null;
+        for (int skip = 0; ; skip++)
+        {
+            var cur = NclxOf(d, skip);
+            if (cur is null) break;
+            last = cur;
+        }
+        return last;
+    }
+
+    /// <summary>读 iloc 各 item 的 extent 总长（version 0/1/2；本仓写出器恒写 offset_size=4/length_size=4）。</summary>
+    static Dictionary<int, int> ReadIlocByteLengths(byte[] d)
+    {
+        var map = new Dictionary<int, int>();
+        int p = -1;
+        for (int i = 0; i + 8 <= d.Length; i++)
+            if (d[i + 4] == 'i' && d[i + 5] == 'l' && d[i + 6] == 'o' && d[i + 7] == 'c') { p = i; break; }
+        if (p < 0) return map;
+        int ver = d[p + 8];
+        int q = p + 12;
+        int b0 = d[q], b1 = d[q + 1]; q += 2;
+        int offSize = b0 >> 4, lenSize = b0 & 0xF, baseSize = b1 >> 4, idxSize = b1 & 0xF;
+        int count, idSize;
+        if (ver < 2) { count = (d[q] << 8) | d[q + 1]; q += 2; idSize = 2; }
+        else { count = (d[q] << 24) | (d[q + 1] << 16) | (d[q + 2] << 8) | d[q + 3]; q += 4; idSize = 4; }
+        for (int i = 0; i < count && q + idSize + 2 <= d.Length; i++)
+        {
+            int id = idSize == 4
+                ? (d[q] << 24) | (d[q + 1] << 16) | (d[q + 2] << 8) | d[q + 3]
+                : (d[q] << 8) | d[q + 1];
+            q += idSize;
+            if (ver is 1 or 2) q += 2;      // construction_method
+            q += 2;                         // data_reference_index
+            q += baseSize;
+            int ec = (d[q] << 8) | d[q + 1]; q += 2;
+            int total = 0;
+            for (int k = 0; k < ec; k++)
+            {
+                q += idxSize;
+                long off = 0, len = 0;
+                for (int z = 0; z < offSize; z++) off = (off << 8) | d[q + z];
+                q += offSize;
+                for (int z = 0; z < lenSize; z++) len = (len << 8) | d[q + z];
+                q += lenSize;
+                total += (int)len;
+            }
+            map[id] = total;
+        }
+        return map;
+    }
+    /// <summary>从 mdat 里按 iloc 定位 tmap 载荷，读出 flags 字节（载荷偏移 1+4）。</summary>
+    static bool TryReadTmapFlags(byte[] d, Dictionary<int, int> ilocLens, out byte flags)
+    {
+        flags = 0;
+        // 本仓写出器的布局固定：base / tmap / gainmap 三段紧邻。用长度反推 tmap 起点更稳：
+        // mdat 头 8 字节之后依次是 base(iloc[1])、tmap(iloc[2])、gainmap(iloc[3])。
+        int mdat = -1;
+        for (int i = 0; i + 8 <= d.Length; i++)
+            if (d[i + 4] == 'm' && d[i + 5] == 'd' && d[i + 6] == 'a' && d[i + 7] == 't') { mdat = i; break; }
+        if (mdat < 0 || !ilocLens.TryGetValue(1, out int baseLen) || !ilocLens.TryGetValue(2, out int tmapLen)) return false;
+        int start = mdat + 8 + baseLen;
+        if (start + 5 >= d.Length || tmapLen < 5) return false;
+        flags = d[start + 5];
+        return true;
     }
 
     static void EncodedAvif_ColorProperties()

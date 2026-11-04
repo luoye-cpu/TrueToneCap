@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/FormatEncoders.cs
 // 全部编码器 — 零 Magick.NET 依赖
@@ -364,6 +364,14 @@ public sealed class AvifEncoder : ImageEncoder
     {
         if (s.HdrOutput)
         {
+            // ═══ 2026-11-03（用户口径）：AVIF 的 HDR 有两种承载，默认 PQ（产物与本轮之前逐字节一致）═══
+            // GainMap 档复用 JPEG 增益图的整套像素阶段（同一个 Reinhard / 增益比 / 降采样），
+            // 只有"装进哪个容器"不同 —— 公式再写一遍就是本仓反复付学费的第二份真相。
+            if (s.AvifHdrMode == AvifHdrMode.GainMap)
+            {
+                await EncodeAvifGainMapAsync(f, s, path, ct);
+                return;
+            }
             // HDR AVIF: scRGB → 目标色域线性 → PQ 16-bit → 16-bit PNG 中转 + avifenc
             await Task.Run(() =>
             {
@@ -506,6 +514,179 @@ public sealed class AvifEncoder : ImageEncoder
             await EncodeSdrAsync(d, f.Width, f.Height, s, path, ct);
         }
     }
+
+    /// <summary>
+    /// AVIF 增益图 HDR 出口（2026-11-03 用户口径的新档，默认不走这里 —— 默认是上面的 PQ 路）。
+    /// <para><b>像素阶段与 JPEG 出口逐字同源</b>：同一个 <c>PrepareGainMapColorSpace</c> /
+    /// <c>ComputeWhitePoint</c> / <c>ReinhardToSdr</c> / <c>ComputeGainMap</c> / <c>RescaleGainMap</c>
+    /// （都从 <see cref="JpegGainMapEncoder"/> internal 出来复用），只有"装进哪个容器"不同 ——
+    /// 公式再写一遍就是两条路迟早漂移的第二份真相。容器用 <see cref="IsoBmffGainMapWriter"/>
+    /// 把两张 avifenc 单图 + tmap/ISO 21496-1 拼成 libavif 同形的三 item 容器
+    /// （外部裁判 avifdec 实测读出 "Gain map … Alternate Headroom"）。</para>
+    /// <para><b>恒交付 3 平面</b>：Gray 增益把 ch0 复制成三套，Rgb 逐通道。声明与交付都是 3
+    /// ⇒ 写出器的"声明==交付"门恒过；这与 libavif 自家样本（Alternate image Planes: 3）和它对
+    /// 单通道"参数复制成套"的处理同形，逐通道施加因此等价、不改变结果。</para>
+    /// <para><b>SDR 输入（headroom ≤ 1）⇒ 拒绝而不是降级</b>：产出的会是一张"自称带增益图、
+    /// 实际零增益"的假 HDR 容器（本仓最忌讳的"宣称≠交付"），外层 <c>EncodeAsync</c> 的 PNG 保底
+    /// 兜住它并留痕。硬件后端（NVENC/QSV）在这一档不参与：增益图底图是 tone-map 后的 SDR，
+    /// 与硬件 10-bit PQ 直通是两种形状 ⇒ 恒走 avifenc 软件路。</para>
+    /// <para><b>底图位深按设置（默认 10-bit），增益层恒 8-bit</b>（2026-11-04 用户口径）：
+    /// AVIF 能承载高位深底图（JPEG 不能，那边保持 8-bit），10-bit 底图明显减少 SDR 呈现的带状；
+    /// 增益层保持 8-bit 是 ISO 21496-1 的比值图惯例（增益是平滑乘数，8-bit 够用且兼容性最好）。
+    /// 底图走 16-bit PNG 中转 + avifenc <c>--depth N</c>，只量化一次。</para>
+    /// </summary>
+    private async Task EncodeAvifGainMapAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct)
+    {
+        await Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!NativeAvifEncoder.IsAvailable)
+                throw new DllNotFoundException("[AVIF] avifenc 不可用，增益图档需要它编底图与增益图");
+
+            int w = f.Width, h = f.Height;
+            // 0. 色彩模式（与 JPEG 出口同一函数、同一判据）
+            //    ⚠ 必须用返回的 baseIcc（2026-11-03 审查轮修）：这个函数在"显式 Rec.2020"时
+            //      会把像素搬到 2020 原色并返回 2020 的 ICC；此前这里丢掉返回值、改从
+            //      s.IccProfile 重算 —— 拿到的是用户 profile（可能是显示器 ICC 或 null），
+            //      与已经搬过的像素不是一套 ⇒ 产物要么标签错、要么回落到 sRGB ICC 而像素是 2020。
+            //      JPEG 出口一直用的是这个返回值，AVIF 侧没有理由各算一份。
+            //    ⚠ requireExplicit: false（2026-11-04）：HDR 输出的 BT.2020 是【标准色域】，
+            //      不是"用户偏好广色域"——决策层在 HDR 下就是这么解析的（ColorDecision: hdr ⇒ target=BT2020）。
+            //      此前沿用默认"必须显式"门，导致【跟随显示器 + HDR 屏】这一最常见组合下
+            //      像素留在 sRGB/709，而容器 nclx 照样写 9/13/9、还嵌了一份 sRGB ICC ⇒ 三处矛盾
+            //      （实测 avifdec：Primaries 9 而 ICC desc = "sRGB IEC61966-2.1"）。
+            //      增益图档必须与 PQ 档交付同一套原色，否则"底图是 SDR"会退化成"底图还更窄"。
+            //    ⚠ WideApplied（2026-11-04 深夜审查轮）：函数在"取不到可嵌 2020 ICC"时会【静默
+            //      退回 sRGB 像素】——那种情况像素没搬，声明就必须跟着像素写 sRGB；否则又是
+            //      "nclx 9/13/9 + sRGB ICC + sRGB 像素"的错件（与上面刚修的同一个病，只是换了触发条件）。
+            var (hdrPixels, baseIcc, wideApplied) = JpegGainMapEncoder.PrepareGainMapColorSpace(
+                f.Pixels, w, h, s, requireExplicit: false);
+            // 1. 白点 / headroom
+            var (hdrPeakNits, sdrWhiteNits, sdrWhiteScrgb, headroom) = JpegGainMapEncoder.ComputeWhitePoint(s);
+            // 1b. 拒绝零增益：headroom ≤ 1 ⇒ 增益区间为 0，产出的是假 HDR 容器 ⇒ 宁可不写
+            if (headroom <= 1.0f + 1e-6f)
+                throw new InvalidOperationException(
+                    $"AVIF 增益图档要求 HDR 源（headroom > 1），本次 headroom={headroom:F2} "
+                    + $"（峰值 {hdrPeakNits:F0} nits / SDR 白 {sdrWhiteNits:F0} nits）⇒ 增益区间为 0，"
+                    + "拒绝产出「自称带增益图、实际零增益」的容器；如需保存请改用「传统 HDR（PQ）」档");
+            // 2. Reinhard → SDR 线性
+            float[] sdrLinear = JpegGainMapEncoder.ReinhardToSdr(hdrPixels, w, h, headroom, sdrWhiteScrgb);
+            // 底图位深：按设置（HDR 协商后 ≥10，默认 10）；增益层恒 8-bit。
+            // 2026-11-04 用户口径："AVIF 默认 10bit 底图、8bit 增益图"——AVIF 能承载高位深底图
+            // （JPEG 不能，所以 JPEG 侧保持 8-bit 不动），10-bit 底图能明显减少 SDR 呈现的带状。
+            int baseDepth = Math.Clamp(s.OutputBitDepth, 8, 12);
+            // 3. 增益比（与 JPEG 出口同一个 ComputeGainMap）
+            float invSdrWhite = 1.0f / Math.Max(sdrWhiteScrgb, 1.0f);
+            float maxLog2Gain = JpegGainMapEncoder.GainMapMaxLog2(headroom);
+            byte[] gainMapPixels = JpegGainMapEncoder.ComputeGainMap(hdrPixels, sdrLinear, w, h, s.GainMapMode, maxLog2Gain, invSdrWhite);
+            // 4. 降采样（复用同一函数）+ 复制成 3 平面交付
+            byte[] gmScaled = JpegGainMapEncoder.RescaleGainMap(gainMapPixels, w, h, s.GainMapMode, out int gmW, out int gmH);
+            byte[] gmBgra = new byte[gmW * gmH * 4];
+            if (s.GainMapMode == GainMapMode.Gray)
+                for (int i = 0; i < gmW * gmH; i++)
+                {
+                    int o = i * 4, v = gmScaled[i];
+                    gmBgra[o] = gmBgra[o + 1] = gmBgra[o + 2] = (byte)v;   // ch0 复制成套（声明 3 = 交付 3）
+                    gmBgra[o + 3] = 255;
+                }
+            else
+                for (int i = 0; i < gmW * gmH; i++)
+                {
+                    int o = i * 4, g = i * 3;
+                    gmBgra[o] = gmScaled[g + 2]; gmBgra[o + 1] = gmScaled[g + 1]; gmBgra[o + 2] = gmScaled[g];
+                    gmBgra[o + 3] = 255;
+                }
+
+            FormatHelper.ValidateNativePath(path, nameof(path));
+            string codec = AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind);
+            int quality = Math.Clamp((int)s.Quality, 0, 63);   // AVIF 的质量刻度就是 CRF 0-63
+            var tmpBase = Path.Combine(Path.GetTempPath(), $"ttc_gm_base_{Guid.NewGuid():N}.png");
+            var tmpGm = Path.Combine(Path.GetTempPath(), $"ttc_gm_gain_{Guid.NewGuid():N}.png");
+            var outBaseAvif = Path.Combine(Path.GetTempPath(), $"ttc_gm_base_{Guid.NewGuid():N}.avif");
+            var outGmAvif = Path.Combine(Path.GetTempPath(), $"ttc_gm_gain_{Guid.NewGuid():N}.avif");
+            try
+            {
+                // 底图声明：CICP 与 ICC 都必须跟着【像素实际所在的色域】说话，而不是跟着 tag。
+                // ⚠ ICC 只在【真的搬成广色域】时嵌（2026-11-03 审查轮）：sRGB 目标下 cicp 1/13/1
+                //   已经把话说全了，再塞 2100B 的 sRGB ICC 既违背 8-bit SDR 路的既有契约
+                //   （"sRGB 不嵌 ICC"），也让能力卡文案对不上产物。广色域必须嵌，
+                //   而且必须用 PrepareGainMapColorSpace 返回的那一份 —— 像素已被它搬到 2020，
+                //   ICC 必须与像素同一套原色（不能用调用方随手给的 profile）。
+                // ⚠ wideApplied（2026-11-04 深夜审查轮）：只有它才代表"像素真的搬了"。
+                //   若 tag 是 BT2020 但 2020 ICC 不可用，函数会退回 sRGB 像素 ⇒ 此处必须同步
+                //   退回 sRGB 声明，绝不能出现"nclx 9/13/9 + sRGB ICC"的错件。
+                bool widePixels = wideApplied;
+                byte[]? embedIcc = widePixels ? baseIcc : null;
+                byte[]? baseCicp = FormatHelper.BuildSdrCicp(widePixels ? "BT2020" : "sRGB");
+                if (s.ColorSpaceTag == "BT2020" && !widePixels)
+                    CoreLog.Warn("GainMap-AVIF",
+                        "目标要求 BT.2020，但 2020 ICC 不可用 ⇒ 底图按 sRGB 交付（声明与像素一致，宁可窄不错）",
+                        LogCategory.Encoding);
+                // ⚠ 这两个 PNG 是【中转】（喂给 avifenc 后随即删除），不是产物 ⇒ 走 EncodeFast / fastest：
+                //   压缩率不影响最终 AVIF 质量，按产物档位压反而白烧几秒（4K 实测差距在秒级）。
+                //   同一条纪律在 HDR-PQ 路的 Encode16(..., fastest: true) 上已经立着。
+                // ⚠ 底图按 baseDepth 走：>8 必须经 16-bit PNG 中转（Encode16，大端 BGRA16），
+                //   8-bit 才走 EncodeFast。avifenc 侧靠 bitDepth 参数补 --depth，
+                //   否则它会按 8-bit 处理高位深输入（这正是 2026-10-08 修过的那个坑）。
+                byte[]? embedIccOk = FormatHelper.IsEmbeddableIcc(embedIcc) ? embedIcc : null;
+                if (baseDepth > 8)
+                {
+                    byte[] baseBgra16 = JpegGainMapEncoder.LinearToBgra16(sdrLinear, w, h, baseDepth);
+                    // omitAlpha: true —— 必须写 RGB（color type 2）。
+                    //   实测：avifenc 对【16-bit PNG】输入一律按"带 alpha"处理，即便 alpha 全满值
+                    //   也会产出 alpha 副 item（infe=2 + auxC）；而增益图容器只搬主图，
+                    //   底图一旦带副 item 就被写出器的"底图含副 item"门拒写（本轮实测卡在这里）。
+                    //   截图恒不透明 ⇒ 丢 alpha 通道零信息损失。
+                    ManagedPngEncoder.Encode16(baseBgra16, w, h, tmpBase, cicp: baseCicp, iccProfile: embedIccOk, bitDepth: baseDepth, fastest: true, omitAlpha: true);
+                }
+                else
+                {
+                    byte[] baseBgra8 = JpegGainMapEncoder.LinearToBgra8(sdrLinear, w, h);
+                    ManagedPngEncoder.EncodeFast(baseBgra8, w, h, tmpBase, iccProfile: embedIccOk, cicp: baseCicp);
+                }
+                // 增益层恒 8-bit（ISO 21496-1 的比值图惯例：8-bit 足够，且兼容性最好）
+                ManagedPngEncoder.EncodeFast(gmBgra, gmW, gmH, tmpGm);
+                // 增益图恒 --yuv 444（3 平面）与"声明 3 参数集"成套；底图按用户色度
+                NativeAvifEncoder.EncodeFile(tmpBase, outBaseAvif, quality, cicp: baseCicp,
+                    colorSpaceTag: widePixels ? "BT2020" : "sRGB",
+                    chroma: s.ChromaSubsampling, codec: codec,
+                    bitDepth: baseDepth, effort: s.Effort, iccProfile: embedIcc);
+                // 增益层恒 8-bit（比值图惯例；与上面 EncodeFast 的 8-bit PNG 输入一致）
+                NativeAvifEncoder.EncodeFile(tmpGm, outGmAvif, quality, chroma: "444", codec: codec, bitDepth: 8, effort: s.Effort);
+
+                byte[] baseAvif = File.ReadAllBytes(outBaseAvif);
+                byte[] gmAvifBytes = File.ReadAllBytes(outGmAvif);
+                // tmap 载荷 = version(0) + ISO 21496-1（与 JPEG 出口同一个生成器；forceChannels=3 与交付成套）
+                byte[] iso = JpegGainMapEncoder.BuildIso21496Metadata(s.GainMapMode, headroom, forceChannels: 3);
+                byte[] tmap = IsoBmffGainMapWriter.BuildTmapPayload(iso);
+                // 替代图（HDR 侧）的 nclx：primaries 跟【像素实际色域】走，matrix 跟 primaries 同一来源。
+                // ⚠ 2026-11-03 审查轮修：此前 matrix 恒写 6，而底图走 AvifMatrixCoefficients
+                //   （BT.709⇒1 / BT.2020⇒9）⇒ 同一个文件里"底图 matrix=1、替代图 matrix=6"，
+                //   自相矛盾的组合（libavif 参考样本里两者是一致的：1/13/6 对 1/16/6）。
+                // ⚠ 2026-11-04 深夜审查轮：primaries 必须跟 widePixels 而不是跟 tag —— 底图回退成
+                //   sRGB 时，替代图若仍写 9 就又造出"底图 709 / 替代图 2020"的分叉。
+                byte altPrim = widePixels ? FormatHelper.CicpPrimariesBt2020 : FormatHelper.CicpPrimariesBt709;
+                var r = IsoBmffGainMapWriter.Build(baseAvif, gmAvifBytes, tmap,
+                    alternateTransfer: FormatHelper.CicpTransferPq,
+                    alternateMatrix: FormatHelper.AvifMatrixCoefficients(altPrim),
+                    alternatePrimaries: altPrim);
+                if (!r.Ok)
+                    throw new InvalidOperationException($"AVIF 增益图容器组装失败：{r.FailReason}");
+                AtomicFileWriter.Write(path, fs => fs.Write(r.Data!, 0, r.Data!.Length));
+
+                CoreLog.Info("GainMap-AVIF",
+                    $"输出: {w}x{h} 底图 + {gmW}x{gmH} 增益图(tmap/ISO 21496-1, 3 平面交付), "
+                    + $"headroom={headroom:F1}, 底图 {r.BaseItemBytes}B / tmap {r.TmapPayloadBytes}B / 增益 {r.GainMapItemBytes}B",
+                    LogCategory.Encoding);
+            }
+            finally
+            {
+                foreach (var t in new[] { tmpBase, tmpGm, outBaseAvif, outGmAvif })
+                    try { if (File.Exists(t)) File.Delete(t); } catch { }
+            }
+        }, ct);
+    }
+
     public override async Task EncodeSdrAsync(byte[] px, int w, int h, EncodingSettings s, string path, CancellationToken ct = default)
     {
         // ═══ 2026-09-16 重构：单一「AVIF 编码器」模型 ═══

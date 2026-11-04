@@ -314,6 +314,31 @@ public static class SelfTest
                 landingFailures.Add(
                     $"全局·增益档反向: 设置 GainMapMode=\"{flipped.GainMapMode}\" 落点={probeEsFlipped.GainMapMode}" +
                     "（正向随每条格式探针判，这一格补的是反方向）");
+
+            // ═══ 色度落点分家（2026-11-04 用户口径"JPEG LI 还是默认 420，其他默认 444"）═══
+            // 为什么放全局段而不是逐屏循环：实测色度落点与屏无关（窄色域屏与 HDR 屏同为 420/444），
+            // 逐屏跑只是把同一条断言印四遍。
+            // 用【默认设置那份】判 ⇒ 与本机用户实际色度无关；而且这是"真调管线"的活体证据，
+            // 比源码串比对强：
+            //   · 增益图底图必须恒 444（管线硬编码）。改回 s.ChromaJpegLi ⇒ 这里得到 420 ⇒ 红。
+            //   · JPEG LI 必须跟随设置字段。把它也硬编码成 444 ⇒ 444 ≠ 默认 420 ⇒ 红。
+            // 两条一起才构成"分家"的证据 —— 只留一条的话，"两边都硬编码同一个值"也能过。
+            var esLi = probePipeline.BuildEncodingSettings(
+                OutputFormat.JPEG_LI, false, null, dflt, null, state.acm, null);
+            var esGm = probePipeline.BuildEncodingSettings(
+                OutputFormat.JPEG_GAINMAP, false, null, dflt, null, state.acm, null);
+            sb.AppendLine($"  色度落点: JPEG LI={esLi.ChromaSubsampling}（跟随设置字段 {dflt.ChromaJpegLi}）" +
+                          $" 增益图底图={esGm.ChromaSubsampling}（管线硬编码）" +
+                          $" ⇒ {(esLi.ChromaSubsampling == dflt.ChromaJpegLi && esGm.ChromaSubsampling == "444"
+                              ? "分家成立 ✓" : "★ 分家不成立")}");
+            if (esGm.ChromaSubsampling != "444")
+                landingFailures.Add(
+                    $"全局·增益图底图色度: 应为 444（底图会被乘增益放大还原，色度精度优先），" +
+                    $"实得 {esGm.ChromaSubsampling}");
+            if (esLi.ChromaSubsampling != dflt.ChromaJpegLi)
+                landingFailures.Add(
+                    $"全局·JPEG LI 色度: 应跟随设置字段 {dflt.ChromaJpegLi}，实得 {esLi.ChromaSubsampling}" +
+                    "（把它也硬编码 ⇒ 用户的选择权没了）");
             if (Math.Abs(snap.GetQuality(OutputFormat.JPEG_XL) - dflt.GetQuality(OutputFormat.JPEG_XL)) < 1e-6 &&
                 snap.GainMapMode == dflt.GainMapMode &&
                 snap.ChromaJpegLi == dflt.ChromaJpegLi &&
@@ -461,6 +486,11 @@ public static class SelfTest
                         ("增益图 + Rec.2020 底图", OutputFormat.JPEG_GAINMAP, "BT2020", true),
                         ("JPEG XL + Rec.709 目标", OutputFormat.JPEG_XL, "sRGB", false),
                         ("JPEG XL + Rec.2020 目标", OutputFormat.JPEG_XL, "BT2020", true),
+                        // ⚠ 2026-11-04：这里【不放】JPEG LI 探针。加过一次，撞出一条既有契约：
+                        //   HDR 屏上 JPEG LI 的落点是 HdrOutput=True（编码器入口自己降级到 SDR，
+                        //   交付形态 BlockedByFormat 说的正是这件事）⇒ 它没有"HDR 该不该开"的
+                        //   期望可钉。色度落点与屏无关（实测窄色域屏与 HDR 屏同为 420/444），
+                        //   已挪到【全局落点段】判，那里才是它该待的地方。
                     };
                     foreach (var p in probes)
                     {
@@ -1326,7 +1356,9 @@ public static class SelfTest
         Expect("越界", "BitDepthWebP", "10", oob.BitDepthWebP.ToString(), "8");
         Expect("越界", "BitDepthTiff", "10", oob.BitDepthTiff.ToString(), "16");      // >8 一律保精度到 16
         Expect("越界", "BitDepthGainMap", "12", oob.BitDepthGainMap.ToString(), "8");
-        Expect("越界", "ChromaAvif", "999", oob.ChromaAvif, "420");
+        // ⚠ 2026-11-04：AVIF 与增益图的默认色度不再相同 ⇒ 非法值各回各家
+        //   AVIF 默认 444（用户口径，截图以文字/UI 为主）；增益图仍 420（Ultra HDR 常规形状）。
+        Expect("越界", "ChromaAvif", "999", oob.ChromaAvif, "444");
         Expect("越界", "ChromaJpegXl", "422", oob.ChromaJpegXl, "444");  // JXL 值域不含 422 ⇒ 走自己的表
         Expect("越界", "ChromaJpegLi", "42", oob.ChromaJpegLi, "420");
         Expect("越界", "ChromaGainMap", "0", oob.ChromaGainMap, "420");
@@ -1336,7 +1368,8 @@ public static class SelfTest
         Expect("越界", "GainMapMode", "Mono", oob.GainMapMode, "Gray");
         Expect("越界", "ArchiveMode", "Week", oob.ArchiveMode, "Month");  // 界面从来没有这一项（2026-09-29 摘掉）
         Expect("越界", "ToastPosition", "Middle", oob.ToastPosition, "BottomRight");
-        Expect("越界", "AvifEncoder", "Nvidia", oob.AvifEncoder, "Auto");
+        // 2026-11-04：默认编码器 Auto → LibAom，非法值回落随之改（白名单仍是那五档）
+        Expect("越界", "AvifEncoder", "Nvidia", oob.AvifEncoder, "LibAom");
 
         // ── 臂②：合法但非默认的值必须原样活着（否则"一律回默认"的错法也能过检）──
         var keep = SettingsOrNull(ctx, Json(

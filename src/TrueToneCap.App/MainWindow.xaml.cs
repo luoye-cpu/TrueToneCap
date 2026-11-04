@@ -234,7 +234,9 @@ public sealed partial class MainWindow : Window
             //   QSV 8-bit（NV12 输入）。HDR 恒 10-bit。
             // · 真精度：>8-bit 只在「源为 Float16 + 编码器支持真 10-bit 输入」时保留源精度，
             //   否则是容器级升位深（交接 §4.3）。
-            Hint: "✅ 支持 HDR（PQ）与广色域；NVENC 硬件加速仅 4:2:0，软件可 4:4:4 与 12-bit。位深与色度按所选编码器生效。"),
+            // 2026-11-03：HDR 有两种承载（默认 PQ 容器；可切"增益图档"=SDR 底图 + tmap/ISO 21496-1）。
+            // 这句必须说明"默认哪档"——默认变了就是所有老用户产物变了，这类改动不能悄悄发生。
+            Hint: "✅ 支持 HDR（默认传统 PQ，可切换为增益图档）与广色域；NVENC 硬件加速仅 4:2:0，软件可 4:4:4 与 12-bit。位深与色度按所选编码器生效。"),
         [OutputFormat.WebP] = new(OutputFormat.WebP,
             SupportsHdr: false, SupportsWideGamut: true, IccEmbeddable: true,
             Hint: "⚠ 仅 8-bit，容器没有 HDR 通道；默认目标 Rec.709，显式选 Rec.2020 才输出 Rec.2020。适合简单分享。"),
@@ -742,7 +744,15 @@ public sealed partial class MainWindow : Window
         bool showGm = gainMapOn;
         if (GainMapOptionsDesc is not null) GainMapOptionsDesc.Visibility = showGm ? Visibility.Visible : Visibility.Collapsed;
         if (GainMapModeRow is not null) GainMapModeRow.Visibility = showGm ? Visibility.Visible : Visibility.Collapsed;
+        // 元数据方式行已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，不做用户抉择）
         if (GainMapHintTxt is not null) GainMapHintTxt.Visibility = showGm ? Visibility.Visible : Visibility.Collapsed;
+
+        // 2026-11-03：AVIF 的「HDR 承载方式」只在 AVIF + HDR 打开时才有意义 ——
+        // HDR 关着时这一格无论选哪档都不生效，显示出来就是"动了没反应"的那种控件。
+        if (AvifHdrModeRow is not null)
+            AvifHdrModeRow.Visibility = isAvif && HdrSwitch.IsOn ? Visibility.Visible : Visibility.Collapsed;
+        if (AvifHdrModeHintTxt is not null)
+            AvifHdrModeHintTxt.Visibility = isAvif && HdrSwitch.IsOn ? Visibility.Visible : Visibility.Collapsed;
 
         // ═══ 2026-09-27：这里曾经加过"当前格式没有 HDR 通道 ⇒ 把 Rec.2020 那一档禁选" ═══
         // 撤掉了，因为实测把前提打掉了：JPEG LI 与 WebP 确实【没有】HDR 通道（SupportsHdr=false，
@@ -774,6 +784,17 @@ public sealed partial class MainWindow : Window
                 HdrHintTxt.Text = _hdrSystemHint
                     + "\n🔒 增益图为 Ultra HDR：HDR 输出锁定开启；底图恒为 SDR，HDR 由增益图还原。";
             }
+            // ═══ 2026-11-04（用户口径）：增益图态底图恒 4:4:4 ⇒ 色度下拉必须禁用 ═══
+            // 管线对 JPEG_GAINMAP 不再读 ChromaJpegLi（见 CapturePipelineService 的 switch）。
+            // 不禁用就是"改了不生效"的假配置；禁用与说明成对出现，用户不会以为控件坏了。
+            // 只动 IsEnabled、不写 _settings —— 与 HDR 锁定同一手法，离开增益图态自动还原。
+            if (ChromaJpegLiCbo is not null) ChromaJpegLiCbo.IsEnabled = false;
+            if (ChromaJpegLiNoteTxt is not null)
+            {
+                // ⚠ 必须写成【单一字面量】：本地化死键判据按"完整中文键在源码里连续出现"计数，
+                //   拆成两段拼接会让表键变成死键（2026-11-04 门禁当场抓到一次）。
+                ChromaJpegLiNoteTxt.Text = LocaleManager.Tr("增益图态底图恒为 4:4:4（底图会被乘增益放大还原，色度精度优先于体积）；关闭「附带增益图」后可再选。");
+            }
         }
         else
         {
@@ -782,6 +803,13 @@ public sealed partial class MainWindow : Window
             // （界面上是开、编码时读的却是 settings 里的关，两边说的不是一件事）。
             SetHdrSwitchSilently(_settings.HdrEnabled);
             if (ColorCbo is not null) ColorCbo.IsEnabled = true;
+            // 色度下拉与说明文字同步还原（说明文字还原成 XAML 里的原文，两处口径一致）。
+            if (ChromaJpegLiCbo is not null) ChromaJpegLiCbo.IsEnabled = true;
+            if (ChromaJpegLiNoteTxt is not null)
+            {
+                ChromaJpegLiNoteTxt.Text = LocaleManager.Tr(
+                    "采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小。");
+            }
         }
 
         // ═══ 色彩页那张卡跟着面板一起刷：HDR 开关刚被上面的格式联动改过（禁用/锁定），
@@ -849,7 +877,7 @@ public sealed partial class MainWindow : Window
     private void OnAvifEncoderChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_uiReady) return;
-        var tag = (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto";
+        var tag = (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "LibAom";
         _settings.AvifEncoder = tag;
         // 软件编码器（libaom/svt）由 SelectByKind 按调用解析（P2-5 修复：
         // 不再写全局静态 NativeAvifEncoder.Codec，避免并发编码任务互相覆盖）。
@@ -1200,6 +1228,20 @@ public sealed partial class MainWindow : Window
         AppServices.Settings.SaveQuiet();
     }
 
+    // OnGainMapMetadataChanged 已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，不做用户抉择）
+
+    /// <summary>AVIF 的 HDR 承载方式切换（2026-11-03）。提示文案复用类级的 AvifHdrModeHintFor，两处入口一份映射。</summary>
+    private void OnAvifHdrModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_uiReady) return;
+        var tag = (AvifHdrModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Pq";
+        AvifHdrModeHintTxt.Text = AvifHdrModeHintFor(tag);
+        _settings.AvifHdrMode = tag;
+        AppServices.Settings.SaveQuiet();
+        // 承载方式换了 ⇒ "这一格式能不能 HDR、以什么形状 HDR" 的答案变了，色彩卡片必须跟着说真话
+        RefreshColorMappingUi();
+    }
+
     private void OnArchiveChanged(object sender, RoutedEventArgs e)
     {
         if (!_uiReady) return;
@@ -1324,8 +1366,10 @@ public sealed partial class MainWindow : Window
         "HDR 用带 PQ TRC 的 ICC 声明。",
         "SDR 用标准色域 ICC。",
         "JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {0} ⇒ 底图、增益比、",
-        "声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由 XMP hdrgm + ",
-        "ISO 21496-1 增益图段承载，容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。",
+        "声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由增益图段承载，",
+        "恒写 ISO 21496-1 最新标准；容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。",
+        // 2026-11-03：AVIF 增益图档的声明文案（FormatColorFacts 的 AVIF 分支新增一条）
+        "HDR 走增益图档：底图是 SDR（声明同普通 SDR 产物），动态范围在 tmap/ISO 21496-1 增益图里（容器不写 PQ）。",
         "无码点",
         "未知格式：给不出声明通道。",
     };
@@ -3469,8 +3513,9 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(EffortJpegLiCbo)) _settings.EffortJpegLi = tag;
             else if (cb.Name == nameof(EffortPngCbo)) _settings.EffortPng = tag;
             else if (cb.Name == nameof(EffortTiffCbo)) _settings.EffortTiff = tag;
-            // 2026-09-26：原 GainMapChromaCbo 分支已删除 —— 增益图并入 JPEG LI 后，
-            //   色度就是上面 ChromaJpegLiCbo 那一条（管线对 JPEG_GAINMAP 也改读 ChromaJpegLi）。
+            // 2026-09-26：原 GainMapChromaCbo 分支已删除 —— 增益图并入 JPEG LI 后不再另设色度下拉。
+            //   2026-11-04 更新：增益图态底图【恒 444，由管线硬编码】，ChromaJpegLiCbo 这一条
+            //   只服务普通 JPEG LI 照片档（开启增益图时该下拉被禁用，见 UpdateQualityPanelCore）。
             //   两个下拉写同一个字段 = 刚被合并掉的那种分裂。
             // 2026-09-19：原 nameof(ChromaWebPCbo) 分支已删除 —— WebP 色度下拉撤掉了
             //   （有损 WebP 恒 4:2:0 由格式定义，cwebp 侧没有色度参数 ⇒ 选了也不生效）。

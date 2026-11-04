@@ -377,14 +377,27 @@ public sealed class AnimationRecorder : IDisposable
                 };
 
                 System.Diagnostics.Process? proc = null;
+                // ═══ 2026-11-03（遗留 5）：进程根本没起来 ≠ 编码失败 ═══
+                // 原来只把 NativeErrorCode==2（ERROR_FILE_NOT_FOUND）记成"缺席"，
+                // 其余错误码一律落到"ffmpeg 编码失败 —— 已退化为单帧 PNG"：
+                // 而"拒绝访问(5) / 找不到路径(3) / 不是有效的 Win32 程序(193) / 参数错误(87)"
+                // 这几种一个字节都没编过，说"编码失败"是把用户往错的方向指（他会去看片源、看格式，
+                // 而真正要改的是路径或权限）。⇒ 改成三态：缺席(2/3) / 起不来(其他) / 编码失败(进程跑过)。
                 bool ffmpegMissing = false;
+                string? startError = null;
+                string? startIssue = null;      // 给用户看的那半句（区分"找不到"和"起不来"）
                 try { proc = System.Diagnostics.Process.Start(psi); }
                 catch (System.ComponentModel.Win32Exception ex)
                 {
-                    // 起不来（多数=locator 解析结果已失效/裸名不在 PATH）：错误必须可执行，回退要 Toast 明说
-                    ffmpegMissing = ex.NativeErrorCode == 2;   // ERROR_FILE_NOT_FOUND
+                    // ERROR_FILE_NOT_FOUND(2) / ERROR_PATH_NOT_FOUND(3) ⇒ 确实是没有这个文件
+                    ffmpegMissing = ex.NativeErrorCode is 2 or 3;
+                    startError = $"0x{ex.NativeErrorCode:X}({ex.NativeErrorCode}) {ex.Message}";
+                    startIssue = ffmpegMissing
+                        ? "未找到 ffmpeg"
+                        : $"ffmpeg 无法启动（{startError}）";
                     LogService.Error("AnimationRecorder",
-                        $"ffmpeg 无法启动 ({psi.FileName}): {ex.Message}（请在设置里指定路径，或把 ffmpeg 加入 PATH）");
+                        $"ffmpeg 无法启动 ({psi.FileName}): {startError}"
+                        + "（请在设置里指定路径，或把 ffmpeg 加入 PATH；也可能是该文件不可执行/被安全软件拦下）");
                 }
                 int exitCode = -1;
                 if (proc is not null)
@@ -430,9 +443,14 @@ public sealed class AnimationRecorder : IDisposable
                     TrueToneCap.Core.Encoding.ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 16,
                         iccProfile: icc, cicp: cicp);
                     path = fallbackPath;
+                    // 三态文案（2026-11-03 遗留 5）：进程跑过才叫"编码失败"。
+                    // 缺席（2/3）给出可执行指引；其他 Win32 错误码如实说"起不来"+错误码，
+                    // 不再把"没跑起来"谎报成"编码失败"——那会把用户引去查片源/格式。
                     degradation = ffmpegMissing
                         ? "未找到 ffmpeg：请在设置里指定路径，或把 ffmpeg 加入 PATH —— 已退化为单帧 PNG（SDR）"
-                        : "ffmpeg 编码失败 —— 已退化为单帧 PNG（SDR）";
+                        : startIssue is not null
+                            ? $"{startIssue}——已退化为单帧 PNG（SDR）；请检查该文件是否可执行、以及安全软件是否拦下"
+                            : "ffmpeg 编码失败 —— 已退化为单帧 PNG（SDR）";
                     LogService.Warn("AnimationRecorder", degradation);
                 }
                 else

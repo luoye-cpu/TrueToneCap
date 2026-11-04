@@ -434,7 +434,9 @@ public static class NativeAvifEncoder
         // 此前 EncodeFile 完全不传 --yuv ⇒ HDR 输出的实际色度由 avifenc 默认策略决定，
         // 与设置里的 ChromaSubsampling 无关（典型的"改了不生效"）。
         // 这里与 SDR 路径使用**逐字相同**的映射，未知值同样落到 444。
-        string chromaArg = chroma switch { "420" => "--yuv 420", "422" => "--yuv 422", _ => "--yuv 444" };
+        // 2026-11-03 加 "400"：增益图（Gray 档）必须是真单平面灰度 AVIF —— 写出器会拿 pixi
+        // 平面数对撞 tmap 声明的通道数，喂"复制成三份的灰度 + 444"会产出"声明 1 通道、实交付 3 平面"的谎件。
+        string chromaArg = chroma switch { "420" => "--yuv 420", "422" => "--yuv 422", "400" => "--yuv 400", _ => "--yuv 444" };
 
         // ═══ 2026-10-08 修复(P1①): SDR ≥10-bit 分支补传 --depth ═══
         // 此前 16-bit PNG 中转后未传位深 → avifenc 默认按 8-bit 处理高位深输入。

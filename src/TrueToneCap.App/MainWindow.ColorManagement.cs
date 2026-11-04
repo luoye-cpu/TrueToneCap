@@ -36,12 +36,15 @@ public sealed partial class MainWindow : Window
         var ui = CaptureEncodingUiState();
         // 与编码入口同一条构造路径（光标屏；粘贴/预览这些入口本来就没有"被截那块屏"的概念）。
         var decision = DecisionForCursorScreen(ui, ui.HdrEnabled);
-        var delivery = FormatColorFacts.Delivery(decision, ui.Format);
+        // 2026-11-03：AVIF 的 HDR 承载方式来自【快照】而不是活控件 —— 与 Settings 快照的纪律一致，
+        // 也保证"界面这一行"和"管线真正会编的形状"读的是同一份值。
+        var avifMode = ui.Settings.AvifHdrMode == "GainMap" ? AvifHdrMode.GainMap : AvifHdrMode.Pq;
+        var delivery = FormatColorFacts.Delivery(decision, ui.Format, avifMode);
         bool writesPq = delivery == HdrDelivery.PqContainer;
 
         SourceGamutTxt.Text = DescribeSourceDisplay(decision);
         TargetGamutTxt.Text = DescribeTargetGamut(decision, ui.Format);
-        MappingArrow.Text = !ui.HdrEnabled
+        string arrow = !ui.HdrEnabled
             ? (decision.NeedsMapping ? LocaleManager.Tr("→ 色域映射到") : LocaleManager.Tr("→ 直通（同色域）"))
             : delivery switch
             {
@@ -51,7 +54,14 @@ public sealed partial class MainWindow : Window
                 HdrDelivery.BlockedBySrgbTarget => LocaleManager.Tr("→ 色调映射为 SDR（sRGB 容器装不下 PQ）"),
                 _ => LocaleManager.Tr("→ 色调映射为 SDR（此格式没有 HDR 通道）"),
             };
-        GamutMapHintTxt.Text = BuildGamutHint(ui.Format, decision, delivery, writesPq);
+        MappingArrow.Text = arrow;
+        // ═══ 2026-11-03（A 流遗留 §9-5）：tooltip 与标签同源 ═══
+        // 标签最长那两支在 120px 固定首列里会被换行截成两行（见 MainWindow.xaml 的布局契约注释），
+        // 悬停时给出完整原文。⚠ 刻意读 arrow 这个局部量而不是再调一次那些 Tr(...)：
+        // 若此处另写一遍文案，tooltip 与标签就会在"改了文案表却漏改一处"时悄悄分叉，
+        // 而这正是本仓反复付学费的那类 bug（显示层另存一份真相）。
+        Microsoft.UI.Xaml.Controls.ToolTipService.SetToolTip(MappingArrow, arrow);
+        GamutMapHintTxt.Text = BuildGamutHint(ui.Format, decision, delivery, writesPq, avifMode);
     }
 
     /// <summary>源那一行：按<b>三档分类</b>印，而不是按"开关组合"拼字符串。</summary>
@@ -87,7 +97,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>灰字那一行：管线在干什么 + 这个格式能把声明写成什么 + 有没有被收口。</summary>
     private static string BuildGamutHint(OutputFormat format, ColorDecision d,
-        HdrDelivery delivery, bool writesPq)
+        HdrDelivery delivery, bool writesPq, AvifHdrMode avifMode = AvifHdrMode.Pq)
     {
         var parts = new System.Collections.Generic.List<string>();
         parts.Add(delivery switch
@@ -107,7 +117,7 @@ public sealed partial class MainWindow : Window
                     : LocaleManager.Tr("8-bit 源 → ICC/矩阵搬到目标 → SDR 输出。"))
                 : LocaleManager.Tr("源与目标同一套原色 ⇒ 矩阵是恒等变换，本次不跑搬色。"),
         });
-        parts.Add(FormatColorFacts.Declaration(format, d.TargetTag, writesPq, LocaleManager.Tr));
+        parts.Add(FormatColorFacts.Declaration(format, d.TargetTag, writesPq, LocaleManager.Tr, avifMode));
         if (d.GamutClamped)
             parts.Add(Trf("⚠ 广色域声明已被逐屏证据收口为 Rec.709 ⇒ {0}", d.Evidence));
         if (d.HdrClamped)

@@ -77,12 +77,20 @@ public static class FormatColorFacts
     /// <see cref="HdrDelivery.GainMap"/> —— 它的 base 层恒为 SDR、按格式约定恒写 sRGB/BT.709 原色，
     /// "目标不是 HDR 档"对它本来就不构成冲突，所以上面的默认改动<b>不该</b>、也确实<b>没有</b>波及它。</para>
     /// </summary>
-    public static HdrDelivery Delivery(ColorDecision decision, OutputFormat format)
+    public static HdrDelivery Delivery(ColorDecision decision, OutputFormat format,
+        AvifHdrMode avifHdrMode = AvifHdrMode.Pq)
     {
         // ① 屏幕授权：Build 里已经收口过（HdrOutput=false），这里只负责说出原因。
         if (!decision.HdrOutput) return HdrDelivery.BlockedByDisplay;
         // ② 容器有没有 HDR 通道 —— JPEG LI / WebP 在这里出局，产物是 8-bit SDR 色调映射。
         if (!EncoderFactory.Create(format).SupportsHdr) return HdrDelivery.BlockedByFormat;
+        // 2026-11-03：AVIF 选了「增益图」档 ⇒ 与 JPEG 增益图同族形状：base 恒 SDR，
+        // HDR 在 tmap/ISO 21496-1 增益图里。于是 ③ 的"目标与 PQ 互斥"对它不适用
+        // （sRGB 底图是这条路的常态，不是降级），最终形态也报 GainMap 而不是 PqContainer。
+        // ⚠ 这条必须在这里、不能只在卡片文案里：Delivery 是"这条产物到底怎么声明"的唯一判据，
+        //   光学文案不改它，就会出现"界面说增益图、产物按 PQ 走"的两套账。
+        if (format == OutputFormat.AVIF && avifHdrMode == AvifHdrMode.GainMap)
+            return HdrDelivery.GainMap;
         // ③ sRGB 目标与 PQ 声明互斥（PQ 是 HDR 的传输函数，容器却声明 sRGB ⇒ 自相矛盾）。
         //    增益图除外：它的 base 层【恒为】SDR，HDR 在增益图里，sRGB base 是格式约定而非降级。
         if (decision.TargetTag == "sRGB" && format != OutputFormat.JPEG_GAINMAP)
@@ -108,7 +116,8 @@ public static class FormatColorFacts
     /// <param name="writesPq">本次容器到底许不许写 PQ —— 由 <see cref="Delivery"/> 给，不许由调用方猜开关。</param>
     /// <param name="tr">模板 → 当前语言；省略即保持中文原文。</param>
     public static string Declaration(OutputFormat format, string targetTag, bool writesPq,
-                                     Func<string, string>? tr = null)
+                                     Func<string, string>? tr = null,
+                                     AvifHdrMode avifHdrMode = AvifHdrMode.Pq)
     {
         Func<string, string> T = tr ?? (static s => s);
         string L(string template, params object[] args) =>
@@ -153,7 +162,15 @@ public static class FormatColorFacts
             OutputFormat.AVIF =>
                 L("AVIF：colr(nclx) {0}，matrix 随三原色取 {1} —— 它是 YUV 码流，", AvifCicp(), MatrixName())
                 + L("不能像 PNG 那样写 identity（写 0 时部分解码器自行套错矩阵）。")
-                + (writesPq ? L("HDR 不嵌 ICC。") : wide ? L("{0} 另可嵌 ICC。", TargetName()) : L("{0} 不嵌 ICC。", TargetName())),
+                // 2026-11-03：AVIF 有两档 HDR 承载，卡片必须跟着说。增益图档的底图是 SDR、
+                // 声明走 sRGB/Rec.2020 原色 + 嵌 ICC（HDR 在 tmap/ISO 21496-1 里），
+                // 与"PQ 容器不嵌 ICC"是两条不同的声明链 —— 写成同一句就是让界面替实现撒谎。
+                + (avifHdrMode == AvifHdrMode.GainMap
+                    // ⚠ 这句曾被写成"底图是 SDR 并嵌 ICC"，被外部裁判 avifdec 当场推翻：
+                    //   Rec.709 目标下底图只有 colr(nclx)、ICC Profile: Absent（只有显式 Rec.2020 才嵌）。
+                    //   教训：容器文案必须由读手实读校准，不能照实现意图写。现在只说两档都成立的事实。
+                    ? L("HDR 走增益图档：底图是 SDR（声明同普通 SDR 产物），动态范围在 tmap/ISO 21496-1 增益图里（容器不写 PQ）。")
+                    : writesPq ? L("HDR 不嵌 ICC。") : wide ? L("{0} 另可嵌 ICC。", TargetName()) : L("{0} 不嵌 ICC。", TargetName())),
 
             OutputFormat.JPEG_XL =>
                 L("JPEG XL：color fields 与 ICC 二选一（同时给时 cjxl 只走 ICC、fields 被丢弃；")
@@ -197,8 +214,11 @@ public static class FormatColorFacts
 
             OutputFormat.JPEG_GAINMAP =>
                 L("JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {0} ⇒ 底图、增益比、", TargetName())
-                + L("声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由 XMP hdrgm + ")
-                + L("ISO 21496-1 增益图段承载，容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。"),
+                // 2026-11-03：不再写死"HDR 由 XMP hdrgm + ISO 21496-1 承载"。默认档改成只写 ISO 后，
+                // 2026-11-03 二次收口：恒写 ISO 21496-1，元数据不做用户抉择（下拉已退役）。
+                // 界面直说事实，不指向已删除的设置项。
+                + L("声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由增益图段承载，")
+                + L("恒写 ISO 21496-1 最新标准；容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。"),
 
             _ => L("未知格式：给不出声明通道。"),
         };

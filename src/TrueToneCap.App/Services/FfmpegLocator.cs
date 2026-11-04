@@ -57,6 +57,43 @@ internal static class FfmpegLocator
         lock (_lock) _cache = null;
     }
 
+    /// <summary>
+    /// 给"设置里手填的那个路径"一个当场可读的判断（2026-11-03 遗留 3 的配套）。
+    /// <para>返回 <c>null</c> = 没问题（含"留空 = 自动解析"，那是合法值，不是缺失）；
+    /// 返回非空串 = 一句能直接显示给用户的中文原因。<b>永不抛异常</b> —— 它长在保存路径上，
+    /// 保存设置不该因为一次文件探测而失败。</para>
+    /// <para>⚠ 与 <see cref="Resolve"/> 的分工：Resolve 决定"最终用哪个 ffmpeg"（会回退、会探测），
+    /// 这里只回答"用户填的这一格本身像不像话"。两者刻意不共用代码：把探测塞进保存路径会让
+    /// 每次点保存都 fork 一个 ffmpeg -version（内层 3s 超时），而这一步只需要文件系统事实。</para>
+    /// <para>⚠ 只做存在性/形状判断，<b>不</b>实跑 <c>-version</c>：保存是同步 UI 路径，
+    /// 不能为一句提示起子进程。真实可执行性留给 Resolve 的探测，它在真录制时才发生。</para>
+    /// </summary>
+    public static string? DescribePathIssue(string? configuredPath)
+    {
+        try
+        {
+            var p = configuredPath?.Trim() ?? "";
+            if (p.Length == 0) return null;                 // 留空 = 自动解析，合法
+            // 只有目录没有文件名：用户常从"打开所在文件夹"复制路径 ⇒ 给它一句能照做的提示
+            if (Directory.Exists(p)) return "这是一个目录，请填到 ffmpeg.exe（例如 " + Path.Combine(p, "ffmpeg.exe") + "）";
+            if (!File.Exists(p)) return $"文件不存在：{p}";
+            // 扩展名不是 .exe：Windows 下 Process.Start 未必起得来，属于"填了但不是它"的常见笔误
+            if (!string.Equals(Path.GetExtension(p), ".exe", StringComparison.OrdinalIgnoreCase))
+                return $"不是 .exe 文件：{p}";
+            return null;
+        }
+        catch (Exception ex)
+        {
+            // ⚠ 实测：在当前 .NET 11 上这条 catch 进不去 —— File.Exists / Directory.Exists 对
+            //   "非法字符 / 超长路径 / 无权限 / UNC / 末尾反斜杠"一律返回 false 而不抛，
+            //   Path.GetExtension 只在入参为 null 时抛而上面已经用 `?? ""` 挡掉（2026-11-03 探针实测 11 类边界输入，零抛出）。
+            //   留着它是【防御】：这段承诺是"对 UI 永不抛"，而承诺靠的不该是"今天的 BCL 恰好不抛"——
+            //   BCL 哪天改了这些方法的异常行为，或者将来有人往这个同步 UI 路径里塞一个真会抛的调用，
+            //   这里就是最后一道闸。判据钉的是"函数有 catch 兜底"这个形状，不是"哪条输入会触发它"。
+            return $"路径无法识别：{ex.Message}";
+        }
+    }
+
     private static (string? Path, string Source) ResolveCore(string configured)
     {
         // ① 设置指定（非空 = 优先）。指向无效时记日志后【继续】自动解析 —— 用户填错路径

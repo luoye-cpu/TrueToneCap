@@ -38,6 +38,9 @@ namespace TrueToneCap.Core.Encoding;
 /// <summary>增益图类型。</summary>
 public enum GainMapMode { Gray, Rgb }
 
+// 2026-11-03 二次收口：GainMapMetadataMode 枚举已整体删除 —— JPEG 增益图元数据恒为 ISO 21496-1，
+// 不存在“哪一档”的概念；settings/UI/XAML 的选档面同轮退役（见台账 §16）。
+
 /// <summary>JPEG Gain Map (Ultra HDR) 编码器。
 /// 仅支持从 HDR 源数据编码（需要原始浮点像素计算增益比）。
 /// SDR 输入将直接回退为 JPEG LI 编码。</summary>
@@ -122,11 +125,19 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// 跟解析后的目标走（<paramref name="requireExplicit"/>=false），否则会出现
     /// "同一个目标色域，8-bit 源搬进 2020、浮点源不搬"这种按源精度分叉的老问题（§41.4-M6）。
     /// （2026-10-06 这一路行为不变：目标只可能是用户显式选的 2020，默认档已在 ColorDecision 里被收成 sRGB。）</para>
+    /// <para><b>2026-11-04：AVIF 增益图档也走 requireExplicit=false</b>，理由与上面不同 ——
+    /// HDR 输出的 BT.2020 是【标准色域】而不是"用户偏好广色域"（<c>ColorDecision</c> 在 HDR 下
+    /// 本来就把 target 解析成 BT2020），而 AVIF 增益图的替代图声明 9/16/9 ⇒ 底图必须真在 2020。
+    /// 若此处仍要求显式，产物就是"nclx 9/13/9 + sRGB ICC + sRGB 像素"的三处矛盾错件（台账 §18/§19）。</para>
     /// </summary>
     /// <param name="requireExplicit">true = 只有用户显式选广色域才升级整条增益图；
-    /// false = 解析后的目标是广色域就搬（无增益图的普通 JPEG 路）。</param>
-    /// <returns>要参与后续色调映射的线性 float[]（可能就是一个新数组）+ base JPEG 该嵌的 ICC。</returns>
-    internal static (float[] Linear, byte[] BaseIcc) PrepareGainMapColorSpace(
+    /// false = 解析后的目标是广色域就搬（无增益图的普通 JPEG 路 + AVIF 增益图档）。</param>
+    /// <returns>要参与后续色调映射的线性 float[]（可能就是一个新数组）+ 调用方该嵌的 ICC +
+    /// <c>WideApplied</c>（<b>像素是否真的被搬进 BT.2020</b>）。
+    /// ⚠ <c>WideApplied</c> 存在的唯一理由：本函数在"取不到可嵌 2020 ICC"时会静默退回 sRGB 像素；
+    /// 有两条声明通道的调用方（AVIF 的 nclx + ICC）必须据它决定声明，否则会写出
+    /// "声明 2020、像素 709"的错件。JPEG 侧只有 ICC 一条通道，直接用返回的 BaseIcc 即自洽。</returns>
+    internal static (float[] Linear, byte[] BaseIcc, bool WideApplied) PrepareGainMapColorSpace(
         float[] scrgbLinear, int w, int h, EncodingSettings settings, bool requireExplicit = true)
     {
         bool wideTarget = settings.ColorSpaceTag == "BT2020";
@@ -140,13 +151,15 @@ public sealed class JpegGainMapEncoder : ImageEncoder
                 CoreLog.Info("GainMap",
                     "用户显式选 BT.2020 ⇒ 整张增益图走 2020：base/增益/声明三件同一套原色",
                     LogCategory.Encoding);
-                return (moved, icc2020!);
+                return (moved, icc2020!, true);
             }
             CoreLog.Warn("GainMap",
                 "要求 BT.2020 增益图，但取不到可嵌的 2020 ICC ⇒ 整条退回默认 sRGB 模式"
                 + "（JPEG 只有 ICC 一条色彩声明通道，只搬像素不声明会产出错件）", LogCategory.Encoding);
         }
-        return (scrgbLinear, ColorProfileProvider.GetDefaultSRgbIcc());
+        // WideApplied=false 是给 AVIF 那类"有两种声明通道"的调用方看的：
+        // 像素没搬走，声明就必须跟着像素走 sRGB，不许按 tag 写 9/13/9（否则是错件）。
+        return (scrgbLinear, ColorProfileProvider.GetDefaultSRgbIcc(), false);
     }
 
     /// <summary>仅编码 Base JPEG（无增益图）——HDR 关闭时的降级路径。
@@ -161,7 +174,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             // 与主路径共用同一次色彩模式判定 ⇒ 切 HDR 开关时 base 的色彩空间不会跟着跳变。
             // requireExplicit: false —— 这条路产的是无增益图的普通 JPEG，Ultra HDR 的
             // "base 恒 sRGB"约定不适用，直接跟解析后的目标色域走（与 8-bit 源那条同向）。
-            var (linear, baseIcc) = PrepareGainMapColorSpace(frame.Pixels, w, h, settings,
+            var (linear, baseIcc, _) = PrepareGainMapColorSpace(frame.Pixels, w, h, settings,
                 requireExplicit: false);
             var (_, _, sdrWhiteScrgb, headroom) = ComputeWhitePoint(settings);
             float[] sdrLinear = ReinhardToSdr(linear, w, h, headroom, sdrWhiteScrgb);
@@ -223,7 +236,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             int w = frame.Width, h = frame.Height;
             // 色彩模式在这一步一次定死（默认 sRGB / 显式 BT.2020 全 2020），后面 base、增益比、
             // 声明全部消费同一份线性像素与同一个 ICC ⇒ 三者不可能各说各话。
-            var (hdrPixels, baseIcc) = PrepareGainMapColorSpace(frame.Pixels, w, h, settings);
+            var (hdrPixels, baseIcc, _) = PrepareGainMapColorSpace(frame.Pixels, w, h, settings);
 
             // ── 0. HDR 峰值亮度 + SDR 白点（headroom 计算输入）──
             //     ═══ Windows scRGB 语义 (Microsoft 文档权威确认) ═══
@@ -283,9 +296,9 @@ public sealed class JpegGainMapEncoder : ImageEncoder
                 gainMapMode, gmDistance, settings.Effort);
             ct.ThrowIfCancellationRequested();
 
-            // ── 6. MPF + XMP 封装（增益范围基于实际 headroom）──
-            WriteJpegGainMapFile(baseJpegBytes, gainMapJpegBytes, w, h, gmSW, gmSH,
-                gainMapMode, headroom, outputPath);
+            // ── 6. MPF + 元数据封装（增益范围基于实际 headroom）──
+            //    恒写 ISO 21496-1（2026-11-03 用户口径二次收口：不做用户抉择）
+            WriteJpegGainMapFile(baseJpegBytes, gainMapJpegBytes, gainMapMode, headroom, outputPath);
 
             CoreLog.Debug("GainMap",
                 $"输出: {w}x{h}, 增益图: {gmSW}x{gmSH} ({gainMapMode}), " +
@@ -307,7 +320,9 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// （gain=log2(y/f(y))=log2(y)），纯 SDR 查看器则表现为高光削平。
     /// 输出: [0, 1.0] 相对 SDR 白点 (解码器理解的 Base 亮度)
     /// </summary>
-    private static float[] ReinhardToSdr(float[] hdrPixels, int w, int h, float headroom,
+    // internal（2026-11-03）：AVIF 增益图出口复用同一套像素阶段，公式只留一份 ——
+    // 再写一遍 Reinhard/增益比/降采样就是"两条路迟早漂移"的第二份真相（本仓反复付学费的病）。
+    internal static float[] ReinhardToSdr(float[] hdrPixels, int w, int h, float headroom,
         float sdrWhiteScrgb)
     {
         int pixelCount = w * h;
@@ -342,7 +357,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// hdrPeakNits: DisplayMaxNits (系统检测 SystemMaxNits 优先, 用户配置回退);
     /// sdrWhiteNits: PaperWhiteNits (系统 SdrWhiteLevel 优先, 用户配置回退);
     /// sdrWhiteScrgb = sdrWhiteNits / 80; headroom = hdrPeakNits / sdrWhiteNits。</summary>
-    private static (float hdrPeakNits, float sdrWhiteNits, float sdrWhiteScrgb, float headroom)
+    internal static (float hdrPeakNits, float sdrWhiteNits, float sdrWhiteScrgb, float headroom)
         ComputeWhitePoint(EncodingSettings settings)
     {
         float hdrPeakNits = settings.ToneMappingParams.DisplayMaxNits > 0
@@ -374,7 +389,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// 输出是 BGRA → 必须 B←linear[i+2], R←linear[i]。
     /// 旧实现写成 B←linear[i](R) / R←linear[i+2](B) → R/B 通道交换!
     /// 红色变蓝、蓝色变红 = GainMap 偏色根因 (灰平衡测试无法检出, 灰色 R≈G≈B)。</summary>
-    private static byte[] LinearToBgra8(float[] linear, int w, int h)
+    internal static byte[] LinearToBgra8(float[] linear, int w, int h)
     {
         int pixelCount = w * h;
         var bgra = new byte[pixelCount * 4];
@@ -387,6 +402,47 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             bgra[i + 3] = 255;
         });
         return bgra;
+    }
+
+    /// <summary>
+    /// 线性 SDR 像素 → sRGB 编码 → N-bit 量化 → **大端 BGRA16**（每像素 8 字节）。
+    /// <para>2026-11-04：AVIF 增益图档的底图改走真 10-bit（用户口径"AVIF 默认 10bit 底图、
+    /// 8bit 增益图"）。AVIF 能承载高位深底图（JPEG 不能，那边保持 8-bit），
+    /// 10-bit 底图能明显减少 SDR 呈现上的带状。</para>
+    /// <para>量化约定与 <c>ToneMapper.FloatToBgra16Bytes</c> / <c>ManagedPngEncoder.Encode16</c>
+    /// 逐字一致：先量化到 <c>2^bits−1</c> 再左对齐进 16-bit 容器高位，
+    /// 下游 avifenc 吃 16-bit PNG + <c>--depth N</c> 时只截高位，不会二次量化。</para>
+    /// </summary>
+    internal static byte[] LinearToBgra16(float[] linear, int w, int h, int bitDepth)
+    {
+        int pixelCount = w * h;
+        int qBits = Math.Clamp(bitDepth, 1, 16);
+        int qMax = qBits >= 16 ? 65535 : (1 << qBits) - 1;
+        int qShift = qBits >= 16 ? 0 : 16 - qBits;
+        var bytes = new byte[pixelCount * 8];
+        System.Threading.Tasks.Parallel.For(0, pixelCount, pi =>
+        {
+            int i = pi * 4;
+            // sRGB gamma 查表与 8-bit 路径同源（ToneMapper.LinearToSrgbLut）⇒ 只差量化精度
+            uint r16 = ((uint)(ToneMapper.LinearToSrgbLut(linear[i]) * qMax + 0.5f) << qShift);
+            uint g16 = ((uint)(ToneMapper.LinearToSrgbLut(linear[i + 1]) * qMax + 0.5f) << qShift);
+            uint b16 = ((uint)(ToneMapper.LinearToSrgbLut(linear[i + 2]) * qMax + 0.5f) << qShift);
+            if (r16 > 65535) r16 = 65535;
+            if (g16 > 65535) g16 = 65535;
+            if (b16 > 65535) b16 = 65535;
+            // ⚠ alpha 不参与位深量化：必须给满值 65535。
+            //   写 qMax<<qShift（10-bit = 65472）时 avifenc 认为 alpha 不是"恒定不透明"，
+            //   于是为底图多产出一个 alpha 副 item ⇒ 增益图容器组装被"底图含副 item"门拒写。
+            //   ⚠ 不能用 const：常量会让下面 (byte)a16 触发 CS0221 常量折叠错误。
+            uint a16 = 65535;
+            // 大端 BGRA16（PNG 网络序；Encode16 的输入约定）
+            int di = pi * 8;
+            bytes[di]     = (byte)(b16 >> 8); bytes[di + 1] = (byte)b16;
+            bytes[di + 2] = (byte)(g16 >> 8); bytes[di + 3] = (byte)g16;
+            bytes[di + 4] = (byte)(r16 >> 8); bytes[di + 5] = (byte)r16;
+            bytes[di + 6] = (byte)(a16 >> 8); bytes[di + 7] = (byte)a16;
+        });
+        return bytes;
     }
 
     // ═══════════════════════════════════════
@@ -560,7 +616,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// 使用 ceiling 除法确保不丢失右/下边缘像素。
     /// 例: 1921×1081 → 481×271 (最后列/行只平均余数像素)。
     /// </summary>
-    private static byte[] RescaleGainMap(byte[] src, int w, int h, GainMapMode mode,
+    internal static byte[] RescaleGainMap(byte[] src, int w, int h, GainMapMode mode,
         out int outW, out int outH)
     {
         // Ceiling 除法: (w+3)/4 确保覆盖所有源像素
@@ -609,13 +665,21 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     ///   主图 (Base): [SOI][APP1: XMP (hdrgm+GContainer)][DQT/SOF/DHT...][APP2: MPF][SOS][扫描数据][EOI]
     ///   增益图 (GainMap JPEG): [SOI][APP2: ISO 21496-1 (命名空间+二进制元数据)][DQT/SOF/DHT...][SOS][扫描数据][EOI]
     ///   最终 EOI
-    /// 关键: XMP/MPF 必须插在 Base JPEG 的 SOS **之前**；ISO 元数据必须插在增益图 JPEG 的 SOI **之后**。
-    /// 双元数据: XMP (hdrgm, Ultra HDR v1 解码器) + ISO 21496-1 二进制 (APP2, ISO 解码器)。
+    /// 关键: MPF 必须插在 Base JPEG 的 SOS **之前**；ISO 元数据必须插在增益图 JPEG 的 SOI **之后**。
+    /// 元数据: 只有 ISO 21496-1 二进制 (APP2) 一份 —— hdrgm XMP 双写通路已于 2026-11-03 退役。
     /// </remarks>
     private static void WriteJpegGainMapFile(byte[] baseJpeg, byte[] gainMapJpeg,
-        int baseW, int baseH, int gmW, int gmH, GainMapMode mode, float headroom, string outputPath)
+        GainMapMode mode, float headroom, string outputPath)
     {
-        byte[] iso = BuildIso21496Metadata(mode, headroom);
+        // ═══ 2026-11-03 用户口径二次收口：JPEG 增益图【恒写 ISO 21496-1】，不做用户抉择 ═══
+        // 上午的版本给了 Iso/Xmp/Both 三档下拉；用户明确"应该只产出 ISO 标准的这一种，
+        // 不应该让用户去进行抉择"——兼容性取舍不该由终端用户背，XMP 双写路径整体退役
+        // （含只服务它的三个私有 helper）。依据不变：上游 libultrahdr 默认
+        // UHDR_WRITE_XMP=FALSE / UHDR_WRITE_ISO=TRUE；双写的真实风险是"两份声明各自漂移，
+        // 不同解码器还原出不同 HDR"。hdrgm XMP 生成器（BuildXmpMetadata）保留为 public ——
+        // 它是文档级参照与测试对照，只是不再被任何产物路径调用。
+        // 这里不再有 writeIso/writeXmp 两个布尔：恒写 ISO 是【结构】而不是【配置】，
+        // 留一个恒真的开关只会让下一个人以为它还有另一态。
 
         // 1. 定位 Base JPEG 的 SOS (FFDA) 标记位置
         int sosIndex = FindSosIndex(baseJpeg);
@@ -638,71 +702,66 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         int baseScanStart = sosIndex + sosLen;              // 扫描数据起点
         int baseScanLen = baseJpeg.Length - baseScanStart;  // 扫描数据（含 EOI）
 
-        // 3. 将 ISO 21496-1 元数据插入增益图 JPEG: [SOI][APP2: ISO][增益图数据(去SOI)]
-        byte[] gainMapWithIso = InsertIsoIntoSegment(gainMapJpeg, iso);
+        // 3. 次图承载：ISO 21496-1（APP2）—— 唯一承载，恒写
+        //    ⚠ 2026-11-03 二次收口：hdrgm XMP 双写通路整体退役（用户口径"不应让用户抉择"），
+        //      于是次图侧的 APP1 XMP、"Xmp/Both 档"分支、以及那三个只服务它们的私有 helper
+        //      （InsertXmpIntoSegment / BuildSecondaryXmpPayload / PrefixXmpNamespace）一并删除。
+        //      BuildXmpMetadata 仍保留（public，有测试对照），但不再有产物路径调用它。
+        byte[] gainMapSegment = InsertIsoIntoSegment(gainMapJpeg, BuildIso21496Metadata(mode, headroom));
 
-        // ═══ 2026-08-10 修复: XMP 增益图 item 添加 Item:Length ═══
-        // 对齐 libultrahdr generateXmpForPrimaryImage: GainMap item 写 Item:Length
-        // = 增益图 JPEG 完整大小 (SOI + ISO 段 + 数据)。部分解码器用 Item:Length
-        // 定位增益图, 缺失 → 增益图层无法解析 → "增益涂层写入不正确"
-        byte[] xmp = BuildXmpMetadata(baseW, baseH, gmW, gmH, mode, headroom, gainMapWithIso.Length);
+        // 4. 底图不再写 APP1（XMP 承载已退役）⇒ app1Total 恒 0。
+        //    保留这个变量与下面的算式是有意的：MPF 的两个偏移量都拿它参与计算，
+        //    "现在恒为 0"与"将来若恢复某条 APP1 段"是两件事，算式按结构写而不是按 0 化简，
+        //    恢复时只需让它重新非 0，不必重推公式。
+        const int app1Total = 0;
 
-        // ═══ 2026-08-10 修复: XMP payload 必须带标准命名空间前缀 ═══
-        // libultrahdr (jpegr.cpp appendGainMap): APP1 payload =
-        //   "http://ns.adobe.com/xap/1.0/\0" + XMP XML (kXmpNameSpace + null 终止符)
-        // 旧实现写裸 XML → MS Photos 等解码器无法识别 XMP → 元数据解析失败 → 偏色/无 HDR
-        // (libultrahdr getMetadataFromXMP 也要求 payload 以 namespace 开头)
-        byte[] xmpNs = System.Text.Encoding.ASCII.GetBytes("http://ns.adobe.com/xap/1.0/\0");
-        byte[] xmpPayload = new byte[xmpNs.Length + xmp.Length];
-        System.Buffer.BlockCopy(xmpNs, 0, xmpPayload, 0, xmpNs.Length);
-        System.Buffer.BlockCopy(xmp, 0, xmpPayload, xmpNs.Length, xmp.Length);
-
-        // 4. 构建 MPF（big-endian）
+        // 5. 构建 MPF（big-endian）
         //    ═══ 2026-08-10 修复: offset 语义 + primary size ═══
         //    对齐 libultrahdr (jpegr.cpp appendGainMap + multipictureformat.cpp):
         //    - 增益图 offset 是相对 MPF 数据段起始 (APP2 payload 中 'MPF\0' 之后,
         //      即 TIFF 头 'MM' 处) 的偏移, 不是文件绝对偏移!
         //      libultrahdr: secondary_image_offset = primary_image_size - pos - 8
         //      (8 = APP2 marker(2) + length(2) + 'MPF\0'(4))
-        //    - primary image size = 主图完整大小 (含 XMP/MPF 段), 不是 0
+        //    - primary image size = 主图完整大小 (含 MPF 段), 不是 0
         // 旧实现: gmOffset 传文件绝对偏移 + primary size=0 → 部分解码器 (如
         // libultrahdr 解析) 按错误偏移查找增益图 → 找不到/解析失败 → "增益涂层写入不正确"
-        // ⚠ app1Total 必须用 xmpPayload.Length (含 namespace) — 否则 MPF 偏移差 29 字节
-        int app1Total = 2 + 2 + xmpPayload.Length; // marker(2) + length(2) + data
         int mpfDataLen = 86;                      // BuildMpf 输出固定长度
         int app2Total = 2 + 2 + mpfDataLen;       // marker(2) + length(2) + data
-        // 主图 (Base) 完整大小: 从文件头到 Base EOI (含 XMP/MPF 段)
+        // 主图 (Base) 完整大小: 从文件头到 Base EOI (含 APP1/APP2 段)
         int primarySize = baseHeaderLen + app1Total + app2Total + sosLen + baseScanLen;
         // 增益图绝对偏移 = 主图结束位置
         int gmAbsOffset = primarySize;
-        // 增益图偏移 (相对 MPF 数据段起始, 即 Base 头部 + APP1 之后 + 8)
+        // 增益图偏移 (相对 MPF 数据段起始, 即 Base 头部 + APP1(若有) 之后 + 8)
         int mpfDataStart = baseHeaderLen + app1Total + 8; // 8 = APP2 marker(2)+len(2)+'MPF\0'(4)
         int gmOffset = gmAbsOffset - mpfDataStart;
-        byte[] mpf = BuildMpf(gmOffset, gainMapWithIso.Length, primarySize);
+        byte[] mpf = BuildMpf(gmOffset, gainMapSegment.Length, primarySize);
 
-        // 5. 构建完整文件
-        //    结构: Base头部 + APP1(XMP) + APP2(MPF) + SOS + Base扫描(含EOI)
-        //        + GainMap(含ISO段, 完整含EOI) + 最终EOI
-        using var ms = new MemoryStream(baseJpeg.Length + app1Total + app2Total + gainMapWithIso.Length + 2);
+        // 6. 构建完整文件
+        //    结构: Base头部 + APP2(MPF) + SOS + Base扫描(含EOI)
+        //        + GainMap(含 ISO 元数据段, 完整含EOI) + 最终EOI
+        using var ms = new MemoryStream(baseJpeg.Length + app1Total + app2Total + gainMapSegment.Length + 2);
         // 写入 Base 头部段（SOI...SOS 之前）
         ms.Write(baseJpeg, 0, baseHeaderLen);
-        // 插入 APP1 (XMP, 含 namespace) + APP2 (MPF)
-        WriteAppSegmentMem(ms, 0xE1, xmpPayload);
+        // 插入 APP2 (MPF，恒写：它定位次图)
         WriteAppSegmentMem(ms, 0xE2, mpf);
         // 写入 SOS 段 + Base 扫描数据（含 EOI）
         ms.Write(baseJpeg, sosIndex, sosLen + baseScanLen);
-        // 写入完整 Gain Map JPEG（含 ISO 段 + 自己的 SOI...EOI）
-        ms.Write(gainMapWithIso, 0, gainMapWithIso.Length);
+        // 写入完整 Gain Map JPEG（含元数据段 + 自己的 SOI...EOI）
+        ms.Write(gainMapSegment, 0, gainMapSegment.Length);
         // 最终 EOI
         ms.WriteByte(0xFF);
         ms.WriteByte(0xD9);
 
         File.WriteAllBytes(outputPath, ms.ToArray());
+
+        CoreLog.Debug("GainMap",
+            $"元数据 = ISO 21496-1（恒写，用户口径 2026-11-03：不做用户抉择），"
+            + $"次图段总长={gainMapSegment.Length}B",
+            LogCategory.Encoding);
     }
 
     /// <summary>ISO 21496-1 命名空间 (libultrahdr kIsoNameSpace)。</summary>
     private const string IsoNamespace = "urn:iso:std:iso:ts:21496:-1";
-
     /// <summary>将 ISO 21496-1 元数据作为 APP2 段插入增益图 JPEG 的 SOI 之后。</summary>
     private static byte[] InsertIsoIntoSegment(byte[] gainMapJpeg, byte[] isoData)
     {
@@ -738,7 +797,6 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         ms.Write(gainMapJpeg, 2, gainMapJpeg.Length - 2);
         return ms.ToArray();
     }
-
     /// <summary>在 JPEG 字节流中定位 SOS (FFDA) 标记的偏移。</summary>
     private static int FindSosIndex(byte[] jpeg)
     {
@@ -958,7 +1016,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     ///   不能共用公共分母 — 否则 gamma 会被错误解析 (如 1/64=0.015625 导致解码过亮!)
     /// 语义: gainMapMin/Max = log2 值; headroom = log2(capacity)
     /// </remarks>
-    public static byte[] BuildIso21496Metadata(GainMapMode mode, float headroom = 12.5f)
+    public static byte[] BuildIso21496Metadata(GainMapMode mode, float headroom = 12.5f, int? forceChannels = null)
     {
         // 与 BuildXmpMetadata 一致的元数据值
         // gainMapMin/Max = log2 值, 用精确分数表示 (与 XMP 完全一致!)
@@ -981,8 +1039,13 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         int alternateHeadroomN = gainMapMaxLog2N; // alternateHdrHeadroom = log2(headroom) 精确
         const int alternateHeadroomD = 100;
 
-        bool multiChannel = mode == GainMapMode.Rgb;
-        int channels = multiChannel ? 3 : 1;
+        // 通道数：JPEG 出口按增益图实际形状（Gray⇒1、Rgb⇒3）。
+        // AVIF 出口传 forceChannels=3：它的 tmap 交付恒为 3 平面 YUV444（Gray 时 ch0 复制成套，
+        // 与 libavif gainmap.c 单通道的处理等价，也与 libavif 自家样本 "Alternate image / Planes: 3" 同形），
+        // 于是"声明 3 参数集"与"交付 3 平面"成套 ⇒ 写出器的对撞门恒过。
+        // 逐通道参数本就相同（下面循环写的是同一组常数），复制不改变施加结果。
+        bool multiChannel = mode == GainMapMode.Rgb || forceChannels == 3;
+        int channels = forceChannels ?? (multiChannel ? 3 : 1);
 
         using var ms = new MemoryStream();
         var bw = new BinaryWriter(ms);

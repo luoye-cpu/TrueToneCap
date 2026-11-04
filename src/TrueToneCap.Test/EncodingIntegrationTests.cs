@@ -213,7 +213,7 @@ public static class EncodingIntegrationTests
                 if (bytes[i] == 0xFF && bytes[i + 1] == 0xD8) soiCount++;
             bool hasGainMap = soiCount >= 2;
 
-            // 验证 XMP 段完整（含 hdrgm:Version）
+            // 全文扫描 hdrgm XMP 是否存在 —— 默认档（Iso 21496-1）不该有它，这里用于反向断言。
             // 注意: ICC 走 APP2（2026-09-20 修正，见 UsabilityTests.Jpeg_IccLargeProfile），
             //       XMP 才是 APP1；这里遍历所有 APP1 段直到找到 hdrgm XMP。
             bool hasXmpFields = false;
@@ -263,9 +263,15 @@ public static class EncodingIntegrationTests
             }
             bool isBaseline = baseSof == 0xC0;
             Console.WriteLine($"  [SOF] Base SOF=0x{baseSof:X2} ({(isBaseline ? "Baseline ✓" : "非Baseline, 可接受")})");
+            // ═══ 2026-11-03：本用例走【默认档】= 只写 ISO 21496-1 ═══
+            // 判据从"有 XMP 且有 ISO"改成"有 ISO 且【无】XMP"：前者会把默认值改回双写也照样绿，
+            // 而双写正是本轮按用户口径退役掉的形态（"只写最新标准 ISO 的元数据"）。
+            // 反向断言（hasXmpFields 必须为 false）才是把默认档钉死的那颗牙；
+            // 三档各自的字节差异由 --color-tests 的 EncodedJpeg_GainMapMarker 逐档全覆盖。
             // 关键判据: 输出含增益图（双 SOI）。SOF 类型可选。
-            bool ok = fi.Length > 0 && hasGainMap && hasXmpFields && hasIsoMetadata;
-            Assert(name, ok, $"{fi.Length / 1024.0:F0}KB, 增益图={hasGainMap}, XMP={hasXmpFields}, ISO={hasIsoMetadata}, Baseline={isBaseline}");
+            bool ok = fi.Length > 0 && hasGainMap && hasIsoMetadata && !hasXmpFields;
+            Assert(name, ok, $"{fi.Length / 1024.0:F0}KB, 增益图={hasGainMap}, ISO={hasIsoMetadata}, 默认档无XMP={!hasXmpFields}, Baseline={isBaseline}"
+                + (hasXmpFields ? " ⇒ 默认档不该写 hdrgm XMP（只写 ISO 21496-1）" : ""));
         }
         catch (Exception ex)
         {

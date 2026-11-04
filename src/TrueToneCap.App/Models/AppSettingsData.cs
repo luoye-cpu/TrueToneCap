@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Models/AppSettingsData.cs
 // 应用设置数据模型 — 独立文件，支持 JSON 序列化（AOT 兼容）
@@ -246,7 +246,19 @@ public sealed class AppSettingsData
     /// 那样会让默认色度下的硬件永远选不上；能力不足改由 Core 协商降级并明确提示。</para>
     /// <para>手动指定时尊重用户选择，若超出该编码器能力则由 Core 协商降级。</para>
     /// </summary>
-    public string AvifEncoder { get; set; } = "Auto";
+    // ═══ 2026-11-04 用户口径：默认 libaom（原 Auto）═══
+    // Auto 会解析到硬件（NVENC/QSV），而硬件路只支持 4:2:0、≤10-bit —— 与新的默认色度
+    // 4:4:4 直接冲突：选了 444 也会被能力协商降回 420，用户看到的是"设了不生效"。
+    // 软件 avifenc(libaom) 支持 420/422/444 全色度与 ≤12-bit，是唯一能兑现 444 的路径，
+    // 因此把它定为默认。想用硬件加速的用户仍可显式选（届时色度会按其能力协商并提示）。
+    public string AvifEncoder { get; set; } = "LibAom";
+
+    /// <summary>
+    /// AVIF 的 HDR 承载方式（2026-11-03 用户口径："AVIF 下允许传统模式的 HDR 也允许使用 GainMap 的 HDR"）。
+    /// <para><c>Pq</c>（默认）＝ 底图直接写 PQ，是本轮之前 AVIF 唯一的 HDR 路 ⇒ 默认保持它，
+    /// 没动过这个开关的老用户产物逐字节不变。<c>GainMap</c> ＝ SDR 底图 + tmap/ISO 21496-1 增益图。</para>
+    /// </summary>
+    public string AvifHdrMode { get; set; } = "Pq";
 
     /// <summary>
     /// 是否允许使用硬件编码加速（当前覆盖 NVENC）。
@@ -325,7 +337,16 @@ public sealed class AppSettingsData
     //     要 444 的用户在下拉里明选即可（会走 libaom，慢但色度不砍）。
     //   ⚠ 必须与 XAML 的 AvifChromaCbo IsSelected 项同源，由 Test_AvifChroma_DefaultIs420 双向钉住
     //     （只改一处会出现"设置里 420、界面显示 444"或反之）。
-    public string ChromaAvif { get; set; } = "420";
+    // ═══ 2026-11-04 用户口径：默认 4:4:4（原 4:2:0）═══
+    // 本应用产出的是截图，内容以文字/UI 为主，而 4:2:0 只保留一半色度分辨率。
+    // 实测（640x240 彩色文字，CRF 20，逐像素比对原始 RGBA，台账 §22/§23）：
+    //   色度    体积      平均|Δ|   边缘|Δ|   说明
+    //   420    28186B    4.60      5.75      当前默认
+    //   422    32142B    4.00      5.46      ✗ 只改善 5% 却更贵，两头不靠
+    //   444    37734B    2.54      3.22      ✓ 边缘改善 44%
+    // 体积代价要分开看：上面是"大面积彩色细节"的最坏情形（+34%）；
+    // 真实桌面截图 +0.7%、中性文档 -0.1% —— 那类内容色度本来就平滑，4:2:0 省不下空间。
+    public string ChromaAvif { get; set; } = "444";
     // ═══ 2026-09-19 清理：原 ChromaWebP / ChromaTiff / ChromaGainMap 三个字段已删除 ═══
     //   删除依据是实测，不是"看着没人用"：同一样张只改 ChromaSubsampling，三种格式的产物
     //   字节完全相同，ffprobe 读数也不变，说明这个值从头到尾没有进入码流。
@@ -417,6 +438,12 @@ public sealed class AppSettingsData
 
     // ── 色调映射 ──
     public string GainMapMode { get; set; } = "Gray";
+
+    // ═══ 元数据承载设置项已删（2026-11-03 用户口径二次收口）═══
+    // "JPEG 应该只产出 ISO 标准的这一种，不应该让用户去进行抉择"——恒写 ISO 21496-1。
+    // settings.json 里遗留的旧键会被忽略（未注册的 JSON 键静默跳过），无需迁移代码；
+    // Normalize 也不再读它。
+
     public int PaperWhiteNits { get; set; } = 200;
     public int DisplayMaxNits { get; set; } = 1000;
 

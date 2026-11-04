@@ -23,6 +23,24 @@ namespace TrueToneCap.App;
 
 public sealed partial class MainWindow : Window
 {
+    /// <summary>
+    /// 「ffmpeg 路径」这一格【回显成功过】没有 —— 保存侧的回写必须有这道闩。
+    /// <para>为什么这一格要单独设闩，而热键、输出路径那些不用的理由：空串在别的格是"没填"，
+    /// 在 <see cref="AppSettingsData.FfmpegPath"/> 却是<b>合法值</b>（= 自动解析）。
+    /// 于是"控件还没回填就保存"这一类事故在这格变成了<b>不可察觉的数据丢失</b>：
+    /// 用户在 settings.json 里手改过路径，若 <see cref="ApplySettingsToUI"/> 有任何一句在回显之前
+    /// 抛异常（它前半段有迁移计算、有 <c>SaveSettingsQuiet()</c> 落盘，都可能抛），
+    /// 而退出路径的 <c>SaveSettings()</c> 是被 <c>try { … } catch { }</c> 吞掉的
+    /// （MainWindow.xaml.cs 的关闭回调两处），那一格会以空串写回去 ——
+    /// 界面上什么都没显示，盘上那行手改的值也没了，两个现象互相掩盖。</para>
+    /// <para>本仓对同族问题的既定答案是"控件状态不可信时【不写】、保留盘上原值"
+    /// （见 <c>SaveSettings</c> 里 OverlayColorCbo 那条 2026-10-01 的注释）。这里照同一个方向做：
+    /// 没回显过 ⇒ 不回写。代价是"回显之前用户就改了这格"会丢一次编辑，
+    /// 但那条路径要求用户在构造期那一瞬之内改到一个还没显示的输入框里，不可达；
+    /// 而"静默清掉手改路径"是可达且无痕的。</para>
+    /// </summary>
+    private bool _ffmpegPathEchoed;
+
     /// <summary>静默保存设置（不更新 UI 控件值，直接序列化 _settings）。</summary>
     private void SaveSettingsQuiet() => AppServices.Settings.SaveQuiet();
 
@@ -145,6 +163,8 @@ public sealed partial class MainWindow : Window
         // 恢复上次选择。软件编码器（libaom/svt）由 SelectByKind 按需解析，
         // 不再写全局静态 Codec（P2-5 修复，见 Core 侧）。
         SetComboByTag(AvifCodecCbo, _settings.AvifEncoder);
+        // 2026-11-03：AVIF 的 HDR 承载方式（默认 Pq）
+        if (AvifHdrModeCbo is not null) SetComboByTag(AvifHdrModeCbo, _settings.AvifHdrMode);
         // ═══ 2026-10-30：这一句实测吃掉 478ms（启动回显四段里 95%）═══
         // 它逐个问 `IsKindAvailable`，软件那几种要真去探测 avifenc.exe（进程创建本机冷启动约 200ms 一档）。
         // 而它只改下拉的**文字后缀**（"（本机不可用）"），不参与任何读取：格式/编码器的实际选择走
@@ -177,6 +197,17 @@ public sealed partial class MainWindow : Window
         if (AnimFormatCbo is not null) SetComboByTag(AnimFormatCbo, _settings.AnimFormat);
         if (RecordFpsCbo is not null) SetComboByTag(RecordFpsCbo, _settings.RecordFps.ToString());
         if (MaxDurationCbo is not null) SetComboByTag(MaxDurationCbo, _settings.MaxDurationSeconds.ToString());
+        // ffmpeg 路径输入框回显（2026-11-03 遗留 3 收口）：这一格此前只存在于 settings.json，
+        // 用户得关掉 app 手编文件。现在界面上直接可填、可清空（清空 = 回到自动解析）。
+        // ⚠ 空值也要回显成空 —— 不要在这里补任何兜底文字，否则"没配过"会变成"配了一个假路径"。
+        // ⚠ 回显与回写之间要一道闩（见 _ffmpegPathEchoed）：本方法前半段任何一句抛异常都会让
+        //   这一格停在"空的"，而退出路径的 SaveSettings() 是 try/catch 吞掉的 ⇒ 空串会被当成
+        //   用户意图写回盘上，把 settings.json 里那行手改的路径静默抹掉。
+        if (FfmpegPathTxt is not null)
+        {
+            FfmpegPathTxt.Text = _settings.FfmpegPath;
+            _ffmpegPathEchoed = true;
+        }
         if (ArchiveChk is not null) ArchiveChk.IsChecked = _settings.ArchiveEnabled;
         if (ArchiveModeCbo is not null) { SetComboByTag(ArchiveModeCbo, _settings.ArchiveMode); ArchiveModePanel.Visibility = _settings.ArchiveEnabled ? Visibility.Visible : Visibility.Collapsed; }
         long m2 = swApply.ElapsedMilliseconds;   // ↑ 编码选项：AVIF 编码器/位深/色度/归档
@@ -215,6 +246,7 @@ public sealed partial class MainWindow : Window
             UpdateOcrLanguageVisibility(initEngineType);
         // Gain Map 模式
         if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
+        // 元数据承载方式回显已删（2026-11-03 二次收口：恒写 ISO 21496-1，不做用户抉择）
 
         // ═══ 压缩强度档位（2026-10-07；2026-10-29 扩到 PNG / TIFF 并分成两组）═══
         // 逐格式恢复各自的档位。SetComboByTag 已处理"未实化容器上写 IsSelected 是空操作"
@@ -359,7 +391,17 @@ public sealed partial class MainWindow : Window
             _settings.JxlPngSuffix = JxlPngSuffixChk.IsChecked == true;
             if (GainMapModeCbo is not null)
                 _settings.GainMapMode = (GainMapModeCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "Gray";
-            _settings.AvifEncoder = (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Auto";
+            // 元数据承载方式落回设置已删（2026-11-03 二次收口：恒写 ISO 21496-1，不做用户抉择）
+            // 兜底必须与 AppSettingsData.AvifEncoder 的默认【同源】（2026-11-04 默认 Auto→LibAom）。
+            // ⚠ 接线审查抓到本轮漏改：这里一度还是 ?? "Auto" ⇒ 控件未回填那一瞬保存会把默认漂回 Auto，
+            //   而 Auto 在 444 下会被能力协商降回 420（正是本轮要消除的形态）。判据见
+            //   Test_Settings_ComboFallbacksMatchDefaults（遍历所有 combo 字段，兜底≠默认即红）。
+            _settings.AvifEncoder = (AvifCodecCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "LibAom";
+            // 2026-11-03：AVIF 的 HDR 承载方式落回设置。兜底必须是 Pq（传统底图写 PQ）——
+            // 那是本轮之前 AVIF 唯一的 HDR 路，也是硬件加速唯一支持的形状；兜到 GainMap
+            // 会让"控件没回填就保存"的用户静默拿到另一条编码器路径。
+            if (AvifHdrModeCbo is not null)
+                _settings.AvifHdrMode = (AvifHdrModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Pq";
             // ═══ 2026-09-18：复选框已移除，硬件总闸恒开（保持字段以兼容旧 settings.json）═══
             _settings.HardwareEncodingEnabled = true;
             // 每格式编码选项
@@ -374,12 +416,16 @@ public sealed partial class MainWindow : Window
             //   PNG 为 RGB 无损格式，本就不支持色度子采样）
             _settings.ChromaJpegLi = (ChromaJpegLiCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420"; // JPEG LI 色度
             // 兜底值必须与 AppSettingsData 的字段默认一致 —— 下拉还没回填的那一瞬保存下去的就是这个兜底值。
-            // AVIF 的默认已于 2026-09-19 改回 420（此处原注释还写着"444 视觉无损"，属过期口径）。
-            _settings.ChromaAvif = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420";
+            // ⚠ 接线审查抓到本轮漏改：AVIF 默认已于 2026-11-04 改为 444，这里一度还停在 ?? "420"
+            //   （原注释写"2026-09-19 改回 420"也过期了）。兜底漂回 420 ⇒ 控件未回填那一瞬会把默认漂错。
+            //   由 Test_Settings_ComboFallbacksMatchDefaults 遍历兜底↔默认，漂即红。
+            _settings.ChromaAvif = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
             _settings.ChromaJpegXl = (ChromaJpegXlCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
-            // 2026-09-26：不再写 ChromaGainMap —— 控件已随"GainMap 并入 JPEG LI"删除，
-            //   管线对增益图态改读 ChromaJpegLi（上面那一条）。留着这行等于让一个看不见的
-            //   下拉的兜底值每次保存都覆盖盘上的历史值。
+            // 2026-09-26：不再写 ChromaGainMap —— 控件已随"GainMap 并入 JPEG LI"删除。
+            //   2026-11-04 更新：增益图态色度【既不读 ChromaGainMap、也不读 ChromaJpegLi】——
+            //   管线对 JPEG_GAINMAP 硬编码 444（见 CapturePipelineService 的 switch），普通 JPEG LI
+            //   才读 ChromaJpegLi。留着写 ChromaGainMap 这行等于让一个看不见的下拉的兜底值
+            //   每次保存都覆盖盘上的历史值。
             // ═══ 2026-09-19 清理：原这两行硬编码赋值已随字段删除 ═══
             //   ChromaWebP（本轮连同下拉一起撤掉）、ChromaTiff（界面上本就没有下拉，
             //   每次保存却被改回固定值）——写进去也没有任何编码器读它，属"只写不读"，
@@ -391,10 +437,18 @@ public sealed partial class MainWindow : Window
             _settings.AnimFormat = (AnimFormatCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "WebP";
             _settings.RecordFps = int.TryParse((RecordFpsCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var recordFps) ? recordFps : 15;
             _settings.MaxDurationSeconds = int.TryParse((MaxDurationCbo?.SelectedItem as ComboBoxItem)?.Tag as string, out var maxDuration) ? maxDuration : 30;
-            // FfmpegPath 无界面（本台账拍板：手动路径走 settings.json 编辑，见 D 流第 4 步），
-            // 这里刻意不写 —— 写兜底会把用户手改的路径抹掉。
-            // （原 AnimAvifBackendIndex 硬编码赋值已删除：该字段于 2026-09-15 清理，
-            //   它无 UI、无消费方，写 0 只是制造"录制 AVIF 后端可配置"的假象）
+            // ═══ FfmpegPath 现在有界面了（2026-11-03 遗留 3）⇒ 从输入框回写 ═══
+            // 空串是合法值（= 自动解析），所以这里不能像别的下拉那样写 `?? 兜底`：
+            // 清空输入框 = 用户主动要求回到自动解析，补兜底会把"清空"变成"清不掉"。
+            // 清洗链保持与 SettingsService.Normalize 同形（Trim → 剥引号 → TrimEnd(';') → Trim），
+            // 两处都做是刻意的：这里管"刚敲进去的"，Normalize 管"盘上读回来的"。
+            // ⚠ _ffmpegPathEchoed 这道闩与上面 OverlayColorCbo 那条"没有选中项就保留盘上原值"
+            //   同一个理由，只是触发条件不同：那一格怕"下拉没回填 ⇒ 兜底值覆盖"，
+            //   这一格怕"回显根本没跑 ⇒ 空的控件被当成用户意图"。未回显 ⇒ 不写，
+            //   否则手改在 settings.json 里的路径会被静默清掉（空串在这格是合法值，清得掉）。
+            if (FfmpegPathTxt is not null && _ffmpegPathEchoed)
+                _settings.FfmpegPath = (FfmpegPathTxt.Text ?? "")
+                    .Trim().Trim('"').Trim('\'').Trim().TrimEnd(';').Trim();
             _settings.ArchiveEnabled = ArchiveChk?.IsChecked == true;
             _settings.ArchiveMode = (ArchiveModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Month";
             _settings.FirstRun = false;
@@ -438,13 +492,32 @@ public sealed partial class MainWindow : Window
 
             // 通过 SettingsService 持久化
             AppServices.Settings.Save();
+            // ═══ 2026-11-03（遗留 3）：手填的 ffmpeg 路径要当场给个说法 ═══
+            // 为什么不能只靠录制入口那句"未找到 ffmpeg"：那句话要到用户按热键开始录时才出现，
+            // 而"路径填错了"这件事在按下保存的那一刻就已经确定了 —— 让用户等一次录制失败才知道，
+            // 等于把一次可立即纠正的笔误拖成一次产品故障。
+            // ⚠ 只警告、不拒绝保存：文件可能在保存之后才被放到那个位置（下载中 / 从别的机器拷），
+            //   而 FfmpegLocator 本来就按"配置无效 ⇒ 回退自动解析"工作（台账 §5.2 第 3 步）。
+            //   这里改了「✅ 设置已保存」那句文案，把警告一并写进同一行状态，不再弹额外对话框。
+            string saveStatus = "✅ 设置已保存";
+            var ffmpegIssue = FfmpegLocator.DescribePathIssue(_settings.FfmpegPath);
+            if (ffmpegIssue is not null)
+            {
+                LogService.Warn("Settings", $"ffmpeg 路径不可用：{ffmpegIssue}");
+                saveStatus = "⚠️ 设置已保存，但 ffmpeg 路径不可用：" + ffmpegIssue;
+            }
+            else if (_settings.FfmpegPath.Length > 0)
+            {
+                // 路径有效 ⇒ 丢掉旧缓存，下次录制按新路径重新解析（否则会继续用上次缓存的那一枚）
+                FfmpegLocator.Invalidate();
+            }
 
             // 热键 + 自启同步
             // ⚠ 之前这两处静默失败：设置界面上的开关已勾选并提示"已保存"，
             // 但系统里自启项/热键实际未生效 —— 用户看到的与实际状态不一致且无从察觉。
             SyncStartupAndHotkey();
 
-            SetStatus("✅ 设置已保存");
+            SetStatus(saveStatus);
         }
         catch (Exception ex) { SetStatus("❌ 保存失败: " + ex.Message); }
     }

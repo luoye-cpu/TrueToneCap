@@ -515,6 +515,11 @@ public sealed class SettingsService
         // 且下一次保存被 `?? "Gray"` 兜底把用户的 RGB 增益静默翻成灰度。现在按 Tag 拼法放行，
         // 大小写变体（"rgb"/"RGB"）由 FitTag 改写成 "Rgb" 而不是回落默认 —— 意图保住，拼法对齐。
         FitTag(s.GainMapMode, v => s.GainMapMode = v, dft.GainMapMode, "Gray", "Rgb");
+        // ═══ 2026-11-03：JPEG 增益图元数据承载方式的白名单 ═══
+        // 元数据承载的 FitTag 已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，
+        // 不做用户抉择；settings.json 里的遗留键被静默忽略）
+        // 2026-11-03：AVIF 的 HDR 承载（Pq=传统底图写 PQ，默认；GainMap=SDR 底图+tmap/ISO 增益图）。
+        FitTag(s.AvifHdrMode, v => s.AvifHdrMode = v, dft.AvifHdrMode, "Pq", "GainMap");
         // ⚠ 2026-09-29 摘掉 "Week"：界面从来没有这一项（Tag 表只有 Year/Month/Day），
         //   归档路径 GetArchivePath 也没有按周的规则（落到 _ ⇒ yyyy-MM，与 Month 同）。
         //   放行它 = 白名单里多一个"选不到、也没有行为"的值，手改配置的人只会看到空白下拉。
@@ -767,14 +772,18 @@ public sealed class SettingsService
         // JPEG XL 单独走自己的值域（NativeJxlEncoder.ChromaOptions）：共享白名单放行 422，
         // 而 JXL 下拉没有 422 项 ⇒ 盘上一旦有 422，按 Tag 选中会落空、下拉显示空白。
         s.ChromaJpegXl  = TrueToneCap.Core.Encoding.NativeJxlEncoder.NormalizeChroma(s.ChromaJpegXl);
-        s.ChromaAvif    = FixChroma(s.ChromaAvif);
-        s.ChromaGainMap = FixChroma(s.ChromaGainMap);   // 2026-09-19：主路径已真读它（默认 420，可到 444）
+        // ⚠ 2026-11-04：两个格式的默认色度【不再相同】，所以非法值回落必须各回各家：
+        //   AVIF 默认已改 444（用户口径：截图以文字/UI 为主，4:2:0 彩色边缘劣化明显）；
+        //   增益图仍是 420（Ultra HDR 的常规形状，且底图是 SDR、色度本就不承担 HDR 信息）。
+        //   共用同一个回落值会让"盘上坏值"把用户带回错误的那一档。
+        s.ChromaAvif    = FixChroma(s.ChromaAvif, fallback: "444");
+        s.ChromaGainMap = FixChroma(s.ChromaGainMap, fallback: "420");
     }
 
-    // 非法值回落 420：与 AVIF 的默认色度（2026-09-17 产品决策）以及 Core 的
-    // AvifEncoderCapabilities.NormalizeChroma 保持一致，避免两处兜底值打架。
-    private static string FixChroma(string? v) =>
-        v is "444" or "422" or "420" ? v : "420";
+    // 非法值回落：默认值按【格式】给（见上面两处调用的注释），不再统一 420。
+    // <para>参数有默认值是为了让 JPEG LI 那条老调用不必改动：它的默认仍是 420。</para>
+    private static string FixChroma(string? v, string fallback = "420") =>
+        v is "444" or "422" or "420" ? v : fallback;
 
     /// <summary>
     /// 位深规范化 —— **按格式**钳制，而不是对所有格式统一放行 8/10/12/16。

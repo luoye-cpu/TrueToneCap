@@ -84,17 +84,29 @@
                                      Auto 模式硬件优先，手动选择尊重用户。 -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock x:Name="AvifCodecLabelTxt" Text="AVIF 编码器" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="AvifCodecCbo" Grid.Column="1" SelectionChanged="OnAvifEncoderChanged">
-                                        <ComboBoxItem Tag="Auto" IsSelected="True">自动</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV / 系统 MFT</ComboBoxItem><ComboBoxItem Tag="LibAom">libaom</ComboBoxItem><ComboBoxItem Tag="SvtAv1">SVT-AV1</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC</ComboBoxItem>
+                                        <ComboBoxItem Tag="Auto">自动</ComboBoxItem><ComboBoxItem Tag="Qsv">Intel QSV / 系统 MFT</ComboBoxItem><ComboBoxItem Tag="LibAom" IsSelected="True">libaom</ComboBoxItem><ComboBoxItem Tag="SvtAv1">SVT-AV1</ComboBoxItem><ComboBoxItem Tag="Nvenc">NVIDIA NVENC</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="AvifCodecHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="120,0,0,0"
                                            Text="自动优先硬件编码器；色度或位深不满足时自动降级并提示。"/>
+                                <!-- ═══ 2026-11-03（用户口径）：AVIF 的 HDR 承载方式，默认传统 PQ ═══
+                                     默认 Pq = 本轮之前 AVIF 唯一的 HDR 路（底图写 PQ）⇒ 老用户产物不变。
+                                     GainMap = SDR 底图 + tmap/ISO 21496-1 增益图（复用 JPEG 增益图的像素阶段）。
+                                     只在 HDR 开着时才有意义；关掉 HDR 时这行随 HDR 开关隐藏（见 UpdateQualityPanel）。 -->
+                                <Grid x:Name="AvifHdrModeRow" ColumnDefinitions="120,*">
+                                    <TextBlock x:Name="AvifHdrModeLabelTxt" Text="HDR 承载方式" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="AvifHdrModeCbo" Grid.Column="1" SelectionChanged="OnAvifHdrModeChanged">
+                                        <ComboBoxItem Tag="Pq" IsSelected="True">传统 HDR（底图写 PQ）</ComboBoxItem>
+                                        <ComboBoxItem Tag="GainMap">增益图（SDR 底图 + HDR 增益层）</ComboBoxItem>
+                                    </ComboBox>
+                                </Grid>
+                                <TextBlock x:Name="AvifHdrModeHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="120,0,0,0"/>
                                 <!-- ═══ 2026-09-18（用户指令）：移除「硬件编码」复选框 ═══
                                      编码器下拉已能显式选择硬件（NVENC/QSV），复选框与之语义重复。
                                      硬件总闸恒开（含崩溃哨兵自动降级保护，保留在 Core 层）。 -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="AvifChromaCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0</ComboBoxItem><ComboBoxItem Tag="422">4:2:2</ComboBoxItem><ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
+                                        <ComboBoxItem Tag="420">4:2:0</ComboBoxItem><ComboBoxItem Tag="422">4:2:2</ComboBoxItem><ComboBoxItem Tag="444" IsSelected="True">4:4:4</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <CheckBox x:Name="AvifPngSuffixChk" Content="额外添加 .png 后缀来提高兼容性" Checked="OnPerFormatChanged" Unchecked="OnPerFormatChanged"/>
@@ -194,6 +206,11 @@
                                         <ComboBoxItem Tag="Gray" IsSelected="True">灰度增益</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
+                                <!-- ═══ 元数据方式下拉已删（2026-11-03 用户口径二次收口）═══
+                                     "JPEG 应该只产出 ISO 标准的这一种，不应该让用户去进行抉择"——
+                                     兼容性取舍不该由终端用户背。产物恒写 ISO 21496-1（最新国际标准）；
+                                     hdrgm XMP 双写路径整体退役（Core 的 XMP 生成器保留为文档级参照）。
+                                     若未来确需"给只认老 XMP 的查看器出图"，恢复时让判据把删除代价再讲一遍。 -->
                                 <TextBlock x:Name="GainMapHintTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
@@ -417,8 +434,17 @@
                                         Text="检测中..." FontWeight="SemiBold"
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                 </Grid>
-                                <Grid ColumnDefinitions="120,*">
-                                    <TextBlock x:Name="MappingArrow" Text="→ 映射到" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="MappingArrow" Text="→ 映射到" VerticalAlignment="Center" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                    <!-- ═══ 2026-11-03（A 流遗留 §9-5 收口）：上面那格的布局契约 ═══
+                                         它是【固定 120px 首列】里的行首标签，文案由 RefreshColorMappingUi 按交付形态选，
+                                         最长两支是「→ 色调映射为 SDR（屏幕证据不授权 HDR 声称）」「→ 增益图（SDR 底图 + gain map）」。
+                                         不换行时它会溢出自己的格子、视觉上撞进第二列的 TargetGamutTxt
+                                         （2026-11-02 在未修改的发布版上用 UIA 取证过是既有缺陷）。
+                                         契约 = ①列宽不动（与「显示器色域」那行保持同一列基线）；
+                                                ②标签在自己的格子里换行（TextWrapping=Wrap），绝不越界；
+                                                ③换行后行变高是可接受的代价，不偷改列宽去挤第二列。
+                                         tooltip 由 MainWindow.ColorManagement.cs 在运行期设成【同一份文案】，
+                                         不在 XAML 写死 —— 写死的那份会与文案表分叉，且必须整句进 ZhToEn 才能过本地化判据。 -->
                                     <TextBlock x:Name="TargetGamutTxt" Grid.Column="1" VerticalAlignment="Center"
                                         Text="Rec.709" FontWeight="SemiBold"/>
                                 </Grid>
@@ -483,6 +509,9 @@
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="最大时长" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="MaxDurationCbo" Grid.Column="1" SelectionChanged="OnMaxDurationChanged"><ComboBoxItem Tag="15">15 秒</ComboBoxItem><ComboBoxItem Tag="30" IsSelected="True">30 秒</ComboBoxItem><ComboBoxItem Tag="60">60 秒</ComboBoxItem><ComboBoxItem Tag="120">120 秒</ComboBoxItem></ComboBox>
+                                </Grid>
+                                <Grid ColumnDefinitions="120,*"><TextBlock x:Name="FfmpegPathLabel" Text="ffmpeg 路径" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="FfmpegPathTxt" Grid.Column="1" PlaceholderText="留空 = 自动解析（设置指定 → PATH → 常见位置）"/>
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="质量" VerticalAlignment="Center"/><Slider x:Name="RecordQualitySld" Grid.Column="1" Minimum="0" Maximum="100" ValueChanged="OnRecordQualityChanged"/></Grid>
                             </StackPanel>

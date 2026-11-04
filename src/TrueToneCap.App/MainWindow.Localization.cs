@@ -43,8 +43,14 @@ public sealed partial class MainWindow : Window
         GainMapEnableChk.Content = LocaleManager.GainMapToggle;
         GainMapOptionsDesc.Text = LocaleManager.GainMapDesc;
         GainMapModeLabelTxt.Text = LocaleManager.GainMapModeLabel;
-        AvifPngSuffixChk.Content = LocaleManager.AvifPngSuffix;
-        JxlPngSuffixChk.Content = LocaleManager.JxlPngSuffix;
+        // 元数据方式一族的刷新已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，不做用户抉择）
+        // 2026-11-03：AVIF 的 HDR 承载方式（标签 + 下拉项 + 提示都读 LocaleManager 属性）
+        AvifHdrModeLabelTxt.Text = LocaleManager.AvifHdrModeLabel;
+        SetComboItemText(AvifHdrModeCbo, "Pq", LocaleManager.AvifHdrPq);
+        SetComboItemText(AvifHdrModeCbo, "GainMap", LocaleManager.AvifHdrGainMap);
+        AvifHdrModeHintTxt.Text = AvifHdrModeHintFor(
+            (AvifHdrModeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? _settings.AvifHdrMode);
+        AvifPngSuffixChk.Content = LocaleManager.AvifPngSuffix;        JxlPngSuffixChk.Content = LocaleManager.JxlPngSuffix;
 
         // ═══ 2026-09-19：WebP 色度下拉已撤掉，改为一句随语言刷新的静态说明 ═══
         // XAML 里的中文只是设计器兜底，运行时以这里为准 —— 否则切到英文界面仍是中文。
@@ -162,6 +168,12 @@ public sealed partial class MainWindow : Window
         SetComboItemText(MaxDurationCbo, "30", LocaleManager.Dur30);
         SetComboItemText(MaxDurationCbo, "60", LocaleManager.Dur60);
         SetComboItemText(MaxDurationCbo, "120", LocaleManager.Dur120);
+
+        // ffmpeg 路径那一格（2026-11-03 遗留 3）。XAML 里写的是中文原文，
+        // 这里在切英文时把它与占位提示一起换掉 —— 走 LocaleManager 属性而不是 Tr("…") 字面量，
+        // 理由同 AnimFormat 那几行：同一条文案只许有一处事实源。
+        if (FfmpegPathLabel is not null) FfmpegPathLabel.Text = LocaleManager.FfmpegPathLabel;
+        if (FfmpegPathTxt is not null) FfmpegPathTxt.PlaceholderText = LocaleManager.FfmpegPathPlaceholder;
 
         SetComboItemText(ThemeCbo, "Default", LocaleManager.ThemeDefault);
         SetComboItemText(ThemeCbo, "Light", LocaleManager.ThemeLight);
@@ -515,6 +527,15 @@ public sealed partial class MainWindow : Window
             }
         }
     }
+
+    // GainMapMetadataHintFor 已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，不做用户抉择）
+
+    /// <summary>AVIF HDR 承载方式的提示文案，按当前选中 Tag 出词（两处入口共用一份映射）。</summary>
+    private static string AvifHdrModeHintFor(string? tag) => tag switch
+    {
+        "GainMap" => LocaleManager.AvifHdrHintGainMap,
+        _ => LocaleManager.AvifHdrHintPq,
+    };
 
     /// <summary>从 _settings.FontFamily 恢复字体下拉框选中项。</summary>
     private void RestoreFontSelection()

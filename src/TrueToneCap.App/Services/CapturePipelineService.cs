@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/CapturePipelineService.cs
 // 截图编码管线服务 — 从 MainWindow 提取
@@ -252,9 +252,18 @@ public sealed class CapturePipelineService
             OutputFormat.AVIF => (s.BitDepthAvif, s.ChromaAvif),
             OutputFormat.WebP => (s.BitDepthWebP, "420"),
             OutputFormat.TIFF => (s.BitDepthTiff, "444"),
-            // 2026-09-26：增益图不再是独立格式，而是 JPEG LI 的一个开关 ⇒ 参数与 JPEG LI 同源。
-            // 位深沿用 JPEG LI 侧（GainMap 侧历史上恒 8 且界面上从来没有控件，合并后不留第二份）。
-            OutputFormat.JPEG_GAINMAP => (s.BitDepthJpegLi, s.ChromaJpegLi),
+            // 2026-09-26：增益图不再是独立格式，而是 JPEG LI 的一个开关 ⇒ 位深与 JPEG LI 同源。
+            // ⚠ 2026-11-04（用户口径）：色度【不再同源】—— 增益图态底图恒 4:4:4，
+            //   而 JPEG LI 普通档仍可 4:2:0（用户拍板："JPEG LI 还是默认 420，其他默认 444"）。
+            //   依据（台账 §24 实测，640×240 彩色文字，distance 1.0）：
+            //     色度   体积      边缘|Δ|
+            //     420   89122B    7.42
+            //     444   105269B   6.71
+            //   增益图底图是 SDR 基准图，HDR 查看器会拿它乘增益放大还原 —— 底图的色度误差
+            //   会被一并放大，所以这一档值得为色度精度付体积；普通 JPEG LI 照片档则按体积优先。
+            //   ⚠ 界面上的色度下拉在增益图开启时【必须禁用并说明】，否则就是"改了不生效"的假配置
+            //     （见 MainWindow 的 gainMapOn 联动，判据钉住这一对）。
+            OutputFormat.JPEG_GAINMAP => (s.BitDepthJpegLi, "444"),
             _ => (s.OutputBitDepth, s.ChromaAvif),
         };
 
@@ -295,6 +304,11 @@ public sealed class CapturePipelineService
             OutputBitDepth = bitDepth,
             Effort = effort,
             GainMapMode = s.GainMapMode == "Gray" ? GainMapMode.Gray : GainMapMode.Rgb,
+            // 元数据承载已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，不做用户抉择）
+            // 2026-11-03：AVIF 的 HDR 承载，默认 Pq（底图写 PQ，本轮之前的唯一路）。
+            // GainMap 档复用 JPEG 增益图的像素阶段、只换容器；白名单已在 Normalize 收口，
+            // 这里 _ 分支只是类型兜底，与 AppSettingsData 的默认同向。
+            AvifHdrMode = s.AvifHdrMode == "GainMap" ? AvifHdrMode.GainMap : AvifHdrMode.Pq,
             Metadata = meta,
             // ── SDR 白点: 系统检测值优先 (DISPLAYCONFIG_SDR_WHITE_LEVEL), 用户手动设置回退 ──
             // 关键: GainMap 的 SDR 直通阈值必须与系统实际 SdrWhiteLevel 一致,
@@ -459,6 +473,31 @@ public sealed class CapturePipelineService
                 // 色度：2026-09-17 起 HDR 路径会真实传递 --yuv（EncodeFile 新增 chroma 形参）
                 // ⇒ 设置生效。这里仍走一遍协商以保持契约诚实：将来若某条 HDR 路径引入
                 // 能力受限的编码器，会立刻降级并提示，而不是"改了设置没反应"。
+                // ═══ 2026-11-03 审查轮：AVIF「增益图」承载档的形状约束，必须在这里【明说】 ═══
+                // 增益图档的产物是「SDR 底图(8-bit) + 8-bit 增益层」，与硬件 10-bit PQ 直通是
+                // 两条不同形状：NVENC 虽然支持 HDR，但只支持 PQ 直通，不产增益图容器。
+                // 旧写法让 Core 内部用 ResolveAvifencCodec 悄悄回落（用户亲手选了 NVENC，
+                // 拿到的却是软件编码，且界面没有任何交代）——正是本仓 §27 那类"换了参数不说"。
+                if (settings.AvifHdrMode == AvifHdrMode.GainMap
+                    && avifKind is not (AvifEncoderKind.Auto or AvifEncoderKind.Avifenc))
+                {
+                    string hwName = AvifEncoderCapabilities.Caps(avifKind).DisplayName;
+                    avifKind = AvifEncoderKind.Avifenc;
+                    string gmMsg = $"{hwName} 不参与「增益图」承载（该档恒由 avifenc 软件编码："
+                                 + "底图是 SDR、HDR 在增益层），本次已改用软件编码";
+                    // Auto 解析到硬件 ≠ 用户显式选择（同上面 SupportsHdrPath 那条的口径）
+                    if (avifAutoResolved)
+                        LogService.Info("Pipeline", "AVIF 增益图承载: " + gmMsg);
+                    else
+                    {
+                        LogService.Warn("Pipeline", "AVIF 增益图承载: " + gmMsg);
+                        if (s_lastDegradedToast != gmMsg)
+                        {
+                            s_lastDegradedToast = gmMsg;
+                            ToastService.ShowToast("AVIF 承载方式提示", gmMsg, ToastTone.Warning);
+                        }
+                    }
+                }
                 chroma = AvifEncoderCapabilities.NegotiateChroma(avifKind, chroma);
                 if (want.Item2 != chroma)
                 {
@@ -483,6 +522,11 @@ public sealed class CapturePipelineService
                 // 现在：下限 10（PQ 要求）、上限 HdrBitDepthFor(avifKind)，且必须在 avifKind
                 // 定稿（含 QSV→avifenc 回落）之后才算。
                 int hdrCeil = AvifEncoderCapabilities.HdrBitDepthFor(avifKind);
+                // ═══ 2026-11-04 用户口径：增益图档底图按位深设置（默认 10-bit），增益层恒 8-bit ═══
+                // 上一轮这里把整档钉死 8-bit（当时的形状是"底图与增益层都 8-bit"）；现在 AVIF 底图
+                // 改走真 10-bit（减少 SDR 呈现的带状），于是它与 PQ 档一样走正常的 HDR 位深协商
+                // ——下限 10、上限按编码器能力。**增益层的 8-bit 不再由管线管**：它是编码器内部的形状
+                // 常量（Core 里固定），管线只负责底图位深，两者各管一段、不重复表达同一事实。
                 bitDepth = AvifEncoderCapabilities.NegotiateBitDepth(avifKind, bitDepth, hdr: true);
                 if (want.Item1 != bitDepth)
                 {
@@ -502,7 +546,9 @@ public sealed class CapturePipelineService
                 settings.ChromaSubsampling = chroma;
                 settings.OutputBitDepth = bitDepth;
                 LogService.Info("Pipeline",
-                    $"AVIF HDR 输出：{bitDepth}-bit（PQ）；NVENC 支持 HDR 硬件直通，QSV 将回落 avifenc");
+                    settings.AvifHdrMode == AvifHdrMode.GainMap
+                        ? $"AVIF HDR 输出：{bitDepth}-bit 底图 + 8-bit 增益层（增益图承载，软件编码）"
+                        : $"AVIF HDR 输出：{bitDepth}-bit（PQ）；NVENC 支持 HDR 硬件直通，QSV 将回落 avifenc");
             }
             else
             {

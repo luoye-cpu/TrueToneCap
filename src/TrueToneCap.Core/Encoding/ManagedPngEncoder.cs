@@ -163,14 +163,14 @@ public static class ManagedPngEncoder
     /// <param name="effort">压缩强度档（2026-10-29）。只在 <paramref name="fastest"/> 为 false 时生效；
     /// 默认 Smallest = 本文件历史上硬编码的 CompressionLevel.SmallestSize。</param>
     public static void Encode16(byte[] bgra16, int w, int h, string path, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false,
-        CompressionEffort effort = CompressionEffort.Smallest)
+        CompressionEffort effort = CompressionEffort.Smallest, bool omitAlpha = false)
     {
-        AtomicFileWriter.Write(path, fs => Encode16(bgra16, w, h, fs, cicp, iccProfile, bitDepth, fastest, effort));
+        AtomicFileWriter.Write(path, fs => Encode16(bgra16, w, h, fs, cicp, iccProfile, bitDepth, fastest, effort, omitAlpha));
     }
 
     /// <summary>编码真 16-bit BGRA 像素为 16-bit PNG 流。</summary>
     public static void Encode16(byte[] bgra16, int w, int h, Stream output, byte[]? cicp = null, byte[]? iccProfile = null, int bitDepth = 16, bool fastest = false,
-        CompressionEffort effort = CompressionEffort.Smallest)
+        CompressionEffort effort = CompressionEffort.Smallest, bool omitAlpha = false)
     {
         // PNG 3.0 (ISO/IEC 15948:2023) Table 11: Color type 6 (RGBA) 只允许 8 和 16
         // 10/12-bit 源数据使用 16-bit 容器 + sBIT 标记实际有效位
@@ -181,21 +181,30 @@ public static class ManagedPngEncoder
         output.Write(PngSignature);
 
         // IHDR
+        // ⚠ omitAlpha（2026-11-04）：写 color type 2（RGB，无 alpha 通道）而不是 6（RGBA）。
+        //   存在的理由是 avifenc 的行为实测：**16-bit PNG 输入一律被当成"带 alpha"**，
+        //   即便 alpha 全为满值也照样产出 alpha 副 item（infe=2 + auxC）——
+        //   拿 8-bit RGB（color type 2）输入则只有一个 item。增益图容器只搬主图，
+        //   底图若带 alpha 副 item 就被写出器的"底图含副 item"门拒写。
+        //   截图恒不透明 ⇒ 丢掉 alpha 通道不损失任何信息。
+        byte colorType = (byte)(omitAlpha ? 2 : 6);
         var ihdr = new byte[13];
         BinaryPrimitives.WriteInt32BigEndian(ihdr, w);
         BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), h);
-        ihdr[8] = (byte)outDepth;        // bit depth: 16 (Color type 6 只允许 8/16)
-        ihdr[9] = 6;                     // color type: RGBA
+        ihdr[8] = (byte)outDepth;        // bit depth: 16 (Color type 2/6 只允许 8/16)
+        ihdr[9] = colorType;
         ihdr[10] = 0;
         ihdr[11] = 0;
         ihdr[12] = 0;
         WriteChunk(output, "IHDR"u8, ihdr);
 
-        // sBIT — 当实际位深不足 16 时标记有效位（PNG 3.0 11.3.2.4）
+        // sBIT — 当实际位深不足 16 时标记有效位（PNG 3.0 11.3.2.4；每通道一个字节，RGB 三份）
         if (bitDepth < 16)
         {
             byte sbitVal = bitDepth switch { 12 => 12, 10 => 10, _ => 8 };
-            byte[] sbit = [sbitVal, sbitVal, sbitVal, sbitVal];
+            byte[] sbit = omitAlpha
+                ? [sbitVal, sbitVal, sbitVal]
+                : [sbitVal, sbitVal, sbitVal, sbitVal];
             WriteChunk(output, "sBIT"u8, sbit);
         }
 
@@ -215,7 +224,7 @@ public static class ManagedPngEncoder
         // 16-bit PNG 也被当作 HDR 编码的**临时中转**（如 AVIF HDR：scRGB→PQ16→PNG→avifenc）。
         // 那种场景文件用完即删，压缩率毫无意义，而 SmallestSize 在 4K 上要多花数秒 ——
         // 实测这正是 4K HDR AVIF 前处理的主要耗时。故提供 fastest 开关。
-        var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth);
+        var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth, omitAlpha);
         if (fastest) WriteIdatFastest(output, rawData);
         else WriteIdat(output, rawData, effort);
 
@@ -350,25 +359,28 @@ public static class ManagedPngEncoder
     /// 支持 10/12/16-bit 位深。10/12-bit 时 IHDR 标记为实际位深。
     /// 使用自适应滤波选择（同 SDR 路径），5 种滤波器中选绝对值最小和。</summary>
     /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放和 IHDR。</param>
-    private static byte[] BuildRawScanlines16(byte[] bgra16, int w, int h, int actualBitDepth = 16)
+    private static byte[] BuildRawScanlines16(byte[] bgra16, int w, int h, int actualBitDepth = 16,
+        bool omitAlpha = false)
     {
         const int bytesPerChannel = 2;
-        const int channels = 4;
-        const int bpp = channels * bytesPerChannel; // 8 BPP
+        // omitAlpha ⇒ PNG color type 2（RGB）：每像素 6 字节，滤波的 bpp 也跟着变成 6。
+        // 滤波算法（Sub/Up/Average/Paeth 的先前像素距离）以 bpp 为单位，改这里即可自适应。
+        int channels = omitAlpha ? 3 : 4;
+        int bpp = channels * bytesPerChannel; // 8 BPP (RGBA) / 6 BPP (RGB)
         int rowBytes = w * bpp;
         var raw = new byte[h * (1 + rowBytes)];
         if (h <= 0) return raw;
 
-        // ── 阶段 1：BGRA16 BE → RGBA16 BE，逐行并行 ──
+        // ── 阶段 1：BGRA16 BE → RGBA16/RGB16 BE，逐行并行 ──
         // 转换只依赖本行，先写进 raw 的原始区（filter 字节之后），供阶段 2 读取。
         System.Threading.Tasks.Parallel.For(0, h, y =>
         {
-            int srcOff = y * rowBytes;
+            int srcOff = y * 8 * w;
             int dstOff = y * (1 + rowBytes) + 1;
             for (int x = 0; x < w; x++)
             {
                 int si = srcOff + x * 8;
-                int di = dstOff + x * 8;
+                int di = dstOff + x * bpp;
                 // 读取 16-bit big-endian 值
                 ushort bVal = (ushort)((bgra16[si] << 8) | bgra16[si + 1]);
                 ushort gVal = (ushort)((bgra16[si + 2] << 8) | bgra16[si + 3]);
@@ -394,11 +406,11 @@ public static class ManagedPngEncoder
                     aVal = RoundToSampleDepth(aVal, shift);
                 }
 
-                // 写入 big-endian 16-bit 容器 (RGBA 顺序)
+                // 写入 big-endian 16-bit 容器（RGB 或 RGBA 顺序）
                 Write16(raw, di, rVal);
                 Write16(raw, di + 2, gVal);
                 Write16(raw, di + 4, bVal);
-                Write16(raw, di + 6, aVal);
+                if (!omitAlpha) Write16(raw, di + 6, aVal);
             }
         });
 

@@ -52,9 +52,9 @@
          绿色包的目录名又写着 v0.3.10-beta —— 三个坐标互不相同，用户装的到底是哪一版
          无法只凭产物判断（发布前实机审查记为 P3-7）。
          历史 release 提交（v0.3.4 ~ v0.3.7）本来就在提交里 bump 这三行，那是正确做法。 -->
-    <Version Condition="'$(Version)' == ''">0.3.10-beta</Version>
-    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">0.3.10.0</AssemblyVersion>
-    <FileVersion Condition="'$(FileVersion)' == ''">0.3.10.0</FileVersion>
+    <Version Condition="'$(Version)' == ''">0.3.11</Version>
+    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">0.3.11.0</AssemblyVersion>
+    <FileVersion Condition="'$(FileVersion)' == ''">0.3.11.0</FileVersion>
 
     <!-- ── 包元数据 (合规补齐 2026-09-20) ──
          PackageLicenseExpression 用 SPDX 标识而非 PackageLicenseFile: 仓库根 LICENSE 全文

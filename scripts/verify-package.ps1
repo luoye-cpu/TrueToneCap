@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 TrueToneCap contributors
 # TrueToneCap 发布产物冒烟验证
 #
@@ -372,6 +372,39 @@ if (Test-Path $vscapDir) {
     Write-Host ("   ❌ data\vscap 仍在包里（{0} 个文件）" -f $leaked.Count) -ForegroundColor Red
 } else {
     Write-Host "   ✅ 包内没有 data\vscap（与归档一致）"
+}
+
+# ── [5.7/6] 设置文件必须是「首启模板」 ──
+# 为什么要有这一步：本仓 2026-11-04 出过一次真实的交付事故 —— 为演示新开关，把
+# publish 目录里的 TrueToneCap.settings.json 改成了"增益图档"，随后忘了恢复。
+# 未打包形态的设置文件就落在 exe 同目录（见 SettingsService.SettingsPath），
+# 于是【用户装上这个包，第一次打开看到的不是产品默认，而是出包者调试时的界面状态】。
+# 这类污染不会让任何既有步骤变红：exe 能跑、版本对、许可齐 —— 只有这条能拦。
+# 判据：settings 若存在，必须逐字等于首启模板（只有迁移标记、没有任何用户偏好键）。
+$settingsRel = 'TrueToneCap.settings.json'
+$settingsPath = Join-Path $PackageDir $settingsRel
+if (Test-Path $settingsPath) {
+    $settingsRaw = (Get-Content $settingsPath -Raw -ErrorAction SilentlyContinue)
+    # 允许的键：迁移/首启标记。出现任何"用户偏好"键都说明这份是被人用过（或调试过）的。
+    $allowedKeys = @('SettingsRevision', 'GainMapMerged', 'FreeEndpointsMigrated', 'FirstRun')
+    $polluted = @()
+    try {
+        $obj = $settingsRaw | ConvertFrom-Json
+        foreach ($p in $obj.PSObject.Properties) {
+            if ($allowedKeys -notcontains $p.Name) { $polluted += "$($p.Name)=$($p.Value)" }
+        }
+    } catch {
+        $failures.Add("$settingsRel 不是合法 JSON：$($_.Exception.Message)")
+        Write-Host "   ❌ $settingsRel 不是合法 JSON" -ForegroundColor Red
+    }
+    if ($polluted.Count -gt 0) {
+        $failures.Add("$settingsRel 被污染（含用户偏好键：$($polluted -join ', ')）⇒ 装包用户会继承出包者的界面状态")
+        Write-Host "   ❌ $settingsRel 被污染：$($polluted -join ', ')" -ForegroundColor Red
+    } else {
+        Write-Host "   ✅ $settingsRel 是首启模板（无用户偏好键）"
+    }
+} else {
+    Write-Host "   ✅ 包内无 $settingsRel（首次运行由程序自行生成）"
 }
 
 #  [6/6] 汇总

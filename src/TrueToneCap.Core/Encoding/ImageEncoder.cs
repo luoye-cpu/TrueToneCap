@@ -36,7 +36,12 @@ public sealed class EncodingSettings
     // 留着只会让新代码误以为"还有一条后端选择通道"。后端枚举 AvifEncoderBackend 保留
     // （AvifEncoderSelector.Select(backend) 与 IAvifEncoder.Backend 仍在使用）。
     /// <summary>AVIF 编码器种类（单一「AVIF 编码器」下拉，2026-09-16 重构）。</summary>
-    public AvifEncoderKind AvifEncoderKind { get; set; } = AvifEncoderKind.Auto;
+    /// <remarks>2026-11-04 用户口径：默认由 <c>Auto</c> 改为 <c>LibAom</c>。
+    /// <para>理由是与默认色度 4:4:4 配套 —— <c>Auto</c> 会经 <c>PickAuto</c> 解析到硬件
+    /// （NVENC/QSV 只支持 4:2:0、≤10-bit），用户选了 444 也会被能力协商静默降回 420。
+    /// 软件 avifenc(libaom) 支持 420/422/444 全色度与 ≤12-bit，是唯一能兑现 444 的路径。
+    /// 想用硬件加速仍可显式选，届时色度按其能力协商并给出提示（不是静默降级）。</para></remarks>
+    public AvifEncoderKind AvifEncoderKind { get; set; } = AvifEncoderKind.LibAom;
     /// <summary>是否为 AVIF 文件添加 .png 后缀（兼容不支持 .avif 的软件）。</summary>
     public bool AvifPngSuffix { get; set; }
     /// <summary>是否为 JXL 文件添加 .png 后缀（兼容不支持 .jxl 的软件）。</summary>
@@ -63,6 +68,17 @@ public sealed class EncodingSettings
     public string ColorSpaceTag { get; set; } = "System";
     /// <summary>JPEG Gain Map 增益图模式: Rgb 彩色增益 / Gray 灰度增益。</summary>
     public GainMapMode GainMapMode { get; set; } = GainMapMode.Gray;
+
+    // ═══ GainMapMetadata 字段已删（2026-11-03 用户口径二次收口）═══
+    // JPEG 增益图【恒写 ISO 21496-1】，元数据承载不做用户抉择——兼容性取舍不该由终端用户背。
+    // hdrgm XMP 生成器（JpegGainMapEncoder.BuildXmpMetadata）保留为文档级参照，不再写进产物。
+
+    /// <summary>
+    /// AVIF 的 HDR 承载方式：<b>默认 <see cref="AvifHdrMode.Pq"/></b>（2026-11-03 用户口径加开关）。
+    /// <para>保持 PQ 为默认 = 本轮之前 AVIF 唯一的 HDR 路，所有没动过这个开关的老用户产物逐字节不变；
+    /// <see cref="AvifHdrMode.GainMap"/> 是新增档，复用 JPEG 增益图的像素阶段，容器换成 tmap/ISO 21496-1。</para>
+    /// </summary>
+    public AvifHdrMode AvifHdrMode { get; set; } = AvifHdrMode.Pq;
 
     /// <summary>目标色域是用户<b>显式</b>选的，而不是"跟随显示器"自动解析出来的。
     /// <para>只有 JPEG GainMap 读它：Ultra HDR 的 base layer 默认走 sRGB/BT.709，
@@ -113,6 +129,20 @@ public enum OutputFormat { PNG, JPEG_LI, JPEG_XL, AVIF, WebP, TIFF, JPEG_GAINMAP
 
 /// <summary>AVIF 编码后端。</summary>
 public enum AvifEncoderBackend { Auto, LibAom, Qsv, Nvenc, Mft }
+
+/// <summary>
+/// AVIF 的 HDR 承载方式（2026-11-03 用户口径："AVIF 下允许传统模式的 HDR 也允许使用 GainMap 的 HDR，加一个开关"）。
+/// <para>两档的产物形状完全不同，不是"同一张图两种写法"：</para>
+/// <list><item><b><see cref="Pq"/></b>（默认）—— 底图直接写 PQ（BT.2100 HLG/PQ 传输函数），
+///   查看器按 HDR 屏直接显示。这就是本轮之前 AVIF 唯一的 HDR 路，NVENC/软件两条都产它，
+///   已实机验证。默认保持它 = 所有没动过这个开关的老用户产物逐字节不变。</item>
+/// <item><b><see cref="GainMap"/></b> —— 底图是 SDR（Reinhard 映射后的 8-bit），HDR 信息在 tmap 派生项
+///   承载的 ISO 21496-1 增益图里（与 JPEG GainMap 同一个元数据生成器）。SDR 查看器显示底图、
+///   HDR 查看器叠加增益还原完整动态范围。代价：底图是有损色调映射的 SDR，峰值处的精度受增益图量化限制。</item></list>
+/// <para>⚠ GainMap 档的元数据恒为 ISO 21496-1（AVIF 的 tmap 只承载这一种，没有"XMP-only 增益图"这种
+/// 标准形态）——所以 JPEG 那个 Iso/Xmp/Both 开关对 AVIF 无意义，这里不引入那根轴。</para>
+/// </summary>
+public enum AvifHdrMode { Pq, GainMap }
 
 public sealed class ImageMetadata
 {

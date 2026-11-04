@@ -58,6 +58,24 @@ public static class LocaleManager
     public static string GainMapDesc => s_lang == AppLanguage.Chinese ? "底图恒为 SDR，HDR 在增益图里。「目标色域」决定底图与增益图的原色；打开此开关时 HDR 输出锁定为开。" : "The base image is always SDR; the HDR lives in the gain map. Target gamut sets the primaries for base and gain map; with this on, HDR output is locked on.";
     public static string GainMapModeLabel => s_lang == AppLanguage.Chinese ? "增益图模式" : "Gain Map Mode";
 
+    // ═══ 2026-11-03（用户口径："只写最新标准 ISO 的元数据"）：元数据承载方式三档 ═══
+    // 文案把"谁看得见 HDR"说清楚 —— 这一档是用户可感知的取舍（老查看器只认 hdrgm XMP），
+    // 不是纯工程术语。运行时属性是唯一事实源：下拉项、提示、事件处理全部读这里，
+    // 别处再写一份字面量就会在"改了表漏改一处"时漂移（本仓反复付学费的那类 bug）。
+    // ═══ GainMapMetadataLabel / GmMeta* 七个属性已删（2026-11-03 用户口径二次收口）═══
+    // "JPEG 应该只产出 ISO 标准的这一种，不应该让用户去进行抉择"——下拉整体退役，
+    // 运行时属性随消费方一并删除，不留死键。
+    // ═══ 2026-11-03：AVIF 的 HDR 承载方式（默认 Pq = 传统底图写 PQ，产物与本轮之前一致）═══
+    public static string AvifHdrModeLabel => s_lang == AppLanguage.Chinese ? "HDR 承载方式" : "HDR carrier";
+    public static string AvifHdrPq => s_lang == AppLanguage.Chinese ? "传统 HDR（底图写 PQ）" : "Traditional HDR (PQ base)";
+    public static string AvifHdrGainMap => s_lang == AppLanguage.Chinese ? "增益图（SDR 底图 + HDR 增益层）" : "Gain map (SDR base + HDR gain layer)";
+    public static string AvifHdrHintPq => s_lang == AppLanguage.Chinese
+        ? "底图直接写 PQ（BT.2100），HDR 屏按 HDR 显示。这是默认，也是硬件加速唯一支持的形状。"
+        : "The base image writes PQ (BT.2100) directly; HDR displays show it as HDR. This is the default and the only shape hardware acceleration supports.";
+    public static string AvifHdrHintGainMap => s_lang == AppLanguage.Chinese
+        ? "底图是 SDR（色调映射后，位深按下面「AVIF 位深」，默认 10-bit），HDR 信息在 ISO 21496-1 增益图里（增益层恒 8-bit）：SDR 查看器显示底图，HDR 查看器叠加增益还原动态范围。与 JPEG「附带增益图」同一族形状；恒由软件编码。"
+        : "The base is SDR (tone-mapped; bit depth follows the AVIF bit-depth setting below, 10-bit by default) and the HDR lives in an ISO 21496-1 gain map (the gain layer is always 8-bit): SDR viewers show the base, HDR viewers apply the gain to restore the full range. Same family as the JPEG 'attach gain map' mode; always software-encoded.";
+
     // ═══ 2026-09-19：WebP 的「色度采样」下拉已撤掉，改为一句静态说明 ═══
     //   撤掉而非"修好接线"的原因是实测接不上：同一样张只改色度，420 与 444 产物字节完全相同、
     //   ffprobe 恒 yuv420p —— NativeWebPEncoder 没有色度形参，而有损 WebP 的格式定义就是 4:2:0
@@ -205,6 +223,9 @@ public static class LocaleManager
                 "On: a failed encode is saved as PNG with a notice (the format changes, pixels stay lossless). Off: the failure is reported and the output stays in the chosen format.",
             ["采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小。"] =
                 "More chroma means more accurate colour and larger files: 4:4:4 keeps full chroma, 4:2:0 is smallest.",
+            // 2026-11-04：增益图态底图恒 4:4:4 ⇒ 色度下拉禁用时的说明（MainWindow 的 gainMapOn 联动）
+            ["增益图态底图恒为 4:4:4（底图会被乘增益放大还原，色度精度优先于体积）；关闭「附带增益图」后可再选。"] =
+                "In gain-map mode the base image is always 4:4:4 (the base gets multiplied back up by the gain, so chroma accuracy beats size); re-enable the choice by turning off 'Attach gain map'.",
             ["底图恒为 SDR，HDR 在增益图里。「目标色域」决定底图与增益图的原色；打开此开关时 HDR 输出锁定为开。"] =
                 "The base image is always SDR; the HDR lives in the gain map. Target gamut sets the primaries for base and gain map; with this on, HDR output is locked on.",
             ["PNG 选项"] = "PNG options",
@@ -323,6 +344,8 @@ public static class LocaleManager
             ["额外添加 .png 后缀来提高兼容性"] = "Add .png suffix for compatibility",
             ["附带增益图（输出 Ultra HDR 照片）"] = "Attach gain map (Ultra HDR output)",
             ["增益图模式"] = "Gain Map Mode",
+            // 「元数据方式」标签键已删（2026-11-03 二次收口：下拉整体退役，不留死键）
+            ["HDR 承载方式"] = "HDR carrier",
             ["灰度增益：只编码亮度差，体积最小，适合文字与图标。"] = "Gray gain: encodes luminance only, smallest files, best for text and icons.",
             ["RGB 增益：三通道独立编码，色彩更准，适合彩色截图。"] = "RGB gain: encodes each channel separately, more accurate colour, best for colour screenshots.",
             ["8-bit 源不会升位深；高位深只对 Float16/HDR 源有效。"] = "An 8-bit source gains no bit depth; high bit depth only matters for Float16/HDR sources.",
@@ -335,6 +358,8 @@ public static class LocaleManager
             ["动图录制"] = "Animation",
             ["帧率"] = "Frame Rate",
             ["最大时长"] = "Max Duration",
+            ["ffmpeg 路径"] = "ffmpeg Path",
+            ["留空 = 自动解析（设置指定 → PATH → 常见位置）"] = "Empty = auto-detect (configured → PATH → common locations)",
             ["AI 翻译"] = "AI Translate",
             ["引擎"] = "Engine",
             ["目标语言"] = "Target Language",
@@ -478,7 +503,7 @@ public static class LocaleManager
             ["✅ Ultra HDR (ISO 21496-1)：SDR 查看器显示基础图，HDR 查看器还原完整动态范围。目标色域就是【底图】的色彩空间：Rec.709 或显式 Rec.2020（三件一起搬，底图本身仍是 SDR）。"] = "✅ Ultra HDR (ISO 21496-1): SDR viewers show the base image, HDR viewers restore the full dynamic range. The target gamut IS the base image's colour space - Rec.709 or explicit Rec.2020 (all three travel together; the base image stays SDR).",
             ["✅ 8-bit，容器没有 HDR 通道；质量由 butteraugli 距离控制。默认目标 Rec.709，显式选 Rec.2020 才输出 Rec.2020。"] = "✅ 8-bit, and the container has no HDR channel; quality is driven by the butteraugli distance. The default target is Rec.709 — Rec.2020 is written only when you pick it explicitly.",
             ["✅ Modular 模式对截图最优，支持 HDR 与广色域；16-bit 声明真实精度。"] = "✅ Modular mode is best for screenshots, with HDR and wide-gamut support; 16-bit declares the real precision.",
-            ["✅ 支持 HDR（PQ）与广色域；NVENC 硬件加速仅 4:2:0，软件可 4:4:4 与 12-bit。位深与色度按所选编码器生效。"] = "✅ Supports HDR (PQ) and wide gamut; NVENC acceleration is 4:2:0 only, software allows 4:4:4 and 12-bit. Bit depth and chroma follow the selected encoder.",
+            ["✅ 支持 HDR（默认传统 PQ，可切换为增益图档）与广色域；NVENC 硬件加速仅 4:2:0，软件可 4:4:4 与 12-bit。位深与色度按所选编码器生效。"] = "✅ Supports HDR (traditional PQ by default, switchable to a gain-map carrier) and wide gamut; NVENC acceleration is 4:2:0 only, software allows 4:4:4 and 12-bit. Bit depth and chroma follow the selected encoder.",
             ["⚠ 仅 8-bit，容器没有 HDR 通道；默认目标 Rec.709，显式选 Rec.2020 才输出 Rec.2020。适合简单分享。"] = "⚠ 8-bit only, and the container has no HDR channel; the default target is Rec.709 and Rec.2020 is written only when you pick it explicitly. Suited to casual sharing.",
             ["✅ TIFF 无损格式，支持 16-bit HDR + ICC 嵌入。适合存档。"] = "✅ Lossless TIFF, supports 16-bit HDR + embedded ICC. Suited to archiving.",
             ["✅ Ultra HDR (ISO 21496-1)。编码基准 = 系统 SDR 白点 "] = "✅ Ultra HDR (ISO 21496-1). Encoding reference = system SDR white point ",
@@ -603,8 +628,9 @@ public static class LocaleManager
             ["HDR 用带 PQ TRC 的 ICC 声明。"] = "HDR is declared by an ICC with a PQ TRC.",
             ["SDR 用标准色域 ICC。"] = "SDR uses the standard-gamut ICC.",
             ["JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {0} ⇒ 底图、增益比、"] = "JPEG (with gain map): the base image is always SDR and always carries an embedded ICC - with target {0} the base, the gain ratio and ",
-            ["声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由 XMP hdrgm + "] = "the declaration all share one set of primaries; changing the target changes the primaries, it never turns the base into HDR (HDR is carried by XMP hdrgm + ",
-            ["ISO 21496-1 增益图段承载，容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。"] = "the ISO 21496-1 gain-map section, and the container writes no PQ, so this does not conflict with 'the target is not the HDR tier').",
+            ["声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由增益图段承载，"] = "the declaration all share one set of primaries; changing the target changes the primaries, it never turns the base into HDR (the HDR is carried by the gain-map section, ",
+            ["恒写 ISO 21496-1 最新标准；容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。"] = "always ISO 21496-1 (the newest standard); the container writes no PQ, so this does not conflict with 'the target is not the HDR tier').",
+            ["HDR 走增益图档：底图是 SDR（声明同普通 SDR 产物），动态范围在 tmap/ISO 21496-1 增益图里（容器不写 PQ）。"] = "HDR uses the gain-map carrier: the base is SDR (declared like an ordinary SDR image), and the dynamic range lives in the tmap/ISO 21496-1 gain map (the container writes no PQ).",
             ["无码点"] = "no code point",
             ["未知格式：给不出声明通道。"] = "Unknown format: no declaration channel to give.",
         // ── 2026-10-03 第五批附：OCR 语言提示（R2 收尾）
@@ -714,6 +740,14 @@ public static class LocaleManager
     public static string Dur30 => s_lang == AppLanguage.Chinese ? "30 秒" : "30 sec";
     public static string Dur60 => s_lang == AppLanguage.Chinese ? "60 秒" : "60 sec";
     public static string Dur120 => s_lang == AppLanguage.Chinese ? "120 秒" : "120 sec";
+
+    // ── 动图录制：ffmpeg 路径（2026-11-03 遗留 3：这一格此前只存在于 settings.json）──
+    public static string FfmpegPathLabel => s_lang == AppLanguage.Chinese ? "ffmpeg 路径" : "ffmpeg Path";
+    /// <summary>输入框占位提示。<b>必须</b>把"留空 = 自动解析"和解析顺序一起说清 ——
+    /// 这一格最容易被误解成"填了才录制"，而实际是空着也能录（PATH 里找得到就行）。</summary>
+    public static string FfmpegPathPlaceholder => s_lang == AppLanguage.Chinese
+        ? "留空 = 自动解析（设置指定 → PATH → 常见位置）"
+        : "Empty = auto-detect (configured → PATH → common locations)";
 
     // ── 主题 ──
     public static string ThemeDefault => s_lang == AppLanguage.Chinese ? "跟随系统" : "Follow System";

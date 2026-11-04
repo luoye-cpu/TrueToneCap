@@ -134,6 +134,10 @@ tests/manual/cse-probe/*
 # 2026-10-20 补点名：此文件早已跟踪入库却漏了这一行，与上面「那一行就是审查点」的自定契约不符，
 # 也让 git ls-files -i --exclude-standard 长期挂着一个"已跟踪但命中忽略"的项。它是 scripts/verify.ps1:553 的活判据。
 !tests/manual/combo_locale_coverage_measure.py
+# 2026-11-03 点名：动图四格式的播放器肉眼抽验单。它是产品交付物的一部分
+# （台账 §9-3 的处置 = "自动化部分已尽，留清单给用户"），不是一次性的本机取证脚本
+# ⇒ 必须跟仓库走，否则新克隆的人拿不到这份要执行的单子。
+!tests/manual/media-player-visual-checklist-2026-11-03.md
 # ⚠ glm_* 三个脚本【已于 2026-09-26 删除】（它们的输入根目录 Pictures\TrueToneCap 整个不在了，
 #   且三份各硬编码一把活的 GLM API Key —— 账本 §5359 记着这件事）。删除只是移除了本机上的明文副本，
 #   【密钥本身仍需在智谱侧撤销】，撤销前它还是活的。

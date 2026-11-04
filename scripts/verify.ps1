@@ -1268,6 +1268,12 @@ Write-Host "══════════════════════�
 # （后者此前被当作"通过"，是完整的假绿灯路径 —— 典型诱因是套件名拼错）
 $failedSuites = @($results | Where-Object { $_.Exit -ne 0 -or $_.NoResult })
 $totalPassed = ($results | Where-Object { $_.Passed -ne $null } | Measure-Object -Property Passed -Sum).Sum
+# ═══ 2026-11-03：总和必须是【整数】，不能让它以 double 落进基线 ═══
+# Measure-Object -Sum 的返回类型随输入浮动：本轮实测它把 2515 写成了 2515.0（JSON 里是浮点），
+# 而 2026-10-31 那版手写基线是整数 2438。两种形状都能被 ConvertFrom-Json 读回、`-lt` 比较也不受影响
+# —— 也就是说这个瑕疵不会自己变红，只会让每一份历史 diff 里都有一条噪声。
+# 更要紧的是它属于同一类病：基线是本仓唯一的"断言规模地板"，它的形状应当可预测。
+$totalPassed = [int]$totalPassed
 
 # ═══ 断言总数对基线（2026-09-29 审查轮 §11.4）═══
 # Publish.ps1 里那个 MinGateAssertions=340 对真实 1379 ⇒ 删掉上千条断言两处都照样绿。
@@ -1286,7 +1292,66 @@ if ($WriteGateBaseline -and $failedSuites.Count -eq 0) {
         }
     }
     $noteKey = '_说明'
-    $doc.各套件.$noteKey = '用 scripts\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里'
+    $header = '用 scripts\verify.ps1 -WriteGateBaseline 重生成；刻意删断言时要显式改这份文件，让删除行为留在 diff 里'
+    # ═══ 2026-11-03：历史沿革不再被重生成抹掉 ═══
+    # 旧版这里是一个固定字面量 ⇒ 每次 -WriteGateBaseline 都把 10-31 那三段手改记录
+    # （每次为什么加/减、删掉的是哪一条判据、为什么删）整段冲掉。那份沿革是"地板为什么会
+    # 长成这个数"的唯一解释，丢了以后只看 diff 只能看到数字变动、看不到理由。
+    # 现在的规则：**沿革只追加不重写** —— 读回旧文件里已有的 _说明，保留它，再把本轮一行追加在末尾。
+    # 跟着 _说明 一起写"上一版的总断言与取数时间"，这样即便有人手工删了沿革，
+    # 相邻两次读数之间的跳跃仍然留痕（数字无法悄悄改写）。
+    $history = ''
+    try {
+        if (Test-Path -LiteralPath $baselinePath) {
+            $oldDoc = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json
+            $oldNote = $oldDoc.各套件._说明
+            if ($oldNote) {
+                $history = [string]$oldNote
+                # ═══ 2026-11-03 审查轮第二刀：读回来先剥 header ═══
+                # 写出的格式是 `header + 空行 + 沿革`，而 header 在每次写出时都会被重新前置。
+                # 上一版的封顶逻辑只裁「═══ 现跑」行、不认 header ⇒ 旧 header 被当成沿革的一部分
+                # 读回来、拼在 head 里，外面又套一层新 header —— 实测连跑两轮后 header 出现 3 次。
+                # 剥法：按行剥，剥掉所有等于 header 的行与其后的空行（不依赖出现次数与位置）。
+                $historyLines = $history.Replace("`r`n", "`n").Split("`n")
+                $history = (@($historyLines | Where-Object { $_ -ne $header }) -join "`n").TrimStart("`n")
+                # ═══ 2026-11-03 审查轮：沿革必须【封顶】，否则每跑一次就净增一行 ═══
+                # 上面"只追加不重写"的改法有一个自然后果：本轮追加的「上一版基线」「本轮现跑」
+                # 两行，下一轮会被当成 oldNote 读回来再追加两条 ⇒ 每次 -WriteGateBaseline
+                # 净增约 250 字符、无上限。基线是每次发版都会重生成的文件，几十轮之后
+                # 这份 JSON 的绝大多数体积会变成历史噪声，而真正要读的"当前读数"埋在最后。
+                # 规则：保留【最近 N 轮】的现跑记录，更早的压成一行摘要（保留首版沿革的开头）。
+                # N 取 8：足够覆盖一个发布周期的来回，又不至于让文件无限长。
+                $allLines = $history.Replace("`r`n", "`n").Split("`n")
+                $roundStarts = @()
+                for ($li = 0; $li -lt $allLines.Count; $li++) {
+                    if ($allLines[$li] -match '^═══ .*现跑') { $roundStarts += $li }
+                }
+                $maxRounds = 8
+                if ($roundStarts.Count -gt $maxRounds) {
+                    # 把【第 1 条现跑记录之前】的内容（= 原始沿革头，含 10-31 手改史）保留，
+                    # 中间那些被裁掉的轮次压成一句，最后接上最近 N 轮。
+                    $headEnd = $roundStarts[0]
+                    $keepFrom = $roundStarts[$roundStarts.Count - $maxRounds]
+                    $dropped = $keepFrom - $headEnd
+                    $head = ($allLines[0..($headEnd - 1)]) -join "`n"
+                    $tail = ($allLines[$keepFrom..($allLines.Count - 1)]) -join "`n"
+                    $history = $head + "`n（此处省略 $dropped 行较早的现跑记录，仅保留最近 $maxRounds 轮）`n" + $tail
+                }
+            }
+            if ($null -ne $oldDoc.总断言 -and $null -ne $oldDoc.取数时间) {
+                $history += "`n═══ 上一版基线：总断言 $($oldDoc.总断言)，取数 $($oldDoc.取数时间) ═══"
+            }
+        }
+    } catch {
+        # 旧文件读不动（格式坏了 / 被清空）不是本轮失败理由 —— 但必须留痕，否则"沿革断了"没有任何记录。
+        Write-Host "  ⚠️  旧基线读不动（$($_.Exception.Message)）⇒ 本轮沿革从空白开始重建" -ForegroundColor Yellow
+        $history = "（旧基线读不动，2026-11-03 这轮起沿革重新记录）"
+    }
+    $thisRound = "═══ $((Get-Date -Format 'yyyy-MM-dd HH:mm')) 现跑：总断言 $totalPassed（" +
+        (($results | Where-Object { $null -ne $_.Passed } |
+            ForEach-Object { "$($_.Suite.Replace('--', '').Replace('-tests', '')) $($_.Passed)" }) -join ' / ') +
+        "）═══"
+    $doc.各套件.$noteKey = if ($history) { $header + "`n`n" + $history.TrimEnd("`n") + "`n" + $thisRound } else { $header + "`n`n" + $thisRound }
     # ⚠ 不能用 `Set-Content -Encoding UTF8`：PowerShell 5.1 那个写法【必然】在文件头加 BOM (EF BB BF)。
     #   2026-10-21 那轮是生成后手工剥掉 BOM 的 —— 治标：本轮 -WriteGateBaseline 一跑就又长回来了，
     #   而且带 BOM 的这份 JSON 用 python json.load(open(p, encoding='utf-8')) 会当场抛

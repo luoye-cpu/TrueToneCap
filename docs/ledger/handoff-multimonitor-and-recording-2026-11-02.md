@@ -376,6 +376,9 @@ dotnet run --project src\TrueToneCap.Test -- --format-tests   # 52 通过 / 0 �
 
 ## §9 待拍板 / 已知未决
 
+> **⚠️ 本节已被 §13 收口（2026-11-03）**：下面六条的处置结果全部记在 §13.1 的逐条表里。
+> 本表**保留原样不回写**（append-only 纪律）：它记的是"当时的未知"，§13 记的是"后来的结论"。
+
 | # | 事项 | 现状 | 需要决定 |
 |---|---|---|---|
 | 1 | `scripts/gate-baseline.json` 的 `--unit-tests` 期望计数 | 仍写 **1807**，实际 **1820**（B 流 +13 条） | 发版前要不要更新 baseline（更新即承认新增判据） |
@@ -566,8 +569,862 @@ A/B 流（上轮遗留）：
 `AnimatedContainerColor` 峰值内存三份并存（量级可接受）；Win32 错误码非 2 的文案轻度失真；
 PNG 手术负路径测试仅 WebP junk 一条。
 
+> **2026-11-03 更新**：上面最后两条已在 §13.4 / §13.5 修掉（三态文案 + PNG 四条负路径，
+> 各带变异验证）。前三条维持记档：AVIF prof box 是 ffmpeg muxer 限制不动；
+> `Cancel()` 是预留 API；峰值内存量级可接受。
+
 ### 12.3 终态
 
 unit **1868 通过 / 0 失败 / 2 跳过**（1820 基线 + 48 条）；format 52 / ocr 12；构建 0/0。
 审查修复后实机复跑一轮 WebP 端到端 ✅（毫秒时间戳文件名、TargetMonitor、声明手术照常）。
 本节成文即提交基线。
+
+---
+
+## §13 遗留清单收口（2026-11-03，本轮全部处置完毕）
+
+> 承接 §9 的六条未决 + §12 的三条未修记档。本节逐条给"做了什么 / 判据在哪 / 怎么证明它真咬得住"。
+> 纪律：凡是"改了产品码"的条目，都必须有一条**变异验证**（把修复摘掉 ⇒ 判据红 ⇒ 装回去 ⇒ 绿），
+> 否则那条判据只是装饰。
+
+### 13.1 逐条处置表
+
+| # | 遗留 | 处置 | 落点 |
+|---|---|---|---|
+| 1 | gate-baseline 仍写 1807/2438（§9-1） | **✅ 用 `-WriteGateBaseline` 正规重生成**：八格全部来自同一次现跑，总断言 **2515**（2438 + 77） | `scripts/gate-baseline.json` |
+| 2 | A 流表头溢出（§9-5，`MappingArrow` 布局契约） | **✅ 本轮修**：`TextWrapping="Wrap"` + tooltip 运行期同源，4 条布局契约判据 | `MainWindow.xaml`、`MainWindow.ColorManagement.cs` |
+| 3 | `FfmpegPath` 无 UI（settings.json 手编） | **✅ 补设置页输入框** + 回显 + 保存回写 + 保存期校验 + 中英文本地化，5 条判据 | `MainWindow.xaml`/`.Settings.cs`/`.Localization.cs`、`LocaleManager.cs`、`FfmpegLocator.cs` |
+| 4 | B 流无 CHANGELOG 条目（多屏修复是用户可感知的） | **✅ 补**：新条目「双屏/多屏：选区色彩与气泡都跟着那块屏走」六条 bullet | `CHANGELOG.md` |
+| 5 | Win32 错误码≠2 文案失真、PNG 手术无负路径测试（§12 记档） | **✅ 顺手修**：三态文案 + PNG 手术四条负路径（7 条判据） | `AnimationRecorder.cs`、`CorePipelineTests.cs` |
+| 6 | §9-6 冲突提示 | **✅ 结案**：`fallback` 列表 + Error 日志已覆盖（§6 记档原判成立，不另加提示） | 无改动（判定即处置） |
+| 7 | §9-3 播放器肉眼验证 | **✅ 自动化部分已尽，留清单给用户**：`tests/manual/media-player-visual-checklist-2026-11-03.md` | 新增手动清单 |
+
+§9 里其余两条（§9-2 动图色彩声明 / §9-4 回退位深）已在 §11 由用户拍板并落地，不属本轮。
+
+### 13.2 遗留 2：`MappingArrow` 布局契约（§9-5）
+
+**病灶不是文案，是列宽装不下**：固定 120px 首列 + 最长两支文案
+（`→ 色调映射为 SDR（屏幕证据不授权 HDR 声称）`）⇒ 不换行就溢出自己的格子、视觉上撞进第二列
+的 `TargetGamutTxt`。2026-11-02 在**未修改的发布版**上用 UIA 取证过是既有缺陷，不是 A 流引入。
+
+**契约（写进 XAML 注释，判据锁住）**：
+1. 列宽**不动**（`120,*`）—— 与「显示器色域」那行保持同一列基线；
+2. 标签在自己的格子里 `TextWrapping="Wrap"`，绝不越界；
+3. 换行后行变高是可接受的代价，**不**偷改列宽去挤第二列。
+
+**tooltip 的处理（这里改了两轮）**：第一版把说明写在 XAML 的 `ToolTipService.ToolTip` 里，
+内容是"2026-11-02 A 流遗留…"这种开发注释——两处都不对：① 用户不该看到开发备忘；
+② 本地化判据要求 XAML 每条中文都进 `ZhToEn`，写死就等于维护第二份会分叉的文案。
+最终形态：**tooltip 由 `RefreshColorMappingUi` 在运行期设成与标签同一个 `arrow` 局部量**
+（不是在 tooltip 里再调一遍 `Tr(...)` —— 那会重新变成两份真相）。
+
+**变异验证**：摘掉 `TextWrapping="Wrap"` ⇒
+`❌ MappingArrow 允许换行（TextWrapping=Wrap）—— 长文案在自己的 120px 列里折行，不越界撞第二列`
+（1 失败）。装回 ⇒ 1884/0。
+
+### 13.3 遗留 3：`FfmpegPath` 设置页输入框
+
+原来这一格只存在于 `settings.json`，用户要关掉 app 手编文件。补完后四层都在：
+
+| 层 | 落点 | 关键约定 |
+|---|---|---|
+| 控件 | `MainWindow.xaml` 动图录制卡片 | 与相邻设置行**同一套列定义**（`120,*`），不自成排版 |
+| 回显 | `ApplySettingsToUI` | 空值回显成空 —— 不补兜底文字，否则"没配过"变"配了个假路径" |
+| 保存 | `SaveSettings` | 清洗链与 `SettingsService.Normalize` 同形；**空串是合法值**（= 自动解析），不写 `?? 兜底` |
+| 校验 | `FfmpegLocator.DescribePathIssue` | 目录 / 文件不存在 / 非 `.exe` 三类各有专句；**永不抛**，且**不**实跑 `-version`（保存是同步 UI 路径，不能起子进程） |
+
+**为什么校验放在保存那一刻而不是等录制失败**：路径填错这件事在按下保存时就已经确定，
+让用户等一次录制失败才知道，等于把一次可立即纠正的笔误拖成一次产品故障。
+但**只警告、不拒绝保存** —— 文件可能稍后才到位，而 locator 本来就按"配置无效 ⇒ 回退自动解析"工作。
+有效路径会 `Invalidate()` 掉缓存，否则改完路径还继续用上次解析的那一枚。
+
+**变异验证**：摘掉 `_settings.FfmpegPath = (FfmpegPathTxt.Text ?? "")` 回写 ⇒
+`❌ SaveSettings 从输入框回写 FfmpegPath`（1 失败）。装回 ⇒ 1884/0。
+
+### 13.4 遗留 5：`Win32` 错误码 ≠ 2 的文案失真
+
+原实现只有 `ex.NativeErrorCode == 2`（`ERROR_FILE_NOT_FOUND`）才算"缺席"，其余一律落到
+`"ffmpeg 编码失败 —— 已退化为单帧 PNG（SDR）"`。问题是：**进程压根没起来**（拒绝访问 5 /
+找不到路径 3 / 不是有效的 Win32 程序 193 / 参数错误 87）时，一个字节都没编过，说"编码失败"
+会把用户引去查片源和格式，而真正要改的是路径或权限。
+
+改成**三态**：
+
+| 态 | 判据 | 文案 |
+|---|---|---|
+| 缺席 | `NativeErrorCode is 2 or 3` | `未找到 ffmpeg：请在设置里指定路径，或把 ffmpeg 加入 PATH` |
+| 起不来 | 其他 `Win32Exception` | `ffmpeg 无法启动（0x…(N) 原因）——请检查该文件是否可执行、以及安全软件是否拦下` |
+| 编码失败 | 进程跑过但退出码非 0 / 无产物 | `ffmpeg 编码失败` |
+
+日志里另外保留完整 `0x{code}({code}) {Message}`，便于贴给上游查。
+
+### 13.5 遗留 5 后半：PNG 手术的负路径（§12 记档原话"仅 WebP junk 一条"）
+
+`TryEmbedPngDeclaration` 有四个 `return false`，每个都是一句"畸形输入不会产出坏文件"的承诺——
+没有判据的承诺等于注释。补了四条，**每条都带"原文件字节未变"的强判据**（拒绝 = 不写盘，
+不是先写了再报错）：
+
+| # | 输入 | 守的是哪个分支 |
+|---|---|---|
+| ① | 非 PNG（任意 12 字节） | 签名守卫 —— 不拒就会在第 33 字节插 chunk，造出杂种文件 |
+| ② | 签名对、`IHDR` 类型对但**长度=15** | 审查轮 R2-P2-2 那条：不校验长度就切进载荷中间静默产出坏文件 |
+| ③ | `cICP` 3 字节 / 5 字节 | 载荷恒 4 字节契约 —— 别的长度会让读回方跨到隔壁 chunk 头 |
+| ④ | 两个声明都为 `null` | 唯一"成功却不写盘"的返回 ⇒ 调用方要能区分"没东西可嵌"与"嵌失败" |
+
+**变异验证（这条最值钱）**：把 `BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(8)) != 13`
+改成 `false`（等于摘掉 IHDR 长度守卫）⇒ 负路②两条同时红，且**实际产出了坏文件**：
+
+```
+❌ 负路②：IHDR 长度≠13 的畸形 PNG 被拒绝（不再切进载荷中间产出坏文件） —— cICP+iCCP 已插入 IHDR 之后
+❌ 负路②的强判据：畸形文件保持原样（拒绝不许留下半截写入）
+```
+
+装回 ⇒ 1884/0。**这就是 §12 记档时那条"没有负路径测试"背后真存在的风险**：
+守卫一旦被误删，没有任何东西会喊。
+
+### 13.6 遗留 1：gate-baseline 正规重生成（附带修了 writer 的两个缺陷）
+
+`-WriteGateBaseline` 跑完（`GATE_EXIT=0`、8/8 套件、**2515 断言**、无 BOM 已复核），
+但生成结果暴露了脚本自身两个缺陷，一并修掉：
+
+1. **`总断言` 变成浮点**：`Measure-Object -Sum` 的返回类型随输入浮动，把 2515 写成了 `2515.0`。
+   旧版是整数 `2438`。`ConvertFrom-Json` 读得回、`-lt` 比较也不受影响 ⇒ **这个瑕疵不会自己变红**，
+   只会让每份历史 diff 都带一条噪声。修法：`$totalPassed = [int]$totalPassed`。
+2. **`_说明` 里的历史沿革被整段冲掉**：旧版是个固定字面量，每次重生成就把 10-31 三段手改记录
+   （每次为什么加/减、删的是哪一条判据、为什么删）全冲了。那是"地板为什么长成这个数"的唯一解释。
+   修法：**沿革只追加不重写** —— 读回旧 `_说明` 保留，追加本轮一行；并跟着记"上一版总断言与取数时间"，
+   这样即便有人手工删了沿革，相邻两次读数之间的跳跃仍留痕。
+
+**同轮验证（第二轮门禁）**：`-SkipBuild` 再跑一次吃新基线 ⇒
+`✅ 8 个套件全部通过 — 共 2515 断言`，无"断言数从基线掉落"告警。基线比对真的生效。
+
+### 13.7 本轮读数与"没判"清单（诚实口径）
+
+- **构建**：`dotnet build src\TrueToneCap.App -c Debug` ⇒ **0 警告 0 错误**（42.4s）。
+- **门禁**：`scripts\verify.ps1 -Configuration Debug -WriteGateBaseline` ⇒ `GATE_EXIT=0`，
+  8/8 套件，**2515 断言 / 0 失败**（unit 1884 跳 2；service 2 跳 1）。
+- **变异验证 3 条全部咬住**（§13.2 / §13.3 / §13.5 各一次），每次恢复后都回到 1884/0。
+- **没判的**（不是通过）：
+  - `--gainmap-color-product` 仍 ⏭ SKIP（两个候选 `ultrahdr_app.exe` 都过不了能力探测）。
+    补上认新 CLI 的外部件后要重跑。
+  - §9-3 播放器肉眼兼容（本轮给了清单 `tests/manual/media-player-visual-checklist-2026-11-03.md`，
+    仍需人执行）。
+  - 本轮**没有**做 §9-2 的 AVIF prof(ICC) box（ffmpeg muxer 限制，nclx 已够用，维持 §12 记档）。
+
+### 13.8 本轮环境坑（下次别再踩）
+
+1. **`pwsh` 工具在 `workspace-write` 下完全不可用**：每次调用返回空输出 + 退出码 `3221225794`
+   （`0xC0000142` / `STATUS_DLL_INIT_FAILED`），连 `echo hello` 都不例外。`danger-full-access` 下正常。
+   这不是本仓的 bug，是这台机器的沙箱形态（历史台账里多次出现）。
+2. **`edit` 工具改完要立刻回读**：本轮我在 `ApplySettingsToUI` 里一度写出重复块、在 `SaveSettings`
+   里把方向写反（设置→UI），都是靠回读 + 构建 + 判据三重才发现。判据那条
+   `SaveSettings 从输入框回写 FfmpegPath` 正是在这一步抓到的。
+3. **C# 字符串里别用中文引号**：`"…"` 当定界符是语法错误，但视觉上和 `"…"` 极像。
+   编译期会拦，别指望肉眼。
+4. **XAML 里写中文就得进 `ZhToEn`**：`界面中文本地化覆盖` 那条判据要求 XAML 每条中文静态文字
+   都在对照表里。往 XAML 加 tooltip/placeholder 前先想清楚要不要走 `LocaleManager` 属性。
+
+### 13.9 遗留清单终态
+
+**§9 六条 + §12 三条记档，全部处置完毕，无一条悬空**：
+
+- 4 条已修并上判据（§9-5 表头溢出、`FfmpegPath` UI、`Win32` 文案、PNG 负路径）；
+- 1 条已重生成（§9-1 baseline，2515）；
+- 1 条已补文档（CHANGELOG B 流条目）；
+- 1 条判定即结案（§9-6 冲突提示，现有兜底已覆盖）；
+- 1 条转手动清单（§9-3 播放器肉眼，自动化部分已尽）。
+
+下一轮接手时：`scripts/gate-baseline.json` 是 **2515**（unit 1884），
+`--unit-tests` 少一条就会红并点名。
+
+> **⚠️ 2026-11-03 §14 更正**：本节数字已成过去时——全量审查（§14）又修了 7 处判据/工具/文档缺陷
+> 与 1 处产品数据丢失窗口，终态为 **2518（unit 1887）**。§13 正文按 append-only 纪律不回写，
+> 读数一律以 §14.5 为准；§13.6 那句 "+77 = 本轮收口三条遗留" 是账目错误（61 条是 B/D 流未入册
+> 的累积），更正后的构成在 `scripts/gate-baseline.json` 的 `_说明` 与 §14.2。
+
+---
+
+## §14 提交前全量审查（2026-11-03，对 §13 整轮的自审）
+
+### 14.1 审查方式（含一次失败的方法学记录）
+
+原计划四路并行只读审查（Lane A App 接线 / Lane B 引擎与 Core / Lane C 判据与门禁 / Lane D 文档诚实性），
+**四路子 agent 全部中途崩溃、零产出**（加上更早的 changelog-scribe / player-checklist 两路，
+本会话子 agent 通道六路全灭——环境问题，与仓库无关）。改由我自己按同样四条 lane 逐条过，
+外加两类审查 agent 给不出的东西：**判别性变异**（见 14.4）与**探针实测**（见 14.2-⑦）。
+
+### 14.2 发现并已修复的缺陷（7 处；每处都留了证据）
+
+按发现顺序，标的是"缺陷当时处在哪一层"：
+
+**① 判据假绿：新判据比它替换掉的旧判据更弱（测试侧）**
+旧判据 `!ms.Contains("_settings.FfmpegPath =")` 是"任何回写都禁止"——加了 UI 后必须放宽，但我放宽时
+把保护也丢了：兜底检查写成"同一句的 200 字符内找 `?? "`"，实测两种写法都能绕过（回写之后另起一句
+`if (string.IsNullOrEmpty(...)) _settings.FfmpegPath = "ffmpeg";`、或紧跟着 `.Trim() ?? "ffmpeg"`）。
+拆成三条（回写在不在 / 那条语句取得到 / 语句窗口内不许带兜底）并变异验证（见 14.4-1）。
+
+**② 判据假绿：正向判据读的是未剥注释的原始文本（测试侧）**
+本方法里 `ms/ml/f/lm` 全是 `File.ReadAllText` 原文——注释里写同一句代码也会命中，等于"把代码删掉、
+只留注释"判据照样绿。仓内早有惯例（本文件 `a` / `mCode` 两个变量就是为这存在的，R2-P3），我抄漏了。
+修复：补 `msRaw/fRaw/mlRaw/lmRaw`，并顺手删掉我重复造的局部同名 `StripLineComments`（类级 L8753 已有，
+两份真相）。判别性变异：把回写整段改成注释 ⇒ 两条红（14.4-2）。
+
+**③ 判据假绿的假修复：对 XAML 用 `//` 行剥法 = 一条注释都没剥（测试侧）**
+第一刀修复里 `xRaw = StripLineComments(x)`——XAML 的注释是 `<!-- -->`，行剥法对它**一条都剥不掉**，
+所以那刀"修复"本身是假的，判据读的仍是原始文本。改用本仓既有惯例
+`Regex.Replace(@"<!--.*?-->", "", Singleline)`（`Test_FormatLabels_AreUserFacingNames` 里同款）。
+判别性变异：真控件删掉、注释里留一份带 `TextWrapping="Wrap"` 的假声明 ⇒ 三条 MappingArrow 判据全红
+（14.4-3）；FfmpegPathTxt 同型变异也红，且顺带牵出两条既有本地化死键判据正确工作（注释里的中文
+不再算活引用 ⇒ 死键计数 1）。
+
+**④ 产品缺陷：`FfmpegPath` 的静默数据丢失窗口（App 侧，本轮审查抓出的最重要一条）**
+空串在这格是**合法值**（= 自动解析），于是"控件还没回填就保存"在别的格只是显示问题，在这里是
+**无痕的数据丢失**：用户手改在 settings.json 里的 `FfmpegPath`，若 `ApplySettingsToUI` 有任何一句在
+回显（回显位于方法中部）之前抛异常，退出路径的 `SaveSettings()` 是被 `try { } catch { }` 吞掉的
+（MainWindow.xaml.cs 关闭回调两处），那一格会以空串写回盘上。已核对：`SaveSettings` 三个调用点都在
+关闭/退出/显式保存，构造期顺序安全（回显先于任何保存）；但异常路径的"不可达"不成立。
+修复：`_ffmpegPathEchoed` 闩——回显成功才置真，保存只闩真时回写，与仓内既定惯例
+（OverlayColorCbo"没有选中项就保留盘上原值"，2026-10-01）同向。两种变异都验证会红（14.4-4）。
+
+**⑤ 工具缺陷：baseline `_说明` 每轮净增 ~250 字符且无上限（脚本侧）**
+我修"沿革被重生成抹掉"时只做了追加——追加的东西下一轮被当成旧沿革读回来再追加 ⇒ 每跑一次
+`-WriteGateBaseline` 净增约 250 字符。而且 header 每轮重新前置、读回时不认 ⇒ 实测连跑两轮后
+header 出现 3 次。修复：沿革封顶最近 8 轮（更早的压成一行省略摘要，保留 10-31 手改史原文）+
+读回先按行剥 header。验证：种入 10 条假轮次跑一轮，省略行出现、长度回落；再跑一轮 header 恒为 1。
+
+**⑥ 账目不实（文档/基线侧，两条）**
+- CHANGELOG B 流条目写"新增 13 条判据…unit 1820 → 1868"——13 条对应 1807→1820，1820→1868 是
+  D 流 +48。一句里两个增量混装。已改成 1807 → 1820（与 §9-1 的"实际 1820（B 流 +13 条）"对齐）。
+- baseline `_说明` 把 +77 全记成"本轮收口三条遗留"——实际 61 条是 B 流（+13）与 D 流（+48）
+  **从未入册的累积**（基线 10-31 之后就没人重生成过），本轮真正新增只有 +16。已重写构成
+  （+13 / +48 / +16 三段分记）。这条能被抓出来靠的是把 4+5+7=16 与 77 对不上当成线索往下挖。
+
+**⑦ 不实注释（App 侧，防御性代码的诚实口径）**
+`DescribePathIssue` 的 catch 注释声称"非法字符 / 超长路径 / 无权限枚举会走到这里"。探针实测
+（临时 console 工程，.NET 11 同运行时）11 类边界输入——null / 空白 / 含 NUL / 400 字符超长 / UNC /
+末尾反斜杠 / 目录 / 非 .exe / 不存在——**零抛出**：`File.Exists`/`Directory.Exists` 对畸形输入返回
+false 而不抛，`Path.GetExtension` 只在 null 时抛而上面已用 `?? ""` 挡掉。catch 当前是死代码，
+留作防御（承诺"永不抛"不该押在"今天的 BCL 恰好不抛"上），注释改成如实说"实测进不去、为什么还留着"。
+
+### 14.3 判据的两处顺带加固（同一批）
+
+- "MappingArrow 所在行仍是 120px 固定首列"原本是紧邻正则（Grid 与元素之间只许有注释）——
+  它把"注释在不在"变成了通过条件，**逼着我把布局契约注释挪出 Grid**（判据扭曲代码，方向反了），
+  且别人日后在 Grid 里加一句注释它会假红。改成位置判据：从元素往前 `LastIndexOf` 最近的
+  `<Grid ColumnDefinitions=`。变异：列宽 120→200 ⇒ 红并印出 `<Grid ColumnDefinitions="200,*">`。
+  注释随之挪回 Grid 内原位。
+- tooltip 判据原先只看元素自身标签——tooltip 挂在外层 Grid 上它会漏。扩成"Grid 开标签 + 元素标签"合并判。
+
+### 14.4 变异验证台账（审查轮 6 次，全部咬住）
+
+| # | 变异 | 预期 | 实测 |
+|---|---|---|---|
+| 1 | `SaveSettings` 里插入 `if (IsNullOrEmpty(…)) … = "ffmpeg"` 兜底行 | 旧判据放行、新判据红 | ✅ 旧判据（拆分前）对此全绿；新"不许带兜底"红 |
+| 2 | 回写代码整段注释掉（代码没了、注释还在） | 正向判据必须红 | ✅ "回写"与"不许带兜底"两条红 |
+| 3 | 删真 MappingArrow、注释里留带 Wrap 的假声明 | 读原始文本会假绿 | ✅ 三条 MappingArrow 判据红 |
+| 4 | 删真 FfmpegPathTxt、原样放进 `<!-- -->` | 同上 | ✅ 控件判据红；本地化死键 +1（既有判据正确联动） |
+| 5 | MappingArrow 列宽 120→200 | 列宽判据红 | ✅ 红且印出 `<Grid ColumnDefinitions="200,*">` |
+| 6 | 回显闩：摘掉 `&& _ffmpegPathEchoed` / 置真挪到回显之前 | 闩判据红 | ✅ 两种变异各红一次 |
+
+§13 收口轮的 3 次变异（摘 Wrap / 摘回写 / 摘 IHDR 长度守卫）见 §13.2/§13.3/§13.5，不重复记。
+
+### 14.5 终态（取代 §13.7 的读数）
+
+- **构建**：`dotnet build`（App 与全解）⇒ **0 警告 0 错误**。
+- **门禁**：`scripts\verify.ps1 -Configuration Debug -WriteGateBaseline` ⇒ `GATE_EXIT=0`，
+  8/8 套件，**2518 断言 / 0 失败**（unit 1887 跳 2；service 2 跳 1），宿主新鲜度 ✅，基线无 BOM 已复核。
+- **账目自洽**：八格之和 = 总断言 = 2518；1868（§12.3）+16（§13 收口）+3（§14 审查）= 1887；
+  1807 + 13（B）+ 48（D）+ 16（收口）+ 3（审查）= 1887。
+- **没判的**（不是通过）：`--gainmap-color-product` 仍 ⏭ SKIP（两个候选 ultrahdr_app 都过不了能力探测，
+  补认新 CLI 的外部件后重跑）；§9-3 播放器肉眼仍待用户按
+  `tests/manual/media-player-visual-checklist-2026-11-03.md` 执行；AVIF prof(ICC) box 维持 §12 记档不动。
+- **已知代价**（有意接受，记档）：回显闩防的是"回显前抛异常"，代价是"回显完成前用户就改了这格"
+  会丢一次编辑——那条路径要求用户在构造期一瞬之内改到一个还没显示的输入框，不可达；
+  而它防的"静默清掉手改路径"是可达且无痕的。
+
+### 14.6 本轮踩坑（下次别再踩）
+
+1. **`pwsh` 工具在 `workspace-write` 下整轮不可用**（`0xC0000142`，连 `echo` 都失败），全程
+   `danger-full-access`。会话中段用户把文件策略切成 `danger-full-access` 后才恢复。
+2. **PowerShell 内嵌 here-string 的引号坑**：`-replace` 的替换串里带引号 + here-string 结尾标记同行
+   ⇒ ParserError；C# 代码片段里的 `\"` 转义同样翻车。第二次起一律把 python 脚本写到 `%TEMP%\probe\`
+   再执行（§8-4 的惯例），一次过。
+3. **变异验证必须做判别型**：把"真元素删掉、注释里留假元素"才验得出剥注释是否生效——只摘属性
+   （如只摘 Wrap）验不出"读的是注释还是代码"，因为真元素还在原位、匹配到的仍是它。
+4. **修 A 引入 B 要再审一轮**：本轮 7 处缺陷里有 3 处（⑤ 的两个、⑥ 的 CHANGELOG 一处）是
+   §13 收口轮自己修东西时带进来的。审查对象必须包含"为修它而写的每一行"，不只是产品码。
+5. **`git show HEAD:file` 取原文**是清污染的锚：沿革被我种过假轮次、改过账目，最后靠逐字取回
+   HEAD 的 10-31 三段史重建，避免"重写历史 = 第二份真相"。（顺带：HEAD 原文里
+   `scripts\u000berify.ps1` 那个 `\v` 竖直制表符是 10-31 就存在的字节，本轮逐字保真未"修"。）
+
+### 14.7 审查后的遗留清单终态（取代 §13.9 的读数行）
+
+§13.9 的五条处置**全部维持成立**，只有读数行作废：`scripts/gate-baseline.json` 终态
+**2518（unit 1887）**，`--unit-tests` 少一条就会红并点名。本轮全部改动未提交，工作树
+14 个跟踪文件 + 1 个新增（播放器清单，`.gitignore` 已点名入库）。
+
+
+## §15 增益图元数据三档 + AVIF 双 HDR 承载（2026-11-03，用户口径两拍板）
+
+### 15.1 需求与结论
+
+用户原话两个诉求：①"分析 GainMap 增益模式下的 JPEG 是怎么写入元数据的，改为只写最新标准
+ISO 的元数据"；②"PNG 默认不开启 HDR、WebP 没办法开启；AVIF 允许传统 HDR 也允许 GainMap HDR，
+加开关，参考隔壁 ffmpegPictureUI"。
+
+结论：
+- **JPEG**：旧实现恒双写（底图 APP1 `hdrgm` XMP + 次图 APP2 ISO 21496-1）。现改为三档
+  `GainMapMetadataMode { Iso, Xmp, Both }`，**默认 Iso**（对齐 libultrahdr 上游默认
+  `UHDR_WRITE_XMP=FALSE / UHDR_WRITE_ISO=TRUE`）。MPF 偏移改按档位动态算（旧代码假设 APP1
+  恒在，iso 档会多算 29B 导致次图定位失败）。顺带修真 bug：Xmp/Both 档现在**次图也写属性形式
+  XMP**（libultrahdr 只从次图读元数据，旧版只写底图会被参考读手判"无有效增益图元数据"）。
+- **PNG 默认 HDR / WebP 无 HDR**：均为预期行为非 bug。HDR 是全局开关（`AppSettingsData.HdrEnabled`
+  默认 true + "HDR 屏自动开"规则 + `HdrUserToggled` 一旦置真永久尊重）；WebP 是
+  `SupportsHdr: false`（有损 WebP 容器无 HDR 传输函数通道），开关置灰正确。
+- **AVIF**：新增 `AvifHdrMode { Pq, GainMap }`，**默认 Pq**（=本轮之前唯一 HDR 路，老用户产物
+  逐字节不变；也是 NVENC/QSV 硬件直通唯一支持的形状）。GainMap 档像素阶段与 JPEG 出口
+  **逐字同源**（`PrepareGainMapColorSpace / ComputeWhitePoint / ReinhardToSdr / ComputeGainMap /
+  RescaleGainMap` 全部 internal 化复用），只换容器；恒交付 3 平面（Gray 复制 ch0 成套，
+  与 libavif 对单通道"参数复制成套"处理等价）；元数据恒 ISO 21496-1（tmap 只承载这一种）。
+
+### 15.2 AVIF 容器写出器（移植 + 三处必须改）
+
+从隔壁移植 `IsoBmffGainMapWriter`（纯托管 ISO-BMFF tmap 容器组装，两遍法算偏移），
+但照搬就是错的，三处适配：
+1. **不 patch 底图 colr**：隔壁底图来自 ffmpeg `avif` muxer（实测不采纳 -color_primaries，
+   写出 unspecified），必须重写 nclx；我们的底图来自 avifenc `--cicp`，实测 colr 恒正确
+   ⇒ patch 反而改坏。只给 tmap 项追加替代图（HDR 侧）colr（默认 16/6/1，与 libavif 官方
+   seine_sdr_gainmap_srgb 样本逐字段一致，avifdec 实读核对）。
+2. **Temporal Delimiter 保留为防御**：实测 avifenc 每个 item 首字节已是 0x12(TD) ⇒ no-op，
+   留着挡"哪天换无 TD 编码器"。
+3. **auxC（alpha 副 item）拒绝而非静默丢**：实测恒不透明 RGBA ⇒ avifenc 丢 alpha 出单 item，
+   真半透明才出 auxC；写出器只搬主 item ⇒ 检测到副 item 就拒写，绝不出"丢 alpha 谎件"。
+   （另实测：写出器 pixi 通道对撞门、"增益图 > 底图尺寸"拒绝门都在。）
+
+**外部裁判**：`avifdec --info`（隔壁 libavif build，560KB）完整读出我们的手拼容器
+（`Gain map: … Alternate Headroom 2.32 (HDR)` + `Alternate image: Transfer Char. 16`）。
+`ultrahdr_app v2.0.2` 读 libavif 自家增益图 AVIF 样本报 "does not contain gainmap image"
+（exit -1）——这就是门禁 `--gainmap-color-product` 长期 SKIP 的根因，仍未解决。
+
+### 15.3 判据与变异（本轮 4 套件全绿后的读数）
+
+- unit **1907**（+17）、color **300**（+13）、encoding 23、usability 225，全 0 失败。
+- 新判据：`Test_AvifHdrMode_DefaultIsPq_AllLayers`（类型默认真跑 + App 四处源码形态同向）、
+  白名单 `AvifHdrModeCbo` 交叉、`EncodedAvif_GainMapContainer`（ftyp tmap 品牌 / iinf 3 item /
+  dimg 引用体逐字节 / grpl.altr / tmap 142B flags bit7 / **默认 PQ 档不含 tmap**）。
+- **变异一**（分派 `if (false && …)`）：7 条容器结构判据全红 ⇒ 开关真换容器。
+- **变异二**（dimg 砍掉增益图引用）：**首轮判据全绿、avifdec 当场报
+  "Invalid tone mapped image item"** —— 自解析抓不住引用体内容，是"自解析≠合法"的活教材。
+  补 `TryReadDimgBody` 逐字节验 `from=2/count=2/[1,3]` 后重放变异 ⇒ 红；恢复 ⇒ 绿。
+
+### 15.4 外部裁判推翻过一次界面文案
+
+AVIF 增益图档的卡片文案初版写"底图是 SDR 并嵌 ICC"，avifdec 实读 sRGB 目标产物
+`ICC Profile: Absent`（只有显式 Rec.2020 才嵌）⇒ 界面在撒谎。改为"底图是 SDR（声明同普通
+SDR 产物）"。教训：容器文案必须由读手实读校准，不能照实现意图写。
+
+### 15.5 措辞/接线判据的连锁（判据教我补的）
+
+改 `Declaration` 加第 5 参 `avifHdrMode` 后：调用形态判据（钉死带 `LocaleManager.Tr` 的整句）
+红 ⇒ 同步改判据并要求 `avifMode` 一路；`BuildGamutHint` 形参名从 `avifHdrMode` 统一成
+`avifMode`（判据钉整句）。AVIF Hint 改口径 ⇒ ZhToEn 死键判据红（旧中文串还在表里）⇒ 换键。
+AVIF 增益图档声明新片段 ⇒ "App 清单点名" + "ZhToEn 有译文"两条判据红 ⇒ 三处逐字同步
+（Core 片段 / App 登记 / 对照表）。两个中转 PNG 站点初写用 `ManagedPngEncoder.Encode` ⇒
+"PNG/TIFF 档位接线"判据红（它是产物站点计数器，中转必须 `EncodeFast`）⇒ 改用 EncodeFast，
+与 HDR-PQ 路 `Encode16(fastest: true)` 同纪律。
+
+### 15.6 基线更新与包
+
+`scripts/verify-publish-gates.ps1` 首跑 4/8 红——**不是代码问题**：15:44 实机验证 HDR 能力时
+启动的旧 beta 包（`publish\TrueToneCap-v0.3.10-beta\TrueToneCap.exe`，PID 132500）没退出，
+Publish.ps1 的运行中检测正确地拒绝了 stub 场景。结束进程后 8/8。教训记下：跑门禁前先查
+`Get-Process TrueToneCap`。
+
+**全门禁重跑通过（exit 0），`-WriteGateBaseline` 已写入**：总断言 **2518 → 2568（+50）**，
+取数 2026-11-03 21:16:08。分套件：unit 1887→**1907**（+20：默认链 Iso 六处 8 + AVIF 默认链
+Pq 四层 5 + 白名单交叉 2 + 调用形态/死键/清单/档位连锁修判据后净 +5）、color 270→**300**
+（+30：JPEG 三档全覆盖改写 + AVIF 增益图容器结构含 dimg 引用体 + ftyp/盒族）、encoding 23、
+usability 225、service 2 跳 1、ocr 12、qr 47、format 52（后五格不变）。同轮
+`--gainmap-color-product` 仍 ⏭ SKIP（ultrahdr_app 读 AVIF 增益图样本报
+"does not contain gainmap image"，能力探测不过），不是通过。
+
+CHANGELOG「未发布」节已加两条用户口径（JPEG 元数据三档 / AVIF 双承载）。
+
+**包已发**：`.\Publish.ps1 -Version 0.3.11-beta -AllowDirty`（沿用上一包 dirtyWorktree=True
+的惯例，27 项未提交改动与 HEAD 6e3895f 一并记入 build-info）。发布脚本内含测试门禁与
+SHA256SUMS，exit 0；包 613 文件 / 417.7 MB，位于 `publish\TrueToneCap-v0.3.11-beta`。
+包内 exe 冒烟（--display-audit）正常：HDR 硬件支持=yes。
+
+## §16 元数据不做用户抉择：JPEG 恒写 ISO 21496-1（2026-11-03 晚，二次收口）
+
+### 16.1 用户口径与处置
+
+用户看完 v0.3.11-beta 后追加："元数据方式 JPEG 应该只产出 ISO 标准的这一种，不应该让用户去
+进行抉择。"——上午 §15 的三档下拉（Iso/Xmp/Both）整体退役：
+
+- **Core**：`WriteJpegGainMapFile` 删 `metaMode` 参数，`writeIso=true/writeXmp=false` 字面固化；
+  `GainMapMetadataMode` 枚举缩成单档并标 `[Obsolete]`（新代码不许引用）；`EncodingSettings.GainMapMetadata`
+  字段删除；`BuildXmpMetadata` 等 hdrgm XMP 生成器**保留为 public**（文档级参照 + 测试对照），
+  不再写进产物。
+- **App**：XAML 下拉/提示行、`OnGainMapMetadataChanged`、`ApplySettingsToUI` 回显、`SaveSettings`
+  回写、`AppSettingsData` 字段、`SettingsService.FitTag` 白名单、管线三态映射、`LocaleManager`
+  七个运行时属性 + 两个 ZhToEn 键、能力卡文案（"写哪份元数据见设置页"改为"恒写 ISO 21496-1
+  最新标准"）——全部拆除。settings.json 遗留键被 JSON 反序列化静默忽略，无需迁移。
+- **Test**：`EncodedJpeg_GainMapMarker` 从三档循环改为单档正反双钉（ISO 恒在 + MPF 恒在 +
+  Base/次图两侧 hdrgm XMP 出现即回归）；`Test_GainMap_MetadataDefaultIsIso_AllLayers` 改为
+  **退役形态反钉**（EncodingSettings 反射无成员 + 五份源文件负向 Contains + 写出器签名无
+  metaMode 且含 `bool writeIso = true;`）；白名单交叉行删除。
+
+### 16.2 判据自己抓的回归
+
+负向 Contains 连注释也算：AppSettingsData 与 SettingsService 的"已删"注释里含
+`GainMapMetadata` 字样 ⇒ 判据红。改写注释措辞（不含该词）后绿——注释不是豁免区，
+这条对今后删字段类重构同样有效。
+
+### 16.3 验证读数
+
+- 四套件全绿：unit **1904** / color **282** / encoding 23 / usability 225。
+- **变异**（`writeIso=true` → `false`）：ISO 恒在判据红 ⇒ 恢复 ⇒ 绿。源确认
+  `bool writeIso = true;`。
+- **外部裁判**：ultrahdr_app v2.0.2 解码 ISO-only 产物 exit 0（32×32 RGBA8888 = 4096B，
+  非零字节 4047 = 真实图像数据）。⚠ 该工具写不了 `%TEMP%` 与 artifacts（后者 ACL 有 DENY DC），
+  只能写在自己 exe 同目录——探针类工具的落盘约束各异，失败时先换路径别急着判产物坏。
+- 全门禁重跑 exit 0，`-WriteGateBaseline` 写入：总断言 **2568 → 2547**（−21：三档循环判据
+  收敛成单档 + 白名单交叉行退役），unit 1907→1904、color 300→282。
+- 重新出包 `v0.3.11-beta`（同版本号覆盖式重发：上一包发出后口径即变，不发 0.3.12 避免把
+  三档下拉当"已存在过的功能"留在版本史里）。
+
+## §17 完整审查轮：四处实现问题 + 两处判据自身缺陷（2026-11-03 深夜）
+
+用户要求"进行一轮完整审查，确保相关实现正确"。审的是 §15/§16 两轮的全部产物码。
+结论：**发现 4 处实现问题（其中 2 处是真行为错误）与 2 处判据自身缺陷，全部修复并验证**。
+
+### 17.1 实现侧四处
+
+**① AVIF 替代图 matrix 与底图不同源（真错误，字节级证据）**
+`IsoBmffGainMapWriter.Build(...)` 的调用把 `alternateMatrix` 写死 `6`，而底图走
+`FormatHelper.AvifMatrixCoefficients(altPrim)`（709⇒1 / 2020⇒9）。于是 Rec.2020 目标下
+同一个文件里出现"底图 matrix=9、替代图 matrix=6"的自相矛盾组合。
+实测对照：libavif 全部官方增益图样本里两者都同源（1/13/6 配 1/16/6）。
+改为 `FormatHelper.AvifMatrixCoefficients(altPrim)`。
+⚠ 我最初的担心（"1/16/6 不自洽"）被实测推翻——sRGB 样本的替代图就是 1/16/6，
+libavif 自己的惯例。**不查证就把直觉当结论会改错方向。**
+
+**② AVIF 底图 ICC 来源不一致（真错误）**
+`PrepareGainMapColorSpace` 返回的 `baseIcc`（像素搬到 2020 时配套返回的 2020 ICC）被我丢弃，
+改从 `s.IccProfile` 重算 ⇒ 拿到的是用户 profile（可能是显示器 ICC 或 null），与已搬过的
+像素不是一套。改用返回值。
+但改完立刻被外部裁判抓到**第二层错误**：无条件嵌入后，sRGB 目标底图多了 2100B ICC，
+违背既有"SDR 路 sRGB 不嵌 ICC（cicp 已足够）"契约，也让能力卡文案对不上产物。
+终态：`embedIcc = (ColorSpaceTag == "BT2020") ? baseIcc : null` —— 只在广色域嵌，
+且嵌的是与像素同源的那份。avifdec 复核：sRGB 产物 `ICC Profile: Absent`、
+BT2020 产物 `Present (2100 bytes)`，两条都符合契约。
+
+**③ 管线对「增益图档」的两条形状约束缺失（契约诚实）**
+旧写法把硬件→软件的回落藏在 Core 的 `ResolveAvifencCodec` 里：用户亲手选了 NVENC，
+拿到的是软件编码，界面与日志零交代（§27 那类"换了参数不说"）。另外 HDR 位深协商仍按
+"下限 10"抬，而该档产物恒 8-bit ⇒ 日志说 10、产物是 8。
+补管线分支：`GainMap + 非软件编码器 ⇒ 改写 Avifenc 并留痕`（Auto 只记 Info，显式选择才
+Toast，沿用 SupportsHdrPath 那条的口径）；`GainMap ⇒ bitDepth = 8` 并记 Info（形状约束，
+不是能力降级，故不弹警告）。
+
+**④ 退役后的死代码（清理，无行为影响）**
+XMP 双写通路退役后留下：三个私有 helper（`InsertXmpIntoSegment` / `BuildSecondaryXmpPayload`
+/ `PrefixXmpNamespace`）只剩不可达分支引用、`GainMapMetadataMode` 枚举全仓零使用、
+`WriteJpegGainMapFile` 的 `baseW/baseH/gmW/gmH` 四形参只为已死的 BuildXmpMetadata 调用存在。
+全部删除；`app1Total` 改为 `const int = 0` 但**保留 MPF 算式的完整形态**（恢复某条 APP1 段时
+不必重推公式，注释写明这个意图）。恒真的 `bool writeIso` 一并删除——留一个恒真开关只会让
+下一个人以为它还有另一态。`BuildXmpMetadata` 保留（public，有测试对照）。
+
+### 17.2 判据自身两处缺陷（同样是 bug，且更隐蔽）
+
+**A. `AlternateNclxOf` 按"第二个 nclx"取 → 取到的是增益图自己的 colr。**
+ipco 顺序是 底图属性→增益图属性→tmap 追加属性，替代图那张**恒为最后一个**。
+首版判据报"实得 1/13/1"（增益图的 nclx），差点被当成实现错误。改为取最后一个。
+**B. 用 `"prof"||"iCCP"` 判"嵌了 ICC"** —— 那是 PNG 块名；AVIF 的 ICC 在 colr 盒里，
+任何真 profile 必含 `acsp` magic。首版侥幸通过（撞运气）。改用 `acsp`。
+
+**C. 负向 Contains 判据连注释都算**：AppSettingsData / SettingsService 的"已删"注释里
+含 `GainMapMetadata` 字样 ⇒ 判据红（§16 已记，本轮再次印证这条规矩有效）。
+
+### 17.3 验证
+
+- 四套件全绿：unit **1908** / color **286** / encoding 23 / usability 225。
+- 新判据（BT2020 三条 + sRGB 反向 acsp 缺席 + 管线两条源码形态 + helper 删除 + 无条件 ISO 插入）。
+- **变异三轮**：① alternateMatrix 改回 6 ⇒ "替代图 nclx 9/16/9"红并报出实得 9/16/6；
+  ② 删除管线 `bitDepth = 8;` ⇒ 该判据红；③ §16 的 writeIso 变异已验。均恢复后复绿。
+- **外部裁判**：`avifgainmaputil printmetadata` 独立解析我们的 tmap/ISO 21496-1 载荷，
+  逐项吻合写入意图（Alternate headroom 232/100=2.32、三通道 max 一致、offset 1/64、
+  gamma 1/1、Use Base Color Space True）。`tonemap` 因本机 avifdec/util 未链 AV1 解码器
+  而无法跑像素级（No codec available）——像素级施加增益的验证仍是缺口（见 17.4）。
+- 全门禁 exit 0，基线 **2547 → 2555**（+8：unit +4 / color +4）。
+
+### 17.4 审查确认的遗留（不在本轮处置）
+
+1. **像素级增益施加无验证**：本机没有带 AV1 解码器的 avifdec/avifgainmaputil，
+   `tonemap` 跑不动。声明层已双裁判覆盖（avifdec + printmetadata），但"叠加后亮度对不对"
+   只能靠实机看图。要补需要链了 dav1d/aom 的解码器。
+2. `--gainmap-color-product` 仍 ⏭ SKIP（ultrahdr_app 不解 AVIF 增益图），非通过。
+3. 增益图档的**无损底图**（Quality=0）未单测；该档 CRF 直通 avifenc，形状与有损同路。
+4. AVIF 增益图档不做硬件加速是【当前事实】而非物理必然；若将来 NVENC 支持增益图容器，
+   删掉管线那段改写即可，判据会红并点名。
+
+## §18 AVIF 增益图底图的 Rec.2020 矛盾（2026-11-04，用户提问引出）
+
+### 18.1 用户的问题与实测答案
+
+问："AVIF 的 HDR 下 GainMap 的底图是否是正常的 Rec.2020？"
+
+**答：修复前不是——那是一个三处互相矛盾的错件。** 用探针实跑三场景（32×32 scRGB 浮点帧，
+`AvifHdrMode.GainMap`），再用 `avifdec --info` + ICC desc 解码：
+
+| 设置 | 底图 nclx | 内嵌 ICC desc | 文件大小 | 判定 |
+|---|---|---|---|---|
+| 跟随显示器（HDR 屏，**产品默认**） | 9/13/9 | **"sRGB IEC61966-2.1"** | 2871 | ❌ 三处矛盾 |
+| 显式 Rec.2020 | 9/13/9 | BT.2020 | 2863 | ✅ 一致 |
+| sRGB 目标 | 1/13/1 | 无 ICC | 757 | ✅ 一致 |
+
+矛盾在于：容器声明 Rec.2020 原色、ICC 说是 sRGB、像素实际也是 sRGB/709。
+
+### 18.2 根因
+
+`ColorDecision.Build` 在 HDR 下把目标解析成 BT2020（`target = hdr ? "BT2020" : …`），
+但 `ExplicitWideTarget` 只在用户**亲手**选广色域时才为真（跟随显示器不算"用户的手"）。
+而 AVIF 增益图分支此前调用 `PrepareGainMapColorSpace(..., requireExplicit: true)`（默认门）
+⇒ **像素不搬**，仍留在 sRGB/709；可容器声明却无条件跟 `ColorSpaceTag` 写 9/13/9，
+ICC 又是该函数返回的 sRGB profile。三者各自"看起来对"，合起来是错件。
+
+为什么 JPEG 增益图没这问题：JPEG 家族的默认档被 `ColorDecision` 的格式口径钳制收成 sRGB
+（`rec709Defaulted`），`wideTarget` 直接为 false，声明跟着 ICC 走，自洽。
+
+### 18.3 修法
+
+AVIF 增益图分支改传 `requireExplicit: false` —— **HDR 输出的 BT.2020 是标准色域，
+不是"用户偏好广色域"**，决策层本来就这么解析；增益图档必须与 PQ 档交付同一套原色，
+否则"底图是 SDR"会退化成"底图还更窄"。JPEG 主路径仍用默认门（L229 无实参，未动）。
+
+### 18.4 判据（用逐字节相同，比查标签有牙）
+
+`AVIF 增益图档[HDR+跟随显示器]: 与显式 Rec.2020 逐字节相同` —— 两个设置只差一个布尔，
+若代码真的走同一条路，产物字节就该相同。任何"声明照写、像素不搬"的退化都会让两边分叉。
+- 修复后实测：两者 SHA256 相同（`38bb2213…`，2863B）。
+- **变异**：`requireExplicit: false` → 默认 `true` ⇒ 判据红且诊断直接点出
+  "底图 nclx=9/13/9，但与显式档不同 ⇒ 像素没搬/Metadata 分叉"；恢复 ⇒ 绿。
+
+### 18.5 读数与遗留
+
+四套件：color **287**（+1）/ encoding 23 / unit **1908** / usability 225，全绿。
+**遗留**：① ICC desc 的解码只能在探针里做（测试项目不引 Native 解码器），判据用字节相同间接覆盖；
+② JPEG 增益图在 HDR + 跟随显示器时底图仍是 sRGB/709（自洽，但比 PQ 档窄一档）——
+这是"JPEG 家族默认 Rec.709"的产品口径，不是缺陷，未改。
+
+## §19 第二轮审查：§18 修复留下的同类洞 + 声明通道口径收口（2026-11-04）
+
+用户要求"跑一轮审查"。这轮审的是 §18 那次修复本身 —— 结果是**它只补了主路径，回退路径仍写着同一个错件**。
+
+### 19.1 审查发现（1 处真错件 + 1 处静默参数）
+
+**① `PrepareGainMapColorSpace` 的回退分支仍会产出"声明 2020、像素 709"。**
+该函数在"取不到可嵌 BT.2020 ICC"时会 `CoreLog.Warn` 后**静默退回 sRGB 像素**（这是为 JPEG 设计的：
+JPEG 只有 ICC 一条声明通道，退回 sRGB 像素 + sRGB ICC 仍然自洽）。但 AVIF 有**两条**声明通道
+（nclx + ICC），而 §18 的修复只把 `requireExplicit` 放开了，声明仍按 `s.ColorSpaceTag` 写 ⇒
+一旦 2020 ICC 不可用，产物就是 `nclx 9/13/9` + 内嵌 sRGB ICC + sRGB 像素的三处矛盾错件，
+与 §18 修掉的那个是**同一个病、不同的触发条件**。
+
+修法：让函数返回第三元 `WideApplied`（像素**是否真的**搬走了），AVIF 分支据此决定
+CICP / ICC / 替代图 primaries 三件声明；JPEG 两个调用点丢弃它（它们只有 ICC 一条通道，本就自洽）。
+回退时同时 `CoreLog.Warn` 说明"目标要求 2020 但 ICC 不可用 ⇒ 按 sRGB 交付，宁可窄不错"。
+
+**② 增益图档恒 8-bit，但直调方传 10-bit 时没有任何痕迹。**
+管线侧已经有 Info（§17 加的），但探针/判据宿主直接构造 `EncodingSettings` 绕过管线时，
+`OutputBitDepth=10` 会被无声忽略。补一条 Core 层 Warn。
+
+### 19.2 顺带确认（不是缺陷，不改）
+
+- **JPEG 增益图无同类问题**：`DefaultsToRec709` 把 JPEG_GAINMAP 纳入，HDR 下决策层已把
+  target 收成 sRGB ⇒ `wideTarget=false`，声明跟 ICC 走，自洽。
+- **AVIF PQ 档无同类问题**：`HdrToPq16(f, csTag)` 的转换与 `BuildHdrCicp(csTag)` 的声明
+  共用同一个 tag，不存在"转换一套、声明另一套"。
+- **目标标签取值域**：`CollapseSelectableTag` 只产出 System / sRGB / BT2020 ⇒
+  `widePixels` 判断覆盖全，不会漏掉 DisplayP3/AdobeRGB 这类中间态。
+- **增益图 item 自身的 nclx 是 1/13/1**（底图 9/13/9 时）：增益图是中性比值数据，
+  ISO 21496-1 的 `use_base_cg=true` 表示"按底图色彩空间施加"，libavif 不解它的 colr ⇒ 无影响，不改。
+
+### 19.3 判据与变异
+
+- 新增 3 条源码形态判据（钉 `widePixels` 决定 ICC / CICP / 替代图 primaries 三件），
+  外加 1 条定位守卫：unit 1908 → **1912**。
+- **变异**：把 `embedIcc = widePixels ? baseIcc : null` 改回按 tag 判 ⇒ 判据红并点名"回退路径会产错件"；
+  恢复 ⇒ 绿。
+- 探针复跑三场景：跟随显示器/显式 2020 仍逐字节相同（2863B），sRGB 档 1/13/1 无 ICC —— 无回归。
+- 四套件：unit 1912 / color 287 / encoding 23 / usability 225，全绿。
+
+## §20 AVIF 增益图改为「10-bit 底图 + 8-bit 增益层」（2026-11-04，用户口径）
+
+### 20.1 用户口径与改动
+
+用户问"为什么 AVIF 增益图恒定 8bit"后拍板：**"AVIF 改为默认 10bit 底图、8bit 增益图，JPEG 不变"**。
+
+- 底图：`Math.Clamp(s.OutputBitDepth, 8, 12)`，走正常 HDR 位深协商（下限 10），经
+  **16-bit PNG 中转 + avifenc `--depth N`**，只量化一次；`>8` 时用新增的
+  `JpegGainMapEncoder.LinearToBgra16`（大端 BGRA16，与 `ToneMapper.FloatToBgra16Bytes` 同约定）。
+- 增益层：**恒 8-bit 不变**（ISO 21496-1 的比值图惯例，增益是平滑乘数）。
+- JPEG 侧**一字未动**（JPEG 格式本身没有 10-bit 有损通道，8-bit 是硬约束）。
+- 管线：删掉上一轮"增益图档 ⇒ bitDepth = 8"的形状钉死，改为与 PQ 档相同的协商
+  （增益层的 8-bit 是 Core 内部常量，管线不再重复表达同一事实）。
+
+### 20.2 两个实测踩出来的坑
+
+**① avifenc 对 16-bit PNG 输入一律按"带 alpha"处理。**
+即便 alpha 全为满值，也照样产出 alpha 副 item（`infe=2` + `auxC`）；8-bit RGB 输入则只有
+一个 item。增益图容器只搬主图 ⇒ 底图带副 item 就被写出器的"底图含副 item"门拒写
+（测试直接表现为该条 Skip，报 `底图含 1 个副 item（alpha）⇒ 拒写`）。
+> 期间我先误判为"alpha 值不是满值导致"，把 `a16` 改成 65535（从 `qMax<<qShift`）——
+> 实测三个不同 alpha 值（65535 / 65472 / 0）产出**完全相同**（都 infe=2），证明与值无关。
+> **是先做三组对照实验才找到真因，不是靠推理猜中的。**
+
+修法：给 `ManagedPngEncoder.Encode16` 加 `omitAlpha` 开关，写 **color type 2（RGB）**
+而非 6（RGBA），IHDR/sBIT/扫描线/滤波 bpp 全部随之自适应（bpp 6 而非 8）。
+截图恒不透明 ⇒ 零信息损失。
+
+**② 判据"PNG/TIFF 产物站点必须带 effort"把中转站当成了产物。**
+它按行匹配 `ManagedPngEncoder.Encode16(` 并排除含 `fastest: true` 的行；我最初把调用拆成
+两行，`fastest: true` 落在第二行 ⇒ 被判为"产物站点没带档位"而红。改成单行调用后绿。
+**判据又一次走在实现前面**（与 §15.5 的 EncodeFast 同一条纪律）。
+
+### 20.3 判据与验证
+
+- color 287 → **290**（+3）：`PixiChannelDepths` 读 pixi 盒的 bits_per_channel，
+  钉"底图 10 / 增益层 8"（ipco 顺序：底图属性在前、增益层在后）。
+- unit 1912（+0，但把上一轮"钉 8"的判据**反转为**"不许再钉 8"——否则 10-bit 会被静默压回）。
+- **变异**：`baseDepth = 8` ⇒ 判据红并报 `实得 [8,8,8]`；恢复 ⇒ 绿。
+- **外部裁判**：`avifdec --info` 读出 `Bit Depth: 10`（底图/替代图）+ `Gain map: … 8 bit`，
+  `avifgainmaputil printmetadata` 元数据完好（Alternate headroom 232/100）。
+- 四套件全绿：unit 1912 / color 290 / encoding 23 / usability 225。
+
+## §21 交付事故：演示污染了出包设置文件（2026-11-04）
+
+### 21.1 用户报的现象
+
+"AVIF 的默认方式是传统方式，处理一下"——用户打开包后看到 AVIF 「HDR 承载方式 = 增益图」，
+而产品默认应该是「传统 HDR（底图写 PQ）」。
+
+### 21.2 根因：不是代码，是我污染了出包设置
+
+代码三处默认值都正确（`EncodingSettings.AvifHdrMode = Pq`、`AppSettingsData.AvifHdrMode = "Pq"`、
+XAML `Tag="Pq" IsSelected="True"`）。真因是：**我为了截图演示新开关，直接改了
+`publish\TrueToneCap-v0.3.11-beta\TrueToneCap.settings.json`，把 `AvifHdrMode` 写成 `"GainMap"`，
+之后没有恢复就重发了包。**
+
+未打包形态的设置文件就落在 `AppContext.BaseDirectory`（exe 同目录）——见
+`SettingsService.SettingsPath`——所以用户装上这个包，第一次打开看到的不是产品默认，
+而是**出包者调试时的界面状态**。
+
+实测确认：干净 settings 下 AVIF 默认就是「传统 HDR（底图写 PQ）」，代码无需改动。
+
+### 21.3 处置
+
+1. **清理全部污染**：`publish\*` 与 `src\...\bin\*` 下 6 份被污染的 settings 全部重置为
+   首启模板 `{"SettingsRevision":2,"GainMapMerged":true,"FreeEndpointsMigrated":true,"FirstRun":false}`。
+2. **加门禁**（`scripts\verify-package.ps1` 新增 [5.7/6]）：包内 settings 若存在，其键必须
+   全部属于 `{SettingsRevision, GainMapMerged, FreeEndpointsMigrated, FirstRun}` 这一组
+   "迁移/首启标记"；出现任何**用户偏好键**（FormatIndex / AvifHdrMode / Quality / OutputPath …）
+   即判失败并点名，因为那意味着"装包用户会继承出包者的界面状态"。
+3. **变异验证**：故意写入 `FormatIndex=3, AvifHdrMode=GainMap` ⇒ 门禁失败并点名这两项；
+   恢复 ⇒ 通过。
+
+### 21.4 教训（写进纪律）
+
+**演示/截图不得改动产品目录里的持久化文件。** 需要展示某个非默认界面状态时，正确做法是
+临时复制一份 exe 到独立目录去改那份设置，或直接在界面上点（本轮的截图本来也是这么做的）——
+一旦写进 `publish\` 里的 settings，它就会随包发给用户，而**既有 6 步冒烟一条都不会红**
+（exe 能跑、版本对、许可齐）。这条门禁就是为这个盲区加的。
+
+## §22 AVIF 色度默认 420 → 444，编码器默认 Auto → LibAom（2026-11-04，用户口径）
+
+### 22.1 用户报告的问题
+
+"目前 420 的截图文字边界有了很明显的劣化，思考一下原因。"
+
+### 22.2 实测定位（不是推测）
+
+用 avifenc 编码含文字/UI 的合成画面，ffmpeg 解码回 rgb24，逐像素与原始 RGBA 比对：
+
+| 内容类型 | 444 边缘误差 | 420 边缘误差 | 判定 |
+|---|---|---|---|
+| 中性黑白文字 | 0.00 | **0.00** | 完全不受影响（信息全在亮度 Y 平面） |
+| **彩色 UI 文字** | 0.14 | **7.82** | **劣化 56 倍 —— 真正的病灶** |
+| 自然照片平滑渐变 | 0.53 | 0.79 | 温和 |
+
+**结论：4:2:0 只砍色度分辨率，所以纯黑白文字毫发无损；被破坏的是彩色文字、图标描边、
+ClearType 彩边。** 提高质量救不回来（q68→q90 只从 13.05→12.82），因为这是采样阶段的结构性损失。
+
+### 22.3 为什么不是 422（专门测过）
+
+用户要求"测试一下 422 的表现"，实测三档（640×240 彩色文字，CRF 20）：
+
+| 色度 | 体积 | 平均\|Δ\| | 边缘\|Δ\| | C 边缘误差 |
+|---|---|---|---|---|
+| 420 | 28186B | 4.60 | 5.75 | 4.15 |
+| **422** | **32142B** | 4.00 | **5.46**（仅改善 5%） | 3.90 |
+| **444** | 37734B | **2.54** | **3.22**（改善 44%） | **2.18** |
+
+**422 是"两头不靠"**：只改善 5% 却比 420 大 14%。原因：422 只补了水平方向的色度分辨率，
+垂直仍减半，而文字/UI 在两个方向都有锐利边缘。Y 边缘误差 420/422 几乎相同（1.95/1.96），
+证明 422 改善的纯粹是色度那一半。
+另：中性文档上 422 甚至比 444 还大 6%（1499 vs 1410B）—— 每种内容上都最差或并列最差。
+
+### 22.4 体积代价要分开看
+
+上面 444 的 +34% 是"大面积彩色细节"的最坏情形。真实场景：
+- 桌面截图混合：420 2110B → 444 2124B（**+0.7%**）
+- 中性文档：420 1412B → 444 1410B（**−0.1%**）
+
+那类内容色度本来就平滑，4:2:0 省不下空间 ⇒ 默认 444 的实际代价接近零。
+
+### 22.5 为什么编码器默认也必须改
+
+`AvifEncoderCapabilities.PickAuto` 只在 **420** 才选硬件（NVENC/QSV 只支持 4:2:0、≤10-bit）。
+保持 `Auto` 为默认时，"默认 444"会在硬件机上被能力协商**静默降回 420** —— 用户看到 444、
+产物却是 420。所以两个默认值必须成对改：色度 `444` + 编码器 `LibAom`（软件 avifenc 是唯一
+支持全色度 + ≤12-bit 的路径）。想用硬件加速仍可显式选，届时色度按其能力协商并给出提示。
+
+### 22.6 判据与变异
+
+- `Test_AvifChroma_DefaultIs420` → 重写为 `Test_AvifChroma_DefaultIs444`（含方法名、
+  三处事实源：Core 类型默认 / App 设置项 / XAML IsSelected）。
+- 新增 `Test_AvifEncoder_DefaultIsLibAom`：Core 行为判据（真跑）+ App 设置项 + XAML IsSelected
+  + "不许有两个 IsSelected"。
+- `Test_EncodingSettings_Defaults` 同步（原钉 `Auto`），失败消息改成打印实得全字段。
+- **变异两轮**：ChromaAvif 改回 420 ⇒ 红并点名；AvifEncoder 改回 Auto ⇒ 红并点名
+  "默认色度 444 会在硬件机上被静默降回 420"；恢复 ⇒ 全绿。
+- 四套件：unit **1919**（+7）/ color 290 / encoding 23 / usability 225。
+
+## §23 试过 sharpyuv，实测否决（2026-11-04）
+
+### 23.1 动机与构建
+
+`--sharpyuv` 是 libavif 里唯一专门缓解 4:2:0 色度下采样损伤的开关，看起来正对 §22 的病。
+按用户要求"在 avifenc 侧重构建"执行，结果：**构建成功，但实测是负收益，已回退。**
+
+### 23.2 关键认知错误（值得记住）
+
+**`--sharpyuv` 的编译开关是 `AVIF_LIBSHARPYUV`（libwebp 的 libsharpyuv），
+不是 `AVIF_LIBYUV`（Google libyuv 的缩放/快速路径）—— 两个独立选项。**
+
+我一开始只改 `AVIF_LIBYUV=LOCAL`，`avifenc --version` 于是印出 `libyuv : available`，
+看起来成功了；但 `--sharpyuv` 一用就报 `Conversion to YUV failed`、零产出。
+隔壁 ffmpegPictureUI 自建的那枚二进制正是这个状态（version 报 available、一用就失败）。
+**判断 sharpyuv 能不能用，只能靠真实编码对比，不能看 version 串。**
+
+### 23.3 实测数据（彩色文字/UI，CRF 20）
+
+| 配置 | 体积 | 平均\|Δ\| | 边缘\|Δ\| | Y误差 | Cb误差 | Cr误差 |
+|---|---|---|---|---|---|---|
+| 420 普通 | 28186B | 4.60 | 5.75 | 1.56 | 3.46 | 3.20 |
+| **420 +sharpyuv** | **47823B** | **7.33** | **9.25** | 2.02 | 5.23 | 5.58 |
+| 444 | 37734B | 2.54 | 3.22 | 1.16 | 1.81 | 1.56 |
+
+**sharpyuv 让亮度和色度误差同时变大（边缘劣化 61%），体积还涨 70%，且比 444 更差又更大。**
+它优化的是"主观边缘锐度"，代价是色度精度；在本仓的逐像素度量下是净损失。
+
+### 23.4 回退与保留
+
+配方 `scripts/build-avifenc.py` 已回退：`AVIF_LIBSHARPYUV=OFF` + `AVIF_LIBYUV=OFF`，
+并把上述数据与"两个开关不是一回事"的坑写进注释（防止下次再走一遍）。
+
+**保留的真实修复（与 sharpyuv 无关，是配方原有 bug）：**
+1. `SRC = args[i+1]` 的变量遮蔽：让它赋值后 `SRC` 成为整个 `main()` 的局部变量 ⇒
+   不传 `--workdir` 时抛 `UnboundLocalError`。改为局部别名 `src`。
+2. 工具链探测：ninja（VS 自带，不在 PATH）、perl（隔壁 exiftool 带的是**精简版，
+   缺 Getopt::Long**，会让 aom 的 rtcd.pl 在编译中途炸；必须用 Strawberry Perl）、
+   nasm（系统已装但不在 PATH）。现在脚本自己找，找不到就在 configure 之前明确报错。
+
+## §24 全格式色度体检：增益图底图与 JPEG LI 分家（2026-11-04，用户口径）
+
+### 24.1 用户报的问题与本轮范围
+
+"分析一下其他格式是否也有类似的问题"（§22 修完 AVIF 之后）。本轮把**所有带色度概念的格式**
+都做了实测体检，方法同 §22：项目自己的编码器 API 出图 → ffmpeg 解回 rgb24 → 逐像素比对。
+
+**先做了测量有效性诊断**（避免拿有偏的尺子下结论）：纯色块近无损往返，白/中灰/黑 Δ 全 0，
+证明 ffmpeg 的 JPEG 解码没有 limited-range 偏移 ⇒ 下面的数字可信。
+
+### 24.2 体检结果
+
+| 格式 | 默认色度 | 420→444 边缘误差 | 结论 |
+|---|---|---|---|
+| PNG / TIFF | 管线硬编码 444 | — | ✅ 无损 RGB，无色度概念 |
+| WebP | 硬编码 420 | **无法改** | ⚠️ VP8 有损格式定义只有 4:2:0 |
+| JPEG XL | 444 | 30.67 → 5.48（**420 劣化 5.6 倍**） | ✅ 默认本来就对 |
+| AVIF | 444（§22 已修） | 5.75 → 3.22 | ✅ |
+| **JPEG LI** | 420 | 7.42 → 6.71（仅 −10%） | ⚠️ 同类问题，幅度小 |
+| **增益图底图** | 共用 ChromaJpegLi=420 | 同上 | ⚠️ **本轮处理对象** |
+
+（绝对值不能跨格式比，只能看同格式内的相对差。）
+
+### 24.3 用户拍板与分家理由
+
+用户口径：**"JPEG LI 还是默认 420，其他默认 444"**。
+
+分家的技术理由：增益图的底图会被查看器**乘增益放大还原**，底图的色度误差会一并放大 ⇒
+这一档色度精度优先于体积；普通 JPEG LI 照片档按体积优先。
+
+### 24.4 实现（三处，都不在 Core）
+
+1. **管线 switch**：`JPEG_GAINMAP => (s.BitDepthJpegLi, "444")` —— 与 PNG/TIFF 同一手法
+   （硬编码在调用方，Core 不感知），位深仍同源。
+2. **UI 联动**：`gainMapOn` 时 `ChromaJpegLiCbo.IsEnabled = false` + 说明文字；
+   else 分支成对还原（与 HDR 锁定同一手法，不写 _settings，避免状态粘住）。
+3. **ZhToEn 新键**：禁用时的说明文案进表。
+
+### 24.5 门禁当场抓到的一次自我纠错（记进纪律）
+
+新文案我最初写成两段拼接：
+
+```csharp
+LocaleManager.Tr("增益图态底图恒为 4:4:4（…）；"
+    + "关闭「附带增益图」后可再选。")
+```
+
+死键判据立刻报红（当前树死键 0 → 1）：**表里的完整键在源码中不连续出现，就等于没人用**。
+改成单一字面量后绿。**教训：给 `LocaleManager.Tr` 传中文串时必须写成一整条字面量，
+不许 `+` 拼接**，否则要么判据红，要么真的漏译。
+
+### 24.6 判据与变异
+
+- 原"同源"判据（`JPEG_GAINMAP => (…, s.ChromaJpegLi)`）改写为钉"分家的形状"，
+  并新增反向判据：JPEG LI 普通档**仍必须**读字段（不许把 420 也硬编码掉，那是用户选择权）。
+- 新增两条假配置锁：开启时禁用 / 关闭时还原。
+- **变异两轮**：① 增益图色度改回 `s.ChromaJpegLi` ⇒ 红并点名"会让它跟着默认掉到 420"；
+  ② 删掉 UI 禁用行 ⇒ 红并点名"留着就是假配置"；恢复 ⇒ 全绿。
+- 本轮没动 Core ⇒ 只跑 unit **1923**（+7）/ color 290 / usability 225，encoding 未跑
+  （按用户偏好：非出包不跑全量）。
+
+### 24.7 补：色度落点断言该放哪 —— 撞出一条既有契约（2026-11-04）
+
+给"分家"加活体判据（真调 `BuildEncodingSettings`，比源码串强）时，我最初把 JPEG LI 探针
+加进了【逐屏循环】的 `probes`，`--display-audit` 当场报红：
+
+```
+✗ DISPLAY5·JPEG LI 色度跟随设置: 交付形态说 BlockedByFormat 而落点 HdrOutput=True，期望 False
+```
+
+**这不是产品缺陷，是我这条新探针的期望设错了。** 查编码器入口注释确认：JPEG LI 的
+`EncodeAsync` 开头就写着"不支持 HDR，始终降级到 SDR"，`HdrOutput=True` 是既有契约
+（交付形态 `BlockedByFormat` 说的正是这件事）。原四条探针没有 JPEG LI，正是因为
+它没有"HDR 该不该开"的可钉期望。
+
+两个更正：
+1. **撤掉逐屏的 JPEG LI 探针**，色度断言挪到【全局落点段】—— 实测色度落点与屏无关
+   （窄色域屏与 HDR 屏同为 420/444），逐屏跑只是把同一句印四遍。
+2. 断言写成【成对的两条】：增益图必须恒 444、JPEG LI 必须跟随字段。只留一条的话，
+   "两边都硬编码同一个值"也能过 —— 两条同时判才是"分家"的证据。
+
+**行为级变异两轮**（`--display-audit` 退出码为判据，非源码串）：
+- 增益图色度改回 `s.ChromaJpegLi` ⇒ `✗ 全局·增益图底图色度: …实得 420`，退出码 1
+- JPEG LI 改回硬编码 `"444"` ⇒ `✗ 全局·JPEG LI 色度: …实得 444（用户的选择权没了）`，退出码 1
+- 恢复 ⇒ `色度落点: JPEG LI=420 增益图底图=444 ⇒ 分家成立 ✓`，退出码 0
+
+教训一句话：**新加探针时，先确认这条格式在该轴上"有没有可钉的期望"** —— JPEG LI 的
+HDR 落点是"恒开、由编码器降级"，拿别的格式的 WantHdr 模板套它就会自己造出一条假分叉。
