@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!-- TrueToneCap/Package.appxmanifest
      MSIX 清单 —— 仅在做商店/侧载打包时被引用（见 TrueToneCap.App.csproj 的 MsixPackaging 段）。
      默认的未打包构建（WindowsPackageType=None）不读本文件。
@@ -12,6 +12,9 @@
           仍产出 0.3.7.0 的包）—— 出包前必须手动把这里改成与发布版本一致（x.y.z.0 形态）。
        3) 所有 Logo 路径指向的文件必须真实存在，否则 MakeAppx / 认证直接失败。
           Assets/ 下的图由 scripts/gen-msix-assets.py 生成（可重跑复现）。
+        4) Identity/@Name 必须是 Partner Center「产品标识」页给出的【完整软件包标识名称】
+           （账号前缀 + 预留名，如 luoye-cpu.TrueToneCap），不能只写预留名本身 ——
+           2026-11-05 实测：裸名被商店校验拒收（"无效的软件包标识名称"），报错里会给期望值。
 
      EntryPoint="Windows.FullTrustApplication" 是必需的：本应用是 Win32/WinUI 桌面应用，
      不是 UWP 沙箱应用；配合 rescap:runFullTrust 能力，才能做 D3D11 捕获、子进程调用原生编码器等操作。 -->
@@ -24,7 +27,7 @@
   IgnorableNamespaces="uap uap5 desktop rescap">
 
   <Identity
-    Name="TrueToneCap"
+    Name="luoye-cpu.TrueToneCap"
     Publisher="CN=301BF257-514D-402F-B9D2-1C698A29F2F9"
     Version="0.3.11.0"
     ProcessorArchitecture="x64" />

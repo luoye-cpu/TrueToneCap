@@ -174,6 +174,14 @@ if (-not (Test-Path $manifestPath)) {
         Ok "Publisher 与 Partner Center 标识一致（CN=301BF257-…）"
     }
 
+    # Identity Name 必须是 Partner Center「产品标识」页的完整软件包标识名称（2026-11-05 实测：
+    # 裸预留名 TrueToneCap 被商店拒收"无效的软件包标识名称"，期望 luoye-cpu.TrueToneCap）。
+    if ($id.Name -ne 'luoye-cpu.TrueToneCap') {
+        Fail "包标识名称 '$($id.Name)' ≠ Partner Center 的 'luoye-cpu.TrueToneCap' —— 上传必拒收；换预留名时同步清单与本判据"
+    } else {
+        Ok "包标识名称与 Partner Center 产品标识一致（luoye-cpu.TrueToneCap）"
+    }
+
     # PublisherDisplayName 必须与账号的「发布者显示名称」逐字一致（2026-11-05 实测学费：
     # 清单里写 TrueToneCap contributors，Partner Center 校验拒收 —— 本地 WACK 测不出这一项）。
     $pubDisp = $m.Package.Properties.PublisherDisplayName
