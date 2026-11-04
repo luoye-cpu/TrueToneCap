@@ -174,6 +174,15 @@ if (-not (Test-Path $manifestPath)) {
         Ok "Publisher 与 Partner Center 标识一致（CN=301BF257-…）"
     }
 
+    # PublisherDisplayName 必须与账号的「发布者显示名称」逐字一致（2026-11-05 实测学费：
+    # 清单里写 TrueToneCap contributors，Partner Center 校验拒收 —— 本地 WACK 测不出这一项）。
+    $pubDisp = $m.Package.Properties.PublisherDisplayName
+    if ($pubDisp -ne 'luoye-cpu') {
+        Fail "PublisherDisplayName='$pubDisp' ≠ 账号发布者显示名称 'luoye-cpu' —— 商店上传必拒收；改账号显示名时同步清单与本判据"
+    } else {
+        Ok "PublisherDisplayName 与账号发布者显示名称一致（luoye-cpu）"
+    }
+
     # runFullTrust：桌面应用必需
     $caps = @($m.Package.Capabilities.ChildNodes | Where-Object { $_.Name -eq 'Capability' -or $_.LocalName -eq 'Capability' })
     $hasFullTrust = $caps | Where-Object { $_.GetAttribute('Name') -eq 'runFullTrust' }

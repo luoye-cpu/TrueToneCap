@@ -31,7 +31,10 @@
 
   <Properties>
     <DisplayName>TrueToneCap 真色截图</DisplayName>
-    <PublisherDisplayName>TrueToneCap contributors</PublisherDisplayName>
+    <!-- 2026-11-05：PublisherDisplayName 必须与 Partner Center 账号的「发布者显示名称」逐字一致，
+         否则包校验直接拒收（首轮上传实测： contributors 被拒，账号显示名 = luoye-cpu）。
+         换账号/改显示名时，这一行与 verify-msix.ps1 的同名判据要一起改。 -->
+    <PublisherDisplayName>luoye-cpu</PublisherDisplayName>
     <Description>TrueToneCap — HDR 感知的截图与 OCR 工具</Description>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
