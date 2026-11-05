@@ -1499,3 +1499,34 @@ unit 1949 → 1959。
 
 **F4 仪表语义变化**：frameUs 从"纯渲染耗时"变为"帧周期"（含 Present(1) 的 vblank 等待），
 峰值≈刷新周期。判读历史对比数据时注意口径切换点 = 本提交。
+
+### §26 补：WGC 启动延迟优化 —— 用户反馈"WGC 捕获开启时有一点卡顿"（2026-11-05）
+
+**定位**（publish 0d9d127 真机日志，双屏 3840×2160 HDR@120nits + 2560×1600 SDR@80nits）：
+热键→覆盖层首帧 727ms。分解：WGC 冷启动会话 265ms（15s 闲置回收 ⇒ 典型节奏每截必冷）+
+**白点查询 ~150ms**（每次截图 3 次完整 QueryDisplayConfig，无缓存）+ **拼接 ~236ms**
+（两块画布 55MB+221MB 零初始化 + 每块 SDR 屏 132MB 临时 float 数组 + 整块拷贝）+ 覆盖层 94ms。
+
+**三项修复**（提交本条）：
+- **A 白点缓存**：GetSdrWhiteLevel/ForMonitor 加 120s TTL 缓存（只缓存成功值>0），
+  挂进 DisplayEnumerator.InvalidateCache（显示器变更信号已覆盖主要失效场景；
+  系统 HDR 亮度滑块无通知 ⇒ TTL 兜底）。拼接侧懒查询：无 HDR 源时这两个量没有消费者，纯 SDR 截图跳过全部 3 次查询。
+- **B 画布免零分配**：fullPixels/fullHdr 改 GC.AllocateUninitializedArray；免零后"未填到=黑"
+  的旧语义由 failedRects（三条失败路径登记：首帧超时/取帧失败/copyW 非法）在循环后 Array.Clear 显式兜底。
+- **C SDR→scRGB 直写**：PixelOps.BgraToScrgbLinearInto（逐行转换直写目标区域，scale 只乘 RGB、
+  alpha 不缩放，越界抛 ArgumentException）替换"132MB 临时数组 + scale 循环 + CopyFloatRegion"三段串联。
+
+**不做的**：池常驻（15s→更长）。10-30 探针实测常驻帧在画面移动时 p50 已落后 250ms，
+而截图语义是"拍到按下那一刻"——拿 250ms 陈旧帧换 127ms 冷启动，语义上不成立。
+
+**实机验证**（新构建 Debug，同一台双屏机）：666ms（-61ms），白点段并入并行等首帧（缓存命中），
+拼接段 ~120ms。预期典型节奏（冷启动）总收益 ~60-100ms；高频连拍（120s 内）因白点缓存全额生效更多。
+**探针验证**：--capture-freshness-probe 被单实例机制挡住（用户实例占位时激活已有窗口），
+跑探针前必须关掉常驻实例 —— 写在这里防止下次误判"探针坏了"。
+
+**判据**（unit 1959→1974，+15；基线 2600→2625）：
+- Test_PixelOps_BgraToScrgbLinearInto：全画布逐位等价 Fast / 区域写+scale 只乘 RGB / 区域外不动 / 越界抛
+- Test_DisplayEnumerator_WhitePointCache：命中不增长真实查询计数 / 失效后重查且值不变 / 逐屏同款
+- Test_WgcStitch_CanvasAllocation：形态锁（免零分配/failedRects 三路径/显式清黑/直写/白点懒查询）
+- 变异验证：R/B 互换 → 等价性 2 条红；画布退回零初始化 → 形态锁 2 条红（恢复均绿）。
+  ⚠ 教训：改 Core 后 Test 项目不 --no-incremental 会吃到旧 DLL 假红 —— 恢复后必须强制重建再判。

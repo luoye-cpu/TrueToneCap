@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/WgcCaptureService.cs
 // Windows.Graphics.Capture (WGC) 统一捕获服务 — 会话池化高性能版
@@ -2418,7 +2418,11 @@ public sealed partial class WgcCaptureService : IDisposable
         int vw = displays.Max(d => d.X + d.Width) - vx;
         int vh = displays.Max(d => d.Y + d.Height) - vy;
 
-        var fullPixels = new byte[vw * vh * 4];
+        // ═══ 2026-11-05：两块画布改【免零分配】 ═══
+        // 旧实现 new byte[55MB] + new float[221MB]（6400x2160）每次截图都强制清零，
+        // 真机实测拼接段 236ms 里约 60-100ms 是这笔。免零之后"未填到的区域"不再自动是黑，
+        // 由 failedRects 在循环后显式清黑兜底（语义与旧版逐字节一致，判据见台账）。
+        var fullPixels = GC.AllocateUninitializedArray<byte>(vw * vh * 4);
         var fullStride = vw * 4;
 
         // 从各显示器的池化会话取帧并拼接（2026-08-10: 按显示器并行，显示器矩形不重叠，
@@ -2468,7 +2472,7 @@ public sealed partial class WgcCaptureService : IDisposable
                 hdrSrcPixels = null;
             }
         }
-        var fullHdr = hdrSrcPixels is not null ? new float[vw * vh * 4] : null;
+        var fullHdr = hdrSrcPixels is not null ? GC.AllocateUninitializedArray<float>(vw * vh * 4) : null;
         // HDR 拼接完整性计数：任一显示器未能填充，整图就放弃 HDR（理由见下方汇总处）
         int hdrFillFailures = 0;
 
@@ -2480,19 +2484,27 @@ public sealed partial class WgcCaptureService : IDisposable
         // ═══ 2026-11-02（多屏同源 P2-9）：白点逐屏查 ═══
         // Windows 允许逐屏设置 SDR 亮度，系统级单值是"第一条成功路径"——哪块屏胜出不确定。
         // 逐屏失败的那块回退系统级单值（保持旧行为，不因新查询失败而变得更错）。
-        int sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
+        // ═══ 2026-11-05：只在真的有 HDR 拼接时才查白点 ═══
+        // 这两个量唯一的消费者是下面"非 HDR 源屏上转换"那个分支（fullHdr 非 null 才走）。
+        // 纯 SDR 截图原先也白查 3 次 QueryDisplayConfig（实测 ~150ms），现在跳过。
+        int sdrWhiteNits = 0;
         var sdrScaleByDisplay = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var d in displaysArr)
+        float sdrScale = 1f;
+        if (fullHdr is not null)
         {
-            int per = DisplayEnumerator.GetSdrWhiteLevelForMonitor(d.Name);
-            sdrScaleByDisplay[d.Name] = per > 0 ? per : sdrWhiteNits;
+            sdrWhiteNits = DisplayEnumerator.GetSdrWhiteLevel();
+            foreach (var d in displaysArr)
+            {
+                int per = DisplayEnumerator.GetSdrWhiteLevelForMonitor(d.Name);
+                sdrScaleByDisplay[d.Name] = per > 0 ? per : sdrWhiteNits;
+            }
+            int distinctNits = sdrScaleByDisplay.Values.Distinct().Count();
+            if (distinctNits > 1)
+                LogInfo($"[WGC] 逐屏 SDR 白点: {string.Join(", ", sdrScaleByDisplay.Select(kv => $"{kv.Key}={kv.Value}nits"))}（查询失败的那块已回退系统级单值 —— 这条是『第二块屏偏亮/偏暗』的唯一线索，须在 Brief 档可见）");
+            sdrScale = sdrWhiteNits > 0 ? sdrWhiteNits / TrueToneCap.Core.PixelOps.NominalSdrReferenceWhiteNits : 1f;
+            if (sdrScale != 1f)
+                Log($"[WGC] SDR 内容亮度对齐: {sdrWhiteNits} nits → 缩放 ×{sdrScale:F2}");
         }
-        int distinctNits = sdrScaleByDisplay.Values.Distinct().Count();
-        if (distinctNits > 1)
-            LogInfo($"[WGC] 逐屏 SDR 白点: {string.Join(", ", sdrScaleByDisplay.Select(kv => $"{kv.Key}={kv.Value}nits"))}（查询失败的那块已回退系统级单值 —— 这条是『第二块屏偏亮/偏暗』的唯一线索，须在 Brief 档可见）");
-        float sdrScale = sdrWhiteNits > 0 ? sdrWhiteNits / TrueToneCap.Core.PixelOps.NominalSdrReferenceWhiteNits : 1f;
-        if (sdrScale != 1f)
-            Log($"[WGC] SDR 内容亮度对齐: {sdrWhiteNits} nits → 缩放 ×{sdrScale:F2}");
 
         // ═══ 2026-11-03（审查轮）：逐屏会话登记，供返回处聚合降级警告 ═══
         // 静态 s_lastItemDegradation 是单槽：A 屏回退置位后，B 屏的 CreateItemForMonitor
@@ -2500,6 +2512,8 @@ public sealed partial class WgcCaptureService : IDisposable
         // 而每个会话在 Start() 里、于【自己屏幕】的 item 创建之后捕获过一次静态值
         // ⇒ 会话级警告才是逐屏真账，返回处从这里取，静态值只作兜底。
         var stitchSessions = new System.Collections.Concurrent.ConcurrentBag<(string Name, PooledSession Session)>();
+        // 未填满的显示器区域（免零分配后必须显式清黑兜底，见画布分配处与循环后）
+        var failedRects = new System.Collections.Concurrent.ConcurrentBag<(int X, int Y, int W, int H)>();
         Parallel.ForEach(displaysArr, display =>
         {
             var session = GetOrCreateSdrSession(display.MonitorHandle);
@@ -2509,6 +2523,7 @@ public sealed partial class WgcCaptureService : IDisposable
                 // ═══ 2026-11-02（P3-10）：Brief 档可见 ═══
                 // SDR 画布零初始化 ⇒ 这块屏在产物里是纯黑，用户必须能在默认日志档看到原因。
                 LogInfo($"[WGC] 显示器 {display.Name} 首帧超时 ⇒ 拼接图该屏区域为黑（HDR 侧计入放弃条件）");
+                failedRects.Add((display.X - vx, display.Y - vy, display.Width, display.Height));
                 if (fullHdr is not null) Interlocked.Increment(ref hdrFillFailures);
                 return;
             }
@@ -2516,6 +2531,7 @@ public sealed partial class WgcCaptureService : IDisposable
             var pixels = session.GetLatestSdr();
             if (pixels is null)
             {
+                failedRects.Add((display.X - vx, display.Y - vy, display.Width, display.Height));
                 if (fullHdr is not null) Interlocked.Increment(ref hdrFillFailures);
                 return;
             }
@@ -2534,7 +2550,7 @@ public sealed partial class WgcCaptureService : IDisposable
             int srcX = sessionIsFullDesktop ? dx : 0;
             int srcY = sessionIsFullDesktop ? dy : 0;
             int copyW = Math.Min(display.Width, session.Width - srcX);
-            if (copyW <= 0) { if (fullHdr is not null) Interlocked.Increment(ref hdrFillFailures); return; }
+            if (copyW <= 0) { failedRects.Add((display.X - vx, display.Y - vy, display.Width, display.Height)); if (fullHdr is not null) Interlocked.Increment(ref hdrFillFailures); return; }
 
             for (int row = 0; row < copyH; row++)
             {
@@ -2551,24 +2567,19 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 try
                 {
-                    var scrgb = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(pixels, session.Width, session.Height);
                     // ═══ 2026-11-02（多屏同源 P2-9）：亮度基准按【这一块屏自己】的 SDR 白点 ═══
                     // 原先统一乘系统级单值（GetSdrWhiteLevel 第一条成功路径）⇒ 白点不同的
                     // 第二块屏系统性偏亮/偏暗。现在逐屏查（查不到回退系统级单值，再回退 1）。
                     float scaleThis = sdrScaleByDisplay.TryGetValue(display.Name, out var perMon) && perMon > 0
                         ? perMon / TrueToneCap.Core.PixelOps.NominalSdrReferenceWhiteNits
                         : sdrScale;
-                    if (scaleThis != 1f)
-                    {
-                        // 只缩放 RGB，alpha 不参与
-                        for (int i = 0; i < scrgb.Length; i++)
-                        {
-                            if ((i & 3) == 3) continue;   // alpha 通道
-                            scrgb[i] *= scaleThis;
-                        }
-                    }
-                    // 与 SDR 同理：会话可能是全桌面，此时源需带显示器偏移
-                    CopyFloatRegion(scrgb, session.Width, fullHdr, vw, dx, dy, copyH, srcX, srcY);
+                    // ═══ 2026-11-05：直写画布 ═══
+                    // 旧实现先 BgraToScrgbLinearFast 分配 132MB 临时 float 数组（再跑一遍 scale 循环）
+                    // 然后 CopyFloatRegion 整块拷进画布 —— 每块 SDR 屏每次截图白付一次大分配 + 一次整块拷贝。
+                    // 新实现逐行边转边写（行间互不重叠），三项语义逐位等价（见 PixelOps 的注释与判据）。
+                    TrueToneCap.Core.PixelOps.BgraToScrgbLinearInto(
+                        pixels, session.Width, session.Height, srcX, srcY,
+                        fullHdr, vw, dx, dy, copyW, copyH, scaleThis);
                 }
                 catch (Exception ex)
                 {
@@ -2578,6 +2589,20 @@ public sealed partial class WgcCaptureService : IDisposable
                 }
             }
         });
+
+        // ═══ 2026-11-05：免零分配后，未填到的区域显式清黑 ═══
+        // 与旧版「未覆盖 = 纯黑」逐字节一致（旧语义靠全画布零初始化，新语义靠这一小段；
+        // 只有"某屏首帧超时/取帧失败/拷贝宽非法"这类罕见路径才会进这里）。
+        foreach (var (fx, fy, fw, fh) in failedRects)
+        {
+            int cw = Math.Min(fw, vw - fx), chh = Math.Min(fh, vh - fy);
+            if (cw <= 0 || chh <= 0) continue;
+            for (int r = 0; r < chh; r++)
+            {
+                Array.Clear(fullPixels, (fy + r) * fullStride + fx * 4, cw * 4);
+                if (fullHdr is not null) Array.Clear(fullHdr, ((fy + r) * vw + fx) * 4, cw * 4);
+            }
+        }
 
         // ═══ HDR 拼接完整性：宁可全 SDR，也不要半张 HDR ═══
         // 若有任一显示器未参与填充（首帧超时 / 取帧失败 / 上转换异常），

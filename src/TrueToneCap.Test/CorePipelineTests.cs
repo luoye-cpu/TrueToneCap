@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Test/CorePipelineTests.cs
 // 核心管线单元测试 — PixelOps / ToneMapper / ColorProfileProvider / Annotation / Encoders
@@ -227,6 +227,9 @@ public static class CorePipelineTests
         Test_Xaml_CollapsedCards_HaveVisibilityOwner();
         Test_AvifHdrModeRow_VisibilityReadsFinalHdrState();
         Test_CaptureOverlay_RenderPacing();
+        Test_PixelOps_BgraToScrgbLinearInto();
+        Test_DisplayEnumerator_WhitePointCache();
+        Test_WgcStitch_CanvasAllocation();
         Test_Jxl_ColorSpaceMapping();
         Test_HdrProbeJudge_NotDead();
         Test_HdrAdobeTag_NormalizedBeforeMatrix();
@@ -12833,6 +12836,141 @@ public static class CorePipelineTests
                && moveBody.Contains("if (h != _toolbarHover) { _toolbarHover = h; RequestRedraw(); }"));
         Assert("ToolbarHoverIndex 命中算式存在（着色器 §4 的 CPU 镜像，漂移=悬停高亮迟一拍）",
                code.Contains("private int ToolbarHoverIndex(int x, int y)"));
+    }
+
+    /// <summary>
+    /// <c>PixelOps.BgraToScrgbLinearInto</c> 的行为判据（2026-11-05，多屏拼接启动优化 C）。
+    /// <para>它替换的是"Fast 出整块临时数组 → 手写 scale 循环 → CopyFloatRegion"这条三段串联链路。
+    /// 任何一处做歪（通道序、alpha 除 255、scale 误乘 alpha、区域偏移）在真机上的症状都是
+    /// "某块副屏发暗 / 内容串到另一块屏"，极难归因 ⇒ 必须有逐位等价的判据。</para>
+    /// <para>等价基准就是被替换掉的那条老链路本身：Fast（全画布）+ 手写 scale+区域拷贝。</para>
+    /// </summary>
+    static void Test_PixelOps_BgraToScrgbLinearInto()
+    {
+        const int w = 61, h = 47;
+        var rnd = new Random(20261105);
+        var src = new byte[w * h * 4];
+        rnd.NextBytes(src);
+        var fast = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast(src, w, h);
+
+        // ① 全画布 scale=1 ⇒ 与 Fast 逐位相同
+        var dstFull = new float[w * h * 4];
+        TrueToneCap.Core.PixelOps.BgraToScrgbLinearInto(src, w, h, 0, 0, dstFull, w, 0, 0, w, h, 1f);
+        bool identical = true;
+        for (int i = 0; i < dstFull.Length; i++)
+            if (!dstFull[i].Equals(fast[i])) { identical = false; break; }
+        Assert("Into(全画布, scale=1) 与 BgraToScrgbLinearFast 逐位相同", identical);
+
+        // ② 区域写 + scale=1.5 + 区域外不动（基准 = Fast + 手写 scale/拷贝）
+        const int dw = 90, dh = 70, rx = 7, ry = 5, rw = 23, rh = 19;
+        const int dx0 = 25, dy0 = 13;
+        const float scale = 1.5f;
+        var canvas = new float[dw * dh * 4];
+        Array.Fill(canvas, -777f);
+        TrueToneCap.Core.PixelOps.BgraToScrgbLinearInto(src, w, h, rx, ry, canvas, dw, dx0, dy0, rw, rh, scale);
+        bool regionOk = true, outsideOk = true;
+        for (int row = 0; row < dh && regionOk && outsideOk; row++)
+            for (int col = 0; col < dw; col++)
+            {
+                int di = (row * dw + col) * 4;
+                bool inRegion = row >= dy0 && row < dy0 + rh && col >= dx0 && col < dx0 + rw;
+                if (inRegion)
+                {
+                    int si = ((ry + (row - dy0)) * w + (rx + (col - dx0))) * 4;
+                    for (int c = 0; c < 4; c++)
+                    {
+                        float want = c == 3 ? fast[si + c] : fast[si + c] * scale;   // scale 只乘 RGB、alpha 不缩
+                        if (!canvas[di + c].Equals(want)) { regionOk = false; break; }
+                    }
+                    if (!regionOk) break;
+                }
+                else if (canvas[di] != -777f) { outsideOk = false; break; }
+            }
+        Assert("Into 区域写：值与「Fast + scale（只乘 RGB）」逐位一致", regionOk);
+        Assert("Into 区域写：区域外目标像素一个都不许动", outsideOk);
+
+        // ③ 越界抛 ArgumentException
+        bool threwSrc = false, threwDst = false;
+        try { TrueToneCap.Core.PixelOps.BgraToScrgbLinearInto(src, w, h, w - 3, 0, canvas, dw, 0, 0, 10, 10, 1f); }
+        catch (ArgumentException) { threwSrc = true; }
+        try { TrueToneCap.Core.PixelOps.BgraToScrgbLinearInto(src, w, h, 0, 0, canvas, dw, dw - 3, 0, 10, 10, 1f); }
+        catch (ArgumentException) { threwDst = true; }
+        Assert("Into 源区域越界抛 ArgumentException", threwSrc);
+        Assert("Into 目标区域越界抛 ArgumentException", threwDst);
+    }
+
+    /// <summary>
+    /// 系统 SDR 白点缓存判据（2026-11-05，多屏拼接启动优化 A）。
+    /// <para>背景：多屏拼接每次截图跑 3 次 QueryDisplayConfig（真机实测 ~150ms）。现在带 120s TTL +
+    /// 显示器变更失效（DisplayEnumerator.InvalidateCache 已挂钩）。</para>
+    /// <para>本条只钉两件事：命中时真实查询次数不许增长；InvalidateWhitePointCache 之后必须重查。
+    /// 自适应：本机查询返回 0（失败不缓存，设计如此）时 Skip 而不是判红。</para>
+    /// </summary>
+    static void Test_DisplayEnumerator_WhitePointCache()
+    {
+        var de = typeof(TrueToneCap.Core.Capture.DisplayEnumerator);
+        de.GetMethod("InvalidateWhitePointCache")!.Invoke(null, null);
+        Func<string, int> count = _ => (int)de.GetField("WhitePointQueryCount",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+
+        int c0 = count("");
+        int v1 = TrueToneCap.Core.Capture.DisplayEnumerator.GetSdrWhiteLevel();
+        int c1 = count("");
+        int v2 = TrueToneCap.Core.Capture.DisplayEnumerator.GetSdrWhiteLevel();
+        int c2 = count("");
+        if (v1 <= 0)
+        {
+            Skip("白点缓存", $"本机系统级白点查询返回 {v1}（失败不缓存 = 设计）");
+            return;
+        }
+        Assert($"白点缓存：第二次调用命中（真实查询 {c1 - c0} → {c2 - c0} 次，值 {v1}nits）",
+            c2 == c1 && v1 == v2);
+
+        TrueToneCap.Core.Capture.DisplayEnumerator.InvalidateWhitePointCache();
+        int v3 = TrueToneCap.Core.Capture.DisplayEnumerator.GetSdrWhiteLevel();
+        int c3 = count("");
+        Assert($"白点缓存：失效后必须重查（查询计数 {c3} > {c2}）且值不变（{v3}）", c3 > c2 && v3 == v1);
+
+        var displays = TrueToneCap.Core.Capture.DisplayEnumerator.EnumerateDisplaysUncached();
+        if (displays.Count == 0) { Skip("逐屏白点缓存", "未枚举到显示器"); return; }
+        TrueToneCap.Core.Capture.DisplayEnumerator.InvalidateWhitePointCache();
+        int p0 = count("");
+        int pv1 = TrueToneCap.Core.Capture.DisplayEnumerator.GetSdrWhiteLevelForMonitor(displays[0].Name);
+        int p1 = count("");
+        int pv2 = TrueToneCap.Core.Capture.DisplayEnumerator.GetSdrWhiteLevelForMonitor(displays[0].Name);
+        int p2 = count("");
+        if (pv1 <= 0) { Skip("逐屏白点缓存", $"本机 {displays[0].Name} 查询返回 {pv1}"); return; }
+        Assert($"逐屏白点缓存：第二次命中（{p1 - p0} → {p2 - p0} 次，{pv1}nits）", p2 == p1 && pv1 == pv2);
+    }
+
+    /// <summary>多屏拼接启动优化的形态锁（2026-11-05）：免零分配 + 失败屏显式清黑 + 白点懒查询 + 直写画布。
+    /// <para>为什么形态锁：这段的收益全在"少一次分配/少一次查询"上，行为上等价 ⇒ 性能回退不会让任何
+    /// 行为判据变红。所以把"必须是这个形状"钉死，避免日后顺手改回老写法时无人察觉。</para></summary>
+    static void Test_WgcStitch_CanvasAllocation()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "WgcCaptureService.cs"));
+        if (path is null) { Skip("拼接画布形态", "未找到 WgcCaptureService.cs"); return; }
+        var code = StripComments(File.ReadAllText(path));
+
+        Assert("SDR 拼接画布免零分配（旧 new byte[vw*vh*4] 每次截图白清 55MB）",
+            code.Contains("GC.AllocateUninitializedArray<byte>(vw * vh * 4)"));
+        Assert("HDR 拼接画布免零分配（旧 new float[vw*vh*4] 每次白清 221MB）",
+            code.Contains("GC.AllocateUninitializedArray<float>(vw * vh * 4)"));
+        Assert("旧的整画布分配形态不许回潮",
+            !code.Contains("new byte[vw * vh * 4]") && !code.Contains("new float[vw * vh * 4]"));
+        Assert("三条失败路径都登记 failedRects（免零分配的清黑依据）",
+            Regex.Matches(code, @"failedRects\.Add\(\(display\.X - vx").Count >= 3);
+        Assert("未填区域显式清黑兜底（某屏首帧超时后产物不许出现垃圾像素）",
+            code.Contains("foreach (var (fx, fy, fw, fh) in failedRects)")
+            && code.Contains("Array.Clear(fullPixels")
+            && code.Contains("Array.Clear(fullHdr"));
+        Assert("SDR→scRGB 直写画布（旧：132MB 临时数组 + 整块拷贝）",
+            code.Contains("BgraToScrgbLinearInto(")
+            && !code.Contains("var scrgb = TrueToneCap.Core.PixelOps.BgraToScrgbLinearFast("));
+        int lazy = code.IndexOf("if (fullHdr is not null)", StringComparison.Ordinal);
+        int wp = code.IndexOf("DisplayEnumerator.GetSdrWhiteLevel()", StringComparison.Ordinal);
+        Assert("白点查询只在有 HDR 源时才做（纯 SDR 截图跳过 3 次 QueryDisplayConfig）",
+            lazy >= 0 && wp > lazy, $"lazy@{lazy} wp@{wp}");
     }
 
     /// <summary>

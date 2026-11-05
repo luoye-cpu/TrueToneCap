@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/PixelOps.cs
 // 多 ISA 像素操作加速库
@@ -516,6 +516,52 @@ public static class PixelOps
         }
 
         return linear;
+    }
+
+    /// <summary>
+    /// BGRA8 源【区域】→ scRGB linear，直写目标画布的【区域】（2026-11-05）。
+    /// <para>存在的理由：多屏拼接给每块 SDR 屏先 <see cref="BgraToScrgbLinearFast"/> 出一块 132MB 临时数组
+    /// （3840×2160×4 float），再 CopyFloatRegion 拷进画布 —— 每块屏每次截图多一次大分配 + 整块拷贝。
+    /// 本方法逐行边转边写：行间互不重叠 ⇒ 可按行并行，且不产生临时数组。</para>
+    /// <para>语义与旧三段串联（Fast → 手写 scale 循环 → CopyFloatRegion）逐位一致：
+    /// 通道序 BGRA→RGBA、A = b/255f、<paramref name="rgbScale"/> 只乘 RGB（A 不参与）、区域外目标像素不动。</para>
+    /// <para>越界一律抛 ArgumentException —— 本仓惯例：源/目标缓冲不足还照样出图是反复拦的那类。</para>
+    /// </summary>
+    public static void BgraToScrgbLinearInto(
+        byte[] bgra, int srcW, int srcH, int srcX, int srcY,
+        float[] dst, int dstW, int dstX, int dstY,
+        int copyW, int copyH, float rgbScale)
+    {
+        if (copyW <= 0 || copyH <= 0) return;
+        if (srcX < 0 || srcY < 0 || srcX + copyW > srcW || srcY + copyH > srcH)
+            throw new ArgumentException($"源区域越界：源 {srcW}x{srcH}，区域 ({srcX},{srcY},{copyW}x{copyH})");
+        if (dstX < 0 || dstY < 0 || dstX + copyW > dstW)
+            throw new ArgumentException($"目标区域越界：目标宽 {dstW}，区域 x={dstX} w={copyW}");
+        if ((long)srcH * srcW * 4 > bgra.Length)
+            throw new ArgumentException($"源缓冲不足：需 {(long)srcH * srcW * 4} 字节，实得 {bgra.Length}");
+        if ((long)(dstY + copyH) * dstW * 4 > dst.Length)
+            throw new ArgumentException($"目标缓冲不足：需 {(long)(dstY + copyH) * dstW * 4} 个 float，实得 {dst.Length}");
+
+        var lut = SrgbToLinearLut;
+        void Row(int row)
+        {
+            int srcOff = ((srcY + row) * srcW + srcX) * 4;
+            int dstOff = ((dstY + row) * dstW + dstX) * 4;
+            for (int col = 0; col < copyW; col++)
+            {
+                int s = srcOff + col * 4;
+                int d = dstOff + col * 4;
+                dst[d] = lut[bgra[s + 2]] * rgbScale;       // R
+                dst[d + 1] = lut[bgra[s + 1]] * rgbScale;   // G
+                dst[d + 2] = lut[bgra[s]] * rgbScale;       // B
+                dst[d + 3] = bgra[s + 3] / 255f;            // A（不缩放）
+            }
+        }
+
+        if ((long)copyW * copyH >= 50000)
+            Parallel.For(0, copyH, Row);
+        else
+            for (int r = 0; r < copyH; r++) Row(r);
     }
 
     /// <summary>名义 SDR 参考白 (nits)：HDR 输出下 scRGB 的 1.0 代表的就是这一档亮度。</summary>

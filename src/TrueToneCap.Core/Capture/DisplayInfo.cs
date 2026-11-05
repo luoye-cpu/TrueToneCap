@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+﻿// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Capture/DisplayInfo.cs
 // 显示器信息枚举、HDR 检测、鼠标所在显示器定位
@@ -197,6 +197,73 @@ public static partial class DisplayEnumerator
     public static void InvalidateCache()
     {
         lock (s_cacheLock) { s_cache = null; s_cacheTick = 0; }
+        InvalidateWhitePointCache();   // 2026-11-05：白点随显示器配置一起失效
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    //  SDR 白点缓存（2026-11-05，多屏拼接启动耗时优化）
+    // ═════════════════════════════════════════════════════════════════════════════
+    // 为什么加：多屏拼接捕获每次调用 1 次系统级 + 每屏各 1 次 QueryDisplayConfig，
+    // 真机日志实测这一串占掉"热键→覆盖层首帧 727ms"里约 150ms（会话首帧就绪 → 逐屏白点行之间）。
+    // 什么时候变：① 显示器配置变更（已有失效钩子，见 InvalidateCache）② 系统 HDR/SDR 亮度滑块。
+    //   ②Windows 不保证发显示器变更通知 ⇒ 用 TTL 兜底：陈旧上限 120s，而两分钟内连续截图全部吃缓存。
+    // 只缓存成功值（>0）：查询失败每轮重试，不把一次瞬时失败钉成两分钟。
+    private const int WhitePointCacheTtlMs = 120_000;
+    private static readonly object s_whiteCacheLock = new();
+    private static readonly Dictionary<string, int> s_whiteByMonitor = new(StringComparer.OrdinalIgnoreCase);
+    private static int s_whiteSystem = -1;
+    private static long s_whiteSystemAtMs, s_whiteTableAtMs;
+
+    /// <summary>真实查询次数（测试用：缓存命中时不许增长）。</summary>
+    internal static int WhitePointQueryCount;
+
+    /// <summary>清空白点缓存。由 <see cref="InvalidateCache"/> 在显示器/系统设置变更时统一调用。</summary>
+    public static void InvalidateWhitePointCache()
+    {
+        lock (s_whiteCacheLock)
+        {
+            s_whiteByMonitor.Clear();
+            s_whiteSystem = -1;
+            s_whiteSystemAtMs = 0;
+            s_whiteTableAtMs = 0;
+        }
+    }
+
+    /// <summary>系统级 SDR 白点（nits，带缓存；语义见上方缓存段）。失败返回 0。</summary>
+    public static int GetSdrWhiteLevel()
+    {
+        long now = Environment.TickCount64;
+        lock (s_whiteCacheLock)
+        {
+            if (s_whiteSystem > 0 && now - s_whiteSystemAtMs <= WhitePointCacheTtlMs) return s_whiteSystem;
+        }
+        int v = GetSdrWhiteLevelUncached();
+        if (v > 0) { lock (s_whiteCacheLock) { s_whiteSystem = v; s_whiteSystemAtMs = now; } }
+        return v;
+    }
+
+    /// <summary>指定这块屏的 SDR 白点（nits，带缓存；语义见上方缓存段）。失败返回 0。</summary>
+    public static int GetSdrWhiteLevelForMonitor(string gdiDeviceName)
+    {
+        if (string.IsNullOrWhiteSpace(gdiDeviceName)) return 0;
+        long now = Environment.TickCount64;
+        lock (s_whiteCacheLock)
+        {
+            if (now - s_whiteTableAtMs <= WhitePointCacheTtlMs
+                && s_whiteByMonitor.TryGetValue(gdiDeviceName, out int hit) && hit > 0)
+                return hit;
+        }
+        int v = GetSdrWhiteLevelForMonitorUncached(gdiDeviceName);
+        if (v > 0)
+        {
+            lock (s_whiteCacheLock)
+            {
+                if (now - s_whiteTableAtMs > WhitePointCacheTtlMs) s_whiteByMonitor.Clear();  // 整表过期 ⇒ 一起换新
+                s_whiteByMonitor[gdiDeviceName] = v;
+                s_whiteTableAtMs = now;
+            }
+        }
+        return v;
     }
 
     private static IReadOnlyList<DisplayInfo> EnumerateDisplaysCore()
@@ -365,8 +432,9 @@ public static partial class DisplayEnumerator
     /// 通过 DISPLAYCONFIG_SDR_WHITE_LEVEL API 读取 (Windows 10 2004+)。
     /// 失败时返回 0 (调用方回退到默认值)。
     /// </summary>
-    public static int GetSdrWhiteLevel()
+    private static int GetSdrWhiteLevelUncached()
     {
+        Interlocked.Increment(ref WhitePointQueryCount);
         try
         {
             uint nPaths = 0, nModes = 0;
@@ -463,9 +531,10 @@ public static partial class DisplayEnumerator
     /// 源侧 GDI 设备名，与调用方给的 <paramref name="gdiDeviceName"/>（即 DisplayInfo.Name）
     /// 匹配后对目标查 DISPLAYCONFIG_SDR_WHITE_LEVEL。</para>
     /// </summary>
-    public static int GetSdrWhiteLevelForMonitor(string gdiDeviceName)
+    private static int GetSdrWhiteLevelForMonitorUncached(string gdiDeviceName)
     {
         if (string.IsNullOrWhiteSpace(gdiDeviceName)) return 0;
+        Interlocked.Increment(ref WhitePointQueryCount);
         try
         {
             uint nPaths = 0, nModes = 0;
