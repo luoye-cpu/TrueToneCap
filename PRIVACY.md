@@ -7,7 +7,7 @@
     本文件的内容必须与代码实际行为一致。以下每一条都已在代码里核对过并注明出处；
     若日后改动这些路径，请同步改本文件，否则构成商店政策 10.1「误导」风险。
     （行号以 v0.3.10-beta 为准，改动 TranslationService.cs 后请重新核对。）
-      · 免费翻译默认启用四端点 → App/Models/AppSettingsData.cs:317（默认 true）
+      · 免费翻译默认启用四端点 → App/Models/AppSettingsData.cs:414（默认 true）
       · 免费通道以 query 传文本 → Core/Services/TranslationService.cs:445/447/950
       · Vision 模式上传截图      → Core/Services/TranslationService.cs:1180
       · 不把 OCR 原文写进日志    → Core/Services/TranslationService.cs:304

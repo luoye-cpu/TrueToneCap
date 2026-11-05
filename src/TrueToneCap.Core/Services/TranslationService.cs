@@ -165,7 +165,8 @@ public class TranslationService
         _ => $"自定义 LLM 失败: {ex.GetType().Name}: {ex.Message}"
     };
 
-    /// <summary>翻译文本。LLM 优先（如已配置）→ 有道官方开放平台 → 非官方端点（必应 / Google，默认关闭）。</summary>
+    /// <summary>翻译文本。LLM 优先（如已配置）→ 有道官方开放平台 → 免费公共端点
+    /// （Edge / 必应 / MyMemory / Google，默认启用，可在设置关闭）。</summary>
     public async Task<string> TranslateAsync(string text, string targetLang, string? sourceLang = null,
         CancellationToken ct = default)
     {

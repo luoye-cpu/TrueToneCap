@@ -56,7 +56,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | 🖼️ **Export** | PNG (lossless HDR) · JPEG (optional Ultra HDR gain map) · JPEG XL · AVIF (NVENC / MFT-QSV / libaom / SVT-AV1) · WebP · TIFF | PNG（无损 HDR）· JPEG（可附 Ultra HDR 增益图）· JPEG XL · AVIF（NVENC / 系统 MFT(QSV) / libaom / SVT-AV1）· WebP · TIFF |
 | 🔤 **OCR** | PP-OCRv6 (ONNX, DirectML/CPU) + Windows OCR fallback · zh/en strongest, ja needs ≥24px, ko unsupported | PP-OCRv6（ONNX，DirectML/CPU）+ Windows OCR 兜底 · 中/英文最准，日文需字高 ≥24px，韩文不支持（转系统 OCR） |
 | 🔳 **QR recognition** | Multi-code local decode (ZXing.Net) · plain-text display with control-char/bidi escaping · open action whitelisted to http/https and only on an explicit click — dangerous schemes (file:/ms-msdt:/…) are red-flagged and never executed | 多码本机解码（ZXing.Net）· 明文展示，控制字符/双向符转义可见 · 仅 http/https 且显式点击才允许"打开链接"，危险协议（file:/ms-msdt:/…）红牌展示且永不执行 |
-| 🌐 **Translate** | Custom LLM → Youdao official API → (opt-in) Bing / Google web endpoints | 自定义 LLM → 有道官方开放平台 →（需显式勾选）必应 / Google 网页端点 |
+| 🌐 **Translate** | Custom LLM → Youdao official API → free public endpoints (Edge / Bing / MyMemory / Google — **on by default**, opt-out in Settings) | 自定义 LLM → 有道官方开放平台 → 免费公共端点（Edge / 必应 / MyMemory / Google——**默认启用**，设置里可关闭） |
 | ⌨️ **Hotkeys** | Recordable · tray minimize · autostart | 可录制 · 托盘最小化 · 开机启动 |
 | 🧩 **VS-Cap mode** (opt-in) | Optional Qt sidecar editor: selection annotation, unified undo, always-on-top pinning, clipboard-pin hotkey | 可选 Qt 侧车编辑器：选区标注、统一撤销、置顶贴图、剪贴板贴图热键 |
 
@@ -353,8 +353,10 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
   使"用户装的版本"能对应到仓库中的不可变坐标。
 - **自动拦截**：`scripts/git-hooks/`（入库、可 review）经 `core.hooksPath` 挂载 ——
   `pre-commit` 挡编译不过、`pre-push` 挡测试不过；CI 只调用同一个 `verify.ps1`，不复制门禁逻辑。
-- **凭据与外发**：LLM Key / 有道 AppSecret 用 DPAPI 加密存储，明文不落盘；非官方翻译端点默认关闭，
-  截图原文只在用户明确同意后才发给第三方。日志设三档（设置 → 行为 → 日志详细度），
+- **凭据与外发**：LLM Key / 有道 AppSecret 用 DPAPI 加密存储，明文不落盘；免费公共翻译端点
+  （Edge / 必应 / MyMemory / Google）**默认启用**（2026-10-23 用户拍板"开箱即用"），
+  设置里可随时关闭，关闭后连请求都不构造；
+  截图原文只在用户主动执行翻译时才发给对应服务。日志设三档（设置 → 行为 → 日志详细度），
   **任何一档都会先刮掉 URL 参数值与凭据赋值**（`q=` / `key=` / `token=` 之类）再落盘；
   它刮的是"参数位上的值"，调用方把敏感内容拼成正文它认不出来 —— 2026-09-21 迁移那 142 处遗留调试输出时逐条把关（交接 §35.1）。
 - **第三方许可随包分发**：`licenses/` 收录每个再分发组件的许可全文，`THIRD-PARTY-NOTICES.md`
