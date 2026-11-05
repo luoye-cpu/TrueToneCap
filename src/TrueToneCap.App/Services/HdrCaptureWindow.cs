@@ -68,7 +68,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
 
     // ═══ 2026-08-16 方案A: GSYNC/FreeSync (VRR) 支持 ═══
     // 检测到允许撕裂时交换链加 AllowTearing + Present(Tear), 让 DWM 在 VRR 面板
-    // 刷新窗口内任意相位呈现 → 选区拖拽更平滑、输入延迟更低。不支持时回退 Present(0)。
+    // 刷新窗口内任意相位呈现。⚠ 2026-11-05: 该路径已随"拖拽不顺手"修复整体退役 ——
+    // 当时在无 ALLOW_TEARING 标志的交换链上传了 Present(1, AllowTearing)（非法组合）
+    // 导致画面不更新, 修法误伤成全面 Present(0)+Sleep 定步; 现在 PresentFrame 恒
+    // Present(1, None)（标准 vsync）, 帧率锁刷新率, 本标志仅留作启动诊断。
     /// <summary>中心行亮度打点的一次性开关（0=未打点）。</summary>
     private int _diagSampleDone;
     /// <summary>首帧合成打点的一次性开关（0=未打点）。渲染线程独占访问。</summary>
@@ -96,7 +99,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
     /// <summary>那次预热所依据的 DPI 缩放 —— 与当前值不一致就作废。</summary>
     private double _pendingAtlasScale;
 
-    private bool _vrrSupported; // 仅用于启动时诊断输出（Present 路径已固定 Present(0)）
+    private bool _vrrSupported; // 仅用于启动时诊断输出（Present 路径 2026-11-05 起恒 Present(1, None)，见 PresentFrame）
     // ═══ 2026-08-16 增强: 多平面覆盖层 (MPO) / 硬件缩放合成支持 (独立翻转前提) ═══
     // 窗口化 DirectFlip 由 DWM 自动协商, 但可查询确认 — 诊断日志供排障。
     private bool _mpoWindowed;
@@ -222,6 +225,11 @@ public sealed partial class HdrCaptureWindow : IDisposable
     private string _mosaicMode = "Rect";                    // Rect | Brush
     private bool _optRowVisible;
     private int _optHover = -1;                             // 第二行悬停格（-1 = 无）
+    // 主工具栏悬停索引缓存（-1 = 无）：Move 里的重绘去重用。着色器按 MousePos 现算悬停，
+    // 索引没变就不需要新帧。窗口尺寸变化会让同一坐标落在不同按钮上 ⇒ 连同尺寸一起缓存,
+    // 尺寸失配即当作"无悬停"重算一次（代价：可能多画一帧, 正确性优先）。
+    private int _toolbarHover = -1;
+    private int _toolbarHoverW, _toolbarHoverH;
     private const int IdOptColorCount = 6, IdOptMosaicCount = 2;
     // 马赛克画笔粗细（图像像素）：第二行里是一条可左右拉的滑条，1..100 px 直接写进图层 BrushWidth
     private const float MosaicBrushMinPx = 1f, MosaicBrushMaxPx = 100f;
@@ -677,9 +685,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
             }
 
             // ═══ 2026-08-25 修复: 创建交换链时强制不带 AllowTearing ═══
-        // 用户环境 Present(1, AllowTearing) 静默失败 (不抛异常, 画面不更新)。
-        // 即使 VRR 支持, 也先创建不带 AllowTearing 的交换链, 确保 Present(0) 正常。
-        // 若后续需要在 PresentFrame 中尝试 VRR, 可在此处加 AllowTearing 并在失败时重建。
+        // 用户环境 Present(1, AllowTearing) 静默失败 (不抛异常, 画面不更新) —— 非法组合:
+        // AllowTearing 按 DXGI 规范必须配 SyncInterval=0。交换链无此标志 ⇒ PresentFrame
+        // (2026-11-05 起恒 Present(1, None)) 是合法的标准 vsync 路径, 不受此历史缺陷影响。
+        // 若日后要真上 VRR 撕裂呈现, 需同时: 交换链加 AllowTearing + Present(0, AllowTearing)。
             // 背景面格式/颜色空间契约见 CreateOverlayDesc 上方注释（唯一出处）
             _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, CreateOverlayDesc(w, h));
             factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);
@@ -976,16 +985,30 @@ public sealed partial class HdrCaptureWindow : IDisposable
         long lastRender = System.Diagnostics.Stopwatch.GetTimestamp();
         bool isFirstFrame = true;
         int frameCount = 0;
+        bool prioRaised = false;   // 交互期已提到 Normal（只在状态翻转时动系统调用）
         while (!_disposed && !_closing)
         {
             _renderSignal.WaitOne();
             if (_disposed || _closing) return;
+
+            // ═══ 2026-11-05: 交互期优先级提升（拖拽不顺手的第二根源）═══
+            // BelowNormal 在系统空闲时无感，但拖拽中鼠标消息洪峰 + 其他进程的 Normal 线程
+            // 会把它饿出几十毫秒的调度延迟 ⇒ 选区追不上光标。交互期间提到 Normal，
+            // 结束后还回去。_down 覆盖选区拖拽/手柄/平移/滑条，_annoDown 覆盖标注绘制。
+            bool interactive = _down || _annoDown || _sliderDrag;
+            if (interactive != prioRaised)
+            {
+                prioRaised = interactive;
+                try { Thread.CurrentThread.Priority = interactive ? ThreadPriority.Normal : ThreadPriority.BelowNormal; }
+                catch (ThreadStateException) { /* 线程退出竞态：优先级设置失败不影响渲染 */ }
+            }
+
             try
             {
                 // ═══ 阶段 4：ImmediateContext 可能被多扇窗共用（进程级设备）⇒ 渲染段串行 ═══
                 // 产品路径同一时刻只有一扇窗在渲染，这把锁在真机上恒无竞争；它挡的是探针那种
                 // "旧窗还没 Dispose、新窗已在渲染"的叠加场景（Map/Unmap 交错 = 偶发花屏/设备丢失）。
-                long tFrame = PerfMeter.Now();   // F4 仪表：只圈住渲染段，不含下面那次定步长 Sleep
+                long tFrame = PerfMeter.Now();   // F4 仪表：只圈住渲染段
                 lock (s_ctxLock) { RenderCore(); }
                 long frameUs = PerfMeter.SinceMicro(tFrame);
                 PerfMeter.Record(ref _mFrames, ref _mFrameUs, ref _mFrameMaxUs, frameUs);
@@ -1007,9 +1030,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
             }
 
             if (isFirstFrame) isFirstFrame = false;
-            long elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - lastRender) * 1000 / System.Diagnostics.Stopwatch.Frequency;
-            int wait = 16 - (int)elapsedMs;
-            if (wait > 0) Thread.Sleep(wait);
+            // ═══ 2026-11-05: Thread.Sleep 定步已删 ═══
+            // 旧两行（wait = 16 - elapsed; Sleep(wait)）在无 timeBeginPeriod 的机器上受
+            // 15.6ms 计时器粒度影响，实际睡满下一拍 ⇒ 有效帧率 30-45fps 且逐帧抖动；
+            // 且它叠加在 Present 之后，若 Present 本身阻塞（现改 Present(1)）就会错过
+            // 下一个 vblank。帧节奏现在完全由 PresentFrame 的 vblank 阻塞提供：
+            // RenderCore(≈1-2ms GPU 合成) → Present(1) 阻塞到下一 vblank → 回到 WaitOne。
+            // F4 仪表的 frameUs 语义随之从"纯渲染耗时"变为"帧周期"（含 vblank 等待），
+            // 峰值≈刷新周期 —— 判读仪表时注意。
+            // 防 hot-spin 护栏：RenderCore 早退（设备丢失/后台缓冲未就绪）时没有 Present 的
+            // vblank 阻塞兜底，信号被持续置位会让本线程全速空转。正常路径一帧 ≥ 一个
+            // vblank（~16ms），这行永远触发不到；只有异常路径靠它退回有界节奏。
+            long frameMs = (System.Diagnostics.Stopwatch.GetTimestamp() - lastRender) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            if (frameMs < 2) Thread.Sleep(4);
             lastRender = System.Diagnostics.Stopwatch.GetTimestamp();
         }
         LogService.Debug("HdrCapture", $"渲染循环退出, 总帧数={frameCount}", LogCategory.Capture);
@@ -1316,16 +1349,20 @@ public sealed partial class HdrCaptureWindow : IDisposable
         }
     }
 
-    /// <summary>统一帧呈接入口 (2026-08-26 修复: VRR 路径彻底禁用)。
-    /// ═══ 根因确认: 交换链已改为不带 ALLOW_TEARING (04:0x 修复), 但 PresentFrame
-    /// 仍走 _vrrSupported=true 的 Present(1, AllowTearing) 分支 → DXGI 规范不允许
-    /// 无标志交换链传 ALLOW_TEARING → Present 静默失败 (不抛异常) → 画面永不更新。
-    /// 最终方案: 无论 VRR 检测结果如何, 一律 Present(0, None) — 截图工具不需要 VRR
-    /// 的毫秒级延迟优化, 稳定可靠优先。</summary>
+    /// <summary>统一帧呈接入口 (2026-11-05 重修: 恢复垂直同步节奏)。
+    /// ═══ 历史根因复盘: 2026-08-26 的失败是 Present(<b>1, AllowTearing</b>) —— AllowTearing
+    /// 标志按 DXGI 规范必须配 SyncInterval=0，非法组合在无 ALLOW_TEARING 标志的交换链上
+    /// 静默失败（不抛异常、画面不更新）。当时的修法把【整个】vsync 一起扔了，退到
+    /// Present(0) + 渲染线程 Thread.Sleep(16) 定步 —— 这正是"拖拽不顺手"的根源:
+    /// ① Sleep 受系统计时器 15.6ms 粒度影响, 实际睡满下一拍 ⇒ 有效帧率 30-45fps 且逐帧抖动;
+    /// ② 无 vsync ⇒ 呈现相位不受控, 选区边缘追赶光标、肉眼可见的撕裂/掉帧。
+    /// 现在: Present(1, None) —— 标准垂直同步路径（合法组合: 同步间隔 1 × 无 tearing 标志）,
+    /// 渲染线程阻塞到 vblank, 帧率锁刷新率、相位由 DWM 对齐、输入延迟恰一个 vblank。
+    /// 渲染循环里原来的 Sleep 定步已随之删除（双重的节拍器只会错过 vblank）。</summary>
     private void PresentFrame()
     {
         if (_swapChain is null) return;
-        _swapChain.Present(0, PresentFlags.None);
+        _swapChain.Present(1, PresentFlags.None);
     }
 
     /// <summary>每次渲染前重新获取后台缓冲 + RTV（FlipSequential Present 后缓冲翻转）。</summary>
@@ -2887,6 +2924,25 @@ public sealed partial class HdrCaptureWindow : IDisposable
     internal (int Tx, int Ty, int BtnW, int BtnH, int Gap, int PadX, int PadY, int TotalW, int TotalH)
         ProbeToolbarFrame(int n) => ToolbarFrame(n, _winW, _winH);
 
+    /// <summary>主/标注工具栏的悬停按钮索引（-1 = 无）。
+    /// <b>必须与 OverlayComposite.hlsl §4 的命中算式逐项一致</b>：
+    /// b0 = ToolbarRect.xy + (PadX + i*(BtnW+Gap), PadY)，命中域是 [b0, b0+BtnW×BtnH] 闭区间，
+    /// 越过 BtnW 的间隙不算命中。这里只服务 Move 的"悬停索引变了才重绘"去重，
+    /// 真正的高亮/提示仍由着色器在帧内现算 —— 两边算式若漂移，症状是"悬停高亮跳变迟一拍"。</summary>
+    private int ToolbarHoverIndex(int x, int y)
+    {
+        if (!_selComplete) return -1;
+        int n = _annoMode ? 10 : ToolbarContract.Main.Length;
+        var lay = ToolbarFrame(n, _winW, _winH);
+        int bx = lay.Tx + lay.PadX, by = lay.Ty + lay.PadY;
+        for (int i = 0; i < n; i++)
+        {
+            if (x >= bx && x <= bx + lay.BtnW && y >= by && y <= by + lay.BtnH) return i;
+            bx += lay.BtnW + lay.Gap;
+        }
+        return -1;
+    }
+
     /// <summary>探针读数口：当前选区（帧内、已归一化）。工具条点击一类"不该动选区"的判据要读它。</summary>
     internal (int X, int Y, int W, int H) ProbeSelection()
     {
@@ -3396,7 +3452,19 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 RequestRedraw();
             }
         }
-        else if (!_down && _selComplete) RequestRedraw(); // hover 时刷新工具栏高亮
+        else if (!_down && _selComplete)
+        {
+            // 悬停高亮与提示全部由着色器按 MousePos 现算（OverlayComposite.hlsl §4），
+            // 视觉状态只取决于"落在哪个按钮上" ⇒ 索引不变就不需要新帧。
+            // 旧写法每条 WM_MOUSEMOVE 都 RequestRedraw ⇒ 选完框后在工具栏上滑动,
+            // 整屏 GPU 合成以刷新率空转。索引每条 Move 都现算（ToolbarHoverIndex 读当前
+            // 布局，天然跟随窗口尺寸变化）；窗口尺寸变了就强制重绘一帧（-2 哨兵 ≠ 任何索引），
+            // 因为已画出的那帧工具栏还在旧位置。
+            bool layoutMoved = _toolbarHoverW != _winW || _toolbarHoverH != _winH;
+            if (layoutMoved) { _toolbarHover = -2; _toolbarHoverW = _winW; _toolbarHoverH = _winH; }
+            int h = ToolbarHoverIndex(x, y);
+            if (h != _toolbarHover) { _toolbarHover = h; RequestRedraw(); }
+        }
     }
 
     private void Up(int x, int y)

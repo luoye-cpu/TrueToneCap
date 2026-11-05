@@ -226,6 +226,7 @@ public static class CorePipelineTests
         Test_VisibleToastAndHintStrings_UseCurrentNames();
         Test_Xaml_CollapsedCards_HaveVisibilityOwner();
         Test_AvifHdrModeRow_VisibilityReadsFinalHdrState();
+        Test_CaptureOverlay_RenderPacing();
         Test_Jxl_ColorSpaceMapping();
         Test_HdrProbeJudge_NotDead();
         Test_HdrAdobeTag_NormalizedBeforeMatrix();
@@ -12766,6 +12767,73 @@ public static class CorePipelineTests
     static string StripComments(string src)
         => Regex.Replace(src, @"(?://[^\n]*)|/\*.*?\*/", "",
              System.Text.RegularExpressions.RegexOptions.Singleline);
+
+    /// <summary>
+    /// 抓屏覆盖层的<b>渲染节奏</b>接线锁（2026-11-05，"截图后拖拽不顺手"修复）。
+    /// <para><b>修的什么</b>：旧渲染循环是 <c>Present(0) + Thread.Sleep(16-elapsed)</c> 定步。
+    /// ① 无 timeBeginPeriod 时 Sleep 受 15.6ms 计时器粒度影响，实际睡满下一拍 ⇒ 拖拽有效帧率
+    /// 30-45fps 且逐帧抖动；② 无 vsync ⇒ 呈现相位不受控，选区边缘追赶光标、肉眼可见掉帧。
+    /// 现在：PresentFrame 恒 <c>Present(1, None)</c>（标准 vsync，历史失败的
+    /// <c>Present(1, AllowTearing)</c> 是非法组合而非 vsync 本身的问题），渲染循环里的
+    /// Sleep 定步删除，帧节奏完全由 vblank 阻塞提供；另加交互期（_down/_annoDown/_sliderDrag）
+    /// 渲染线程 BelowNormal→Normal 的优先级提升，防拖拽中被调度饿出几十毫秒。</para>
+    /// <para><b>为什么用形态锁</b>：帧平滑度本身无法在单测进程断言（需要真窗口+真 vblank），
+    /// 实机手感由用户复核。能机器钉住的是四条结构契约：①RenderLoop 里不许再有 Sleep 定步
+    /// （唯一允许的是防 hot-spin 的 <c>Thread.Sleep(4)</c> 护栏）；②Present 必须同步间隔 1
+    /// 且全文件不许再出现 Present(0)（旧节奏的回潮哨兵）；③交互优先级提升在 RenderLoop 里；
+    /// ④悬停重绘必须按索引变化去重（<see cref="Test_AvifHdrModeRow_VisibilityReadsFinalHdrState"/>
+    /// 的同族教训：悬停路径每条鼠标消息都全量重绘，是"不顺手"观感的另一半）。</para>
+    /// </summary>
+    static void Test_CaptureOverlay_RenderPacing()
+    {
+        var path = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "HdrCaptureWindow.cs"));
+        if (path is null) { Skip("覆盖层渲染节奏", "未找到 HdrCaptureWindow.cs"); return; }
+        var code = StripComments(File.ReadAllText(path));
+
+        // ── ① RenderLoop：不许有 Sleep 定步（防 hot-spin 的 Sleep(4) 护栏是唯一白名单）──
+        int loopStart = code.IndexOf("private void RenderLoop()", StringComparison.Ordinal);
+        Assert("找到 RenderLoop（找不到 = 判据失明）", loopStart >= 0);
+        if (loopStart < 0) return;
+        int loopEnd = code.IndexOf("private void RenderCore()", loopStart, StringComparison.Ordinal);
+        var loopBody = loopEnd > loopStart ? code[loopStart..loopEnd] : code[loopStart..];
+        Assert("RenderLoop 不许再有 Thread.Sleep 定步（帧节奏已由 Present(1) 的 vblank 阻塞提供，" +
+               "再叠 Sleep 就会错过 vblank；唯一白名单是防 hot-spin 的 Sleep(4) 护栏）",
+               !Regex.IsMatch(loopBody, @"Thread\.Sleep\((?!4\))"),
+               "旧节奏回潮 —— 拖拽帧率会掉回 30-45fps");
+        Assert("RenderLoop 保留防 hot-spin 护栏（设备丢失早退路径没有 vblank 兜底，" +
+               "信号被持续置位会全速空转）",
+               loopBody.Contains("Thread.Sleep(4)"));
+
+        // ── ② Present：同步间隔必须为 1，且全文件不许再出现 Present(0) ──
+        int pfStart = code.IndexOf("private void PresentFrame()", StringComparison.Ordinal);
+        Assert("找到 PresentFrame", pfStart >= 0);
+        if (pfStart < 0) return;
+        int pfEnd = code.IndexOf("private void EnsureBackBuffer()", pfStart, StringComparison.Ordinal);
+        var pfBody = pfEnd > pfStart ? code[pfStart..pfEnd] : code[pfStart..(pfStart + 600)];
+        Assert("PresentFrame 必须是 Present(1, None)（标准 vsync；Present(0)+Sleep 定步是" +
+               "拖拽不顺手的根源，见 PresentFrame 注释的历史复盘）",
+               pfBody.Contains("Present(1, PresentFlags.None)"));
+        Assert("全文件不许再出现 Present(0（旧节奏回潮哨兵；含注释不算，本判据读的是剥注释源码）",
+               !code.Contains("Present(0"));
+
+        // ── ③ 交互期优先级提升 ──
+        Assert("RenderLoop 含交互期优先级提升（BelowNormal 在拖拽中会被调度饿出几十毫秒）",
+               loopBody.Contains("Thread.CurrentThread.Priority")
+               && loopBody.Contains("_down || _annoDown || _sliderDrag"));
+
+        // ── ④ 悬停重绘按索引变化去重 ──
+        int moveStart = code.IndexOf("private void Move(int x, int y)", StringComparison.Ordinal);
+        Assert("找到 Move", moveStart >= 0);
+        if (moveStart < 0) return;
+        int moveEnd = code.IndexOf("private void Up(int x, int y)", moveStart, StringComparison.Ordinal);
+        var moveBody = moveEnd > moveStart ? code[moveStart..moveEnd] : code[moveStart..];
+        Assert("悬停重绘必须按工具栏索引变化去重（ToolbarHoverIndex 现算 + _toolbarHover 比较），" +
+               "不许退回每条 WM_MOUSEMOVE 都全量重绘的旧写法",
+               moveBody.Contains("ToolbarHoverIndex(x, y)")
+               && moveBody.Contains("if (h != _toolbarHover) { _toolbarHover = h; RequestRedraw(); }"));
+        Assert("ToolbarHoverIndex 命中算式存在（着色器 §4 的 CPU 镜像，漂移=悬停高亮迟一拍）",
+               code.Contains("private int ToolbarHoverIndex(int x, int y)"));
+    }
 
     /// <summary>
     /// 「HDR 承载方式」行的可见性必须读【定稿后】的 HDR 开关状态（2026-11-04 接线审查 E-1）。
