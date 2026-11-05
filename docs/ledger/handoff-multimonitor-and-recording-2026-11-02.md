@@ -1467,3 +1467,35 @@ HDR 落点是"恒开、由编码器降级"，拿别的格式的 WantHdr 模板�
 - **F-3**：AVIF HDR 承载文案"XAML 表 + LocaleManager 运行时属性"两份真相，改一侧即分叉。
 
 unit 1925 → 1949（+24，其中本轮新增 5 条判据、多条带变异）。
+
+### §25 补：抓屏覆盖层"拖拽不顺手"重修（2026-11-05，提交 9539e37）
+
+**用户原话**："截图后的界面目前拖拽不是很顺手"。根因两个，都在渲染循环（HdrCaptureWindow.RenderLoop）:
+
+1. **Present(0) + Thread.Sleep(16-elapsed) 定步**。两层伤害：
+   - Sleep 在无 timeBeginPeriod 的机器上受 15.6ms 计时器粒度影响，`Sleep(14)` 实际睡满下一拍
+     ⇒ 拖拽有效帧率 30-45fps 且逐帧抖动；
+   - 无 vsync ⇒ 呈现相位不受控，选区边缘追赶光标、肉眼可见的撕裂/掉帧。
+   **历史包袱**：2026-08-26 曾用 Present(1, AllowTearing) 在无 ALLOW_TEARING 标志的交换链上
+   静默失败（该组合本身非法——AllowTearing 必须配 SyncInterval=0），当时的修法把 vsync
+   整个扔了。Present(1, None) 才是标准路径，本次恢复；注释里已把这段误诊写清。
+2. **渲染线程 Priority.BelowNormal**：拖拽中鼠标消息洪峰 + 其他进程 Normal 线程会把它饿出
+   几十毫秒的调度延迟。现交互期（_down/_annoDown/_sliderDrag）提到 Normal，结束还回。
+
+附带修复：**悬停重绘去重**。旧 Move 里 `else if (!_down && _selComplete) RequestRedraw();`
+让选完框后在工具栏上滑动时每条 WM_MOUSEMOVE 都全量合成一帧。现在 ToolbarHoverIndex
+（与 OverlayComposite.hlsl §4 同一套命中算式）现算悬停索引，变了才画；窗口尺寸变化用
+-2 哨兵强制重绘一帧。
+
+**验证**：Test_CaptureOverlay_RenderPacing 四条结构契约（RenderLoop 无 Sleep 定步〔唯一白名单
+是 Sleep(4) 防 hot-spin 护栏〕/ PresentFrame 恒 Present(1, None) 且全文件无 Present(0) /
+交互优先级提升 / 悬停索引去重）。变异验证：Present(0) 红、Sleep 定步红、恢复绿。
+unit 1949 → 1959。
+
+**⚠ 流程事故自查（写在这里防止再犯）**：变异验证恢复时我顺手敲了 `git checkout -- <file>`，
+把**未提交的全部修复**回滚掉了（diff 清零才发现）。重做时逐条补齐后立即提交。教训：
+**验证用的文件改动恢复必须走备份文件（.bak copy），永远不许用 git checkout 恢复未提交工作**；
+产品代码改完第一件事是提交，不让带牙的判据守着一份随时会被自己回滚的工作区。
+
+**F4 仪表语义变化**：frameUs 从"纯渲染耗时"变为"帧周期"（含 Present(1) 的 vblank 等待），
+峰值≈刷新周期。判读历史对比数据时注意口径切换点 = 本提交。
