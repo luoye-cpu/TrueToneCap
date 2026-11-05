@@ -271,9 +271,9 @@ public sealed partial class HdrCaptureWindow : IDisposable
     //   结算行随窗走、点名自己的客户区尺寸。写入者有两个线程（渲染线程与定时器线程池回调），
     //   所以一律 Interlocked（峰值 CAS 环）；单位微秒 —— 一帧常在 1ms 以下，按毫秒会整列读成 0。
     // 逐帧一律零日志：只在 Close 结算一行，且只有诊断档落盘（默认简档连这一行都不写）。
-    private long _mFrames;             // RenderCore 帧数
-    private long _mFrameUs;            // 帧耗时合计
-    private long _mFrameMaxUs;         // 帧耗时峰值
+    private long _mFrames;             // RenderCore 帧数（含早退帧，判读注意）
+    private long _mFrameUs;            // 帧周期合计（含 Present(1) 的 vblank 等待，正常帧≈刷新周期）
+    private long _mFrameMaxUs;         // 帧周期峰值（≈刷新周期；早退帧 µs 级不抬峰）
     private long _mIdleWakeFrames;     // 其中由 3s 静置定时器唤醒的那几帧
     private long _mIdleWakeUs;
     private long _mIdleWakeMaxUs;
@@ -662,7 +662,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
             // 检测 VRR/撕裂支持 (Win10 1607+ 驱动 + 显示器): present_allow_tearing 非零即支持
             try { _vrrSupported = factory.PresentAllowTearing; }
             catch { _vrrSupported = false; }
-            LogService.Info("HdrCapture", $"VRR (GSYNC/FreeSync) 支持: {(_vrrSupported ? "✓ 启用" : "✗ 不可用, 回退常规呈现")}");
+            LogService.Info("HdrCapture", $"VRR (GSYNC/FreeSync) 支持: {(_vrrSupported ? "检测到支持（未启用 —— Present 恒 vsync，见 2026-11-05 注）" : "不可用, 常规呈现")}");
 
             // ═══ 2026-08-16 增强: 检测 MPO/硬件合成 (独立翻转/DirectFlip 前提) ═══
             // 窗口化 DirectFlip + MPO 时 DWM 可绕过合成直接扫描出画面, 延迟进一步降低。
@@ -1154,7 +1154,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
                 _ctx.CopyResource(_backBuffer, _desktopTex);
             }
 
-            // Present(0)：不等待 vsync，避免渲染线程被垂直同步阻塞
+            // PresentFrame：统一 vsync 节奏（阻塞到 vblank，见 PresentFrame 2026-11-05 注）
             PresentFrame();
         }
         catch (Exception ex)
@@ -3245,6 +3245,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         // 上一次滑条拖拽没收到抬起（丢焦点/捕获被抢）→ 新一次按下先收尾，否则 Move 永远走拖拽分支
         if (_sliderDrag) { _sliderDrag = false; ReleaseCapture(); }
         _down = true; _moved = false; _dragHandle = -1; _movingSel = false;
+        _toolbarHover = -1;   // 选区态翻转 ⇒ 工具栏/悬停几何全部重算（2026-11-05 审查硬化）
         // 闩描述的是【这一次按下】归谁，所以每次按下都重算：不在这儿清零，拖完滑条留下的闩
         // 会把下一笔"涂一笔"的松手也吃掉（2026-10-28 探针 ⑫ 当场抓到：涂抹图层没了）。
         _toolClickLatch = false;
@@ -3686,6 +3687,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         if (_annoMode) return;
         _annoMode = true;
         _annoTool = "Rect";
+        _toolbarHover = -1;   // 工具栏 7→10 按钮换布局（2026-11-05 审查硬化）
         _annoDown = false;
         ShowSecondRowForTool(); // 矩形工具 → 第二行出颜色格
         LogService.Info("HdrCapture", "进入标注模式", LogCategory.UI);
@@ -3727,6 +3729,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         if (!_annoMode) return;
         _annoMode = false;
         _annoDown = false;
+        _toolbarHover = -1;   // 工具栏 10→7 按钮换布局（2026-11-05 审查硬化）
         // 拖滑条时按 Esc：Move() 会先看 _sliderDrag 再看出标注模式，不收尾就把整块界面卡住
         if (_sliderDrag) { _sliderDrag = false; ReleaseCapture(); }
         lock (_penPointsLock) { _penPoints.Clear(); }
@@ -4442,8 +4445,8 @@ public sealed partial class HdrCaptureWindow : IDisposable
         long lifeUs = PerfMeter.SinceMicro(_mOpenedAtQpc);
         LogService.Debug("HdrCapture",
             $"[Meter/F4] 预览窗 {_winW}x{_winH}（{reason}）: 存活 {lifeUs / 1_000_000.0:F1}s"
-            + $"，渲染 {frames} 帧（合计 {PerfMeter.Ms(Interlocked.Read(ref _mFrameUs))}"
-            + $"，均 {(frames == 0 ? 0 : Interlocked.Read(ref _mFrameUs) / frames / 1000.0):F2}ms/帧"
+            + $"，渲染 {frames} 帧（帧周期合计 {PerfMeter.Ms(Interlocked.Read(ref _mFrameUs))}"
+            + $"，均 {(frames == 0 ? 0 : Interlocked.Read(ref _mFrameUs) / frames / 1000.0):F2}ms/帧（2026-11-05 起含 vblank 等待）"
             + $"，峰 {PerfMeter.Ms(Interlocked.Read(ref _mFrameMaxUs))}）"
             + $"≈{(lifeUs == 0 ? 0 : frames * 1_000_000.0 / lifeUs):F2} 帧/s"
             + $"｜RTV 真重建 {Interlocked.Read(ref _mRtvRebuilds)} 次（帧数={frames}：两者相等就坐实「每帧重建」，差一大截就是只在换缓冲时才建）"
