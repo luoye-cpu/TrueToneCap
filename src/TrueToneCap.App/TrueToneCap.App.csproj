@@ -11,6 +11,11 @@
     <Platform>x64</Platform>
     <RootNamespace>TrueToneCap.App</RootNamespace>
     <AssemblyName>TrueToneCap</AssemblyName>
+    <!-- 应用/exe 图标（2026-11-05）：由 scripts/gen-msix-assets.py 的图像模式
+         （源图 scripts/icon-src/TTC-icon.png，生成 16 到 256 多分辨率）写出。
+         换图标 = 重跑该命令，不要手改 ico。⚠ XML 注释里不能写连续两个短横线，
+         所以这里没法原样引用命令行参数（Directory.Build.props 同款教训）。 -->
+    <ApplicationIcon>TrueToneCap.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained Condition="'$(TtcFrameworkDependent)' != 'true'">true</WindowsAppSDKSelfContained>

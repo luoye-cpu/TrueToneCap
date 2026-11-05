@@ -133,12 +133,68 @@ def rounded(w, h, radius_frac=0.18):
     return draw
 
 
+def generate_from_image(src_path, out_dir, files, ico_out=None):
+    """2026-11-05：真图标管线（用户选定 TTC.jpg 裁剪母版）。
+    plated  = 深色底板（取母版不透明像素 5% 分位的暗玻璃色）+ 图标居中 94%；
+    unplated= 图标本体直接铺满（圆角外自带透明，任务栏由系统加阴影）。
+    命名表与程序化模式完全共用 —— 换源图不动变体结构。"""
+    from PIL import Image
+
+    src = Image.open(src_path).convert("RGBA")
+    side = min(src.size)
+    l = (src.size[0] - side) // 2
+    t = (src.size[1] - side) // 2
+    src = src.crop((l, t, l + side, t + side))
+
+    # 底板色：不透明像素里 5% 分位最暗的一档 = 图标玻璃体本色（避开亮金属边框与彩虹）
+    small = src.resize((64, 64), Image.LANCZOS)
+    opaque = [p for p in small.getdata() if p[3] > 200]
+    opaque.sort(key=lambda p: p[0] + p[1] + p[2])
+    pick = opaque[max(0, int(len(opaque) * 0.05))]
+    plate = (pick[0], pick[1], pick[2], 255)
+
+    def icon_at(size):
+        return src.resize((size, size), Image.LANCZOS)
+
+    written = []
+    for name, (w, h, form) in sorted(files.items()):
+        tile = Image.new("RGBA", (w, h), plate)
+        if form == "plated":
+            fit = int(min(w, h) * 0.94)
+            im = icon_at(fit)
+            tile.alpha_composite(im, ((w - fit) // 2, (h - fit) // 2))
+        else:  # unplated
+            tile.alpha_composite(icon_at(min(w, h)))
+        tile.save(os.path.join(out_dir, name))
+        written.append((name, w, h))
+
+    for n, w, h in written:
+        print("  %-56s %dx%d" % (n, w, h))
+    print("generated %d asset files from %s into %s" % (len(written), os.path.basename(src_path), out_dir))
+
+    if ico_out:
+        # 应用/exe 图标：Pillow 按尺寸表一次出多分辨率 ico
+        icon_at(256).save(ico_out, format="ICO",
+                          sizes=[(s, s) for s in (16, 20, 24, 32, 48, 64, 128, 256)])
+        print("ico written: %s" % ico_out)
+
+
 def main():
     import sys
     out_dir = OUT_DIR
-    for i, a in enumerate(sys.argv[1:]):
-        if a == "--out" and i + 2 <= len(sys.argv) - 1:
-            out_dir = sys.argv[i + 2]
+    src = None
+    ico_out = None
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--out" and i + 1 <= len(args) - 1:
+            out_dir = args[i + 1]; i += 2
+        elif args[i] == "--src" and i + 1 <= len(args) - 1:
+            src = args[i + 1]; i += 2
+        elif args[i] == "--ico" and i + 1 <= len(args) - 1:
+            ico_out = args[i + 1]; i += 2
+        else:
+            i += 1
     os.makedirs(out_dir, exist_ok=True)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -178,6 +234,10 @@ def main():
     ):
         for base, (w, h) in dims.items():
             files["%s.scale-%s.png" % (base, scale)] = (w, h, "plated")
+
+    if src:
+        generate_from_image(src, out_dir, files, ico_out)
+        return
 
     written = []
     for name, (w, h, form) in sorted(files.items()):
