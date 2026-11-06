@@ -8180,3 +8180,47 @@ TranslationService.cs:68），默认「简」档根本不落盘；不切档的�
 `QSV: 文件有效但并非硬件产出 → 判为不可用` 是你把色度设成 4:4:4 时的预期（默认测到的是软件路）。
 
 
+
+## 78. README"取证/根因"内容的迁移落点（2026-11-06，README 清理轮）
+
+用户定规矩：README 只描述已实现的部分，试错与回退过程不进用户文档。以下内容原挂在
+README v0.3.4 段（L321-337 的翻译取证三档分类、四个探测脚本、各端点实测延迟与关闭情况、
+有道定价），README 上只留一句结论 + 指到本节。全文原样落这里：
+
+### 翻译免费端点取证（2026-09-21 与 2026-10-23 两轮）
+
+脚本：`scripts/probes/youdao_free_endpoint_probe.py`、`baidu_free_endpoint_probe.py`、
+`bing_free_endpoint_probe.py`、`edge_mymemory_free_endpoint_probe.py`。
+
+分三档：
+- **免钱不免密**：有道/百度/腾讯/阿里的官方 API 都有免费额度，但必须注册拿 key，
+  国内延迟 86–203 ms，比免费端点快一个量级。
+- **免密只到词级**：有道 `jsonapi`、百度 `sug` 给的是词典释义与网页例句节选，整句一律零载荷。
+- **免密整句**：Edge 内置口 → 必应网页版 → MyMemory 匿名档 → Google（四条即产品现用的），
+  2026-10-23 国内实测依次 0.47–0.58 s / 1.06–1.20 s / 0.81–1.41 s / 超时。
+  历史上免密、今天已关的：搜狗/腾讯网页口（均回 405）、Yandex v1（已 410 下线）、
+  DeepL 的 `jsonapi` 口（已 404）。
+
+四条免费端点的硬限制（界面上勾选旁逐条写明）：
+- Edge：免凭据但要求一个非空 User-Agent（实测 `curl/8.9.0` 也算，它只判头存在、不解析浏览器版本）
+- 必应：要先抓页面凭据，约 1 小时过期
+- MyMemory：单条 500 **字符**，匿名档 5000 字符每自然日（官方 usagelimits 页原文）
+
+有道官方定价参考：注册赠 50 元体验金，常见语种 48 元/百万字符 ≈ 104 万字符。
+
+### JXL HDR 声明缺陷的根因（2026-09-27 修复，v0.3.6 段同源）
+
+目标为 P3 时旧实现递给 cjxl 的是【SDR 曲线】的 ICC，而 ICC 块会压过 color fields
+⇒ 产物读回 `Transfer=sRGB` 却仍写 `intensity_target=1000`（PQ 被按 SDR 曲线解释，自相矛盾）。
+修复：改递带 PQ 曲线的那份 ICC（与 HDR TIFF 同一函数）⇒ 读回 P3 原色 + PQ，像素一字未动。
+
+### AVIF 编码器选择器回归事故（2026-09-27 修复）
+
+0.3.5 的发布提交里误删了"展开卡片"那一行 ⇒ 整张 AVIF 选项卡永不显示，
+而构建、日志、测试全都不响（没有任何东西断言"这张卡能被点亮"）。
+修复同时补了孤儿控件判据（Test_Xaml_CollapsedCards_HaveVisibilityOwner 的前身）。
+
+### QualityAvif=63 症状（2026-09-24/25 修复）
+
+2026-09-16 时代的全量序列化旧文件里 `QualityAvif=63`（CRF 区间上界=最差档）原样上界面，
+且被当成用户自选 —— 差量写盘改造与 MigrateStaleDefaults 即为消此症（见 AppSettingsData.SettingsRevision 注释）。

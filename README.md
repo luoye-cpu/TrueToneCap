@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.6-beta** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC
+> **v0.3.11** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
 
 **TrueToneCap** is a scalpel built for pixels. / **TrueToneCap** 是一把为像素而生的手术刀。
 
@@ -11,7 +11,7 @@ In the gap where HDR displays are becoming ubiquitous yet screenshot tools remai
 <details open>
 <summary><b>🌐 English</b></summary>
 
-Selection, annotation, OCR, translation — everything happens in real-time on a full-screen overlay after pressing a hotkey, with no pop-ups and no context switches. Screenshots export to PNG (mathematically lossless), JPEG (with an optional Ultra HDR gain map), AVIF, JPEG XL, and more. Translation goes through Youdao's official open-platform API (bring your own credentials) or a custom LLM (OpenAI/DeepSeek); the credential-free unofficial web endpoints (Bing / Google) stay off until you explicitly opt in.
+Selection, annotation, OCR, translation — everything happens in real-time on a full-screen overlay after pressing a hotkey, with no pop-ups and no context switches. Screenshots export to PNG (mathematically lossless), JPEG (with an optional Ultra HDR gain map), AVIF, JPEG XL, and more. Translation works out of the box through four free public endpoints (Edge / Bing / MyMemory / Google); Youdao's official API (bring your own credentials) and custom LLM endpoints rank ahead of them. Don't want recognized text sent to third parties? Uncheck the free endpoints in Settings → Translation and no request is made at all.
 
 </details>
 
@@ -28,10 +28,10 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 | Step / 步骤 | English | 中文 |
 |-------------|---------|------|
-| 1 | 获取发布包 `TrueToneCap-v0.3.6-beta-win-x64.7z`（由维护者出包分发） | 获取发布包 `TrueToneCap-v0.3.6-beta-win-x64.7z`（由维护者出包分发） |
-| 2 | Extract the archive | 解压压缩包 |
+| 1 | Install from [Microsoft Store](https://apps.microsoft.com/) (search "TrueToneCap"), or download a GitHub Release archive | 从 [Microsoft Store](https://apps.microsoft.com/) 安装（搜 "TrueToneCap 真色截图"），或从 GitHub Release 下载压缩包 |
+| 2 | Extract the archive (portable edition only) | 解压压缩包（仅便携版需要） |
 | 3 | Run `TrueToneCap.exe` | 双击运行 `TrueToneCap.exe` |
-| 4 | Press `Ctrl+Shift+S` to capture | 按 `Ctrl+Shift+S` 截图 |
+| 4 | Press `Ctrl+Shift+S` to capture, `Ctrl+Shift+G` to record | 按 `Ctrl+Shift+S` 截图、`Ctrl+Shift+G` 录制动图 |
 
 > **自行出包**（维护者）：`.\Publish.ps1 -Tag` 出包并打 `v<版本>` 标签，再
 > `.\scripts\pack.ps1 -PackageDir publish\TrueToneCap-v<版本>` 压缩。
@@ -58,7 +58,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | 🔳 **QR recognition** | Multi-code local decode (ZXing.Net) · plain-text display with control-char/bidi escaping · open action whitelisted to http/https and only on an explicit click — dangerous schemes (file:/ms-msdt:/…) are red-flagged and never executed | 多码本机解码（ZXing.Net）· 明文展示，控制字符/双向符转义可见 · 仅 http/https 且显式点击才允许"打开链接"，危险协议（file:/ms-msdt:/…）红牌展示且永不执行 |
 | 🌐 **Translate** | Custom LLM → Youdao official API → free public endpoints (Edge / Bing / MyMemory / Google — **on by default**, opt-out in Settings) | 自定义 LLM → 有道官方开放平台 → 免费公共端点（Edge / 必应 / MyMemory / Google——**默认启用**，设置里可关闭） |
 | ⌨️ **Hotkeys** | Recordable · tray minimize · autostart | 可录制 · 托盘最小化 · 开机启动 |
-| 🧩 **VS-Cap mode** (opt-in) | Optional Qt sidecar editor: selection annotation, unified undo, always-on-top pinning, clipboard-pin hotkey | 可选 Qt 侧车编辑器：选区标注、统一撤销、置顶贴图、剪贴板贴图热键 |
+| 🎬 **Animated capture** | Ctrl+Shift+G recording → WebP / GIF / APNG / MP4 (ffmpeg) | Ctrl+Shift+G 动图录制 → WebP / GIF / APNG / MP4（ffmpeg） |
 
 ---
 
@@ -114,7 +114,7 @@ dotnet run --project src\TrueToneCap.App -c Release
 ### 测试 / Tests
 
 ```powershell
-dotnet run --project src\TrueToneCap.Test -- --all   # 全部 8 个套件
+dotnet run --project src\TrueToneCap.Test -- --all   # 全部 9 个套件
 dotnet run --project src\TrueToneCap.Test -- --unit-tests   # 单套件示例
 ```
 
@@ -154,7 +154,7 @@ dotnet run --project src\TrueToneCap.Test -- --unit-tests   # 单套件示例
 | 钩子 | 做什么 | 耗时（2026-09-27 本机实测，Debug） |
 |------|--------|------|
 | `pre-commit` | 只构建（`verify.ps1 -BuildOnly`），挡"编译不过" | 增量 9.6 s / `--no-incremental` 21.2 s |
-| `pre-push` | 构建 + `[1.6/2]` 发布门禁回归 + `[1.7/2]` 外部判据 + `[1.8/2]` 色彩管线 + `[1.9/2]` 宿主新鲜度 + 7 个 headless 套件，挡"测不过" | 105 s（全绿、一个跳过开关都不用） |
+| `pre-push` | 构建 + `[1.6/2]` 发布门禁回归 + `[1.7/2]` 外部判据 + `[1.8/2]` 色彩管线 + `[1.9/2]` 宿主新鲜度 + 8 个 headless 套件，挡"测不过" | 105 s（全绿、一个跳过开关都不用） |
 
 分开放是有意的：把 100 多秒压在每次 commit 上，实际结果是人人都加 `--no-verify`，
 钩子整体失效反而更糟。临时跳过用 `git commit --no-verify` / `git push --no-verify`。
@@ -169,7 +169,7 @@ CI 见 `.github/workflows/ci.yml`，默认面向 self-hosted Windows 运行器
 
 ```powershell
 .\scripts\verify.ps1                   # ① 一键校验（日常提交前用）
-.\scripts\verify.ps1 -IncludeDesktop   #    追加需桌面会话的 --usability-tests 与 --wgc-avif-tests
+.\scripts\verify.ps1 -IncludeDesktop   #    追加需桌面会话的 --wgc-avif-tests
 .\scripts\verify.ps1 -BuildOnly        #    只构建不跑测试（约 27s）
 .\scripts\verify.ps1 -SkipPublishGates #    跳过 [1.6/2] 发布门禁回归
 ```
@@ -188,7 +188,7 @@ CI 见 `.github/workflows/ci.yml`，默认面向 self-hosted Windows 运行器
 | `[1.7/2]` | 外部判据 12 条 | `scripts/precision/*.py` 与探针；`-SkipPrecision` 可跳 |
 | `[1.8/2]` | 色彩管线判据 | 3 条 + `--avif-hdr-depth`，**没有跳过开关** |
 | `[1.9/2]` | 宿主新鲜度 | Tools 宿主早于最新源码 ⇒ **本轮读数作废**（增量构建会跳过没动的宿主） |
-| `[2/2]` | 8 个门禁套件 | `-IncludeDesktop` 追加桌面会话套件（需真实桌面 + GPU）；失败即退出 |
+| `[2/2]` | 8 个 headless 门禁套件 + `-IncludeDesktop` 的 WGC 套件；失败即退出 |
 
 > ⚠ `[1.7/2]` / `[1.8/2]` 在探测不到 `python` / `ffprobe` / `cjxl` 时是**逐条打 SKIP 并继续** ——
 > SKIP 的含义是"这一轮没判"，不是"判了且通过"。看结果要数判据条数，不能只看 exit 0。
@@ -198,12 +198,12 @@ CI 见 `.github/workflows/ci.yml`，默认面向 self-hosted Windows 运行器
 
 ```powershell
 .\Publish.ps1                          # ② 版本号自动取自 Directory.Build.props
-.\Publish.ps1 -Version v0.3.6-beta     # 显式指定版本
+.\Publish.ps1 -Version 0.3.11     # 显式指定版本
 .\Publish.ps1 -Tag                     #    出包同时打 v<版本> 附注标签（一条提交 = 一个版本）
 .\Publish.ps1 -NoReadyToRun            # 禁用 ReadyToRun（体积更小）
 .\PublishLogViewer.ps1                 # 单独发布日志查看器（可选工具）
 
-.\scripts\pack.ps1 -PackageDir publish\TrueToneCap-v0.3.6-beta   # ③ 压缩 + 压缩包哈希入库
+.\scripts\pack.ps1 -PackageDir publish\TrueToneCap-v0.3.11   # ③ 压缩 + 压缩包哈希入库
 ```
 
 > ⚠ 出包两条硬规矩（都是踩出来的）：`Publish.ps1 -OutputDir` 会对目标目录
@@ -222,7 +222,7 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 冒烟也可对任意已有产物单独执行：
 
 ```powershell
-.\scripts\verify-package.ps1 -PackageDir publish\TrueToneCap-v0.3.6-beta -ExpectedVersion 0.3.6-beta
+.\scripts\verify-package.ps1 -PackageDir publish\TrueToneCap-v0.3.11 -ExpectedVersion 0.3.11
 ```
 
 > ⚠️ 发布前请退出正在运行的 TrueToneCap。如确需强制终止进程请加 `-Force`
@@ -245,7 +245,43 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
   富文本文字（字体/字号/加粗/斜体 + 再编辑/拖动）、统一撤销栈、置顶贴图窗已并入主程序；
   Qt 侧车、`BuildVSCap.ps1` 与「VS-Cap 模式」开关已从产品移除（源码在 git 历史里）。
 
-### v0.3.6-beta
+### v0.3.11（2026-11-04 上架 Microsoft Store）
+
+- **JPEG 增益图恒写 ISO 21496-1**（最新国际标准），元数据不做用户抉择；只认老 XMP 的查看器
+  会把这类图当普通 SDR 显示——这是"单一标准"的明确取舍。
+- **AVIF 新增「HDR 承载方式」**：传统 PQ（默认，硬件加速支持）或增益图（SDR 底图 + ISO 增益层，
+  10-bit 底图，只走软件编码）。
+- **AVIF 默认 4:4:4 + libaom**：截图以文字/UI 为主，4:2:0 的彩色文字边缘劣化实测明显；
+  自动档在 4:4:4 下会被静默降回 4:2:0，故默认编码器同步改为 libaom。
+- **增益图底图恒 4:4:4**（与 JPEG 普通照片档的 4:2:0 分家）：底图会被查看器乘增益放大还原，
+  色度精度优先于体积；开启增益图时色度下拉禁用并说明原因。
+- **双屏/多屏跟随**：选区色彩按选区实际覆盖的屏判定（跨屏取最弱），提示气泡落在被截的屏。
+- **动图录制**：Ctrl+Shift+G，WebP / GIF / APNG / MP4（ffmpeg 可选手动路径）。
+- **上架 Microsoft Store**（自包含 MSIX + 真图标），捕获启动链路优化（多屏拼接 ~660ms）。
+
+### v0.3.10-beta（2026-11-02）
+
+- **Ultra HDR 增益图不再被 ffmpeg 系工具拒读**（增益图比值的分母收紧，容器声明与像素一致）。
+- 标注工具条的第二行真正可见（颜色格 / 马赛克方式 / 画笔粗细滑条 / 字体字号下拉）；
+  文字标注支持富文本（字体/字号/加粗/斜体）与就地再编辑、拖动。
+- **性能**：选区预览首帧不再等图集（首帧快约一半）、启动快约 0.5s、SDR 整屏回读省掉、
+  10-bit AVIF 压缩强度档位真的生效、OCR 快约两成。
+- VS-Cap 的能力全部并入主程序（侧车归档）；翻译免费档开箱可用。
+
+### v0.3.9-beta（2026-10-21）
+
+- **修复"点识字/翻译整个软件无声消失"**（每次必崩 → 正常出预览窗，失败也有可读错误）。
+- 外接屏的色域判定不再读错屏（按 GDI 设备名落屏，多屏不再张冠李戴）。
+- **上架铺路**：MSIX 打包、打包形态的开机自启（StartupTask）、设置与日志按包形态落
+  `%LOCALAPPDATA%`、隐私政策与安全披露（商店政策 10.5.1 合规）、真机安装验证轮。
+
+### v0.3.7-beta（2026-09-28 ~ 10-06）
+
+- **HDR 降级不再静默**：多屏拼接放弃 HDR 这类句子提到默认日志档，用户能看到"为什么这张是 SDR"。
+- 修复三个"用户能直接撞见"的缺陷：开机后输出格式被抹回默认、dev 构建会删掉用户的开机自启、
+  以及另两个构造期状态串写缺陷。
+
+### v0.3.6-beta（2026-09-27）
 
 **新增能力**
 
@@ -259,11 +295,10 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
   老配置迁移表与下拉匹配的键），名字现在只有 Core 一个来源。
 - **AdobeRGB 目标一律收口进 Rec.2020**：不是加一条映射，而是消掉三份互相矛盾的映射（界面侧、HDR 路、
   JPEG XL 的 SDR 路原先各说各话）。DisplayP3 / DCI-P3 **不受影响**，它们各有忠实出路（cICP 12、P3 的 ICC）。
-- **AVIF 的编码器选择器回来了**：自动 / 系统 MFT(QSV) / libaom / SVT-AV1 / NVENC 这一档在 0.3.5 的
-  发布提交里被误删了"展开卡片"那一行 ⇒ 整张选项卡永不显示（构建、日志、测试全都不响）。
-- **JPEG XL 的 HDR 声明不再自相矛盾**：目标为 P3 时旧写法递的是【SDR 曲线】的 ICC，而 ICC 在 cjxl 里
-  压过 color fields ⇒ 产物读回 `Transfer=sRGB` 却仍写 `intensity_target=1000`（PQ 被按 SDR 曲线解释）。
-  现在改递带 PQ 曲线的那份 ICC（与 HDR TIFF 同一函数）⇒ 读回 P3 原色 + PQ，像素一字未动。
+- **AVIF 的编码器选择器回来了**：自动 / 系统 MFT(QSV) / libaom / SVT-AV1 / NVENC 一档
+  五选一，与色度、位深的能力协商联动（同一张卡上能选到的组合随编码器能力变化并显式提示）。
+- **JPEG XL 的 HDR 声明正确**：目标为 P3 时产物读回 P3 原色 + PQ，不再出现"ICC 的 SDR 曲线
+  压过 color fields、PQ 被按 SDR 曲线解释"的自相矛盾声明（根因与取证见台账 §78）。
 - **BMP 不再被列为支持的格式**：界面下拉里本来就没有它，Core 那个无人调用的编码器已删。
 - **英文界面收口为一条机制**：XAML 写死的中文 = 翻译表键 + 一张显式声明的扫描面 + 每个窗口挂的钩子，
   五个副窗口与按钮 ToolTip 全进范围；扫描面之外出现中文控件**门禁直接报红**，而不是不翻就算了。
@@ -288,8 +323,8 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 - **增益图并入 JPEG 那一档**（结构变化）：格式表少一档、老设置里的格式号做重映射并记日志。
 - **AVIF 可选编码器与位深**：libaom + HDR 从"恒 10-bit"改成"下限 10 + 上限按编码器"（可到 12）。
 - **设置只认同目录一份、改哪条即时落盘**；存不下去时记一条日志并按默认值跑，不再悄悄降级到
-  `%LOCALAPPDATA%`（设置一旦有两个答案，两边内容可以完全不同）。那道对老文件从未触发过的默认值
-  交还门现在真的会触发（症状曾是：上一版遗留的 `QualityAvif=63` 原样上界面）。
+  `%LOCALAPPDATA%`（设置一旦有两个答案，两边内容可以完全不同）。历史遗留的"默认值交还门"
+  从此对老文件真的会触发。
 - **降级都会告知，并按消息内容去重**：HDR + PNG 至少升到 10-bit、HDR + TIFF 恒 16-bit、非 HDR 通道的
   格式开关落空都会出一条提示；此前一个进程只弹第一次，之后**所有其他种类**的降级永久无声。
 
@@ -318,31 +353,20 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
   （韩文整页被误认成汉字即属此类）、主引擎超时、主引擎抛异常 —— 兜底自带一份独立的时间预算，
   不与主引擎共用那份已经过期的；兜底成功会在结果上标 `FallbackFrom` 并落一条 Warn 级日志。
   单模型统一字典不随语言切换：中文/英文最准，日文需字高 ≥24px，韩文实测 0%（字典不含谚文）。
-  长行拆分与置信度回退。翻译档默认**不需要任何密钥就能用**：默认走四条免费公共端点，
-  顺序按本机实测延迟排（Edge 内置口 → 必应网页版 → MyMemory 匿名档 → Google，
-  2026-10-23 国内实测依次 0.47–0.58 s / 1.06–1.20 s / 0.81–1.41 s / 超时）。
-  填了有道官方凭据（用户自备 AppID/密钥；注册赠 50 元体验金，常见语种 48 元/百万字符 ≈ 104 万字符）
-  或切到 LLM 档，它们排在免费端点之前。
-  2026-09-21 与 2026-10-23 两轮取证（脚本 `scripts/probes/youdao_free_endpoint_probe.py`、
-  `baidu_free_endpoint_probe.py`、`bing_free_endpoint_probe.py`、
-  `edge_mymemory_free_endpoint_probe.py`）分三档说：
-  **免钱不免密**（有道/百度/腾讯/阿里的官方 API 都有免费额度，但必须注册拿 key，国内延迟 86–203 ms，
-  比免费端点快一个量级）；**免密只到词级**（有道 `jsonapi`、百度 `sug` 给的是词典释义与网页例句节选，
-  整句一律零载荷）；**免密整句**（上面那四条免费端点 + 历史上免密、今天已关的搜狗/腾讯网页口，
-  两者都回 405；Yandex v1 已 410 下线、DeepL 的 `jsonapi` 口已 404）。
-  四条免费端点各有硬限制，界面上那条勾选旁边逐条写明：Edge 免凭据但要有个非空 User-Agent
-  （实测 `curl/8.9.0` 也算，它只判头存在、不解析浏览器版本）、必应要先抓页面凭据且约 1 小时过期、
-  MyMemory 单条 500 **字符**且匿名档 5000 字符每自然日（官方 usagelimits 页原文）。
-  ⇒ 这一条是 **opt-out**：不想把识别到的文字发给第三方就取消勾选，取消后这几条连请求都不会发；
-  取消后要用翻译，得填官方凭据或切 LLM 档。
+  长行拆分与置信度回退。
+  翻译档默认**不需要任何密钥就能用**：默认走四条免费公共端点
+  （Edge 内置口 → 必应网页版 → MyMemory 匿名档 → Google），
+  每条的硬限制写在设置界面的勾选旁；填了有道官方凭据（用户自备）或切到 LLM 档，它们排在免费端点之前。
   翻译失败时状态栏会给出「哪条链、什么原因」（如 `有道 errorCode 108：AppID 不存在或输错`），不再只说"失败 N 行"。
+  > 端点选型与关闭情况的取证过程（候选清单、实测延迟、各服务限制、定价）见
+  > `docs/ledger/handoff-avif-10bit-wide-gamut-sdr-2026-09-17.md` §78 —— 本文档只留结论。
 
 
 **工程规范**
 
 - **可复现构建**：`global.json` 钉住 .NET SDK；依赖版本集中在 `Directory.Packages.props`（CPM）
   并强制提交 `packages.lock.json`；公共属性集中在 `Directory.Build.props`，版本号只写一处。
-- **质量门禁**：`scripts/verify.ps1` 默认跑 7 个套件（`-IncludeDesktop` 追加第 8 个 WGC），外加
+- **质量门禁**：`scripts/verify.ps1` 默认跑 8 个 headless 套件（`-IncludeDesktop` 追加第 9 个 WGC），外加
   `[1.7/2]` 外部判据 12 条（`scripts/precision/` 与 `scripts/probes/`）、`[1.8/2]` 色彩管线判据、
   `[1.9/2]` 宿主新鲜度；判据一律用**外部实现读回**
   （ffprobe / ffmpeg / Pillow / avifdec / 浏览器），不用仓库自己的第二份解析器自证。
