@@ -247,3 +247,9 @@ tests/manual/safety/*.patch
 # （见 docs/pipeline-and-usability-review-2026-09-27.md :1302 与 :1458）。副本在仓里，检索就永不安生。
 # ⚠ 这条排除的是目录本身 ⇒ 将来要纳入 safety/ 下某个子目录，得先改这条再反选。
 tests/manual/safety/*/
+
+# ── 外部工具残留（2026-11-06 清理轮发现）──
+# `.arts/settings.json` 内容是 {"clawMode.mode":"claw"}，全仓代码零引用（不是本产品的产物，
+# 是别的 claw 类工具在仓根留下的），却因为没被忽略而一直挂在 git status 里。
+# 这条把它挡在外面；真需要纳入本仓的 .arts 内容时应先删本行再反选子项。
+.arts/
