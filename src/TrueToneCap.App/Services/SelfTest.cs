@@ -1340,7 +1340,9 @@ public static class SelfTest
         SettingsService.Normalize(oob);
         Expect("越界", "QualityPng", "50", F(oob.QualityPng), "100.00");
         Expect("越界", "QualityGainMap", "99", F(oob.QualityGainMap), "1.00");
-        Expect("越界", "QualityJpegLi", "0.1", F(oob.QualityJpegLi), "1.00");
+        // 2026-11-06（用户拍板）：JPEG LI 质量默认 1.0→0.5 ⇒ 越界回落期望随之（0.1 低于区间下界 0.5）；
+        // GainMap/JpegXl 两格保持 1.00 —— 遗留字段与 JPEG XL 不在本次拍板范围，默认没动。
+        Expect("越界", "QualityJpegLi", "0.1", F(oob.QualityJpegLi), "0.50");
         Expect("越界", "QualityJpegXl", "9", F(oob.QualityJpegXl), "1.00");
         // 这条是整张表最容易读反的一格：CRF 区间是 0–63，越界**不钳到 63**，而是交还默认 20
         //（2026-10-27 用户口径：默认 20 = 视觉无损档上沿；旧默认 15 已作废）
