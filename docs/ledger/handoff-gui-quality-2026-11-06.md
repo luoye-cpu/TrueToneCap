@@ -181,3 +181,48 @@ dotnet run --project src\TrueToneCap.Test -- --color-tests    # 290
 
 先做 **§3 第 1 步**（用户调一个非默认值 + 看两行日志），它是判断"接线断"还是"编码器错"的分水岭；
 在拿到这个读数之前，**不要改代码** —— 现有证据只支持"可疑点 A"的假设，尚未坐实。
+---
+
+## 7. 2026-11-06 深夜更正（用户拍板，口径执行员执行；本节只追加，§0-§6 历史正文不改，冲突处以本节为准）
+
+### 7.1 JPEG LI 默认口径变更（色度 420→444、质量 d 1.0→0.5）
+
+- **色度默认 420 → 444**：原口径"JPEG LI 还是默认 420"（§2.2 可疑点 D 与管线注释引用的那条"已拍板"）**作废**。
+- **质量默认 1.0 → 0.5**（butteraugli distance，视觉无损最稳档）：原"d=1.0 即视觉无损默认档"的取值依据对截图内容不成立。
+- 物证：`docs\ledger\quality-chain-evidence-2026-11-06.md` §JPEG LI —— 420 色度下 d=1.0 仍有**重度块效应（1.73/1.77）**+ **色度高频损失 93%**。这两条正是拍板动机。
+- 已同步的全部联动点（文件:行号，改后坐标）：
+  - `src\TrueToneCap.App\Models\AppSettingsData.cs:137`：`QualityJpegLi = 0.5`（取值依据注释块 138-149 重写）；
+    `:352`：`ChromaJpegLi = "444"`（口径注释 339-351，含"三处同源"纪律与 GAINMAP 分家声明）。
+  - `src\TrueToneCap.Core\Encoding\FormatEncoders.cs:119`：`JpegLiEncoder.GetQualityRange()` def **0.5f**
+    （与字段默认成对，`Test_Settings_QualityDefaultsSingleSource` 对撞钉住）——UI 滑块区间回落档（MainWindow.xaml.cs:876-878 的 `def`）与初值都从这里动态来，无硬编码残留。
+  - `src\TrueToneCap.App\MainWindow.xaml:161`：`ChromaJpegLiCbo` 的 `IsSelected` 从 420 项移到 **444 项**。
+  - `src\TrueToneCap.App\MainWindow.Settings.cs:423`：SaveSettings 兜底 `?? "444"`（`Test_Settings_ComboFallbacksMatchDefaults` 强制兜底↔默认一致）。
+  - `src\TrueToneCap.App\Services\SettingsService.cs:773`：JPEG LI 非法色度回落 `FixChroma(…, fallback: "444")`（Normalize 路径；:785-788 注释同步）。
+  - `src\TrueToneCap.App\Services\SelfTest.cs:1364`：越界色度回落期望 420→**444**；`:1511`：GAINMAP_MIGRATION 夹具换用
+    2026-09-24 起差集序列化窗口的真实老文件形态（缺键=当时没动过），"搬 GainMap 侧偏好"的判据路径保留。
+  - `src\TrueToneCap.Core\Encoding\JpegLiNative.cs:114-116` / `CapturePipelineService.cs:256-260` / `SelfTest.cs:318-325`：过期口径注释同步（代码零改动）。
+  - `src\TrueToneCap.Test\CorePipelineTests.cs`：`Test_GainMap_ChromaIsRealSetting` 两断言改 444（:11159 / :11167）；同测试与其余 QualityChain 判据注释同步（:10137 / :10258 / :11085-11093 / :11113-11121）。
+- **JPEG_GAINMAP 共用关系结论**：质量侧**共用** `QualityJpegLi`（`GetQuality(JPEG_GAINMAP)` 同格）⇒ 默认 0.5 对增益图态一次改动双生效；色度侧**不共用**（管线对 JPEG_GAINMAP 硬编码 "444"，CapturePipelineService.cs:266，2026-11-04 分家口径不变）⇒ 色度改动只落在 JPEG LI 普通档，`ChromaGainMap`/`QualityGainMap` 两个遗留字段刻意保持旧默认（迁移拿"是否等于默认"判用户改没改过，漂了会误搬）。
+- **设置迁移影响**（迁移逻辑零改动）：差集序列化下，现有用户文件缺键 = 新默认（0.5/444）自动生效，正是本次拍板意图；显式保存过非默认值的用户不受影响。已知近似：`MigrateGainMapMerge` 用**当前**默认（`d.QualityJpegLi`/`d.ChromaJpegLi`）近似"当时默认"，对 2026-09-24 前整份写回、钉着旧值 1.0/420 的老文件会把"没动过"误判成"JPEG LI 侧改过"⇒ 不搬 GainMap 侧偏好（人群极小：需 2026-09-26 上线后从未再保存过；自检夹具已换差集窗口形态保留"搬"路径判据）。
+- **验证**：`dotnet run --project src\TrueToneCap.Test -- --unit-tests --no-incremental` ⇒ **2043 通过 / 0 失败 / 2 跳过**，与基线（2043/2）一致，不红。
+
+### 7.2 "假 HDR"判定撤回
+
+- 此前按"PQ 538 ↔ 120nit"读数怀疑产物 HDR 标注异常的判定**撤回**：该换算与用户的 SDR 白设定自洽（SDR 白不是标称 80nit 时，UI/管线按系统白点换算，两个读数的比值正是该设定的产物），不构成"假 HDR"。
+- clli **417nit 是上界声明**（MaxCLL 的"不超过"语义），不是实测亮度异常，不能作为"假 HDR"证据。
+- 本档 **§2.2 可疑点 D 的强表述一并撤回**："那是已拍板的产品口径、不是缺陷"不再成立 —— 420 的观感危害是真的（物证同 7.1），且口径已按 7.1 更正。
+- 保留为**待查线索**（本轮不展开）：**PNG 与 AVIF 两路 HDR 处理不一致**。
+### 7.3 PNG/AVIF 两路 HDR 处理不一致 —— 用户裁决：设计而非缺陷（2026-11-06 深夜，遗留项②关闭）
+
+- 物证回顾：PNG 路径日志称 PQ 10-bit、实产 8-bit SDR（cICP transfer=13，三重证据一致）；AVIF 路径对同一 HDR 源保留 PQ 10-bit。
+- 用户裁决：**两条路采用不同的输出路线是设计口径**——PNG 走 tone-map 到 SDR 的路线，AVIF 保留 PQ —— 不是缺陷，不做对齐改造。
+- 因此 7.2 末尾保留的"待查线索"就此关闭；AVIF colr box 19 字节非标写法（低危观察项）维持记录不动。
+
+### 7.4 遗留项③（商店包体积实测 / OCR 模型按需下载）—— 用户裁决：不追查（2026-11-06 深夜，遗留项③关闭）
+
+- §4 待办 #3（Publish.ps1 -Msix -Trim 包体积实测）与 #4（OCR 模型按需下载）维持待办状态，本轮明确不投入。
+
+### 7.5 本轮处置收束
+
+- 全部改动分两笔提交入库（fix+口径 / docs 台账），连同上一轮交接提交（f529306）一并 push；`artifacts\quality-probe\` 探针按 `artifacts/` 既有忽略规则留在本机不入库；`.resultverify/` 验证流程落盘加入忽略。
+- 滑块接线最终结论（承接 `quality-slider-wiring-2026-11-06.md`）：接线 7 环闭合，"失效"体验根源为旧版单字段质量无迁移；新版滑块拖动→字段→编码链路完整，且新默认（0.5/444）即为本轮拍板口径。
