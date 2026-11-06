@@ -315,13 +315,13 @@ public static class SelfTest
                     $"全局·增益档反向: 设置 GainMapMode=\"{flipped.GainMapMode}\" 落点={probeEsFlipped.GainMapMode}" +
                     "（正向随每条格式探针判，这一格补的是反方向）");
 
-            // ═══ 色度落点分家（2026-11-04 用户口径"JPEG LI 还是默认 420，其他默认 444"）═══
+            // ═══ 色度落点分家（2026-11-04 用户口径分家；2026-11-06 用户拍板 JPEG LI 默认也改 444）═══
             // 为什么放全局段而不是逐屏循环：实测色度落点与屏无关（窄色域屏与 HDR 屏同为 420/444），
             // 逐屏跑只是把同一条断言印四遍。
             // 用【默认设置那份】判 ⇒ 与本机用户实际色度无关；而且这是"真调管线"的活体证据，
             // 比源码串比对强：
-            //   · 增益图底图必须恒 444（管线硬编码）。改回 s.ChromaJpegLi ⇒ 这里得到 420 ⇒ 红。
-            //   · JPEG LI 必须跟随设置字段。把它也硬编码成 444 ⇒ 444 ≠ 默认 420 ⇒ 红。
+            //   · 增益图底图必须恒 444（管线硬编码）。改回 s.ChromaJpegLi ⇒ 用户选 420 时这里跟着掉 ⇒ 红。
+            //   · JPEG LI 必须跟随设置字段。把它也硬编码成 420 ⇒ 420 ≠ 默认 444（2026-11-06 起）⇒ 红。
             // 两条一起才构成"分家"的证据 —— 只留一条的话，"两边都硬编码同一个值"也能过。
             var esLi = probePipeline.BuildEncodingSettings(
                 OutputFormat.JPEG_LI, false, null, dflt, null, state.acm, null);
@@ -1358,9 +1358,10 @@ public static class SelfTest
         Expect("越界", "BitDepthGainMap", "12", oob.BitDepthGainMap.ToString(), "8");
         // ⚠ 2026-11-04：AVIF 与增益图的默认色度不再相同 ⇒ 非法值各回各家
         //   AVIF 默认 444（用户口径，截图以文字/UI 为主）；增益图仍 420（Ultra HDR 常规形状）。
+        //   2026-11-06（用户拍板）：JPEG LI 默认 420→444 ⇒ 回落随之（与字段默认同源）。
         Expect("越界", "ChromaAvif", "999", oob.ChromaAvif, "444");
         Expect("越界", "ChromaJpegXl", "422", oob.ChromaJpegXl, "444");  // JXL 值域不含 422 ⇒ 走自己的表
-        Expect("越界", "ChromaJpegLi", "42", oob.ChromaJpegLi, "420");
+        Expect("越界", "ChromaJpegLi", "42", oob.ChromaJpegLi, "444");
         Expect("越界", "ChromaGainMap", "0", oob.ChromaGainMap, "420");
         Expect("越界", "ThemeMode", "neon", oob.ThemeMode, "Default");
         Expect("越界", "Language", "fr", oob.Language, "zh");
@@ -1490,8 +1491,11 @@ public static class SelfTest
     /// <para>为什么必须行为级跑：这条改动的风险全在<b>裸索引</b>上 —— 旧表 1=GainMap、新表 1=JPEG LI，
     /// 而越界钳制对两者都不触发。重映射表本身在 Core（门禁已逐格对撞），但
     /// "表 + 反序列化 + 参数搬格 + 盖章"这条链只有 App 进程能整条跑一遍。</para>
-    /// <para>夹具取本机真实形态：一份 2026-09-25 之前的文件（无 <c>GainMapMerged</c> 键、
-    /// <c>FormatIndex:1</c>、GainMap 侧质量被用户改成 2.5 而 JPEG LI 侧仍是默认）。
+    /// <para>夹具取真实形态：一份 2026-09-24 起差集序列化窗口（并入前两天）的文件
+    /// （无 <c>GainMapMerged</c> 键、<c>FormatIndex:1</c>、GainMap 侧质量被用户改成 2.5，
+    /// JPEG LI 侧没动过 ⇒ 每格式键缺、反序列化落当前默认 —— 2026-11-06 默认改 0.5/444 后
+    /// 依旧表达"没动过"；整份写回时代（&lt;09-24）钉旧默认 1.0/420 的文件会被
+    /// "toCur != 当前默认"误判成两侧都改过 ⇒ 不搬，属迁移对默认漂移的固有近似，见台账）。
     /// 反例两格：已盖章的文件不许再动；两侧都改过时必须保留 JPEG LI 侧而不是静默覆盖。</para>
     /// </summary>
     private static (string Note, string Status, string Detail, long Ms, string JsonExtra)
@@ -1504,7 +1508,7 @@ public static class SelfTest
 
         // ① 老 GainMap 用户：格式号 1 在旧表里就是增益图
         var a = JsonSerializer.Deserialize(
-            """{"FormatIndex":1,"QualityGainMap":2.5,"QualityJpegLi":1.0,"ChromaGainMap":"444","ChromaJpegLi":"420"}""",
+            """{"FormatIndex":1,"QualityGainMap":2.5,"ChromaGainMap":"444"}""",
             ctx.AppSettingsData)!;
         bool fired = SettingsService.MigrateGainMapMerge(a);
         bool gmUser = fired && a.FormatIndex == 1 && a.GainMapEnabled

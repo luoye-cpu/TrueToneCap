@@ -768,7 +768,9 @@ public sealed class SettingsService
         //   TIFF 是 RGB 无损（无子采样概念），二者界面上也都没有下拉。理由全文见 AppSettingsData。
         //   ChromaGainMap 当天曾一并删除，随后用户定为"默认 420、可手动 444"⇒ 主路径改为真读它，
         //   字段随之恢复并进入本表（现在下面四项都是"编码器确实会读"的）。
-        s.ChromaJpegLi  = FixChroma(s.ChromaJpegLi);
+        // 2026-11-06（用户拍板）：JPEG LI 色度默认 420→444 ⇒ 非法值回落跟着字段默认走，
+        //   与下面 AVIF/GainMap 的"各回各家"同一条纪律（三个调用点现在都显式传 fallback）。
+        s.ChromaJpegLi  = FixChroma(s.ChromaJpegLi, fallback: "444");
         // JPEG XL 单独走自己的值域（NativeJxlEncoder.ChromaOptions）：共享白名单放行 422，
         // 而 JXL 下拉没有 422 项 ⇒ 盘上一旦有 422，按 Tag 选中会落空、下拉显示空白。
         s.ChromaJpegXl  = TrueToneCap.Core.Encoding.NativeJxlEncoder.NormalizeChroma(s.ChromaJpegXl);
@@ -780,8 +782,9 @@ public sealed class SettingsService
         s.ChromaGainMap = FixChroma(s.ChromaGainMap, fallback: "420");
     }
 
-    // 非法值回落：默认值按【格式】给（见上面两处调用的注释），不再统一 420。
-    // <para>参数有默认值是为了让 JPEG LI 那条老调用不必改动：它的默认仍是 420。</para>
+    // 非法值回落：默认值按【格式】给（见上面三处调用的注释），不再统一 420。
+    // <para>2026-11-06 起 JPEG LI 也显式传 444（随字段默认 420→444），三个调用点均已显式；
+    // 形参默认值 "420" 已无调用方依赖，保留仅为不惊动签名（GainMap 迁移语义仍按 420 判）。</para>
     private static string FixChroma(string? v, string fallback = "420") =>
         v is "444" or "422" or "420" ? v : fallback;
 

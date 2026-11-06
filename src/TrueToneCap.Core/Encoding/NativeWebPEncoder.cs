@@ -6,6 +6,7 @@
 // 回退: cwebp.exe 不可用时自动回退到 PNG
 
 using System.IO;
+using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Services;
 
 namespace TrueToneCap.Core.Encoding;
@@ -84,6 +85,11 @@ public static class NativeWebPEncoder
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+
+            // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
+            // 之前组装完参数不落任何日志，"命令行数字必须逐字等于日志质量="的排查判据
+            // 对 WebP 无法落地（2026-11-06 质量链路实证报告 §1.4）。
+            CoreLog.Debug("WEBP", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
 
             var result = NativeEncoderGuard.TryExecute("WebP", () =>
             {

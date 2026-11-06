@@ -3238,7 +3238,6 @@ public sealed partial class MainWindow : Window
         OutputFormat Format,
         bool HdrEnabled,
         string ColorSpaceTag,
-        float Quality,
         bool AvifPngSuffix,
         bool JxlPngSuffix,
         // 按下那一刻的整份设置快照：管线要从中读每格式位深/色度/编码器选择，
@@ -3246,6 +3245,12 @@ public sealed partial class MainWindow : Window
         // ⚠ 这里【不再】单列一个从 AvifCodecCbo 解析的 AvifEncoderKind —— 它曾只进日志、
         //   从不参与编码，等于"编码器选择"同时存在两个事实源（控件 / settings.AvifEncoder）。
         //   现已统一由管线从本快照的 Settings.AvifEncoder 解析（§26.4 P1）。
+        // ⚠ 这里【不再】单列质量滑块值（2026-11-06 单一事实源收口）—— 旧字段 Quality 曾被
+        //   BuildEncodingSettings 无条件覆盖进编码设置（"滑块值 = 第二事实源"）。滑块是全局
+        //   单值、随格式换区间，与每格式独立质量字段不同步的时刻（贴图窗 forceFormat
+        //   "保存为 AVIF"但当前格式是 WebP）会把 WebP 区间的滑块值灌进 AVIF 的 CRF ——
+        //   量纲错位。质量的唯一来源 = 管线 GetPerFormatQuality（ui.Settings.GetQuality(format)），
+        //   滑块只经 OnQualityChanged → SetQuality 写每格式字段，不再直接进编码快照。
         AppSettingsData Settings);
 
     /// <summary>
@@ -3358,7 +3363,7 @@ public sealed partial class MainWindow : Window
         // 在这里再兜一次，避免任何没走 UI 那条路径的入口（粘贴/剪贴板另存）漏掉。
         HdrEnabled: (HdrSwitch.IsOn && HdrSwitch.IsEnabled) || CurrentFormat() == OutputFormat.JPEG_GAINMAP,
         ColorSpaceTag: GetSelectedColorSpaceTag(),
-        Quality: (float)QualitySld.Value,
+
         AvifPngSuffix: AvifPngSuffixChk.IsChecked == true,
         JxlPngSuffix: JxlPngSuffixChk.IsChecked == true,
         Settings: _settings.Snapshot());
@@ -3401,7 +3406,17 @@ public sealed partial class MainWindow : Window
         var settings = AppServices.Pipeline.BuildEncodingSettings(
             format, hdrOutput, meta, ui.Settings, ui.ColorSpaceTag, ui.Settings.AcmeDetected, decision);
         // 覆盖 UI 特有的设置（全部取自快照，不读控件）
-        settings.Quality = ui.Quality;
+        // ═══ 2026-11-06 单一事实源收口：质量不再在此覆盖 ═══
+        // 原实现 `settings.Quality = ui.Quality;` 把滑块当前值无条件灌回编码设置（二源覆盖）：
+        // 滑块随格式换区间、每格式质量是独立持久化字段，二者不同步的时刻（贴图窗 forceFormat
+        // "保存为 AVIF"但当前格式是 WebP）就是量纲错位 —— WebP 区间 50-100 灌进 AVIF 的 CRF
+        // 0-63 ⇒ -q 0~20 极差画质；JPEG LI 区间 0.5-3.0 灌进 WebP ⇒ -q 0~3 全糊
+        // （2026-11-06 质量链路实证报告 裁决②/§1.3）。管线 BuildEncodingSettings 已按
+        // ui.Settings.GetQuality(format)（GetPerFormatQuality）取好【本次落盘格式】的每格式
+        // 质量 —— 本方法的 format 实参恒为 ui.Format（forceFormat 已在采集后改写快照的
+        // Format），删掉覆盖即收口：质量唯一来源 = GetQuality 表（与 OnQualityChanged →
+        // SetQuality 同一张键）。常规时刻（滑块与字段同步）行为逐值不变；仅 forceFormat /
+        // 越界回落时刻被修正，且 Pipeline 与 MainWindow 两行质量日志从此恒一致。
         LogService.Info("MainWindow",
             $"BuildEncodingSettings: 质量={settings.Quality:F2} 色域={ui.ColorSpaceTag} AVIF编码器={settings.AvifEncoderKind}");
         settings.AvifPngSuffix = ui.AvifPngSuffix;

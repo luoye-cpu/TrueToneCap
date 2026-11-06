@@ -37,9 +37,13 @@ namespace TrueToneCap.Core.Encoding;
 
 /// <summary>压缩强度三档。作用于 AVIF / JPEG XL / WebP / JPEG LI 的 effort 旋钮，
 /// 以及 PNG / TIFF 的无损 deflate 级别（2026-10-29 起；对这两者它【就是】唯一的旋钮，质量滑块锁死）。
-/// <para>档位名按<b>用户视角的结果</b>命名（体积优先 / 均衡 / 速度优先），而不是按底层参数名 ——
+/// <para>档位名按<b>用户视角的结果</b>命名，而不是按底层参数名 ——
 /// 底层各家的参数名、方向、量纲都不同（avifenc 越小越慢、cjxl 越大越慢、cwebp 越大越慢、
-/// NVENC P 越大越快、cjpegli 是布尔开关），照参数名命名必然误导。</para>
+/// NVENC P 越大越快、cjpegli 是布尔开关），照参数名命名必然误导。
+/// 界面显示名（2026-10-29 用户定名）：两档格式（PNG/TIFF/WebP/JPEG LI）用「均衡 / 快速」，
+/// 三档格式（AVIF/JPEG XL）用「极高 / 均衡 / 快速」⇒ <see cref="Smallest"/> 在两档菜单里
+/// 显示「均衡」（且是默认）、三档菜单里显示「极高」—— 两个菜单里的「均衡」<b>不是</b>
+/// 同一成员，三档菜单的「均衡」是 <see cref="Balanced"/>。</para>
 /// <para>⚠ <b>JPEG LI 是后来加进来的（2026-10-07，用户指出"--xyb 是正收益"）</b>：
 /// 它此前被排除在"压缩强度"之外（理由：它的压缩强度与质量是同一个旋钮）。
 /// 但 <c>--xyb</c> 并非质量旋钮 —— 它换的是色彩空间，实测在当年那批内容与质量上全都更小
@@ -51,7 +55,20 @@ namespace TrueToneCap.Core.Encoding;
 /// JPEG LI 仍只有一个旋钮（质量），不给它第二个入口。</para></summary>
 public enum CompressionEffort
 {
-    /// <summary>体积优先：把压缩参数拉满，编码最慢。</summary>
+    /// <summary><b>压缩力度最大的那一档</b>：各编码器的 effort/deflate 参数拉到最拼、编码最慢、
+    /// 产物体积最小（不承诺逐内容严格最小，实测有反例，见 <see cref="CompressionEffortMap"/>）。
+    /// <para>⚠ <b>它不是"最低质量"</b>：本档只动压缩旋钮，不动任何格式的质量参数 ——
+    /// avifenc/cwebp 的 <c>-q</c>、cjxl/cjpegli 的 <c>-d</c> 质量距离、NVENC 的 RC 全部不变；
+    /// PNG/TIFF 走无损 deflate，解压逐字节相同。把本档误解成"最低质量"并据此调低编码器
+    /// 质量参数，是本文件明令禁止的错误。</para>
+    /// <para>⚠ <b>它同时是两档格式的「均衡」默认档</b>：PNG / TIFF / WebP / JPEG LI 的菜单只有两格，
+    /// 显示名「均衡」的就是本成员（也是 <c>AppSettingsData</c> 的 EffortWebp / EffortJpegLi /
+    /// EffortPng / EffortTiff 默认值）——"均衡"指"菜单里的默认那一格"，<b>不</b>指参数取中点；
+    /// 在 AVIF / JPEG XL 的三档菜单里它显示「极高」，那边默认档是 <see cref="Balanced"/>。</para>
+    /// <para>本档的逐编码器落点（均不改质量旋钮；映射唯一出处 <see cref="CompressionEffortMap"/>）：
+    /// AVIF = <c>-s 0</c> + <c>-a tune=ssim</c>、JPEG XL = <c>-e 7</c>、WebP = <c>-m 6</c>、
+    /// JPEG LI = <b>加</b> <c>--xyb</c>（色彩空间开关，<c>-d</c> 不变）、
+    /// PNG/TIFF = zlib level 9（无损）、NVENC = preset P7。</para></summary>
     Smallest = 0,
 
     /// <summary>均衡（默认）：速度与体积的折中。</summary>
@@ -62,7 +79,9 @@ public enum CompressionEffort
 
     /// <summary>Tag <c>Quick</c>，界面显示「快速」（2026-10-29 用户口径新增）：<b>只比拉满档稍微放宽一点参数</b>的那一档。
     /// <para>为什么要有它：用户给 PNG / TIFF / WebP / JPEG LI 定的菜单是<b>两档</b> ——
-    /// 「均衡」作默认（= Tag <c>Smallest</c> = 参数拉满，<b>名字里的"均衡"指"默认那档"，不指参数在中点</b>）
+    /// 「均衡」作默认（= Tag <c>Smallest</c> = <b>压缩力度最大的那一档</b>，参数拉满；
+    /// <b>名字里的"均衡"指"菜单里的默认那一格"，不指参数在中点，也绝不是"最低质量"
+    /// —— 与 <see cref="Smallest"/> 的 summary 同一口径</b>）
     /// + 一格「快速」（= 本成员）。三档体系里的 <see cref="Balanced"/>
     /// 对无损格式来说放宽的幅度太大（zlib level 6 比 9 快 10 倍但体积涨到 +3.8%、
     /// 平直内容上能涨 163%），不是"稍微"。</para>

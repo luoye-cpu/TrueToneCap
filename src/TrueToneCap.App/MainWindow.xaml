@@ -158,9 +158,9 @@
                                 <TextBlock Text="JPEG 选项" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色度采样" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="ChromaJpegLiCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="444">4:4:4</ComboBoxItem>
+                                        <ComboBoxItem Tag="444" IsSelected="True">4:4:4</ComboBoxItem>
                                         <ComboBoxItem Tag="422">4:2:2</ComboBoxItem>
-                                        <ComboBoxItem Tag="420" IsSelected="True">4:2:0</ComboBoxItem>
+                                        <ComboBoxItem Tag="420">4:2:0</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock x:Name="ChromaJpegLiNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"

@@ -111,10 +111,24 @@ public static class JpegLiNative
         {
             WriteBgraToPpm(bgra, width, height, tmpPpm);
 
-            // cjpegli 的 --distance 接受浮点值，允许范围 [0.0, 25.0]
-            // 重要: 传整数 90 会被解释为 d90.000（超出范围导致错误）
-            // 调用方可能传 quality 值 (0-100)，必须 clamp 到合法范围
+            // cjpegli 的 --distance 参数是 butteraugli distance（浮点，越小画质越好），
+            // 官方允许范围 [0.0, 25.0]；产品档位是 UI 滑块的 0.5-3.0（默认 0.5 —— 2026-11-06
+            // 用户拍板由 1.0 收紧，物证见 quality-chain-evidence §JPEG LI：420 色度下 d=1.0 重度块效应）。
+            // ⚠ 2026-11-06 量纲注释更正：上游（FormatEncoders / JpegGainMapEncoder）传的是
+            //   每格式质量字段 QualityJpegLi —— 量纲即 distance（AppSettingsQuality.GetQuality）。
+            //   旧注释"调用方可能传 quality 值 (0-100)"描述的是滑块覆盖时代（MainWindow
+            //   BuildEncodingSettings 的二源覆盖）的形态，该覆盖已收口删除，不再成立。
+            //   传整数 90 仍会被解释为 d90.000（超出范围导致错误），故保留 Clamp[0,25] 防御；
+            //   钳制发生（输入 <0 或 >25，必然同时超出产品档位 0.5-3.0）必属量纲异常 ⇒
+            //   Warn 留痕：把"静默钳到 25 = 最差画质"（2026-11-06 探针实测：PNG 量纲 100 →
+            //   d25.0000，产物仅为 d0.5 的 1/4.25）变成"留痕钳制"。正常档位不会触发。
             float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
+            if (distance < 0.0f || distance > 25.0f)
+            {
+                CoreLog.Warn("JPEGLI",
+                    $"distance {distance:F4} 超出 cjpegli 合法范围 [0,25]，已钳到 {clampedDist:F4}"
+                    + "（超出产品档位 0.5-3.0 ⇒ 疑似量纲错位，请检查上游质量来源）", LogCategory.Encoding);
+            }
             string distArg = $"{clampedDist:F4}";
             string chromaArg = chromaSubsampling switch
             {
@@ -303,6 +317,12 @@ public static class JpegLiNative
                 fs.Write(gray, 0, gray.Length);
             }
 
+            // 最终防线（2026-11-06 裁决：不加 Warn 留痕）：上游唯一调用链
+            // JpegGainMapEncoder 主路已 Clamp(settings.Quality, 0.0f, 25.0f) 后传入，
+            // 输出域恰好等于这里的 [0,25] ⇒ 本 Clamp 理论不可达，Warn 将是死代码。
+            // 主路 Encode 的调用面宽（FormatEncoders 直链在调用点级无钳制，只靠字段级
+            // Normalize 兜底），那里的 Warn 哨兵有真实价值；灰度路若上游契约真被破坏，
+            // 下方 JPEGLI_GRAY 命令行日志里的 --distance 会显出异常值作间接痕迹。
             float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
             string progArg = forceBaseline ? " --progressive_level 0" : "";
             // 增益图（灰度）同样受益：实测 -p 0 路 --xyb 省 1.5%

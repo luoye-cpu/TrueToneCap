@@ -205,6 +205,14 @@ public static class CorePipelineTests
         // 默认值三处事实源 & HDR 下 Auto 不弹假警报
         Test_Settings_BitDepthOptionsSurviveNormalize();
         Test_Settings_QualityDefaultsSingleSource();
+        // 质量链路回归判据（2026-11-06 交接待办#5）：非默认质量值必须逐字抵达编码器参数
+        // （落点 / 参数换算 / 二源防复活 / 量纲防御，实现见 Test_Settings_QualityDefaultsSingleSource 之后那一段）
+        Test_QualityChain_PerFormatNonDefaultLandsInPipeline();
+        Test_QualityChain_JpegLiDistanceVerbatim();
+        Test_QualityChain_AvifCrfConversionDirection();
+        Test_QualityChain_WebpQualityVerbatim();
+        Test_QualityChain_NoSliderSecondSource();
+        Test_QualityChain_JpegLiDimensionClampWarn();
         Test_Pipeline_HdrAutoNoFalseAlarm();
         Test_Pipeline_EncodeSettingsRequireSnapshot();
         Test_EncoderHonesty_Audit20260919();
@@ -10074,6 +10082,446 @@ public static class CorePipelineTests
         }
     }
 
+    // ═══════════════════════════════════════
+    //  质量链路回归判据（2026-11-06 交接待办#5）
+    //  非默认质量值必须【逐字】抵达编码器参数 —— 2026-11-06 的修复删掉了
+    //  MainWindow BuildEncodingSettings 的滑块二源覆盖（settings.Quality = ui.Quality），
+    //  这组判据把修复后的形态钉住，四条各咬一种退化：
+    //    ① 落点（PerFormatNonDefaultLandsInPipeline）：每格式键表 ↔ 管线唯一写点；
+    //    ② 参数换算（JpegLiDistanceVerbatim / AvifCrfConversionDirection / WebpQualityVerbatim）：
+    //       Quality → 编码器参数的换算值逐字出现、方向不被反转；
+    //    ③ 防复活（NoSliderSecondSource）：滑块二源在快照 record / 采集 / 覆盖点三层都不许回来；
+    //    ④ 量纲防御（JpegLiDimensionClampWarn）：JpegLiNative 主路超范围输入必须"钳制 + Warn"。
+    //  ═══════════════════════════════════════
+
+    /// <summary>挂载 CoreLog 收集 sink —— 行为级取证（命令行 Debug 留痕 / 钳制 Warn）的观察口。
+    /// <para>已有 sink 挂着（别的判据或宿主）时返回 null：不劫持别人的日志出口，
+    /// 调用方据此 Skip 行为级部分（与 Test_CoreLogPrivacyScrub 同一纪律）。
+    /// 挂载会把早期缓冲一次性灌进收集器 ⇒ 调用方在每次被测调用前自行 Clear。</para></summary>
+    static List<(LogLevel Lvl, string Tag, string Msg)>? TryAttachCoreLogSink()
+    {
+        if (CoreLog.HasSink) return null;
+        var caught = new List<(LogLevel, string, string)>();
+        CoreLog.Attach((lvl, cat, tag, msg, file, line, op) => caught.Add((lvl, tag, msg)));
+        return caught;
+    }
+
+    /// <summary>摘除本组判据挂的收集 sink（反射置回无 sink 状态；先例见
+    /// Test_DisplayEnumerator_WhitePointCache 对私有字段的反射访问）。
+    /// <para>必须只在 TryAttachCoreLogSink 返回非 null 且调用方用完之后调用 ——
+    /// 摘除后 CoreLog 回到"消息进早期缓冲"的默认状态，不残留对后续判据的副作用。</para></summary>
+    static void DetachCoreLogSink()
+        => typeof(CoreLog).GetField("s_sink",
+               System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+           ?.SetValue(null, null);
+
+    /// <summary>
+    /// 判据①·落点（每格式穿透）：对 7 格格式逐一，每格式质量字段必须经
+    /// <c>AppSettingsQuality.GetQuality/SetQuality</c> 键表 → 管线
+    /// <c>BuildEncodingSettings</c> 的 <c>EncodingSettings.Quality</c> 逐字落点，
+    /// 中途不允许任何"滑块第二事实源"的改写。
+    /// <para>行为级部分（本工程可引用的 Core 层）：每格非默认测试值落在
+    /// <c>GetQualityRange()</c> 区间内、≠ 默认、量纲刻度逐格钉死 ——
+    /// 测试值本身有判据保护，回归时不会拿默认值自证清白。</para>
+    /// <para>键表段为什么是"钉形态"而不是运行时行为级：AppSettingsData / CapturePipelineService
+    /// 都在 App 层，本测试工程只引用 Core（"Test 引用不到 App，只能钉形态"是本文件既定口径，
+    /// 见 Test_GainMapMerge_Wiring 那组）。运行时穿透由同组三条编码器判据补齐：
+    /// JPEG LI / WebP 真跑收集命令行，AVIF 反射换算函数逐值比对。</para>
+    /// <para>PNG / TIFF 不消费质量（编码器忽略 Quality），但落点断言仍要做：
+    /// 管线照样把字段值写进 EncodingSettings.Quality，"谁消费"是编码器的事，"落没落"是链路的事 ——
+    /// 正是 2026-11-06 实证报告 §1.3 的教训：量纲错位的第一现场在落点，不在消费端。</para>
+    /// </summary>
+    static void Test_QualityChain_PerFormatNonDefaultLandsInPipeline()
+    {
+        // 每格式的量纲刻度与方向敏感非默认值。测试值口径：AVIF 8 而非 20（CRF 越小越好）、
+        // JPEG LI 2.5 而非 0.5（butteraugli 越小越好，2026-11-06 起默认 0.5）、WebP 55 而非 90（q 越大越好）。
+        // PNG/TIFF 的区间退化为固定 (100,100)（QualityIsFixed，无损格式没有"非默认"概念），
+        // Distinct=false ⇒ 不要求 ≠默认，只钉"字段值逐字落进 EncodingSettings.Quality"这条链
+        // —— 它俩不消费质量，正是实证报告 §1.3 的教训：量纲错位的第一现场在落点，不在消费端。
+        var expect = new (OutputFormat F, string Field, float V, QualityScale Scale, bool Distinct)[]
+        {
+            (OutputFormat.PNG,          "QualityPng",    100f, QualityScale.LosslessFixed100,        false),
+            (OutputFormat.JPEG_LI,      "QualityJpegLi", 2.5f, QualityScale.ButteraugliRange,        true),
+            (OutputFormat.JPEG_GAINMAP, "QualityJpegLi", 2.5f, QualityScale.ButteraugliRange,        true),
+            (OutputFormat.JPEG_XL,      "QualityJpegXl", 2.5f, QualityScale.ButteraugliDistanceRange, true),
+            (OutputFormat.AVIF,         "QualityAvif",   8f,   QualityScale.Crf,                     true),
+            (OutputFormat.WebP,         "QualityWebp",   55f,  QualityScale.QualityPercent,          true),
+            (OutputFormat.TIFF,         "QualityTiff",   100f, QualityScale.LosslessFixed,           false),
+        };
+
+        foreach (var (f, _, v, scale, distinct) in expect)
+        {
+            var (min, max, def, got) = EncoderFactory.Create(f).GetQualityRange();
+            Assert($"质量落点: {f} 测试值 {v} 在区间 [{min},{max}] 内"
+                + (distinct ? $"、≠默认 {def}" : $"（固定区间，=默认）") + $"、量纲刻度 {scale}",
+                got == scale && v >= min && v <= max && (!distinct || Math.Abs(v - def) > 1e-4),
+                $"实得 刻度={got} 区间=[{min},{max}] 默认={def} —— 刻度变了=量纲漂移，"
+                + "值出区间/等于默认=测试值失去方向敏感性");
+        }
+
+        var modelPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Models", "AppSettingsData.cs"));
+        var pipePath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"));
+        if (modelPath is null || pipePath is null)
+        { Skip("质量落点键表", "未找到 AppSettingsData / CapturePipelineService"); return; }
+        var model = StripLineComments(ReadSourceNormalized(modelPath));
+        var pipe = StripLineComments(ReadSourceNormalized(pipePath));
+
+        // ① GetQuality 键表：7 格全显式 case（default 死键仅在将来新增枚举值时可达）
+        var getBody = MethodBodyOf(model, "public static double GetQuality(this AppSettingsData s, OutputFormat f)");
+        Assert("质量落点: GetQuality 键表可切出（switch 形态没变）", getBody is not null);
+        if (getBody is not null)
+        {
+            foreach (var (f, field, _, _, _) in expect)
+                Assert($"质量落点: GetQuality({f}) → {field}",
+                    getBody.Contains($"OutputFormat.{f} => s.{field},"),
+                    "键表行丢失 ⇒ 该格质量回落死键或别的字段（AppSettingsData.cs GetQuality）");
+            Assert("质量落点: GetQuality 增益图态共用 JPEG LI 字段（合并口径不变）",
+                getBody.Contains("OutputFormat.JPEG_GAINMAP => s.QualityJpegLi,"));
+            Assert("质量落点: GetQuality 的 default 仍是死键 s.Quality（口径不变）",
+                getBody.Contains("_ => s.Quality,"));
+        }
+
+        // ② SetQuality 键表：与 GetQuality 同一张表（写读同向）
+        var setBody = MethodBodyOf(model, "public static void SetQuality(this AppSettingsData s, OutputFormat f, double value)");
+        Assert("质量落点: SetQuality 键表可切出", setBody is not null);
+        if (setBody is not null)
+        {
+            foreach (var (f, field, _, _, _) in expect)
+                Assert($"质量落点: SetQuality({f}) → {field}",
+                    setBody.Contains($"s.{field} = value")
+                    && setBody.Contains($"case OutputFormat.{f}:"),
+                    "写入键表漂移 ⇒ SetQuality 写的字段 GetQuality 读不到，滑块值静默蒸发");
+            Assert("质量落点: SetQuality 增益图态共用 JPEG LI（两个 case 标签同写一格）",
+                setBody.Contains("case OutputFormat.JPEG_LI:")
+                && setBody.Contains("case OutputFormat.JPEG_GAINMAP: s.QualityJpegLi = value"));
+            Assert("质量落点: SetQuality 的 default 仍是死键（口径不变）",
+                setBody.Contains("default: s.Quality = value"));
+        }
+
+        // ③ 管线唯一写点：EncodingSettings.Quality 只能来自每格式字段
+        Assert("质量落点: 管线 Quality 唯一写点 = GetPerFormatQuality（CapturePipelineService.cs:294）",
+            pipe.Contains("Quality = (float)GetPerFormatQuality(s, format),"));
+        Assert("质量落点: GetPerFormatQuality 是单行委托 s.GetQuality(format)（不另抄一份格式 switch）",
+            pipe.Contains("private static double GetPerFormatQuality(AppSettingsData s, OutputFormat format) =>")
+            && pipe.Contains("s.GetQuality(format);"));
+        Assert("质量落点: 管线内不存在 settings.Quality = 的二次覆盖",
+            !pipe.Contains("settings.Quality ="),
+            "管线里长出了滑块/其他来源的覆盖 ⇒ 落点判据的前提被破坏");
+    }
+
+    /// <summary>
+    /// 判据②·参数换算（JPEG LI，方向敏感）：<c>Quality → --distance</c> 换算必须让传入值
+    /// 【逐字】出现在命令行里，且"越小越好"（butteraugli distance）的方向不被反转。
+    /// <para>产品链：FormatEncoders.cs:158 <c>JpegLiNative.Encode(px, w, h, s.Quality, ...)</c>；
+    /// 换算 = 直传 + Clamp[0,25] + F4 格式化（JpegLiNative.cs:124-131），没有 100-x 之类的方向变换。
+    /// 行为级取证跑两档非默认值（2.5 差端 / 0.5 好端），任何方向反转都会让逐字匹配落空。</para>
+    /// <para>观察口 = 2026-11-06 修复项C 的命令行 Debug 留痕（CoreLog.Debug("JPEGLI", ...)，
+    /// 需要 Diagnose 档）。cjpegli 不在位时 Skip 行为级（仓库范式：先判可用性再 Skip），
+    /// 源码形态钉照常执行 —— 它不需要 exe。</para>
+    /// </summary>
+    static void Test_QualityChain_JpegLiDistanceVerbatim()
+    {
+        // ① 源码形态钉（常绿）：distArg 直接来自 clampedDist，无中间换算、无方向反转
+        var srcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "JpegLiNative.cs"));
+        if (srcPath is null) { Skip("JPEG LI distance 逐字", "未找到 JpegLiNative.cs"); return; }
+        var src = StripLineComments(ReadSourceNormalized(srcPath));
+        var body = MethodBodyOf(src, "public static byte[] Encode(byte[] bgra");
+        Assert("JPEG LI: Encode 方法体可切出", body is not null);
+        if (body is not null)
+        {
+            Assert("JPEG LI: --distance {distArg} 逐字进 Arguments",
+                body.Contains("$\"--distance {distArg}"),
+                "参数名或拼装形态变了 ⇒ 逐字判据的锚点失效，先核对 cjpegli 参数再改判据");
+            Assert("JPEG LI: distArg 唯一赋值 = clampedDist 的 F4 格式化（值直传、方向不反转）",
+                body.Contains("float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);")
+                && body.Contains("string distArg = $\"{clampedDist:F4}\";"));
+            Assert("JPEG LI: 方法体内无 100-x 型方向反转",
+                !body.Contains("100 - "),
+                "出现了 100-x ⇒ 有人把\"越小越好\"刻度按\"越大越好\"反转了（量纲灾难）");
+        }
+
+        // ② 行为级（cjpegli 在位）：真跑两档非默认值，命令行 Debug 留痕逐字含传入值
+        if (!JpegLiNative.IsAvailable)
+        { Skip("JPEG LI distance 行为级", "cjpegli 不可用（源码形态钉已先行断言）"); return; }
+        var caught = TryAttachCoreLogSink();
+        if (caught is null)
+        { Skip("JPEG LI distance 行为级", "CoreLog sink 已被占用（不劫持别人的日志出口）"); return; }
+        var prevDetail = CoreLog.Detail;
+        CoreLog.SetDetail(LogDetail.Diagnose);   // Debug 留痕需要诊断档
+        try
+        {
+            var bgra = new byte[16 * 16 * 4];
+            for (int px = 0; px < bgra.Length; px += 4)
+            { bgra[px] = (byte)(px % 256); bgra[px + 1] = 64; bgra[px + 2] = 255; bgra[px + 3] = 255; }
+
+            foreach (var d in new[] { 2.5f, 0.5f })   // 2.5 差端 / 0.5 好端（0.5 即 2026-11-06 起的默认档；本判据只咬"值逐字进命令行"，不判非默认）
+            {
+                caught.Clear();
+                JpegLiNative.Encode(bgra, 16, 16, d);
+                var cmd = caught.Where(e => e.Lvl == LogLevel.Debug && e.Tag == "JPEGLI")
+                                .Select(e => e.Msg).ToList();
+                string expectArg = $"--distance {d.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}";
+                Assert($"JPEG LI: distance={d} 的命令行留痕逐字出现 {expectArg}",
+                    cmd.Any(m => m.Contains(expectArg)),
+                    $"实得命令行日志 {cmd.Count} 条："
+                    + string.Join(" | ", cmd.Select(m => m[..Math.Min(160, m.Length)]))
+                    + " —— 值没逐字出现=换算被改（含方向反转），排查 FormatEncoders → JpegLiNative 链");
+            }
+            // 方向不反转的行为级佐证：两档值都原样出现 ⇒ "2.5 进 2.5 出、0.5 进 0.5 出"。
+        }
+        finally
+        {
+            CoreLog.SetDetail(prevDetail);
+            DetachCoreLogSink();
+        }
+    }
+
+    /// <summary>
+    /// 判据②·参数换算（AVIF，方向敏感）：CRF(0-63，越小越好) → avifenc -q(0-100，越大越好)
+    /// 的换算 <c>CrfToQuality = clamp(100 - crf·100/63, 0, 100)</c> 方向不许反转。
+    /// <para>换算函数是 NativeAvifEncoder 的 private static —— 行为级走反射取私有静态成员
+    /// （本文件 Test_DisplayEnumerator_WhitePointCache 先例的同一手法；纯函数，不依赖 avifenc 在位，
+    /// 常绿）。CRF=20 → -q 68 的锚点来自 artifacts/quality-probe 的实证
+    /// （2026-11-06 质量链路实证报告 §1.1）。</para>
+    /// <para>组装段（<c>-q {q}</c> 拼进 commonArgs）是 private 局部逻辑：按交接口径不为可测性
+    /// 改产品代码可视性，钉源码形态 + 说明"参数级由命令行 Debug 日志（修复项C）
+    /// + artifacts/quality-probe 实证覆盖"。</para>
+    /// </summary>
+    static void Test_QualityChain_AvifCrfConversionDirection()
+    {
+        // ① 换算函数行为级（反射 private static；锚点 = 换算式独立复算 + 探针实证）
+        var m = typeof(NativeAvifEncoder).GetMethod("CrfToQuality",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert("AVIF: CrfToQuality 可反射定位", m is not null);
+        if (m is not null)
+        {
+            int Q(int crf) => (int)m!.Invoke(null, new object[] { crf })!;
+            Assert("AVIF: CRF 20（默认）→ -q 68（探针实证锚点）", Q(20) == 68, $"实得 {Q(20)}");
+            Assert("AVIF: CRF 8（非默认、更好端）→ -q 87", Q(8) == 87, $"实得 {Q(8)}");
+            Assert("AVIF: CRF 63（最差端）→ -q 0", Q(63) == 0, $"实得 {Q(63)}");
+            Assert("AVIF: CRF 0（无损端）→ -q 100", Q(0) == 100, $"实得 {Q(0)}");
+            // prev 从 int.MaxValue 起步：首迭代 q(100) < MaxValue 不触发，后续每一步才真正
+            // 比较"比上一步小"—— 从 int.MinValue 起步会让首迭代恒 q>=prev、单调配恒红。
+            int prev = int.MaxValue; bool mono = true;
+            foreach (var crf in new[] { 0, 8, 20, 31, 45, 63 })
+            { int q = Q(crf); if (q >= prev) mono = false; prev = q; }
+            Assert("AVIF: CRF 越大 → q 越小（换算方向单调，不被反转）", mono,
+                "换算不再是单调递减 ⇒ 方向被反转，CRF 越小画质越差的语义被破坏");
+        }
+
+        // ② 组装与留痕源码钉
+        var srcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeAvifEncoder.cs"));
+        if (srcPath is null) { Skip("AVIF 组装钉", "未找到 NativeAvifEncoder.cs"); return; }
+        var src = StripLineComments(ReadSourceNormalized(srcPath));
+        Assert("AVIF: q 由 CrfToQuality(crf) 算出（唯一换算点）",
+            src.Contains("int q = CrfToQuality(crf);"));
+        Assert("AVIF: -q {q} 进参数串", src.Contains("$\"-q {q}\""),
+            "组装形态变了 ⇒ 对照 avifenc CLI 语义与 artifacts/quality-probe 实证核对后改判据");
+        Assert("AVIF: 命令行 Debug 留痕在位（修复项C）", src.Contains("CoreLog.Debug(\"AVIF\""));
+    }
+
+    /// <summary>
+    /// 判据②·参数换算（WebP，方向敏感）：<c>Quality → -q</c> 必须直取整逐字出现
+    /// （q 越大越好，无换算无反转），q≥100 走 <c>-lossless</c> 分支且不再发 <c>-q</c>。
+    /// <para>产品链：FormatEncoders.cs:754
+    /// <c>NativeWebPEncoder.Encode(px, w, h, path, s.Quality, s.Quality >= 100, ...)</c>。</para>
+    /// <para>组装是 Encode 方法体内的局部逻辑（private，无独立函数可反射）：行为级 = 真跑
+    /// cwebp 收集命令行 Debug 留痕（修复项C）；cwebp 不在位时 Skip 行为级，源码形态钉照常执行。</para>
+    /// </summary>
+    static void Test_QualityChain_WebpQualityVerbatim()
+    {
+        // ① 源码形态钉（常绿）
+        var srcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeWebPEncoder.cs"));
+        if (srcPath is null) { Skip("WebP -q 逐字", "未找到 NativeWebPEncoder.cs"); return; }
+        var src = StripLineComments(ReadSourceNormalized(srcPath));
+        var body = MethodBodyOf(src, "public static void Encode(byte[] bgra");
+        Assert("WebP: Encode 方法体可切出", body is not null);
+        if (body is not null)
+        {
+            Assert("WebP: quality 直取整进 -q（无换算、无方向反转）",
+                body.Contains("lossless ? \"-lossless\" : $\"-q {(int)quality}\""));
+            Assert("WebP: 方法体内无 100-x 型方向反转", !body.Contains("100 - "),
+                "出现了 100-x ⇒ 有人把\"越大越好\"刻度反转了（q55 会变成 q45，方向灾难）");
+            Assert("WebP: 命令行 Debug 留痕在位（修复项C）", body.Contains("CoreLog.Debug(\"WEBP\""));
+        }
+
+        // ② 行为级（cwebp 在位）
+        if (!NativeWebPEncoder.IsAvailable)
+        { Skip("WebP -q 行为级", "cwebp 不可用（源码形态钉已先行断言）"); return; }
+        var caught = TryAttachCoreLogSink();
+        if (caught is null)
+        { Skip("WebP -q 行为级", "CoreLog sink 已被占用（不劫持别人的日志出口）"); return; }
+        var prevDetail = CoreLog.Detail;
+        CoreLog.SetDetail(LogDetail.Diagnose);
+        string outPath = Path.Combine(Path.GetTempPath(), $"ttc_test_webp_{Guid.NewGuid():N}.webp");
+        try
+        {
+            var bgra = new byte[16 * 16 * 4];
+            for (int px = 0; px < bgra.Length; px += 4)
+            { bgra[px] = 128; bgra[px + 1] = 64; bgra[px + 2] = 255; bgra[px + 3] = 255; }
+
+            caught.Clear();
+            NativeWebPEncoder.Encode(bgra, 16, 16, outPath, 55f, false);   // 非默认（默认 90）、更差端
+            var cmd = caught.Where(e => e.Lvl == LogLevel.Debug && e.Tag == "WEBP")
+                            .Select(e => e.Msg).ToList();
+            Assert("WebP: quality=55 的命令行留痕逐字出现 -q 55",
+                cmd.Any(m => m.Contains("-q 55")),
+                $"实得命令行日志 {cmd.Count} 条："
+                + string.Join(" | ", cmd.Select(m => m[..Math.Min(160, m.Length)])));
+
+            caught.Clear();
+            NativeWebPEncoder.Encode(bgra, 16, 16, outPath, 100f, true);   // q100 = 无损分支
+            var cmd2 = caught.Where(e => e.Lvl == LogLevel.Debug && e.Tag == "WEBP")
+                             .Select(e => e.Msg).ToList();
+            Assert("WebP: q100 走 -lossless 分支且不再发 -q 100",
+                cmd2.Any(m => m.Contains("-lossless")) && cmd2.All(m => !m.Contains("-q 100")),
+                $"实得 {cmd2.Count} 条 —— lossless 分支语义漂移会让\"质量 100\"悄悄变成有损 q100");
+        }
+        finally
+        {
+            CoreLog.SetDetail(prevDetail);
+            DetachCoreLogSink();
+            try { File.Delete(outPath); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// 判据③·防复活（二源分叉钉）：编码路径不得再出现"滑块值 = 第二事实源"。
+    /// <para>2026-11-06 修复删除了 MainWindow.xaml.cs:3404 的 <c>settings.Quality = ui.Quality</c>
+    /// 覆盖、record EncodingUiState 的 Quality 字段、CaptureEncodingUiState 的滑块采集。
+    /// 三层各钉一处：① 编译期 —— record 不再带 Quality 成员，快照想采集都没地方放；
+    /// ② 采集点 —— CaptureEncodingUiState 不再读 QualitySld；③ 覆盖点 ——
+    /// BuildEncodingSettings 方法体内不再有 settings.Quality = / ui.Quality，
+    /// 全文件剥注释后 ui.Quality 零出现（滑块只经 OnQualityChanged → SetQuality 写字段）。</para>
+    /// <para>为什么是源码钉而不是"反射确认 EncodingUiState 无公共成员"：EncodingUiState 是
+    /// App 层 private 嵌套 record，Test 工程引用不到 App 程序集（csproj 只引 Core），
+    /// 反射形态物理不可达 —— 形态钉即本约束下的可断言形态。每个负向断言都先断正向锚存在，
+    /// 切片失败判红而不是静默放过（防"锚点丢失 ⇒ 假绿灯"）。</para>
+    /// </summary>
+    static void Test_QualityChain_NoSliderSecondSource()
+    {
+        var mwPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml.cs"));
+        if (mwPath is null) { Skip("滑块二源防复活", "未找到 MainWindow.xaml.cs"); return; }
+        var mw = StripLineComments(ReadSourceNormalized(mwPath));
+
+        // ① record EncodingUiState 的参数表里没有 Quality（编译期钉）
+        int i = mw.IndexOf("private sealed record EncodingUiState(", StringComparison.Ordinal);
+        Assert("二源钉: record EncodingUiState 定义可定位", i >= 0);
+        if (i >= 0)
+        {
+            int end = mw.IndexOf(");", i, StringComparison.Ordinal);
+            Assert("二源钉: record 参数表收尾锚点可切出", end > i, $"i={i} end={end}");
+            if (end > i)
+            {
+                var rec = mw[i..(end + 2)];
+                Assert("二源钉: record 参数表完整（正向锚，防切片失败假绿）",
+                    rec.Contains("OutputFormat Format") && rec.Contains("AppSettingsData Settings"));
+                Assert("二源钉: record EncodingUiState 无 Quality 成员（滑块值没有可乘之机）",
+                    !rec.Contains("Quality"),
+                    "record 参数表里又出现了 Quality ⇒ 二源覆盖的载体回来了");
+            }
+        }
+
+        // ② CaptureEncodingUiState 不再采集滑块值
+        int c = mw.IndexOf("private EncodingUiState CaptureEncodingUiState() => new(", StringComparison.Ordinal);
+        Assert("二源钉: CaptureEncodingUiState 可定位", c >= 0);
+        if (c >= 0)
+        {
+            int end = mw.IndexOf("Settings: _settings.Snapshot());", c, StringComparison.Ordinal);
+            Assert("二源钉: CaptureEncodingUiState 收尾锚点可切出", end > c);
+            if (end > c)
+            {
+                var cap = mw[c..(end + "Settings: _settings.Snapshot());".Length)];
+                Assert("二源钉: 快照采集仍含 Format 正向锚", cap.Contains("Format: CurrentFormat()"));
+                Assert("二源钉: 快照采集不含滑块（QualitySld / Quality 不进编码快照）",
+                    !cap.Contains("QualitySld") && !cap.Contains("Quality:"),
+                    "CaptureEncodingUiState 又开始采集滑块值 ⇒ 第二事实源的源头回来了");
+            }
+        }
+
+        // ③ BuildEncodingSettings 不再覆盖质量
+        var body = MethodBodyOf(mw,
+            "private EncodingSettings BuildEncodingSettings(OutputFormat format, bool hdrOutput, ImageMetadata? meta,");
+        Assert("二源钉: BuildEncodingSettings 方法体可切出", body is not null);
+        if (body is not null)
+        {
+            Assert("二源钉: 构建仍委托管线（正向锚）",
+                body.Contains("AppServices.Pipeline.BuildEncodingSettings("));
+            Assert("二源钉: 方法体内不存在 settings.Quality = / ui.Quality（3404 覆盖不复活）",
+                !body.Contains("settings.Quality =") && !body.Contains("ui.Quality"),
+                "滑块覆盖回来了 ⇒ 贴图窗 forceFormat 的量纲错位路径重开（实证报告 §1.3）");
+        }
+
+        // ④ 全文件：剥注释后 ui.Quality 零出现（注释里的旧写法不算——只比代码行）
+        Assert("二源钉: 全文件（剥注释）ui.Quality 零出现", !mw.Contains("ui.Quality"));
+    }
+
+    /// <summary>
+    /// 判据④·量纲防御：JpegLiNative 主路对超出 cjpegli 合法范围 [0,25] 的输入必须
+    /// 【钳制 + Warn 留痕】。2026-11-06 探针实测：PNG 量纲 100 → d25.0000 静默钳到最差画质
+    /// （产物仅为 d0.5 的 1/4.25）；修复项在该路径加的 Warn 把"静默钳制"变成"留痕钳制"。
+    /// <para>行为级断言两件事：① Encode(distance: 100) 不抛错且仍产出有效 JPEG
+    /// —— 这是"防御而非失败"的语义本身；② Warn 消息必须同时含原始值与钳后值
+    /// （100.0000 / 已钳到 25.0000；负半轴 -5.0000 / 已钳到 0.0000）。</para>
+    /// <para>可单测性说明：Clamp 与 Warn 内联在 Encode 方法体里，而 Encode 会真实启动
+    /// cjpegli 子进程（GetExePath 缺 exe 时在走到 Clamp 之前就抛 DllNotFoundException）⇒
+    /// 无 exe 环境下行为级物理不可达，故按仓库范式"先判可用性再 Skip"，
+    /// 源码形态钉（常绿）兜住钳制与 Warn 的存在。</para>
+    /// </summary>
+    static void Test_QualityChain_JpegLiDimensionClampWarn()
+    {
+        var srcPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "JpegLiNative.cs"));
+        if (srcPath is null) { Skip("JPEG LI 量纲防御", "未找到 JpegLiNative.cs"); return; }
+        var src = StripLineComments(ReadSourceNormalized(srcPath));
+        var body = MethodBodyOf(src, "public static byte[] Encode(byte[] bgra");
+        Assert("量纲防御: Encode 方法体可切出", body is not null);
+        if (body is not null)
+        {
+            Assert("量纲防御: Clamp[0,25] 在位", body.Contains("Math.Clamp(distance, 0.0f, 25.0f);"));
+            Assert("量纲防御: 钳制发生时必发 Warn（<0 或 >25 条件 + JPEGLI Warn）",
+                body.Contains("if (distance < 0.0f || distance > 25.0f)")
+                && body.Contains("CoreLog.Warn(\"JPEGLI\""));
+        }
+
+        if (!JpegLiNative.IsAvailable)
+        { Skip("JPEG LI 量纲防御行为级", "cjpegli 不可用（源码形态钉已先行断言）"); return; }
+        var caught = TryAttachCoreLogSink();
+        if (caught is null)
+        { Skip("JPEG LI 量纲防御行为级", "CoreLog sink 已被占用（不劫持别人的日志出口）"); return; }
+        try
+        {
+            var bgra = new byte[16 * 16 * 4];
+            for (int px = 0; px < bgra.Length; px += 4)
+            { bgra[px] = 255; bgra[px + 1] = 0; bgra[px + 2] = 0; bgra[px + 3] = 255; }
+
+            // PNG 量纲 100 灌入 JPEG LI：必须"钳到 25.0000 + Warn"，且编码仍成功（防御语义）
+            caught.Clear();
+            byte[] data = JpegLiNative.Encode(bgra, 16, 16, 100f);
+            var warns = caught.Where(e => e.Lvl == LogLevel.Warning && e.Tag == "JPEGLI")
+                              .Select(e => e.Msg).ToList();
+            Assert("量纲防御: distance=100 编码不抛错且产出有效 JPEG（防御而非失败）",
+                data.Length > 100 && data[0] == 0xFF && data[1] == 0xD8,
+                $"实得 {data.Length}B");
+            Assert("量纲防御: distance=100 触发 Warn，消息含原始值 100.0000 与钳后 25.0000",
+                warns.Any(w => w.Contains("100.0000") && w.Contains("已钳到 25.0000")),
+                $"实得 Warn {warns.Count} 条："
+                + string.Join(" | ", warns.Select(w => w[..Math.Min(160, w.Length)])));
+
+            // 负半轴：-5 → 钳到 0.0000
+            caught.Clear();
+            JpegLiNative.Encode(bgra, 16, 16, -5f);
+            var warns2 = caught.Where(e => e.Lvl == LogLevel.Warning && e.Tag == "JPEGLI")
+                               .Select(e => e.Msg).ToList();
+            Assert("量纲防御: distance=-5 触发 Warn，消息含 -5.0000 与已钳到 0.0000",
+                warns2.Any(w => w.Contains("-5.0000") && w.Contains("已钳到 0.0000")),
+                $"实得 Warn {warns2.Count} 条");
+        }
+        finally
+        {
+            DetachCoreLogSink();
+        }
+    }
+
     /// <summary>
     /// NVENC 的 AV1 位深实测（2026-09-17）。
     /// <para>为什么需要这条断言：位深既看不出文件名也看不出体积，只能解析 AV1 序列头。
@@ -10634,13 +11082,14 @@ public static class CorePipelineTests
             }
 
             // ═══ 2026-11-04（用户口径）：增益图态的【色度】与 JPEG LI 分家，位深仍同源 ═══
-            // 用户拍板："JPEG LI 还是默认 420，其他默认 444" ⇒ 增益图底图恒 4:4:4（管线硬编码），
-            // 普通 JPEG LI 照片档仍可 4:2:0（体积优先）。位深仍沿用 JPEG LI 侧，不另开第二份。
+            // 用户拍板：增益图底图恒 4:4:4（管线硬编码）。2026-11-06 再拍板：JPEG LI 默认也改 444
+            //（"JPEG LI 还是默认 420"作废，物证=420 下色度高频损失 93% + d=1.0 重度块效应）；
+            // 分家语义不变 —— 增益图硬编码不可选，普通档读 ChromaJpegLi 可手动 420/422。
             // ⚠ 这条断言在 2026-09-26 合并时钉的是"同源"，现在钉的是"分家的形状"：
-            //   色度必须是字面量 444，且不许回读 ChromaJpegLi（回读 = 增益图底图跟着掉到 420）。
+            //   增益图侧必须是字面量 444，且不许回读 ChromaJpegLi（回读 = 底图跟着用户的字段走）。
             Assert("管线对 JPEG_GAINMAP 读 JPEG LI 的位深、色度恒 444（2026-11-04 分家）",
                 pipeText.Contains("OutputFormat.JPEG_GAINMAP => (s.BitDepthJpegLi, \"444\")"),
-                "增益图底图会被乘增益放大还原 ⇒ 色度精度优先；改回 s.ChromaJpegLi 会让它跟着默认掉到 420");
+                "增益图底图会被乘增益放大还原 ⇒ 色度精度优先；改回 s.ChromaJpegLi 会让底图跟着用户的字段漂（普通档可选 420/422）");
             // 反向：JPEG LI 普通档仍必须读字段（不许把 420 也硬编码掉，那是用户的选择权）
             Assert("管线对 JPEG_LI 仍读 s.ChromaJpegLi（普通照片档保留体积优先的可选项）",
                 pipeText.Contains("OutputFormat.JPEG_LI => (s.BitDepthJpegLi, s.ChromaJpegLi)"));
@@ -10663,13 +11112,15 @@ public static class CorePipelineTests
     }
 
     /// <summary>
-    /// 增益图的色度必须是"真设置"：默认 4:2:0，最高允许手动选 4:4:4（2026-09-19 用户决定）。
+    /// 增益图的色度必须是"真设置"（2026-09-19 用户决定）；2026-11-06 用户拍板后默认 4:4:4、
+    /// 仍可手动降 4:2:0/4:2:2（体积优先的选择权保留）。
     /// <para>回归背景（交接 §27）：主路径把 base JPEG 硬编码成 "444"，只有两条降级旁路读设置
     /// ⇒ 同一格式因走哪条路而色度不同，字段本身形同虚设。现在主路径与旁路同源。</para>
     /// <para>2026-09-26（增益图并入 JPEG LI）：这条判据的<b>语义不变、载体变了</b> ——
     /// 生效的下拉与字段改成 JPEG LI 那一对（<c>ChromaJpegLiCbo</c> / <c>ChromaJpegLi</c>），
     /// 因为管线对 JPEG_GAINMAP 也读它。所以本用例同时钉三件事：
-    /// 编码器不硬编码色度、生效字段默认 420、以及"不许再长出第二个增益图色度下拉"（见 ⑦ 那两条）。</para>
+    /// 编码器不硬编码色度、生效字段默认 444（2026-11-06 用户拍板，原 420）、
+    /// 以及"不许再长出第二个增益图色度下拉"（见 ⑦ 那两条）。</para>
     /// </summary>
     static void Test_GainMap_ChromaIsRealSetting()
     {
@@ -10699,19 +11150,21 @@ public static class CorePipelineTests
 
         // 默认值与下拉档位同源（三处：字段默认 / XAML IsSelected / 兜底值）。
         // 2026-09-26：增益图并入 JPEG LI ⇒ 生效的下拉就是 ChromaJpegLiCbo、生效的字段是 ChromaJpegLi。
+        // 2026-11-06（用户拍板）：ChromaJpegLi 默认 420→444（物证=420 下色度高频损失 93% +
+        // d=1.0 重度块效应），判据随口径更新；三处同源纪律不变。
         // ChromaGainMap 降级为"只被一次性迁移读取的历史字段"，但它仍须默认 420 ——
         // 迁移靠"是否等于默认"判断用户有没有改过，默认漂了就会把没改过的老值当成用户选择搬过去。
         var model = File.ReadAllText(modelPath).Replace('"', '\'');
-        Assert("增益图态实际生效的色度字段 ChromaJpegLi 默认 420",
-            model.Contains("public string ChromaJpegLi { get; set; } = '420'"));
+        Assert("增益图态实际生效的色度字段 ChromaJpegLi 默认 444",
+            model.Contains("public string ChromaJpegLi { get; set; } = '444'"));
         Assert("遗留字段 ChromaGainMap 仍默认 420（迁移拿它判'用户是否改过'，默认漂=误搬）",
             model.Contains("public string ChromaGainMap { get; set; } = '420'"));
         var xaml = File.ReadAllText(xamlPath).Replace('"', '\'');
         int i = xaml.IndexOf("ChromaJpegLiCbo", StringComparison.Ordinal);
         int end = i >= 0 ? xaml.IndexOf("</ComboBox>", i, StringComparison.Ordinal) : -1;
         var block = (i >= 0 && end > i) ? xaml[i..end] : "";
-        Assert("JPEG LI 色度下拉存在且默认落在 420 项（增益图态共用这一条）",
-            block.Contains("Tag='420' IsSelected='True'"), block.Length > 0 ? "" : "未找到 ChromaJpegLiCbo 块");
+        Assert("JPEG LI 色度下拉存在且默认落在 444 项（2026-11-06 用户拍板，原 420）",
+            block.Contains("Tag='444' IsSelected='True'"), block.Length > 0 ? "" : "未找到 ChromaJpegLiCbo 块");
         Assert("该下拉提供 422 与 444（用户可手动升到最高色度，增益图态同样有效）",
             block.Contains("Tag='422'") && block.Contains("Tag='444'"));
     }

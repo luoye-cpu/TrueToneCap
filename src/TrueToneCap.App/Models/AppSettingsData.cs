@@ -114,7 +114,11 @@ public sealed class AppSettingsData
     public bool GainMapEnabled { get; set; } = false;
 
     // ── 质量 ──
-    // 兼容字段：当前格式的质量（保留用于旧配置文件/其他读取点）。
+    // ⚠ 遗留总质量键（死键，2026-11-06 质量链路实证裁决③）：7 格 per-format 字段
+    //   （QualityPng/…/QualityTiff）接管后不再参与编码 —— 读取点仅剩下方 GetQuality/SetQuality
+    //   的 default 分支，当前 OutputFormat 枚举 7 格全被显式 case 覆盖 ⇒ 不可达。
+    //   仅保留向后兼容：老 settings.json 的 "Quality" 键要能反序列化进来，不破坏旧文件。
+    //   不动序列化、不删字段、不改默认值；不要在这里接回任何新读取点（真正生效的是下方每格式字段）。
     // 各格式独立质量见 QualityPng/QualityGainMap 等，切换格式时不再互相覆盖。
     public double Quality { get; set; } = 80;
 
@@ -130,11 +134,15 @@ public sealed class AppSettingsData
     /// </summary>
     public double QualityGainMap { get; set; } = 1.0;      // butteraugli 距离 (0.5-3.0)
 
-    public double QualityJpegLi { get; set; } = 1.0;       // butteraugli 距离 (0.5-3.0)
-    // ═══ 2026-09-16：默认质量统一对齐到"视觉无损" ═══
+    public double QualityJpegLi { get; set; } = 0.5;       // butteraugli 距离 (0.5-3.0)
+    // ═══ 2026-09-16：默认质量统一对齐到"视觉无损"；2026-11-06 用户拍板 JPEG LI 单独收紧到 0.5 ═══
     // 取值依据（业界公认的视觉无损阈值）：
-    //   · JPEG XL / JPEG LI：butteraugli 距离 d=1.0 即 cjxl 官方默认的 visually lossless
-    //                        （0.8 比 1.0 更严格，体积明显变大而肉眼难辨，故放宽到 1.0）
+    //   · JPEG XL：butteraugli 距离 d=1.0 即 cjxl 官方默认的 visually lossless
+    //              （0.8 比 1.0 更严格，体积明显变大而肉眼难辨，故放宽到 1.0）
+    //   · JPEG LI：2026-11-06 用户拍板 1.0 → 0.5（0.5 ≈ 无损最稳档）。物证见
+    //     docs\ledger\quality-chain-evidence-2026-11-06.md §JPEG LI：默认 420 色度下
+    //     d=1.0 仍有重度块效应（1.73/1.77）+ 色度高频损失 93%，"1.0=视觉无损"对截图
+    //     内容不成立 ⇒ 默认档收紧到 0.5；要更小体积的用户可在 0.5-3.0 区间手动放。
     //   · AVIF：CRF ≤ 20 属视觉无损区间；2026-10-27 用户口径取 20（区间上沿即视觉无损档，
     //           体积比 CRF 15 更小；CRF 15 是"多留一档余量"的旧口径，已由用户改回 20）
     //   · WebP：q ≥ 85 即视觉无损，取 90
@@ -331,7 +339,17 @@ public sealed class AppSettingsData
     // ── 每格式色度采样 ──
     // 2026-09-15 清理：原 ChromaPng 字段已删除。PNG 是 RGB 无损格式，不支持色度子采样，
     //   该字段在保存时被硬编码写 "444"、且无任何读取方，属冗余。
-    public string ChromaJpegLi { get; set; } = "420";
+    // ═══ 2026-11-06 用户拍板：JPEG LI 色度默认 444（原 420）═══
+    //   与 AVIF 2026-11-04 同一条思路：本应用产出的是截图（文字/UI 为主），物证见
+    //   docs\ledger\quality-chain-evidence-2026-11-06.md §JPEG LI —— 420 下色度高频
+    //   损失 93% + d=1.0 仍重度块效应（1.73/1.77）⇒ 精度优先于体积。要 420 的用户
+    //   仍可在下拉手动选（体积优先的选择权保留，管线照读本字段）。
+    //   ⚠ 三处同源，改一处必改三处（判据 Test_GainMap_ChromaIsRealSetting /
+    //     Test_Settings_ComboFallbacksMatchDefaults 对撞钉住）：
+    //     本字段默认 / XAML ChromaJpegLiCbo 的 IsSelected 项 / MainWindow.Settings 兜底。
+    //   ⚠ 与 JPEG_GAINMAP 不共用：增益图底图恒 444（CapturePipelineService 硬编码），
+    //     本字段只服务普通 JPEG LI 照片档 —— 改这里不会动增益图那一侧。
+    public string ChromaJpegLi { get; set; } = "444";
     public string ChromaJpegXl { get; set; } = "444";
     // ═══ 2026-11-04 现状：这个字段【只剩迁移价值】，管线已不再读它 ═══
     // 演变史：2026-09-19 用户定为"默认 4:2:0、可手动 4:4:4"；2026-11-04 用户口径改成

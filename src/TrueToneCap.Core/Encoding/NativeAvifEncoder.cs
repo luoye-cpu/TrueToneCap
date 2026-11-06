@@ -298,6 +298,11 @@ public static class NativeAvifEncoder
             CreateNoWindow = true
         };
 
+        // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
+        // 位深回退重试会再次进入本方法 ⇒ 每次实际下发 avifenc 的参数串都各留一条
+        // （2026-11-06 质量链路实证报告 §1.4）。
+        CoreLog.Debug("AVIF", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+
         using var proc = System.Diagnostics.Process.Start(psi);
         if (proc is null) throw new InvalidOperationException("无法启动 avifenc");
 
@@ -483,6 +488,10 @@ public static class NativeAvifEncoder
             RedirectStandardOutput = true,
             CreateNoWindow = true
         };
+
+        // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
+        CoreLog.Debug("AVIF", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+
         try
         {
         using var proc = System.Diagnostics.Process.Start(psi);

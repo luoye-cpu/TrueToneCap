@@ -253,3 +253,7 @@ tests/manual/safety/*/
 # 是别的 claw 类工具在仓根留下的），却因为没被忽略而一直挂在 git status 里。
 # 这条把它挡在外面；真需要纳入本仓的 .arts 内容时应先删本行再反选子项。
 .arts/
+# ── 验证流程落盘（2026-11-06 质量链路轮）──
+# 独立验证员（team-result-verifier）的场景记录 verification_scenario.json 写在这里，
+# 属验证工具的运行产物：正式证据在 docs/ledger/ 的验证报告里，此处不入库。
+.resultverify/

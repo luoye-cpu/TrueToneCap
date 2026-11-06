@@ -114,7 +114,9 @@ public sealed class JpegLiEncoder : ImageEncoder
 {
     public override OutputFormat Format => OutputFormat.JPEG_LI;
     public override bool SupportsHdr => false;
-    public override (float, float, float, QualityScale) GetQualityRange() => (0.5f, 3.0f, 1.0f, QualityScale.ButteraugliRange);
+    // def=0.5：2026-11-06 用户拍板（原 1.0），与 AppSettingsData.QualityJpegLi 成对改
+    // （Test_Settings_QualityDefaultsSingleSource 对撞钉住，改一边不改另一边会红）。
+    public override (float, float, float, QualityScale) GetQualityRange() => (0.5f, 3.0f, 0.5f, QualityScale.ButteraugliRange);
     public override QualityDesc GetQualityDescription(float q) => new(QualityDescKind.DistanceWithNote, q);
     public override async Task EncodeAsync(HdrFrameData f, EncodingSettings s, string path, CancellationToken ct = default)
     {

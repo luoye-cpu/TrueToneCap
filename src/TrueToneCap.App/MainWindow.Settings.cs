@@ -360,7 +360,11 @@ public sealed partial class MainWindow : Window
         try
         {
             _settings.FormatIndex = FormatCbo.SelectedIndex;
-            _settings.Quality = QualitySld.Value;
+            // 2026-11-06 收尾：不再镜像滑块值进遗留死键 Quality —— GetQuality/SetQuality 的
+            // default 分支在当前 7 格枚举下不可达，继续写它只会持续污染死键（误导读它的人）。
+            // 真正的写入点就是下一行 SetQuality 的每格式字段。盘上已残留的旧 "Quality" 键
+            // 无读取方、无害；差集序列化剪不掉它（内存值仍是从文件读进来的旧值 ≠ 默认 80），
+            // 待未来 SettingsRevision 迁移摘除契约时自然消失。
             _settings.SetQuality(CurrentFormat(), QualitySld.Value);
             _settings.OutputPath = PathTxt.Text;
             _settings.FileNamePrefix = PrefixTxt.Text;
@@ -416,11 +420,12 @@ public sealed partial class MainWindow : Window
             _settings.BitDepthGainMap = 8; // Gain Map 基于 JPEG，固定 8-bit
             // （原 ChromaPng 硬编码赋值已删除：该字段于 2026-09-15 清理，
             //   PNG 为 RGB 无损格式，本就不支持色度子采样）
-            _settings.ChromaJpegLi = (ChromaJpegLiCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "420"; // JPEG LI 色度
+            _settings.ChromaJpegLi = (ChromaJpegLiCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444"; // JPEG LI 色度
             // 兜底值必须与 AppSettingsData 的字段默认一致 —— 下拉还没回填的那一瞬保存下去的就是这个兜底值。
             // ⚠ 接线审查抓到本轮漏改：AVIF 默认已于 2026-11-04 改为 444，这里一度还停在 ?? "420"
             //   （原注释写"2026-09-19 改回 420"也过期了）。兜底漂回 420 ⇒ 控件未回填那一瞬会把默认漂错。
             //   由 Test_Settings_ComboFallbacksMatchDefaults 遍历兜底↔默认，漂即红。
+            //   2026-11-06（用户拍板）：JPEG LI 色度默认 420→444，兜底随字段默认一并改到 ?? "444"。
             _settings.ChromaAvif = (AvifChromaCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
             _settings.ChromaJpegXl = (ChromaJpegXlCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444";
             // 2026-09-26：不再写 ChromaGainMap —— 控件已随"GainMap 并入 JPEG LI"删除。
