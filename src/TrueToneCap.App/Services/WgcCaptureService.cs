@@ -1133,7 +1133,12 @@ public sealed partial class WgcCaptureService : IDisposable
             if (!Monitor.TryEnter(_gpuLock, 500)) { Log($"[Pool] {_hmonitor:X}: 选区回读 GPU 锁超时 (500ms)"); return null; }
             try
             {
-                if (!_sharedHeld || !_sharedValid || _sharedTex is null) return null;
+                if (!_sharedHeld || !_sharedValid || _sharedTex is null)
+                {
+                    // 2026-11-11 排障探针：这里曾是纯静默 null，回读失败时日志一个字没有（本次实机复现）。
+                    Log($"[Pool] {_hmonitor:X}: 选区回读静默守卫命中 held={_sharedHeld} valid={_sharedValid} tex={(_sharedTex is null ? "null" : "ok")}");
+                    return null;
+                }
                 if (expectedHandle == 0 || _sharedHandle != expectedHandle)
                 {
                     Log($"[Pool] {_hmonitor:X}: 选区回读拒绝：槽已轮换（持有 {expectedHandle:X} 当前 {_sharedHandle:X}）");
@@ -1164,7 +1169,12 @@ public sealed partial class WgcCaptureService : IDisposable
             if (!Monitor.TryEnter(_gpuLock, 500)) { Log($"[Pool] {_hmonitor:X}: 选区 SDR 回读 GPU 锁超时 (500ms)"); return null; }
             try
             {
-                if (!_sharedHeld || !_sharedValid || _sharedTex is null) return null;
+                if (!_sharedHeld || !_sharedValid || _sharedTex is null)
+                {
+                    // 2026-11-11 排障探针：同 float 那条，静默出口必须留痕（句式与 float 刻意不同）。
+                    Log($"[Pool] {_hmonitor:X}: 选区 SDR 回读静默守卫命中 held={_sharedHeld} valid={_sharedValid} tex={(_sharedTex is null ? "null" : "ok")}");
+                    return null;
+                }
                 if (expectedHandle == 0 || _sharedHandle != expectedHandle)
                 {
                     Log($"[Pool] {_hmonitor:X}: 选区 SDR 回读拒绝：槽已轮换（持有 {expectedHandle:X} 当前 {_sharedHandle:X}）");
@@ -1829,9 +1839,26 @@ public sealed partial class WgcCaptureService : IDisposable
                     {
                         if (_sessionPool.Count > 0)
                         {
-                            foreach (var s in _sessionPool.Values) s.Dispose();
-                            _sessionPool.Clear();
-                            Log("[WGC] 空闲超时，所有会话已自动停止");
+                            // ═══ 2026-11-11 P0（路线 B-3 × 空闲回收的时序冲突）═══
+                            // B-3 之后冻结槽里的像素【就是】下游要交的货：选区窗开着时（槽仍被持有，
+                            // SharedHeld=true），用户随时会点识字/翻译/保存触发 ReadSharedRegion。
+                            // 原先 15 秒一到就 Dispose 会话清空池子，选区超过 15 秒 ⇒ 回读查无会话
+                            // ⇒ "❌ 截图失败"（实机复现两次：Meter/F5 恒在捕获后 15s 整出现，
+                            // 点动作 17-19s ⇒ 必挂）。槽还冻着就顺延一轮，等窗口 Dispose 交还后再收。
+                            // 旧注释"15 秒后 Dispose 与下游无关"只对"像素已复制出会话"的旧路线成立。
+                            bool anyHeld = false;
+                            foreach (var s in _sessionPool.Values) { if (s.SharedHeld) { anyHeld = true; break; } }
+                            if (anyHeld)
+                            {
+                                Log("[WGC] 空闲回收到期，但冻结槽仍被选区窗持有 ⇒ 顺延一轮（15s 后再查）");
+                                ScheduleIdleStop();
+                            }
+                            else
+                            {
+                                foreach (var s in _sessionPool.Values) s.Dispose();
+                                _sessionPool.Clear();
+                                Log("[WGC] 空闲超时，所有会话已自动停止");
+                            }
                         }
                     }
                 }
@@ -1938,6 +1965,10 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
                     return session.ReadSharedRegion(expectedHandle, x, y, w, h);
+                // 2026-11-11 排障探针：查无会话原本也是静默 null —— 把查找键与池内实况一起打出来。
+                var poolKeys = new System.Text.StringBuilder();
+                foreach (var k in _sessionPool.Keys) poolKeys.Append($" {k.Item1:X}/{k.Item2}");
+                Log($"[Pool] 选区回读查无会话 key=({targetMonitor:X},{hdr}) 池内:{poolKeys}");
             }
         }
         finally { RecordPoolLock(LockReadHdr, tLock); }
@@ -1959,6 +1990,10 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 if (_sessionPool.TryGetValue((targetMonitor, false), out var session))
                     return session.ReadSharedRegionBytes(expectedHandle, x, y, w, h);
+                // 2026-11-11 排障探针：查无会话原本也是静默 null（句式与 float 那条刻意不同）。
+                var poolKeysSdr = new System.Text.StringBuilder();
+                foreach (var k in _sessionPool.Keys) poolKeysSdr.Append($" {k.Item1:X}/{k.Item2}");
+                Log($"[Pool] 选区 SDR 回读查无会话 key=({targetMonitor:X},false) 池内:{poolKeysSdr}");
             }
         }
         finally { RecordPoolLock(LockReadSdr, tLock); }

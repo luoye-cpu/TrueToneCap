@@ -74,7 +74,11 @@ public static class NativeWebPEncoder
             //   所以这一栏对 WebP 的实际收益有限。仍然提供，是因为"用户能否控制"与"收益大不大"是两件事。
             // ⚠ 默认档 = m4，与改动前 cwebp 的默认值**相同** ⇒ WebP 的默认产物不变。
             var methodArg = $"-m {CompressionEffortMap.WebPMethod(effort)}";
-            var args = $"{qualityArg} {methodArg} {iccArg} -mt \"{tmpPng}\" -o \"{path}\"";
+            // ═══ 2026-11-08: P0 Security Fix - Sanitize all file paths ═══
+            var safeTmpPng = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPng);
+            var safePath = Core.Security.PathSanitizer.SanitizeForEncoding(path);
+            
+            var args = $"{qualityArg} {methodArg} {iccArg} -mt \"{safeTmpPng}\" -o \"{safePath}\"";
 
             var psi = new System.Diagnostics.ProcessStartInfo
             {

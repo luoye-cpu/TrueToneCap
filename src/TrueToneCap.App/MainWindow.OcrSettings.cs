@@ -11,6 +11,11 @@
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using System.Diagnostics;
+using WinRT.Interop;             // WindowNative（本地导入的 FileOpenPicker 要挂 HWND）
+using TrueToneCap.Core.Logging;   // CoreLog（下载结果落盘）
+using TrueToneCap.Core.Models;    // TranslationPackageInfo（行状态文案要用 FormatSize）
 using TrueToneCap.Core.Services;
 using TrueToneCap.App.Services;   // LocaleManager（OCR 语言提示要接进对照表，2026-10-03）
 
@@ -146,6 +151,19 @@ public sealed partial class MainWindow : Window
         if (FreeModePanel is not null)
             FreeModePanel.Visibility = tag == "Free" ? Visibility.Visible : Visibility.Collapsed;
 
+        // 离线翻译包卡片（2026-11-11 离线翻译包方案）：仅 Offline 模式展开。
+        // 展开时顺带刷运行环境状态与语言包列表 —— 探测要起子进程，放后台任务里。
+        // 显隐本身不带 _uiReady 闸（与上面 LlmConfigCard 同级）：ApplySettingsToUI 回显
+        // 也要走到这里，否则"上次退出时选的 Offline"重启后卡片不展开。
+        bool showOffline = tag == "Offline";
+        if (OfflineTranslateCard is not null)
+            OfflineTranslateCard.Visibility = showOffline ? Visibility.Visible : Visibility.Collapsed;
+        if (showOffline)
+        {
+            _ = RefreshArgosRuntimeStatusAsync();
+            RefreshOfflinePackages();
+        }
+
         if (LlmModeHint is not null)
         {
             if (tag == "LLM")
@@ -170,4 +188,241 @@ public sealed partial class MainWindow : Window
             SaveSettingsQuiet();   // 同上：翻译模式是用户挑的后端，不能只活在内存里等托盘退出
         }
     }
+
+    // ═══ 离线翻译包（2026-11-11 离线翻译包方案，实施方案 Phase 2/3）═══
+    //
+    // 交互形状：卡片里一个 ItemsControl，每行 = 语言对 + 状态 + [删除][下载]，
+    // 下载进度直接写行内控件（行 VM 无 INPC —— 列表刷新时整表重建，运行中的进度
+    // 走 FindName 拿控件改，这是本仓库 code-behind 惯例的延伸）。
+
+    /// <summary>语言包管理器懒加载实例。目录默认 %LOCALAPPDATA%\TrueToneCap\translation-models，
+    /// 与离线引擎共用同一份解析（OfflineArgosEngine.EffectiveModelsDir）。</summary>
+    private TranslationPackageManager? _pkgManager;
+    private TranslationPackageManager PkgManager => _pkgManager ??= new TranslationPackageManager();
+
+    /// <summary>离线卡片一次只跑一个后台任务（下载/导入/装运行环境互斥）。
+    /// 行内按钮禁用只锁得住自己那一行，跨行还得这道闸。</summary>
+    private bool _offlineBusy;
+
+    /// <summary>语言包列表的行数据。用普通 Binding（不走 x:Bind/INPC）：
+    /// 列表每次刷新整表重建，运行中的动态内容直接改行内控件。</summary>
+    private sealed class OfflinePackageRow
+    {
+        public required TranslationPackageInfo Source { get; init; }
+        public string Identifier => Source.Identifier;
+        // 显示名不走 ZhToEn 词表：模型自带双语名（NameChinese/NameEnglish），
+        // 进词表反而会变成死键（死键判据扫不到 Tr(变量) 这种调用点）。
+        public string DisplayName => LocaleManager.CurrentLanguage == AppLanguage.Chinese
+            ? Source.NameChinese
+            : Source.NameEnglish;
+        public string StatusText { get; init; } = "";
+        public string ActionText { get; init; } = "";
+        public Visibility DeleteVisibility => Source.IsInstalled ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>重建语言包列表。整表重建是刻意的选择：状态变化点（装完/删完/导入完）
+    /// 都是低频动作，重建一行数据比给行 VM 补 INPC 便宜且不会漏刷新。</summary>
+    private void RefreshOfflinePackages()
+    {
+        if (OfflinePackageList is null) return;
+        var rows = new List<OfflinePackageRow>();
+        foreach (var pkg in PkgManager.AvailablePackages)
+        {
+            rows.Add(new OfflinePackageRow
+            {
+                Source = pkg,
+                StatusText = pkg.IsInstalled
+                    ? $"{LocaleManager.Tr("已安装")} · {TranslationPackageInfo.FormatSize(pkg.SizeBytes)}"
+                    : pkg.SizeBytes > 0
+                        ? $"{LocaleManager.Tr("约")} {TranslationPackageInfo.FormatSize(pkg.SizeBytes)}"
+                        : LocaleManager.Tr("待下载"),
+                ActionText = pkg.IsInstalled ? LocaleManager.Tr("已安装") : LocaleManager.Tr("下载"),
+            });
+        }
+        OfflinePackageList.ItemsSource = rows;
+    }
+
+    /// <summary>刷运行环境状态。探测要起 Python 子进程（冷态 ~1s），放 Task.Run，
+    /// 回来时窗口可能已关 —— 引用再判空。</summary>
+    private async Task RefreshArgosRuntimeStatusAsync()
+    {
+        if (ArgosRuntimeStatusTxt is null) return;
+        ArgosRuntimeStatusTxt.Text = LocaleManager.Tr("检测运行环境…");
+        var status = await Task.Run(() => OfflineArgosEngine.GetRuntimeStatus());
+        if (ArgosRuntimeStatusTxt is null) return;
+        ArgosRuntimeStatusTxt.Text = status.PythonFound
+            ? status.ArgosAvailable
+                ? LocaleManager.Tr("✅ Python + argostranslate 就绪")
+                : LocaleManager.Tr("⚠ 已装 Python，缺 argostranslate 包")
+            : LocaleManager.Tr("⚠ 未检测到 Python");
+        if (InstallArgosRuntimeBtn is not null)
+            InstallArgosRuntimeBtn.Visibility = status.ArgosAvailable ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void OnInstallArgosRuntimeClick(object sender, RoutedEventArgs e)
+    {
+        if (_offlineBusy) return;
+        _offlineBusy = true;
+        InstallArgosRuntimeBtn.IsEnabled = false;
+        ArgosRuntimeStatusTxt.Text = LocaleManager.Tr("⏳ 正在安装 argostranslate（数分钟，取决于网络）…");
+        SetOfflineMsg("");
+        try
+        {
+            var result = await OfflineArgosEngine.EnsureRuntimeAsync();
+            ArgosRuntimeStatusTxt.Text = result.Success
+                ? LocaleManager.Tr("✅ Python + argostranslate 就绪")
+                : result.Message;
+            if (!result.Success) SetOfflineMsg(result.Message);
+        }
+        catch (OperationCanceledException)
+        {
+            ArgosRuntimeStatusTxt.Text = LocaleManager.Tr("⚠ 未检测到 Python");
+        }
+        finally
+        {
+            _offlineBusy = false;
+            if (InstallArgosRuntimeBtn is not null)
+            {
+                InstallArgosRuntimeBtn.IsEnabled = true;
+                InstallArgosRuntimeBtn.Visibility = Visibility.Visible;
+            }
+        }
+    }
+
+    private async void OnDownloadPackageClick(object sender, RoutedEventArgs e)
+    {
+        if (_offlineBusy) return;
+        if (sender is not FrameworkElement fe || fe.DataContext is not OfflinePackageRow row) return;
+        if (PkgManager.IsPackageInstalled(row.Identifier))
+        {
+            SetOfflineMsg(LocaleManager.Tr("✅ 该语言包已安装，无需重复下载"));
+            return;
+        }
+
+        var root = FindRowRoot(fe);
+        var (bar, statusTxt, downloadBtn, deleteBtn) = TryGetRowControls(root);
+        // ⚠ 局部变量名照抄控件名：进度条在行 DataTemplate 里（x:Name 不生成 codegen 字段，
+        // 经 FindName 取得），而"每个 Collapsed 控件必须有代码点亮"的门禁按 `PkgProgressBar.Visibility`
+        // 这个形状找点亮代码 —— 这里就是真正点亮它的那行，让判据能追到。
+        var PkgProgressBar = bar;
+        _offlineBusy = true;
+        if (downloadBtn is not null) downloadBtn.IsEnabled = false;
+        if (deleteBtn is not null) deleteBtn.IsEnabled = false;
+        if (PkgProgressBar is not null) { PkgProgressBar.Visibility = Visibility.Visible; PkgProgressBar.IsIndeterminate = true; }
+        if (statusTxt is not null) statusTxt.Text = LocaleManager.Tr("下载中…");
+        SetOfflineMsg("");
+
+        try
+        {
+            var result = await PkgManager.DownloadPackageAsync(row.Identifier, (done, total) =>
+            {
+                // 进度回调在线程池上触发 → 必须经调度队列回 UI 线程改控件
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (PkgProgressBar is null) return;
+                    if (total > 0)
+                    {
+                        PkgProgressBar.IsIndeterminate = false;
+                        PkgProgressBar.Value = Math.Min(1.0, (double)done / total);
+                        if (statusTxt is not null)
+                            statusTxt.Text = $"{done / 1048576.0:F0}MB / {total / 1048576.0:F0}MB（{(double)done / total:P0}）";
+                    }
+                    else if (statusTxt is not null)
+                    {
+                        statusTxt.Text = $"{done / 1048576.0:F0} MB";
+                    }
+                });
+            });
+            SetOfflineMsg((result.Success ? "" : "❌ ") + result.Message);
+            CoreLog.Info("OfflineTranslate", $"[UI] {row.Identifier} 下载结果：{result.Message}");
+        }
+        finally
+        {
+            _offlineBusy = false;
+            RefreshOfflinePackages();   // 整表重建会换掉行内控件引用，禁用态自然复位
+        }
+    }
+
+    private void OnUninstallPackageClick(object sender, RoutedEventArgs e)
+    {
+        if (_offlineBusy) return;
+        if (sender is not FrameworkElement fe || fe.DataContext is not OfflinePackageRow row) return;
+        bool ok = PkgManager.UninstallPackage(row.Identifier);
+        SetOfflineMsg(ok
+            ? LocaleManager.Tr("🗑 已删除语言包")
+            : (LocaleManager.Tr("❌ 删除失败") + "：" + row.Identifier));
+        if (ok) RefreshOfflinePackages();
+    }
+
+    private async void OnImportPackageClick(object sender, RoutedEventArgs e)
+    {
+        if (_offlineBusy) return;
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            picker.FileTypeFilter.Add(".argosmodel");
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            _offlineBusy = true;
+            SetOfflineMsg(LocaleManager.Tr("⏳ 正在导入…"));
+            var result = await PkgManager.InstallFromFileAsync(file.Path);
+            SetOfflineMsg((result.Success ? "" : "❌ ") + result.Message);
+            if (result.Success) RefreshOfflinePackages();
+        }
+        catch (Exception ex)
+        {
+            SetOfflineMsg("❌ " + ex.Message);
+        }
+        finally
+        {
+            _offlineBusy = false;
+        }
+    }
+
+    private void OnOpenModelsFolderClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(PkgManager.ModelsDir);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{PkgManager.ModelsDir}\"",
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            SetOfflineMsg("❌ " + ex.Message);
+        }
+    }
+
+    private void SetOfflineMsg(string msg)
+    {
+        if (OfflinePkgMsgTxt is null) return;
+        OfflinePkgMsgTxt.Text = msg;
+        OfflinePkgMsgTxt.Visibility = string.IsNullOrEmpty(msg) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>从模板内任意元素向上找 DataTemplate 根（它的 namescope 持有行内 x:Name 元素）。
+    /// 根的父级是 ItemsControl 生成的 ContentPresenter。</summary>
+    private static FrameworkElement? FindRowRoot(DependencyObject start)
+    {
+        DependencyObject cur = start;
+        while (true)
+        {
+            var parent = VisualTreeHelper.GetParent(cur);
+            if (parent is null) return cur as FrameworkElement;
+            if (parent is ContentPresenter) return cur as FrameworkElement;
+            cur = parent;
+        }
+    }
+
+    private static (ProgressBar? Bar, TextBlock? Status, Button? Download, Button? Delete) TryGetRowControls(FrameworkElement? root) => (
+        root?.FindName("PkgProgressBar") as ProgressBar,
+        root?.FindName("PkgStatusTxt") as TextBlock,
+        root?.FindName("PkgDownloadBtn") as Button,
+        root?.FindName("PkgDeleteBtn") as Button);
 }

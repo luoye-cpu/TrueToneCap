@@ -163,10 +163,13 @@ public static class JpegLiNative
             //   且默认档必须与改动前逐字节一致。
             string xybArg = CompressionEffortMap.JpegLiXybArg(effort);
 
+            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
+            var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
+            
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {distArg}{progArg}{xybArg}{chromaArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"--distance {distArg}{progArg}{xybArg}{chromaArg} \"{safeTmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -327,10 +330,14 @@ public static class JpegLiNative
             string progArg = forceBaseline ? " --progressive_level 0" : "";
             // 增益图（灰度）同样受益：实测 -p 0 路 --xyb 省 1.5%
             string xybArg = CompressionEffortMap.JpegLiXybArg(effort);
+
+            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
+            var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
+            
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {clampedDist:F4}{progArg}{xybArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"--distance {clampedDist:F4}{progArg}{xybArg} \"{safeTmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

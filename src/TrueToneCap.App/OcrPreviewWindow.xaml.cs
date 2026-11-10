@@ -265,10 +265,24 @@ public sealed partial class OcrPreviewWindow : Window
         for (int i = 0; i < _ocr.Lines.Count; i++)
         {
             var line = _ocr.Lines[i];
-            var rect = LineRect(line);
-            if (rect.Width <= 0 || rect.Height <= 0) continue;
+            var rect0 = LineRect(line);
+            if (rect0.Width <= 0 || rect0.Height <= 0) continue;
 
-            double cx = rect.X * sx, cy = rect.Y * sy, cw = rect.Width * sx, ch = rect.Height * sy;
+            // ═══ 2026-11-11（实机排障）：字号锚 = EstimateOriginalFontPx 从【原文】反推 ═══
+            // 旧口径 0.65×框高让覆盖字恒为原字的 4~6 成（det 框高缩水实锚，见 OcrTextOverlay）；
+            // 新口径覆盖字 ≥ 原字（用户口径"至少应该不比原有的字体小"）。锚必须用 det 原框。
+            float referencePx = OcrTextOverlay.EstimateOriginalFontPx(line.Text, rect0.Width, rect0.Height);
+            // det 框高 ≈ 0.6×真实字高：块竖向/横向扩到罩住整段墨迹，垫底才盖得住原字（否则重影）
+            var est = OcrTextOverlay.ExpandRectToInk(line.Text, rect0, _imgH);
+            // det 横向也缩水 ⇒ 墨迹用像素实测（在扩展窗口内扫与底色对比超阈值的像素），
+            // 覆盖块 = 估计扩块 ∪ 实测墨迹+pad —— 不依赖字体度量常数，原字不露边。
+            var ink = OcrTextOverlay.MeasureInkRect(_rawPixels, _imgW, _imgH,
+                (est.X - 10, est.Y, est.Width + 20, est.Height));
+            ink = (Math.Max(0, ink.X - 4), Math.Max(0, ink.Y - 4), ink.Width + 8, ink.Height + 8);
+            var rect = OcrTextOverlay.UnionRect(est, ink);
+            if (rect.Y + rect.Height > _imgH) rect.Height = _imgH - rect.Y;
+
+            double cw = rect.Width * sx, ch = rect.Height * sy;
             // 快照式读取：译文与"是否显示译文"来自同一个不可变对象，不会再出现
             // "标志已置位但译文还是旧的"这类半成品（见 TranslationSnapshot 的说明）。
             var snap = _translation;
@@ -282,62 +296,95 @@ public sealed partial class OcrPreviewWindow : Window
                 ? $"原文: {line.Text}\n译文: {snap!.Lines[i]}"
                 : line.Text;
 
-            // 高亮背景块 (原文模式=半透明蓝, 译文模式=深色不透明)
-            byte bgA = showTranslation ? (byte)235 : (byte)80;
-            var bgColor = showTranslation
-                ? Windows.UI.Color.FromArgb(235, 15, 23, 42)    // 深色不透明
-                : Windows.UI.Color.FromArgb(80, 56, 120, 210);  // 半透明蓝
+            // 高亮背景块：原文模式 = 采样局部底色的不透明垫底（盖掉原字防重影，色随底图融入）。
+            // 2026-11-11 实机第二轮：α80 半透明让原字透出，与覆盖字叠成错位双影；
+            // 实机第三轮：α245 仍有 3.9% 透出 —— 平坦底上 6 luma 的残影肉眼可辨（(510,145)=154
+            // 实测 = 0.961×160 的理论 bleed 值）⇒ 全不透明。垫底色取自 _rawPixels 后按整窗
+            // 暗化折算成呈现色（darkOverlay 是 α90 黑 ⇒ 底色 ×165/255），块与周边亮度一致。
+            byte fg;
+            Windows.UI.Color bgColor;
+            if (showTranslation)
+            {
+                bgColor = Windows.UI.Color.FromArgb(235, 15, 23, 42);    // 深色不透明
+                fg = 240;
+            }
+            else
+            {
+                var bgRaw = OcrTextOverlay.MedianBlockColor(_rawPixels, _imgW, _imgH,
+                    rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height);
+                bgColor = Windows.UI.Color.FromArgb(255,
+                    (byte)(bgRaw.R * 165 / 255), (byte)(bgRaw.G * 165 / 255), (byte)(bgRaw.B * 165 / 255));
+                int bgLuma = (bgColor.R * 299 + bgColor.G * 587 + bgColor.B * 114) / 1000;
+                fg = bgLuma >= 136 ? (byte)20 : (byte)240;
+            }
             var borderColor = showTranslation
                 ? Windows.UI.Color.FromArgb(120, 56, 189, 248)  // 蓝边框
                 : Windows.UI.Color.FromArgb(100, 100, 180, 255); // 浅蓝边框
-
-            var overlay = new Border
-            {
-                Width = Math.Max(1, cw), Height = Math.Max(1, ch),
-                CornerRadius = new CornerRadius(2),
-                Background = new SolidColorBrush(bgColor),
-                BorderBrush = new SolidColorBrush(borderColor),
-                BorderThickness = new Thickness(1),
-                // ═══ 2026-08-25: 文字块可点击复制 + 悬停高亮 ═══
-            };
-            Canvas.SetLeft(overlay, cx);
-            Canvas.SetTop(overlay, cy);
 
             // ═══ 文字覆盖层 — 使用用户选择的字体，与OCR区域对齐 ═══
             //
             // 2026-10-29：译文普遍比原文长，原先 NoWrap + 省略号会把后半句吃掉。
             // 改成"按框宽折行 + 自适应字号"，且字号由 OcrTextOverlay.FitFontSize 在【图像像素空间】
             // 算好再乘回显示缩放 —— 导出的覆盖图调的是同一个函数，预览与产物不会两套排版。
+            // ═══ 2026-11-11（实机排障）：字号锚 = EstimateOriginalFontPx 从【原文】反推 ═══
+            // 旧口径 0.65×框高让覆盖字恒为原字的 4~6 成（det 框高缩水实锚，见 OcrTextOverlay）；
+            // 新口径覆盖字 ≥ 原字（用户口径"至少应该不比原有的字体小"）。
             float fitPx = OcrTextOverlay.FitFontSize(displayText, EffectiveFontFamily,
-                Math.Max(8, rect.Width - 8), Math.Max(8, rect.Height - 8), rect.Height * 0.65f);
+                Math.Max(8, rect.Width - 8), Math.Max(8, rect.Height - 8), referencePx);
+
+            double marginS = Math.Max(1, 4 * sx);
             var textBlock = new TextBlock
             {
                 Text = displayText,
-                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 240)),
+                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, fg, fg, fg)),
                 FontWeight = Microsoft.UI.Text.FontWeights.Medium,
-                TextWrapping = TextWrapping.Wrap,
+                // 原文模式禁折行：显示文本就是块里的原字，锚定字号下本就单行放下；
+                // 折行会让 ±1px 的排版差把词拆成"OC/R"堆叠（实机第二轮抓到）。
+                // 译文模式保留折行：译文普遍更长，折行是设计行为。
+                TextWrapping = showTranslation ? TextWrapping.Wrap : TextWrapping.NoWrap,
                 TextTrimming = TextTrimming.None,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(Math.Max(1, 4 * sx), 0, Math.Max(1, 4 * sx), 0),
+                Margin = new Thickness(marginS, 0, marginS, 0),
                 // 只防 0/负值：这里若给个"最小 6 DIP"，小图缩放后预览的字就会比导出的字大一圈，
                 // 正好把"预览所见 = 产物"这条纪律破坏掉（导出按图像像素画，比例必须一致）
                 FontSize = Math.Max(1.0, fitPx * sy),
                 // ═══ 2026-08-25: 使用用户选择的字体覆盖 ═══
                 FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(EffectiveFontFamily),
             };
+
+            // ═══ 2026-11-11（实机第三轮）：块宽高 = max(墨迹覆盖, 文字实测) —— 不再拍估计值 ═══
+            // 用户的真实字体（如中文字体渲染拉丁文）字幅比 0.55em 估计值宽，锚定字号下末字符
+            // 被块边裁掉（"OCl"/"CHEC!"，实机截图）。XAML Measure 给的是真实字体度量 ——
+            // 块取两者较大值，中心保持对准墨迹块中心，再收拢进画布。
+            textBlock.Measure(showTranslation
+                ? new Windows.Foundation.Size(Math.Max(1, cw - 2 * marginS), double.PositiveInfinity)
+                : new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            double bw = Math.Max(cw, textBlock.DesiredSize.Width + 2);   // +2：Border 左右边框各 1
+            double bh = Math.Max(ch, textBlock.DesiredSize.Height + 2);
+            double left = Math.Max(0, Math.Min(rect.X * sx + cw / 2 - bw / 2, Math.Max(0, canvasW - bw)));
+            double top = Math.Max(0, Math.Min(rect.Y * sy + ch / 2 - bh / 2, Math.Max(0, canvasH - bh)));
+
+            var overlay = new Border
+            {
+                Width = Math.Max(1, bw), Height = Math.Max(1, bh),
+                CornerRadius = new CornerRadius(2),
+                Background = new SolidColorBrush(bgColor),
+                BorderBrush = new SolidColorBrush(borderColor),
+                BorderThickness = new Thickness(1),
+                // ═══ 2026-08-25: 文字块可点击复制 + 悬停高亮 ═══
+            };
+            Canvas.SetLeft(overlay, left);
+            Canvas.SetTop(overlay, top);
             overlay.Child = textBlock;
 
-            // 悬停效果：增加亮度
+            // 悬停效果：边框增亮（块底已是不透明垫底色，保持不动，只亮边框）
             overlay.PointerEntered += (_, _) =>
             {
                 overlay.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 56, 189, 248));
-                overlay.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(
-                    showTranslation ? (byte)255 : (byte)120, 30, 60, 180));
             };
             overlay.PointerExited += (_, _) =>
             {
                 overlay.BorderBrush = new SolidColorBrush(borderColor);
-                overlay.Background = new SolidColorBrush(bgColor);
             };
 
             ToolTipService.SetToolTip(overlay, tooltipText);
@@ -459,6 +506,157 @@ public sealed partial class OcrPreviewWindow : Window
         }
     }
 
+    // ═══ 离线翻译的未就绪引导（2026-11-11 离线翻译包方案）═══
+
+    /// <summary>离线未就绪时用户的走向。</summary>
+    private enum OfflineFallbackAction { Abort, ProceedOnline, ProceedOffline }
+
+    /// <summary>
+    /// 离线翻译前置检查未通过时的引导弹窗：
+    /// <list type="bullet">
+    /// <item>缺语言包 → [开始下载]（进度就地显示，成功后直接继续离线翻译）/ [改用在线翻译] / [取消]</item>
+    /// <item>缺运行环境 → [改用在线翻译] / [取消]（装运行环境去主窗口设置里做，弹窗里不引导长任务）</item>
+    /// </list>
+    /// <para>弹窗构造期可能还没挂上 XamlRoot（自动翻译在构造函数里就开始跑）——
+    /// ShowAsync 抛异常时退回纯状态栏提示，绝不因为引导失败把窗口搞崩。</para>
+    /// </summary>
+    private async Task<OfflineFallbackAction> HandleOfflineNotReadyAsync(
+        OfflineArgosEngine.ReadinessResult ready, CancellationToken ct)
+    {
+        LogService.Warn("OcrPreview",
+            $"离线翻译未就绪：{ready.State}（{ready.From}→{ready.To}，Python={ready.PythonFound} argos={ready.ArgosAvailable}）",
+            LogCategory.Network);
+
+        string title, detail;
+        if (ready.State == OfflineArgosEngine.ReadinessState.ModelMissing)
+        {
+            title = LocaleManager.Tr("未找到离线翻译模型");
+            // 长句拆两条（词表键值不允许反斜杠转义），代码里拼 —— 与词表判据对齐
+            detail = string.Format(LocaleManager.Tr(
+                        "缺少语言包 {0}。下载后即可完全离线翻译，文本不会离开本机。"),
+                    ready.PackageIdentifier ?? $"{ready.From}_{ready.To}")
+                + "\n\n" + LocaleManager.Tr("首次使用还需 Python 运行环境；下载期间请勿关闭本窗口。");
+        }
+        else
+        {
+            title = LocaleManager.Tr("离线翻译运行环境未就绪");
+            detail = ready.PythonFound
+                ? LocaleManager.Tr("已检测到 Python，但缺 argostranslate 包。可到主窗口 设置 → OCR/翻译 的「离线翻译包」卡片点「安装运行环境」，或本次改用在线翻译。")
+                : LocaleManager.Tr("未检测到 Python。离线翻译需要 Python 3.10+ 与 argostranslate；可到主窗口设置里安装，或本次改用在线翻译。");
+        }
+
+        var progressBar = new ProgressBar { Maximum = 1.0, IsIndeterminate = true, Visibility = Visibility.Collapsed };
+        var stack = new StackPanel { Spacing = 12 };
+        stack.Children.Add(new TextBlock { Text = detail, TextWrapping = TextWrapping.Wrap, MaxWidth = 380 });
+        stack.Children.Add(progressBar);
+
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = stack,
+            XamlRoot = this.Content.XamlRoot,
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        bool canDownloadHere = ready.State == OfflineArgosEngine.ReadinessState.ModelMissing;
+        if (canDownloadHere)
+        {
+            dialog.PrimaryButtonText = LocaleManager.Tr("开始下载");
+            dialog.SecondaryButtonText = LocaleManager.Tr("改用在线翻译");
+            dialog.CloseButtonText = LocaleManager.Tr("取消");
+        }
+        else
+        {
+            dialog.PrimaryButtonText = LocaleManager.Tr("改用在线翻译");
+            dialog.CloseButtonText = LocaleManager.Tr("取消");
+        }
+
+        ContentDialogResult result;
+        try
+        {
+            result = await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("OcrPreview", $"离线就绪弹窗无法显示（{ex.Message}），退回状态栏提示");
+            InfoTxt.Text = "⚠ " + detail;
+            ResetTranslateUi();
+            return OfflineFallbackAction.Abort;
+        }
+
+        // "改用在线翻译"按钮：ModelMissing 时在 Secondary，RuntimeMissing 时在 Primary ——
+        // 统一按 canDownloadHere 翻译结果，不再复制一遍按钮语义。
+        if (result == (canDownloadHere ? ContentDialogResult.Secondary : ContentDialogResult.Primary))
+        {
+            SwitchToOnlineModeQuiet();
+            InfoTxt.Text = "🌐 翻译中...";
+            return OfflineFallbackAction.ProceedOnline;
+        }
+        if (canDownloadHere && result == ContentDialogResult.Primary)
+        {
+            // ═══ 就地下载：进度条与状态栏同时更新；成功后直接继续离线翻译 ═══
+            dialog.IsPrimaryButtonEnabled = false;
+            dialog.IsSecondaryButtonEnabled = false;
+            progressBar.Visibility = Visibility.Visible;
+            InfoTxt.Text = "⬇ 正在下载语言包...";
+            var manager = new TranslationPackageManager();
+            var download = await manager.DownloadPackageAsync(
+                ready.PackageIdentifier ?? $"{ready.From}_{ready.To}",
+                (done, total) => DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (total > 0)
+                    {
+                        progressBar.IsIndeterminate = false;
+                        progressBar.Value = Math.Min(1.0, (double)done / total);
+                        InfoTxt.Text = $"⬇ {done / 1048576.0:F0}MB / {total / 1048576.0:F0}MB（{(double)done / total:P0}）";
+                    }
+                    else
+                    {
+                        InfoTxt.Text = $"⬇ {done / 1048576.0:F0} MB";
+                    }
+                }),
+                ct);
+            dialog.Hide();
+            if (download.Success)
+            {
+                InfoTxt.Text = "🌐 翻译中...";
+                return OfflineFallbackAction.ProceedOffline;
+            }
+            LogService.Warn("OcrPreview", $"离线语言包下载失败：{download.Message}", LogCategory.Network);
+            InfoTxt.Text = "❌ " + download.Message;
+            ResetTranslateUi();
+            return OfflineFallbackAction.Abort;
+        }
+        ResetTranslateUi();
+        return OfflineFallbackAction.Abort;
+    }
+
+    /// <summary>本次翻译放弃后把 UI 复位（按钮可再点、翻译态清掉）。</summary>
+    private void ResetTranslateUi()
+    {
+        _translating = false;
+        TranslateBtn.IsEnabled = true;
+    }
+
+    /// <summary>用户在引导里选了"改用在线翻译"：本次窗口内立即切在线，并把模式写回设置。
+    /// <para>写回 "Free" 不动用户的 LLM/Vision 凭据 —— 那些字段在设置里独立存放，
+    /// 模式只是"当前选了哪条路"的指针（SaveSettings 的形状也是这样）。</para></summary>
+    private void SwitchToOnlineModeQuiet()
+    {
+        _translationConfig.UseOfflineArgos = false;
+        try
+        {
+            var s = AppServices.Settings.Current;
+            s.TranslationMode = "Free";
+            s.UseCustomLlm = false;
+            AppServices.Settings.SaveQuiet();
+            LogService.Info("OcrPreview", "离线未就绪 → 本次及后续改用在线免费翻译（已写回设置）");
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("OcrPreview", "在线回退的设置落盘失败: " + ex.Message);
+        }
+    }
+
     private void OnModeToggleChanged(object sender, RoutedEventArgs e)
     {
         bool want = ModeToggle.IsChecked == true;
@@ -527,12 +725,31 @@ public sealed partial class OcrPreviewWindow : Window
         {
             string why = TranslationService.DescribeBackends(_translationConfig);
             LogService.Warn("OcrPreview", $"翻译未开始：一条后端都没配。{why.Replace("\n", "；")}", LogCategory.Network);
+            _translating = false;   // 2026-11-11 补：原先忘了复位，一次"没配置"就永久卡住本窗口的翻译
             DispatcherQueue.TryEnqueue(() =>
             {
                 TranslateBtn.IsEnabled = true;
                 InfoTxt.Text = "⚠ " + why;
             });
             return;
+        }
+
+        // ═══ 离线模式的前置检查（2026-11-11 离线翻译包方案）═══
+        // 在扇出之前问"语言包/运行环境在不在"：缺了就弹引导（可就地下载语言包，
+        // 或改用在线翻译），而不是让 N 行各自失败再把原因吞进"N/N 行失败"里。
+        // 弹窗/下载期间的取消（关窗）会走到 ct —— 下载进程与翻译任务都会被收掉。
+        if (_translationConfig.UseOfflineArgos)
+        {
+            var readiness = OfflineArgosEngine.CheckReady(
+                _translationConfig.OfflineSourceLangHint, _translationConfig.TargetLanguage);
+            if (readiness.State != OfflineArgosEngine.ReadinessState.Ready)
+            {
+                var action = await HandleOfflineNotReadyAsync(readiness, ct);
+                if (action == OfflineFallbackAction.Abort) return;
+                if (action == OfflineFallbackAction.ProceedOnline)
+                    _translationConfig.UseOfflineArgos = false;   // 继续往下走在线路（下方 Vision/文本分派自然接住）
+                // ProceedOffline：语言包已就地下载完，UseOfflineArgos 保持 true，由下方分派接住
+            }
         }
 
         try
@@ -563,6 +780,21 @@ public sealed partial class OcrPreviewWindow : Window
                 // 所以这里不存在"某行失败"。不显式记这一笔的话，下面那句按
                 // "译文 == 原文"数失败的兜底统计会把专有名词/同语言的正常行算成失败。
                 definiteFailed = 0;
+            }
+            else if (_translationConfig.UseOfflineArgos)
+            {
+                // ═══ 离线路：整批进一个本地 Python 进程（2026-11-11 离线翻译包方案）═══
+                // 不走下面的逐行扇出：Argos 每个进程要加载模型（1-3 s），N 行各起一个进程
+                // 就是 N 次加载。一个进程装下整批（stdin 逐行进、JSON 数组出），
+                // 行级容错在桥内做：失败行回填原文并计入 FailedCount —— 语义与视觉路
+                // 相同（整批返回或整批抛异常），definiteFailed 记真实失败数。
+                var from = OfflineArgosEngine.NormalizeLang(_translationConfig.OfflineSourceLangHint) ?? "en";
+                var to = OfflineArgosEngine.NormalizeLang(_translationConfig.TargetLanguage) ?? "en";
+                var batch = await OfflineArgosEngine.TranslateBatchAsync(
+                    lines.Select(l => l.Text).ToArray(), from, to, ct);
+                translated = batch.Lines.ToList();
+                definiteFailed = batch.FailedCount;
+                if (batch.FirstError is not null) firstError = batch.FirstError;
             }
             else
             {
@@ -715,9 +947,11 @@ DispatcherQueue.TryEnqueue(() =>
                         LogCategory.UI);
 
                 string font = EffectiveFontFamily;
+                var originals = new string[lines.Count];
+                for (int i = 0; i < lines.Count; i++) originals[i] = lines[i].Text;
                 // 合成（clone + Win2D 光栅化 + 混合）整段放后台：4K 一次 clone 33MB，压 UI 线程会整窗无响应
                 composed = await Task.Run(() =>
-                    OcrTextOverlay.Compose(_rawPixels, _imgW, _imgH, boxes, snap.Lines, font));
+                    OcrTextOverlay.Compose(_rawPixels, _imgW, _imgH, boxes, snap.Lines, font, originals));
                 LogService.Info("OcrPreview", $"译文覆盖合成完成: {_imgW}x{_imgH} {boxes.Length} 行", LogCategory.UI);
             }
             else

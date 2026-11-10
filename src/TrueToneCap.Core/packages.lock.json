@@ -4,9 +4,9 @@
     "net11.0-windows10.0.26100": {
       "Microsoft.Windows.AI.MachineLearning": {
         "type": "Direct",
-        "requested": "[2.4.89, )",
-        "resolved": "2.4.89",
-        "contentHash": "uc+Lej0vmZJprvHEuNJs7xMegoParROM9pZ2a7uMeXQiELva42V1wAUoYHCsw/u5ho/nwkYasiSFWZ95ABot3A==",
+        "requested": "[2.5.96, )",
+        "resolved": "2.5.96",
+        "contentHash": "nEigqZy0jJu0G0qTcqjOXJ1LtooPJvHt+w3NxrSInAmIYHiMqtUX9oRIVBllqZWR2omOYrwYRfMmvaYpgP3U0A==",
         "dependencies": {
           "System.Numerics.Tensors": "9.0.0"
         }

@@ -24,7 +24,7 @@
                Microsoft.WindowsAppSDK.ML 从 2.1.74（内含 ORT 1.24）抬到 2.1.94，
                降低"传递旧 ORT 与显式 WinML 2.4.89 共存"的复杂度。
          ⚠ 本包是 App/LogViewer 的 WinUI 3 基座，升级牵动面最广，必须整套回归。 -->
-    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="2.6.5" />
     <PackageVersion Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
 
     <!-- ── 依赖注入 (App) ──
@@ -37,7 +37,7 @@
          ⏳ GA 收口（预计 2026-11-10，.NET Conf 2026）: 11.0.0 stable 发布后把
             两个包连同 SDK 一起换成 stable 版，并在 global.json 关掉 allowPrerelease。
             在此之前保持 allowPrerelease: true。 -->
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="11.0.0-rc.2.26504.105" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="11.0.0-rc.3.26522.148" />
 
     <!-- ── 推理 / 图形 (Core) ──
          ═══ 2026-10-07 迁移：Microsoft.ML.OnnxRuntime.DirectML → Microsoft.Windows.AI.MachineLearning ═══
@@ -55,7 +55,7 @@
            - 许可性质变化：WinML 是 Microsoft 专有 EULA（含赔偿担保条款），
              非 ORT 那样的 MIT。台账见 licenses/INDEX.json。
          版本 2.4.89 为实测验证过的稳定版（内含 ORT 1.27.20260711.1.7b7c0e2）。 -->
-    <PackageVersion Include="Microsoft.Windows.AI.MachineLearning" Version="2.4.89" />
+    <PackageVersion Include="Microsoft.Windows.AI.MachineLearning" Version="2.5.96" />
     <PackageVersion Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageVersion Include="Vortice.DXGI" Version="3.8.3" />
 
@@ -72,12 +72,16 @@
          MozJpegSharp.Core 已移除（2026-09-21 许可合规轮）：零引用死重量，
          理由与取证见 src/TrueToneCap.Core/TrueToneCap.Core.csproj 原位注释。 -->
 
-    <!-- ── 测试 / 工具 (Test / Tools) ──
+    <!-- ── 测试/工具 (Test / Tools) ──
          仅用于生成测试图，不随主程序发布。
-         2026-10-07: 10.0.11 → 10.0.12；2026-10-22: → 10.0.13（均为 .NET 10 LTS 线补丁）。
-         2026-10-26: 随"完整迁移 .NET 11"一并切到 11.0.0-rc.2.26504.105
-         （理由与 GA 收口计划见上方 DependencyInjection 条目的注释）。 -->
-    <PackageVersion Include="System.Drawing.Common" Version="11.0.0-rc.2.26504.105" />
+         
+         ═══ 2026-11-08: Upgrade to .NET 11 RC3 (GO version / 最终候选版) ═══
+         Reason / 原因：跟随上述 Microsoft.Extensions.DependencyInjection 升级
+                       到同一 RC3 构建号，保持同源一致性。
+         
+         Note / 说明：此处的 System.Drawing.Common 是测试项目依赖，
+                    与 App 项目的依赖注入包必须保持完全相同的版本号 -->
+    <PackageVersion Include="System.Drawing.Common" Version="11.0.0-rc.3.26522.148" />
   </ItemGroup>
 
 </Project>

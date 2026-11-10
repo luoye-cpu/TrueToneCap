@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ═══ WCAG 2.1 AA Focus Visual Enhancement Styles ═══ -->
+    <!-- 2026-11-08: Ensure high visibility keyboard focus indicators across all controls -->
+    
+    <!-- Focus visual properties -->
+    <SolidColorBrush x:Key="FocusVisualPrimaryBrush" Color="#FFFF5722"/>
+    <SolidColorBrush x:Key="FocusVisualSecondaryBrush" Color="#FFBDBDBD"/>
+    <Thickness x:Key="FocusVisualMargin">0</Thickness>
+    <CornerRadius x:Key="FocusVisualBorderRadius">4</CornerRadius>
+    
+    <!-- ═══ Global Accessible Control Style ═══ -->
+    
+    <!-- Base accessible style for interactive controls -->
+    <Style x:Key="AccessibleControlStyle" TargetType="Control">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- Button with enhanced focus -->
+    <Style x:Key="AccessibleButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- TextBox with enhanced focus -->
+    <Style x:Key="AccessibleTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource DefaultTextBoxStyle}">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- ComboBox with enhanced focus -->
+    <Style x:Key="AccessibleComboBoxStyle" TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- Slider with enhanced focus -->
+    <Style x:Key="AccessibleSliderStyle" TargetType="Slider" BasedOn="{StaticResource DefaultSliderStyle}">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- CheckBox with enhanced focus -->
+    <Style x:Key="AccessibleCheckBoxStyle" TargetType="CheckBox" BasedOn="{StaticResource DefaultCheckBoxStyle}">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- RadioButton with enhanced focus -->
+    <Style x:Key="AccessibleRadioButtonStyle" TargetType="RadioButton" BasedOn="{StaticResource DefaultRadioButtonStyle}">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- NavigationViewItem with enhanced focus -->
+    <Style x:Key="AccessibleNavigationViewItemStyle" TargetType="NavigationViewItem">
+        <Setter Property="FocusVisualMargin" Value="{StaticResource FocusVisualMargin}"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+</ResourceDictionary>

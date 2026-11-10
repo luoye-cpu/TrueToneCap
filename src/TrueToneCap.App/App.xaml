@@ -19,10 +19,23 @@
                     <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
                     <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
                 </ResourceDictionary>
+                <!-- WCAG 2.1 AA: High contrast theme for accessibility mode (2026-11-08) -->
+                <ResourceDictionary x:Key="HighContrast">
+                    <FontFamily x:Key="ContentControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
+                    <FontFamily x:Key="TextControlThemeFontFamily">Microsoft YaHei, Segoe UI, sans-serif</FontFamily>
+                </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <!-- WCAG 2.1 AA: High contrast theme (2026-11-08) -->
+                <ResourceDictionary Source="ms-appx:///Resources/HighContrastTheme.xaml"/>
+                <!-- WCAG 2.1 AA: Focus visual enhancement styles (2026-11-08) -->
+                <ResourceDictionary Source="ms-appx:///Resources/FocusVisualStyles.xaml"/>
+                <!-- WCAG 2.1 AA: General accessibility enhancements (2026-11-08) -->
+                <ResourceDictionary Source="ms-appx:///Resources/AccessibilityEnhancements.xaml"/>
+                <!-- WCAG 2.1 AA: NavigationView items accessibility (2026-11-08) -->
+                <ResourceDictionary Source="ms-appx:///Resources/NavigationViewAccessibilityEnhancements.xaml"/>
             </ResourceDictionary.MergedDictionaries>
 
             <!-- 全局默认字体隐式回退 -->

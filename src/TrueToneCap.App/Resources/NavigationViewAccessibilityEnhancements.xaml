@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:controls="using:Microsoft.UI.Xaml.Controls">
+
+    <!-- ═══ NavigationView Items Accessibility Enhancements ═══ -->
+    <!-- 2026-11-08: WCAG 2.1 AA - Add automation properties to NavMenuItem items -->
+    
+    <!-- Output Settings Tab -->
+    <Style TargetType="controls:NavigationViewItem" x:Key="OutputTabStyle">
+        <Setter Property="AutomationProperties.Name" Value="输出设置页"/>
+        <Setter Property="AutomationProperties.HelpText" 
+                Value="配置截图格式、质量、保存路径和归档方式"/>
+    </Style>
+    
+    <!-- Capture Settings Tab -->
+    <Style TargetType="controls:NavigationViewItem" x:Key="CaptureTabStyle">
+        <Setter Property="AutomationProperties.Name" Value="截图设置页"/>
+        <Setter Property="AutomationProperties.HelpText" 
+                Value="设置截图快捷键、预览选项和录制参数"/>
+    </Style>
+    
+    <!-- AI/OCR Tab -->
+    <Style TargetType="controls:NavigationViewItem" x:Key="AITabStyle">
+        <Setter Property="AutomationProperties.Name" Value="AI 翻译设置页"/>
+        <Setter Property="AutomationProperties.HelpText" 
+                Value="配置 OCR 文字识别引擎和在线翻译服务"/>
+    </Style>
+    
+    <!-- System Settings Tab -->
+    <Style TargetType="controls:NavigationViewItem" x:Key="SystemTabStyle">
+        <Setter Property="AutomationProperties.Name" Value="系统设置页"/>
+        <Setter Property="AutomationProperties.HelpText" 
+                Value="调整主题外观、界面语言和通知行为"/>
+    </Style>
+    
+    <!-- Log Viewer Tab -->
+    <Style TargetType="controls:NavigationViewItem" x:Key="LogTabStyle">
+        <Setter Property="AutomationProperties.Name" Value="运行日志查看器"/>
+        <Setter Property="AutomationProperties.HelpText" 
+                Value="查看程序运行日志、过滤错误信息和搜索内容"/>
+    </Style>
+    
+</ResourceDictionary>

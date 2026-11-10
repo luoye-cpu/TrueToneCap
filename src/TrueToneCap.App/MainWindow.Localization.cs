@@ -262,6 +262,7 @@ public sealed partial class MainWindow : Window
         SetComboItemText(TranslationModeCbo, "Free", LocaleManager.Tr("免费翻译"));
         SetComboItemText(TranslationModeCbo, "LLM", LocaleManager.Tr("LLM 翻译"));
         SetComboItemText(TranslationModeCbo, "Vision", LocaleManager.Tr("视觉翻译"));
+        SetComboItemText(TranslationModeCbo, "Offline", LocaleManager.Tr("离线翻译"));
 
         // ═══ 压缩强度三档（2026-10-07；PNG / TIFF 于 2026-10-29 加入这一组）═══
         // 每张卡片各有自己的一份，且卡片本身按格式显隐（Collapsed 时项不在可视树里）

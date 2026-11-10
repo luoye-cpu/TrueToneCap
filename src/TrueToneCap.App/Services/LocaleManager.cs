@@ -535,6 +535,48 @@ public static class LocaleManager
             ["免费翻译"] = "Free Translation",
             ["硅基流动"] = "SiliconFlow",
             ["视觉翻译"] = "Vision Translation",
+            // ── 2026-11-11 离线翻译包（设置卡片 + 预览窗引导弹窗 + 行状态文案）──
+            // 键必须与 XAML/调用点的字面量逐字相同（含全角括号与省略号），差一个字就是英文界面漏翻。
+            ["离线翻译"] = "Offline Translation",
+            ["离线翻译包"] = "Offline Translation Packages",
+            ["文本全程不出本机。首次使用需先装 Python 运行环境（点「安装运行环境」），再下载所需语言包；包下载后完全离线可用。"] =
+                "Text never leaves this machine. First install the Python runtime (tap 'Install runtime'), then download the language packs you need; downloaded packs work fully offline.",
+            ["运行环境"] = "Runtime",
+            ["安装运行环境"] = "Install runtime",
+            ["语言包列表"] = "Language packs",
+            ["从本地文件导入…"] = "Import from file…",
+            // 「打开文件夹」第 488 行已有同键同译，不再重复登记（Dictionary 重复键会当场炸）
+            ["下载"] = "Download",
+            ["下载中…"] = "Downloading…",
+            ["删除"] = "Delete",
+            ["已安装"] = "Installed",
+            ["约"] = "~",
+            ["待下载"] = "Not downloaded",
+            ["✅ 该语言包已安装，无需重复下载"] = "✅ This pack is already installed",
+            ["🗑 已删除语言包"] = "🗑 Language pack removed",
+            ["❌ 删除失败"] = "❌ Failed to remove",
+            ["⏳ 正在导入…"] = "⏳ Importing…",
+            ["检测运行环境…"] = "Detecting runtime…",
+            ["✅ Python + argostranslate 就绪"] = "✅ Python + argostranslate ready",
+            ["⚠ 已装 Python，缺 argostranslate 包"] = "⚠ Python found, argostranslate package missing",
+            ["⚠ 未检测到 Python"] = "⚠ Python not found",
+            ["⏳ 正在安装 argostranslate（数分钟，取决于网络）…"] = "⏳ Installing argostranslate (takes minutes, depends on network)…",
+            ["未找到离线翻译模型"] = "Offline translation model not found",
+            // ⚠ 本表键值不允许反斜杠转义（判据逐字解析），含换行的长句拆成两条，代码里再拼。
+            ["缺少语言包 {0}。下载后即可完全离线翻译，文本不会离开本机。"] =
+                "Language pack {0} is missing. Once downloaded, translation works fully offline and text never leaves this machine.",
+            ["离线翻译运行环境未就绪"] = "Offline translation runtime not ready",
+            ["已检测到 Python，但缺 argostranslate 包。可到主窗口 设置 → OCR/翻译 的「离线翻译包」卡片点「安装运行环境」，或本次改用在线翻译。"] =
+                "Python is present but the argostranslate package is missing. Install it from the main window's Settings → OCR/Translate → 'Offline Translation Packages' card ('Install runtime'), or use online translation this time.",
+            ["未检测到 Python。离线翻译需要 Python 3.10+ 与 argostranslate；可到主窗口设置里安装，或本次改用在线翻译。"] =
+                "Python not found. Offline translation needs Python 3.10+ and argostranslate; install them from the main window's settings, or use online translation this time.",
+            ["开始下载"] = "Download now",
+            ["改用在线翻译"] = "Use online translation",
+            ["首次使用还需 Python 运行环境；下载期间请勿关闭本窗口。"] =
+                "First-time use also needs the Python runtime; keep this window open while downloading.",
+            // ⚠ Argos 语言包显示名（英语→中文 等 12 条）不走本表：行数据按 CurrentLanguage
+            // 直接取 TranslationPackageInfo.NameChinese/NameEnglish（模型自带双语名）。
+            // 进表反而会变成"死键"—— 死键判据扫不到 Tr(变量) 这种调用点。
             ["🌐 网络"] = "🌐 Network",
             ["💾 编码"] = "💾 Encoding",
             ["📷 捕获"] = "📷 Capture",

@@ -16,6 +16,13 @@ if (args.Length >= 1 && args[0] == "--ocr-bench")
     return;
 }
 
+// ═══ OCR 分行/词框/字号探针 (--ocr-dump <png> <x> <y> <w> <h> [modelDir] [gpu]) ═══
+if (args.Length >= 1 && args[0] == "--ocr-dump")
+{
+    OcrDumpProbe.Run(args);
+    return;
+}
+
 // ═══ OCR 真实语料基准 (--ocr-bench-real [seed]) — 多样化真实内容+真实截图风格 ═══
 if (args.Length >= 1 && args[0] == "--ocr-bench-real")
 {

@@ -4,17 +4,17 @@
     "net11.0-windows10.0.26100": {
       "System.Drawing.Common": {
         "type": "Direct",
-        "requested": "[11.0.0-rc.2.26504.105, )",
-        "resolved": "11.0.0-rc.2.26504.105",
-        "contentHash": "wbTsf0WAcbGQC8U9E/WIvbS/CrnZ942HPdfa7Imj6jsIS+rdf9/u+v9vbFsR47HWRzaIIBbdzCddjEDZMIODNA==",
+        "requested": "[11.0.0-rc.3.26522.148, )",
+        "resolved": "11.0.0-rc.3.26522.148",
+        "contentHash": "cuzPfZYxGwC/Qc/7wKI8non7KzFGbnUOxUqVsA7r+xtxiIk/s0iu/+lA/Wa/CEBktm+fs4mAQnDehpkEPUsKcw==",
         "dependencies": {
-          "Microsoft.Win32.SystemEvents": "11.0.0-rc.2.26504.105"
+          "Microsoft.Win32.SystemEvents": "11.0.0-rc.3.26522.148"
         }
       },
       "Microsoft.Win32.SystemEvents": {
         "type": "Transitive",
-        "resolved": "11.0.0-rc.2.26504.105",
-        "contentHash": "4bPvejlneRpYG6LPJba/gzxqe0lvsoH8ydg6Eece/Jp00W2/E1X1jsIKQH7w+1Q56Ln+S2gMg5ynu9FoZZq2Xg=="
+        "resolved": "11.0.0-rc.3.26522.148",
+        "contentHash": "TPz9gCkuGpMUfpi7xjbUe/krSfa0VPsGOdwrUmrwsfvBEK6OfLuOyB8FjaJI/d5go3ZZaONOOuayZSQmoCLCAw=="
       },
       "SharpGen.Runtime": {
         "type": "Transitive",
@@ -52,7 +52,7 @@
       "truetonecap.core": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.Windows.AI.MachineLearning": "[2.4.89, )",
+          "Microsoft.Windows.AI.MachineLearning": "[2.5.96, )",
           "Vortice.DXGI": "[3.8.3, )",
           "Vortice.Direct3D11": "[3.8.3, )",
           "ZXing.Net": "[0.16.11, )"
@@ -60,9 +60,9 @@
       },
       "Microsoft.Windows.AI.MachineLearning": {
         "type": "CentralTransitive",
-        "requested": "[2.4.89, )",
-        "resolved": "2.4.89",
-        "contentHash": "uc+Lej0vmZJprvHEuNJs7xMegoParROM9pZ2a7uMeXQiELva42V1wAUoYHCsw/u5ho/nwkYasiSFWZ95ABot3A==",
+        "requested": "[2.5.96, )",
+        "resolved": "2.5.96",
+        "contentHash": "nEigqZy0jJu0G0qTcqjOXJ1LtooPJvHt+w3NxrSInAmIYHiMqtUX9oRIVBllqZWR2omOYrwYRfMmvaYpgP3U0A==",
         "dependencies": {
           "System.Numerics.Tensors": "9.0.0"
         }

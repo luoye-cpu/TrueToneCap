@@ -484,10 +484,10 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                 var result = new OcrResult
                 {
                     Text = string.Join("\n", allText),
-                    Lines = lines,
+                    Lines = MergeDetLines(lines),
                 };
 
-                if (lines.Count == 0)
+                if (result.Lines.Count == 0)
                     result.Error = "未检测到文字";
 
                 return (OcrResult)result;
@@ -506,6 +506,52 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     // ═══════════════════════════════════════
     //  文字检测 (DBNet, PP-OCRv6)
     // ═══════════════════════════════════════
+
+    /// <summary>
+    /// det 框 → 视觉行合并（2026-11-11，实机排障）。
+    /// </summary>
+    /// <remarks>
+    /// det 在大字号/大词距下会把同一视觉行拆成多框（实测 40px 行 4 词 4 框，行数从 2 虚报成 5），
+    /// 下游"一行一块"的覆盖渲染跟着碎成词芯片；且词框相邻（间隙可低至 2px）时，
+    /// 预览端任何按框的横向扩块/墨迹扫描都会跨进邻词 ⇒ 芯片互相重叠盖字。
+    /// 行级合并后块间只有行距，几何操作天然安全。
+    /// 规则：词的垂直中心落在簇的垂直范围内 ⇒ 同簇；簇内按 X 排序、文本以空格连接，
+    /// 行框取并集。多栏文本会并成一行 —— 与 OcrService 混合路的行重建口径一致。
+    /// </remarks>
+    internal static List<OcrLine> MergeDetLines(List<OcrLine> lines)
+    {
+        if (lines.Count <= 1) return lines;
+        var sorted = lines.OrderBy(l => l.Y + l.Height / 2.0).ToList();
+        var clusters = new List<List<OcrLine>>();
+        foreach (var l in sorted)
+        {
+            double cy = l.Y + l.Height / 2.0;
+            List<OcrLine>? target = null;
+            foreach (var c in clusters)
+            {
+                int top = c.Min(x => x.Y), bot = c.Max(x => x.Y + x.Height);
+                if (cy >= top && cy <= bot) { target = c; break; }
+            }
+            if (target is null) clusters.Add([l]);
+            else target.Add(l);
+        }
+        var result = new List<OcrLine>();
+        foreach (var c in clusters)
+        {
+            var ordered = c.OrderBy(x => x.X).ToList();
+            if (ordered.Count == 1) { result.Add(ordered[0]); continue; }
+            int x1 = ordered.Min(x => x.X), yy1 = ordered.Min(x => x.Y);
+            int x2 = ordered.Max(x => x.X + x.Width), yy2 = ordered.Max(x => x.Y + x.Height);
+            result.Add(new OcrLine
+            {
+                Text = string.Join(" ", ordered.Select(x => x.Text.TrimEnd())),
+                X = x1, Y = yy1, Width = x2 - x1, Height = yy2 - yy1,
+                Words = ordered.Select(x => new OcrWord
+                { Text = x.Text, X = x.X, Y = x.Y, Width = x.Width, Height = x.Height }).ToList(),
+            });
+        }
+        return result.OrderBy(l => l.Y).ToList();
+    }
 
     private List<Box> RunDetection(byte[] bgra, int w, int h)
     {

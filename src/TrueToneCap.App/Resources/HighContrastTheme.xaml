@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ═══ High Contrast Mode Theme Overrides ═══ -->
+    <!-- 2026-11-08: WCAG 2.1 AA compliance - Add high contrast theme for accessibility mode -->
+    
+    <!-- Core system colors for high contrast -->
+    <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#FF000000"/>
+    <SolidColorBrush x:Key="SolidBackgroundFillColorBase" Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="CardBackgroundFillColorDefault" Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="TextFillColorPrimaryBrush" Color="#FF000000"/>
+    <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#FF555555"/>
+    <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#FF777777"/>
+    
+    <!-- Accent color for interactive elements -->
+    <SolidColorBrush x:Key="AccentBrush" Color="#FF0078D4"/>
+    <SolidColorBrush x:Key="FocusVisualPrimaryBrush" Color="#FFFF0000"/>
+    <SolidColorBrush x:Key="FocusVisualSecondaryBrush" Color="#FF00BFFF"/>
+    
+    <!-- Focus visual properties for keyboard navigation visibility -->
+    <Thickness x:Key="FocusVisualMargin">0</Thickness>
+    <CornerRadius x:Key="FocusVisualBorderRadius">4</CornerRadius>
+    
+    <!-- ═══ Control Style Overrides ═══ -->
+    
+    <!-- Button with strong focus indicator -->
+    <Style x:Key="HighContrastButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="FocusVisualMargin" Value="0"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{StaticResource FocusVisualPrimaryBrush}"
+                            BorderThickness="3"
+                            CornerRadius="{StaticResource FocusVisualBorderRadius}">
+                        <ContentPresenter HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Content="{TemplateBinding Content}"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    
+    <!-- TextBox with visible focus rectangle -->
+    <Style x:Key="HighContrastTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource DefaultTextBoxStyle}">
+        <Setter Property="FocusVisualMargin" Value="0"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- ComboBox with strong borders -->
+    <Style x:Key="HighContrastComboBoxStyle" TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}">
+        <Setter Property="FocusVisualMargin" Value="0"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- Slider with thick focus ring -->
+    <Style x:Key="HighContrastSliderStyle" TargetType="Slider" BasedOn="{StaticResource DefaultSliderStyle}">
+        <Setter Property="FocusVisualMargin" Value="0"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- CheckBox/CheckBox with high contrast rendering -->
+    <Style x:Key="HighContrastCheckBoxStyle" TargetType="CheckBox" BasedOn="{StaticResource DefaultCheckBoxStyle}">
+        <Setter Property="FocusVisualMargin" Value="0"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- NavigationView items enhanced -->
+    <Style x:Key="HighContrastNavigationViewItemStyle" TargetType="NavigationViewItem" 
+           BasedOn="{StaticResource DefaultNavigationViewItemStyle}">
+        <Setter Property="FocusVisualMargin" Value="0"/>
+        <Setter Property="FocusVisualPrimaryBrush" Value="{StaticResource FocusVisualPrimaryBrush}"/>
+        <Setter Property="FocusVisualSecondaryBrush" Value="{StaticResource FocusVisualSecondaryBrush}"/>
+    </Style>
+    
+    <!-- Card/Styling for panels and containers -->
+    <Style TargetType="Border" x:Key="HighContrastCardStyle">
+        <Setter Property="BorderBrush" Value="#FF000000"/>
+        <Setter Property="BorderThickness" Value="2"/>
+        <Setter Property="CornerRadius" Value="8"/>
+    </Style>
+    
+    <!-- Text block readability enhancement -->
+    <Style TargetType="TextBlock" x:Key="HighContrastTextBlockStyle">
+        <Setter Property="Foreground" Value="#FF000000"/>
+    </Style>
+    
+</ResourceDictionary>

@@ -258,6 +258,9 @@ public sealed partial class MainWindow : Window
         this.InitializeComponent();
         swXaml.Stop();
 
+        // ═══ WCAG 2.1 AA: Apply accessibility properties to all UI controls (2026-11-08) ═══
+        ApplyAccessibilityProperties(Content as FrameworkElement);
+
         // XAML 写死中文的按表翻译要在【可视树真的建起来】之后再扫一次：ApplyLocale() 在构造期跑，
         // 那时页面还没实化，VisualTreeHelper 走不到 ⇒ 在根元素 Loaded 后补扫一次，
         // 避免"英文模式静默半套"（扫不到就是扫不到，不能当已经翻译了）。
@@ -3151,7 +3154,11 @@ public sealed partial class MainWindow : Window
             AllowUnofficialTranslateEndpoints = _settings.AllowUnofficialTranslateEndpoints,
             // 视觉模式：整图直传给支持图片的端点，不经 OCR 文本（实现在
             // TranslationService.TranslateImageWithVisionAsync —— 这条曾经是零实现的死开关）
-            UseVision = _settings.TranslationMode == "Vision"
+            UseVision = _settings.TranslationMode == "Vision",
+            // 离线模式（2026-11-11 离线翻译包方案）：本地 Argos 模型，文本不出本机。
+            // 源语言提示用 OCR 语言设置（"zh-en" 混合等形态由 NormalizeLang 归一）。
+            UseOfflineArgos = _settings.TranslationMode == "Offline",
+            OfflineSourceLangHint = _settings.OcrLanguage
         };
         var win = new OcrPreviewWindow(pixels, w, h, ocr, cfg, autoTranslate)
         {
@@ -3427,6 +3434,45 @@ public sealed partial class MainWindow : Window
     // ── 快捷键录制 ──
 
     private bool _uiReady; // InitializeComponent 完成后才响应 UI 事件
+    
+    // ═══ WCAG 2.1 AA: Apply accessibility properties to all controls (2026-11-08) ═══
+    private void ApplyAccessibilityProperties(FrameworkElement? rootElement)
+    {
+        if (rootElement is null) return;
+        
+        try
+        {
+            // Recursively apply automation properties to all elements in the tree
+            ApplyToElement(rootElement);
+            
+            LogService.Debug("Accessibility", "✓ WCAG 2.1 AA properties applied to MainWindow");
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("Accessibility", $"Failed to apply accessibility properties: {ex.Message}");
+        }
+    }
+    
+    private void ApplyToElement(UIElement element)
+    {
+        if (element is FrameworkElement fe && !string.IsNullOrEmpty(fe.Name))
+        {
+            // Apply accessibility mappings by control ID
+            Services.AccessibilityMapper.ApplyToControl(element);
+        }
+        
+        // Recurse into children
+        if (element is DependencyObject obj && VisualTreeHelper.GetChildrenCount(obj) > 0)
+        {
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(obj); i++)
+            {
+                var child = VisualTreeHelper.GetChild(obj, i);
+                if (child is UIElement childElement)
+                    ApplyToElement(childElement);
+            }
+        }
+    }
+    // =======================================================================
 
     /// <summary>
     /// 质量面板正在被<b>程序</b>刷新（启动、切格式、切 HDR、切编码器）。

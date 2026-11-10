@@ -479,10 +479,13 @@ public static class NativeAvifEncoder
             }
         }
 
+        // ═══ 2026-11-08: P0 Security Fix - Sanitize all file paths before encoding ═══
+        var (safePngPath, safeAvifPath) = Core.Security.PathSanitizer.SanitizePair(pngPath, avifPath);
+
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} {chromaArg} {cicpArgs}{iccArg}{clliArg}{depthArg}{advArg} \"{pngPath}\" \"{avifPath}\"".Trim(),
+            Arguments = $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} {chromaArg} {cicpArgs}{iccArg}{clliArg}{depthArg}{advArg} \"{safePngPath}\" \"{safeAvifPath}\"".Trim(),
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,

@@ -257,3 +257,9 @@ tests/manual/safety/*/
 # 独立验证员（team-result-verifier）的场景记录 verification_scenario.json 写在这里，
 # 属验证工具的运行产物：正式证据在 docs/ledger/ 的验证报告里，此处不入库。
 .resultverify/
+.gate-probe-out/
+
+# 门禁/工具临时产物与本地工具目录（2026-11-11 清理）
+.gate-tmp/
+.qoder/
+*.pid

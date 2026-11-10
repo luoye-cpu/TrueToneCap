@@ -231,10 +231,13 @@ public static class NativeJxlEncoder
             // —— 即旧的硬编码值既慢得多、体积**还更大**。三档取 7/5/3，理由见 CompressionEffort.cs 文件头。
             var effortArg = CompressionEffortMap.JxlEffort(effort);
 
+            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
+            var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
+            
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e {effortArg}{bitsArg} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPpm}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e {effortArg}{bitsArg} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{safeTmpPpm}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -321,10 +324,15 @@ public static class NativeJxlEncoder
             }
 
             // 无 -b 参数（cjxl v0.11.2 不支持，位深由输入格式决定 —— 见 Encode 同段注释）
+
+            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
+            var safeTmpPng = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPng);
+            var safePath = Core.Security.PathSanitizer.SanitizeForEncoding(path);
+            
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{safeTmpPng}\" \"{safePath}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -412,10 +420,14 @@ public static class NativeJxlEncoder
             // 现在按编码器自己的规矩来：有可嵌 ICC 就只交 ICC，没有才交 color_space=Rec2100PQ。
             string colorArg = iccArg.Length > 0 ? iccArg : "-x color_space=Rec2100PQ";
 
+            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
+            var safeTmpPng = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPng);
+            var safePath = Core.Security.PathSanitizer.SanitizeForEncoding(path);
+            
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg} --intensity_target={intensityTarget:F0}{WithSpace(BuildResamplingArg(chroma))} \"{tmpPng}\" \"{path}\"".Trim(),
+                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg} --intensity_target={intensityTarget:F0}{WithSpace(BuildResamplingArg(chroma))} \"{safeTmpPng}\" \"{safePath}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

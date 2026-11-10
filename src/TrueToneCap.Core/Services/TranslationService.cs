@@ -17,6 +17,50 @@ namespace TrueToneCap.Core.Services;
 /// <summary>翻译服务：LLM 优先（如已配置）→ 有道官方开放平台（如已填凭据）→ 免费公共端点（Edge / 必应 / MyMemory / Google，默认启用）。</summary>
 public class TranslationService
 {
+    // ═══ 2026-11-09: 智能限速 + 防频繁请求风控 ═══
+    // ⚠️ 关键问题：大量 OCR 行同时翻译时，虽然并发限制为 4，但如果 20 行都走 Edge/Bing，
+    //    仍然可能在短时间内触发"每秒多次请求"的风控。
+    //    解决方案：增加全局限流计数器，检测短时间内的请求频率，自动退避。
+    private static int s_requestCountInSecond = 0;
+    private static DateTime s_lastSecondReset = DateTime.UtcNow;
+    private static readonly object s_rateLimitLock = new();
+    
+    // 最大每秒请求数（针对同一后端，多个后端合计不能超过此值）
+    private const int MAX_REQUESTS_PER_SECOND = 6;
+    
+    /// <summary>智能限流：检测是否超过阈值，如需退避则延时。</summary>
+    private static async Task WaitIfRateLimitedAsync(CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        
+        // ⚠ 不能直接在 lock 内 await！先检查是否需要延迟，然后离开 lock 后延时
+        int needDelay = 0;
+        
+        lock (s_rateLimitLock)
+        {
+            // 重置每秒计数
+            if ((now - s_lastSecondReset).TotalSeconds >= 1.0)
+            {
+                s_requestCountInSecond = 0;
+                s_lastSecondReset = now;
+            }
+            
+            // 如果已达到阈值，记录需要延迟的时间
+            if (s_requestCountInSecond >= MAX_REQUESTS_PER_SECOND)
+            {
+                needDelay = Random.Shared.Next(100, 500);
+                Interlocked.Increment(ref s_requestCountInSecond);
+            }
+        }
+        
+        // 离开 lock 后再延时（避免 deadlock）
+        if (needDelay > 0)
+        {
+            CoreLog.Debug("Translate", $"请求频率过高 ({s_requestCountInSecond}/{MAX_REQUESTS_PER_SECOND})，退避{needDelay}ms");
+            await Task.Delay(needDelay, ct);
+        }
+    }
+    
     // ═══ 2026-09-15 修复：HttpClient 改为进程级共享 ═══
     // 原实现在【构造函数】里 new HttpClient(handler)，而调用方
     // （OcrPreviewWindow.xaml.cs 的翻译入口）是每次点击翻译就 new 一个 TranslationService
@@ -114,7 +158,8 @@ public class TranslationService
     public static bool AnyBackendAvailable(LlmConfig c) =>
         (c.UseCustomLlm && !string.IsNullOrWhiteSpace(c.ApiEndpoint))
         || (!string.IsNullOrWhiteSpace(c.YoudaoAppKey) && !string.IsNullOrWhiteSpace(c.YoudaoAppSecret))
-        || c.AllowUnofficialTranslateEndpoints;
+        || c.AllowUnofficialTranslateEndpoints
+        || c.UseOfflineArgos;
 
     /// <summary>按当前配置生成"缺什么 / 哪几条路可走"的中文说明，可直接展示。
     /// <para>⚠ 这里出现的每一个【引号内的界面控件名】都必须在界面源码里逐字存在 ——
@@ -125,6 +170,15 @@ public class TranslationService
     /// </summary>
     public static string DescribeBackends(LlmConfig c)
     {
+        // 离线模式单独成句、且必须放在最前：TranslateAsync 里离线路在任何在线后端之前
+        // 直接返回，AllowUnofficialTranslateEndpoints 默认 true 也不改变这个事实 ——
+        // 把免费端点列成"已启用"是在撒谎，按"都没返回结果"的网络口径说话更是误导。
+        // 它缺的不是"配置"，是语言包或 Python 运行环境。
+        // 「离线翻译包」「安装运行环境」是界面上真实存在的控件文字（判据钉在 UI 源码里）。
+        if (c.UseOfflineArgos)
+            return "离线翻译已启用，但本地模型或运行环境未就绪：到 设置 → OCR/翻译 的「离线翻译包」卡片下载语言包；"
+                 + "首次使用还需 Python 运行环境，可点该卡片里的「安装运行环境」。";
+
         var on = new List<string>();
         if (c.UseCustomLlm && !string.IsNullOrWhiteSpace(c.ApiEndpoint)) on.Add("自定义 LLM");
         if (!string.IsNullOrWhiteSpace(c.YoudaoAppKey) && !string.IsNullOrWhiteSpace(c.YoudaoAppSecret)) on.Add("有道官方 API");
@@ -176,6 +230,20 @@ public class TranslationService
         //    （调用方应在扇出多行之前先问 AnyBackendAvailable，这里兜住直接调用者）
         if (!AnyBackendAvailable(_config))
             throw new TranslationNotConfiguredException(DescribeBackends(_config));
+
+        // 0.5 离线路（2026-11-11 离线翻译包方案）。
+        //     语义：用户选离线多半就是为了"文字不出本机"——失败时绝不静默回退到在线后端，
+        //     否则隐私承诺变成谎言。原因（缺运行环境/缺语言包/翻译出错）原样抛给 UI。
+        //     批量场景（OCR 预览窗）走 TranslateBatchAsync 整批进一个进程，别在这里逐行起进程。
+        if (_config.UseOfflineArgos)
+        {
+            var from = OfflineArgosEngine.NormalizeLang(_config.OfflineSourceLangHint) ?? "en";
+            var to = OfflineArgosEngine.NormalizeLang(targetLang) ?? "en";
+            var batch = await OfflineArgosEngine.TranslateBatchAsync(new[] { text }, from, to, ct);
+            if (batch.FailedCount > 0)
+                throw new TranslationException($"离线翻译失败：{batch.FirstError ?? "本地模型返回异常"}");
+            return batch.Lines[0];
+        }
 
         // 1. LLM 优先（已配置端点 + Key）
         if (_config.UseCustomLlm && !string.IsNullOrEmpty(_config.ApiEndpoint))
@@ -301,7 +369,10 @@ public class TranslationService
 
             using var cts8 = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, cts8.Token);
-
+            
+            // 智能限流：防止短时间内大量请求触发风控
+            await WaitIfRateLimitedAsync(linked.Token);
+            
             using var request = new HttpRequestMessage(HttpMethod.Post, YoudaoApiUrl)
             {
                 // ⚠ 必须写全 System.Text.Encoding：本文件命名空间为 TrueToneCap.Core.Services，
@@ -485,6 +556,10 @@ public class TranslationService
             {
                 using var quickCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, quickCts.Token);
+                
+                // 智能限流：防止短时间内大量请求触发风控
+                await WaitIfRateLimitedAsync(linked.Token);
+                
                 var response = await _http.GetStringAsync(url, linked.Token);
                 var result = ParseGoogleResponse(response);
                 if (!string.IsNullOrWhiteSpace(result))
@@ -1033,6 +1108,10 @@ public class TranslationService
         {
             using var quickCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, quickCts.Token);
+            
+            // 智能限流：防止短时间内大量请求触发风控
+            await WaitIfRateLimitedAsync(linked.Token);
+            
             string body = await _http.GetStringAsync(built.Value.url, linked.Token);
             var (translation, note) = ParseMyMemoryResponse(body);
             if (translation is not null)
@@ -1108,6 +1187,10 @@ public class TranslationService
             request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");
 
         var response = await _http.SendAsync(request, ct);
+        
+        // 智能限流：防止短时间内大量请求触发风控
+        await WaitIfRateLimitedAsync(ct);
+        
         response.EnsureSuccessStatusCode();
 
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
@@ -1284,7 +1367,7 @@ public class TranslationService
     }
 }
 
-/// <summary>翻译异常。</summary>
+    /// <summary>翻译异常。</summary>
 public class TranslationException : Exception
 {
     public TranslationException(string message) : base(message) { }
@@ -1300,10 +1383,25 @@ public sealed class TranslationNotConfiguredException : TranslationException
     public TranslationNotConfiguredException(string message) : base(message) { }
 }
 
-/// <summary>LLM API 配置（支持 OpenAI 兼容端点）。</summary>
-public class LlmConfig
-{
-    public bool UseCustomLlm { get; set; }
+    /// <summary>LLM API 配置（支持 OpenAI 兼容端点）。</summary>
+    public class LlmConfig
+    {
+        public bool UseCustomLlm { get; set; }
+
+        /// <summary>
+        /// 离线翻译模式（2026-11-11 离线翻译包方案）：走 <see cref="OfflineArgosEngine"/>
+        /// 的本地 Argos 模型，文本不出本机。
+        /// <para>与 设置 → 翻译模式 的 <c>TranslationMode == "Offline"</c> 对应，
+        /// 形状与 UseCustomLlm/UseVision 一致（持久化键是字符串模式，运行时是布尔）。</para>
+        /// <para>失败语义：离线路<b>不静默回退</b>在线后端 —— 用户选离线通常就是为了
+        /// 隐私，回退等于背着用户把文字发出去。失败原因原样抛给 UI。</para>
+        /// </summary>
+        public bool UseOfflineArgos { get; set; }
+
+        /// <summary>离线翻译的源语言提示（设置里的 OCR 语言 Id，如 "zh-en" / "en-US"）。
+        /// 经 <see cref="OfflineArgosEngine.NormalizeLang"/> 归一成 Argos 语言码；
+        /// 空/不认识时按 "en" 处理。</summary>
+        public string? OfflineSourceLangHint { get; set; }
 
     /// <summary>
     /// 视觉翻译模式：整张截图直传给支持图片的 OpenAI 兼容端点，一步完成读图+翻译，

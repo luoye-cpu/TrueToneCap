@@ -563,6 +563,7 @@
                                         <ComboBoxItem Tag="Free" IsSelected="True">免费翻译</ComboBoxItem>
                                         <ComboBoxItem Tag="LLM">LLM 翻译</ComboBoxItem>
                                         <ComboBoxItem Tag="Vision">视觉翻译</ComboBoxItem>
+                                        <ComboBoxItem Tag="Offline">离线翻译</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="目标语言" VerticalAlignment="Center"/>
@@ -653,6 +654,56 @@
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="提示词" VerticalAlignment="Top" Margin="0,6,0,0"/><TextBox x:Name="LlmPromptTxt" Grid.Column="1" PlaceholderText="留空使用默认翻译提示词..." AcceptsReturn="True" Height="52" TextWrapping="Wrap"/></Grid>
                             </StackPanel>
                         </Border>
+
+                        <!-- ═══ 卡片 4: 离线翻译包（仅 Offline 模式可见，2026-11-11 离线翻译包方案）═══
+                             模式选「离线翻译」时展开：运行环境状态 + 语言包列表（下载/删除）+ 本地导入。
+                             文案口径见 LocaleManager 词表 —— 新增中文串必须进表，否则英文界面漏翻、
+                             且 CorePipelineTests 的 XAML 覆盖判据会拦。 -->
+                        <Border x:Name="OfflineTranslateCard" Padding="16" CornerRadius="8"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <PathIcon Data="F0 M10,0 L11.36,0.09 L12.66,0.36 L13.9,0.79 L15.05,1.36 L16.12,2.09 L17.08,2.92 L17.92,3.89 L18.64,4.96 L19.23,6.11 L19.65,7.35 L19.91,8.65 L20,10 L19.91,11.36 L19.65,12.66 L19.23,13.9 L18.64,15.05 L17.92,16.12 L17.08,17.08 L16.12,17.92 L15.05,18.64 L13.9,19.23 L12.66,19.65 L11.36,19.91 L10,20 L8.65,19.91 L7.35,19.65 L6.11,19.23 L4.96,18.64 L3.89,17.92 L2.92,17.08 L2.09,16.12 L1.36,15.05 L0.79,13.9 L0.36,12.66 L0.09,11.36 L0,10 L0.09,8.65 L0.36,7.35 L0.79,6.11 L1.36,4.96 L2.09,3.89 L2.92,2.92 L3.89,2.09 L4.96,1.36 L6.11,0.79 L7.35,0.36 L8.65,0.09 L10,0 M17.91,6.25 L17.01,4.76 L15.84,3.49 L14.44,2.46 L13.68,2.06 L12.86,1.74 L13.5,2.78 L14,3.9 L14.38,5.08 L14.65,6.25 M18.75,10 L18.66,8.74 L18.4,7.5 L14.85,7.5 L14.96,8.75 L15,10 L14.96,11.26 L14.85,12.5 L18.4,12.5 L18.66,11.28 L18.75,10 M10,18.75 L10.48,18.69 L10.9,18.49 L11.3,18.19 L11.66,17.8 L12.3,16.82 L12.79,15.73 L13.15,14.65 L13.38,13.75 L6.64,13.75 L6.86,14.65 L7.22,15.73 L7.71,16.82 L8.35,17.8 L8.71,18.19 L9.11,18.49 L9.54,18.69 L10,18.75 M13.59,12.5 L13.71,11.26 L13.75,10 L13.71,8.75 L13.59,7.5 L6.43,7.5 L6.3,8.75 L6.25,10 L6.3,11.26 L6.43,12.5 M1.25,10 L1.34,11.28 L1.61,12.5 L5.16,12.5 L5.05,11.26 L5,10 L5.05,8.75 L5.16,7.5 L1.61,7.5 L1.34,8.74 L1.25,10 M10,1.25 L9.54,1.33 L9.11,1.52 L8.71,1.83 L8.35,2.21 L7.71,3.19 L7.22,4.29 L6.86,5.36 L6.64,6.25 L13.38,6.25 L13.15,5.36 L12.79,4.29 L12.3,3.19 L11.66,2.21 L11.3,1.83 L10.9,1.52 L10.48,1.33 L10,1.25"/>
+                                    <TextBlock Text="离线翻译包" FontSize="14" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
+                                           Text="文本全程不出本机。首次使用需先装 Python 运行环境（点「安装运行环境」），再下载所需语言包；包下载后完全离线可用。"/>
+                                <Grid ColumnDefinitions="100,*">
+                                    <TextBlock Text="运行环境" VerticalAlignment="Center"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12">
+                                        <TextBlock x:Name="ArgosRuntimeStatusTxt" VerticalAlignment="Center" FontSize="12" TextWrapping="Wrap" Text=""/>
+                                        <Button x:Name="InstallArgosRuntimeBtn" Content="安装运行环境" Click="OnInstallArgosRuntimeClick" Padding="10,4" Visibility="Collapsed"/>
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock Text="语言包列表" FontSize="12" FontWeight="SemiBold"/>
+                                <ItemsControl x:Name="OfflinePackageList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Padding="0,4" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                                                <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                                    <TextBlock x:Name="PkgStatusTxt" Text="{Binding StatusText}" FontSize="11"
+                                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center"/>
+                                                    <Button x:Name="PkgDeleteBtn" Content="删除" Tag="{Binding Identifier}"
+                                                            Click="OnUninstallPackageClick" Padding="10,2" Visibility="{Binding DeleteVisibility}"/>
+                                                    <Button x:Name="PkgDownloadBtn" Content="{Binding ActionText}" Tag="{Binding Identifier}"
+                                                            Click="OnDownloadPackageClick" Padding="10,2"/>
+                                                </StackPanel>
+                                                <ProgressBar x:Name="PkgProgressBar" Grid.Row="1" Grid.ColumnSpan="2"
+                                                             Maximum="1.0" Height="4" Margin="0,4,0,0" Visibility="Collapsed"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock x:Name="OfflinePkgMsgTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" Visibility="Collapsed"/>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Content="从本地文件导入…" Click="OnImportPackageClick" Padding="10,2"/>
+                                    <Button Content="打开文件夹" Click="OnOpenModelsFolderClick" Padding="10,2"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
 
                     <!-- ── 系统 ── -->
@@ -682,11 +733,11 @@
                             <StackPanel Spacing="12">
                                 <TextBlock x:Name="FontTitle" Text="界面字体" FontSize="14" FontWeight="SemiBold"/>
                                 <Grid ColumnDefinitions="120,*">
-                                    <TextBlock x:Name="FontLabel" Text="字体" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="FontCbo" SelectionChanged="OnFontChanged"></ComboBox>
+                                    <TextBlock x:Name="FontLabel" Text="字体" VerticalAlignment="Center" Grid.Column="0"/>
+                                    <ComboBox x:Name="FontCbo" SelectionChanged="OnFontChanged" Grid.Column="1"/>
                                 </Grid>
                                 <Grid x:Name="FontCustomPanel" ColumnDefinitions="120,*" Visibility="Collapsed">
-                                    <TextBlock Text="字体名称" VerticalAlignment="Center"/>
+                                    <TextBlock Text="字体名称" VerticalAlignment="Center" Grid.Column="0"/>
                                     <TextBox x:Name="FontCustomTxt" Grid.Column="1" PlaceholderText="输入系统已安装的字体名称" TextChanged="OnFontCustomTextChanged"/>
                                 </Grid>
                                 <TextBlock x:Name="FontDesc" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Text="界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。"/>

@@ -1,6 +1,8 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.11** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
+> **v0.3.12** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
+> 
+> 🔒 **Secure**: Command injection prevention | ♿ **Accessible**: WCAG 2.1 AA partial compliance
 
 **TrueToneCap** is a scalpel built for pixels. / **TrueToneCap** 是一把为像素而生的手术刀。
 
@@ -59,6 +61,8 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 | 🌐 **Translate** | Custom LLM → Youdao official API → free public endpoints (Edge / Bing / MyMemory / Google — **on by default**, opt-out in Settings) | 自定义 LLM → 有道官方开放平台 → 免费公共端点（Edge / 必应 / MyMemory / Google——**默认启用**，设置里可关闭） |
 | ⌨️ **Hotkeys** | Recordable · tray minimize · autostart | 可录制 · 托盘最小化 · 开机启动 |
 | 🎬 **Animated capture** | Ctrl+Shift+G recording → WebP / GIF / APNG / MP4 (ffmpeg) | Ctrl+Shift+G 动图录制 → WebP / GIF / APNG / MP4（ffmpeg） |
+| ♿ **Accessibility** | WCAG 2.1 AA partial compliance - Narrator support, keyboard navigation, high contrast themes | 无障碍支持 - Narrator 屏幕阅读器、键盘导航、高对比度主题 (WCAG 2.1 AA ~70% 自动覆盖) |
+| 🔒 **Security** | Command injection prevention for all external encoder calls - Path validation & sanitization | 命令注入防护 - 所有外部编码器调用路径验证与清洗 |
 
 ---
 

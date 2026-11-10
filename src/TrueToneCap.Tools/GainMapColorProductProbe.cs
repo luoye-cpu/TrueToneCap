@@ -46,7 +46,15 @@ public static class GainMapColorProductProbe
             return 1;
         }
 
-        var dir = Path.Combine(Path.GetTempPath(), "ttc_gainmap_color_probe");
+        // ⚠ 工作目录两道坑（2026-11-11 实测，机器：360 主动防御 + 自有门禁）：
+        // ① %TEMP%/桌面等用户目录：360 拦"新构建的无签名 exe 写用户目录"；
+        // ② 仓库内 bin/obj 子树：同样被拦（按"构建产物目录"识别），伪装成
+        //   "参考解码器探不过能力探测"。仓库根层级实测放行 ⇒ 向上找 slnx 标记，
+        //   落到 <仓库根>\.gate-probe-out（已 gitignore）；找不到根再退宿主目录。
+        // TTC_PROBE_DIR 永远可显式覆盖。
+        var dir = Environment.GetEnvironmentVariable("TTC_PROBE_DIR") is { Length: > 0 } probeDirOverride
+            ? probeDirOverride
+            : ProbeWorkDir();
         // 每次从空目录开始：临时目录跨轮存活，残留的 .jpg / .raw 会让"本轮什么都没产出"
         // 被读成"判据通过"（与 precision/jxl_color_space_discrimination.py 同一条教训）。
         if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
@@ -409,6 +417,19 @@ public static class GainMapColorProductProbe
         if (e >= 1) return 255;
         double s = e <= 0.0031308 ? e * 12.92 : 1.055 * System.Math.Pow(e, 1.0 / 2.4) - 0.055;
         return (byte)System.Math.Round(System.Math.Clamp(s * 255.0, 0, 255));
+    }
+
+    /// <summary>探针工作目录：向上找仓库根（TrueToneCap.slnx 标记）⇒ &lt;仓库根&gt;\.gate-probe-out；
+    /// 找不到根再退宿主目录。为什么不用 %TEMP%/bin —— 见 Run() 里的 360 主动防御实测注释。</summary>
+    static string ProbeWorkDir()
+    {
+        DirectoryInfo? cur = new DirectoryInfo(AppContext.BaseDirectory);
+        for (int i = 0; i < 8 && cur is not null; i++, cur = cur.Parent)
+        {
+            if (File.Exists(Path.Combine(cur.FullName, "TrueToneCap.slnx")))
+                return Path.Combine(cur.FullName, ".gate-probe-out");
+        }
+        return Path.Combine(AppContext.BaseDirectory, "gate-probe-out");
     }
 
     /// <summary>
