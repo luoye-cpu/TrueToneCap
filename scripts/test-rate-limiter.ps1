@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # 智能限流器专项测试
 # 目标：验证在多行翻译场景下，每秒请求数不超过阈值
 

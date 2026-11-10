@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // ═══ Security Fix: Command Injection Prevention for External Encoders ═══
 // 2026-11-08: Critical CVE fix - Sanitize file paths before passing to native encoders
 // Reference: CWE-78 OS Command Injection in NativeAvifEncoder.cs:485, etc.

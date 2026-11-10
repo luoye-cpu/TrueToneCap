@@ -6,8 +6,6 @@
 // 与预览共用同一套排版：预览的文字块（OcrPreviewWindow.RenderOverlay）与这里的输出
 // 都调 FitFontSize，字号/折行只在一处决定 —— 否则"预览里放得下、导出被裁掉"必然会再犯。
 
-using Microsoft.Graphics.Canvas.Text;
-
 namespace TrueToneCap.App.Services;
 
 internal static class OcrTextOverlay
@@ -19,76 +17,25 @@ internal static class OcrTextOverlay
     /// ⚠ 2026-11-09: 8px 对高分辨率屏仍太小，用户体验差；提至 12px 以平衡"适应多尺寸框"与"可读性"。
     private const float MinFontPx = 12f;
 
-    /// <summary>测量结果缓存：预览每次重绘、导出每行都要问一次字号，而同一行的答案不会变。</summary>
-    private static readonly Dictionary<(string Text, string Family, int MaxW, int MaxH), float> s_fitCache = new();
-
     /// <summary>
-    /// 在一个 <paramref name="maxW"/>×<paramref name="maxH"/> 的框里为这段文字选字号。
-    /// <paramref name="startPx"/> 是【原字号估计】（调用方用 <see cref="EstimateOriginalFontPx"/> 从原文反推），
-    /// 语义是下限：放得下就取能放下的最大字号（≤ 下限），放不下也退回下限 ——
-    /// 溢出交给折行，绝不缩过原字号。
+    /// 覆盖字字号：锚 = <paramref name="startPx"/>（【原字号估计】，调用方用
+    /// <see cref="EstimateOriginalFontPx"/> 从原文反推），floor = MinFontPx。
+    /// 溢出交给折行（译文）或实测扩块（原文），绝不缩过原字号 —— 用户口径"覆盖字 ≥ 原字"。
     /// </summary>
+    /// <remarks>
+    /// ═══ 2026-11-11 性能审计 P2：收缩循环删除（可证明的死代码）═══
+    /// 旧实现"放不下按 0.9 递减找能放下的字号"循环从未影响过返回值：循环产出的
+    /// result ≤ referenceSize 恒成立，而其后无条件 <c>result = Math.Max(result, referenceSize)</c>
+    /// 把它抬回 —— 返回值恒等于 max(MinFontPx, startPx)，与 maxW/maxH/文本内容无关。
+    /// 代价却是真的：译文放不下框时循环走满 ~14 档，每档一次 Win2D 文本布局（原生
+    /// DWrite 分配），且全部发生在 UI 线程（cache miss 时每行最多 14 次）。
+    /// 直接返回锚值，语义与旧实现逐位一致（随机采样断言可证）。
+    /// 顺带删除 <c>s_fitCache</c>：键漏了 startPx 本就是潜伏错误源，O(1) 之后缓存无意义。
+    /// </remarks>
     public static float FitFontSize(string text, string fontFamily, int maxW, int maxH, float startPx)
     {
         if (maxW <= 0 || maxH <= 0 || string.IsNullOrWhiteSpace(text)) return MinFontPx;
-
-        var key = (text, fontFamily, maxW, maxH);
-        lock (s_fitCache)
-            if (s_fitCache.TryGetValue(key, out float cached)) return cached;
-
-        // ═══ 2026-11-11（实机排障）：锚从"框高×0.65"换成"原字号估计" ═══
-        // 旧口径 startPx = 0.65×框高的问题：det 检测框高度在截图上系统性缩水
-        // （实测 40px 字的框高 16px、20px 字的框高 8px ≈ 真实字高的 0.6 倍），
-        // 叠乘 0.65 后覆盖字恒为原字的 4~6 成 —— 这就是"OCR 后的字非常小"的实锚。
-        // 新口径：startPx = EstimateOriginalFontPx(原文, 框W, 框H)，floor = startPx，
-        // 覆盖字 ≥ 原字（用户口径"至少应该不比原有的字体小"）。
-        float referenceSize = Math.Max(MinFontPx, startPx);
-
-        // 先试参考字号本身（放得下就用它），放不下再按 0.9 递减找能放下的；
-        // 但结果一律不低于参考字号 —— 溢出优于缩字。
-        float size = Math.Clamp(referenceSize, MinFontPx, Math.Max(MinFontPx, maxH));
-        float result = MinFontPx;
-
-        while (size >= MinFontPx)
-        {
-            if (MeasureHeight(text, fontFamily, size, maxW) <= maxH) { result = size; break; }
-            size *= 0.9f;
-        }
-
-        // 确保结果不低于参考字号（如果文本太短能放大）或不小于最小限制
-        result = Math.Max(result, referenceSize);
-
-        lock (s_fitCache)
-        {
-            if (s_fitCache.Count > 512) s_fitCache.Clear();   // 防无界增长
-            s_fitCache[key] = result;
-        }
-        return result;
-    }
-
-    /// <summary>按框宽折行后的实测高度（像素）。Win2D 不可用时退回"字数×字号"的粗估。</summary>
-    private static float MeasureHeight(string text, string fontFamily, float fontSize, int maxW)    {
-        try
-        {
-            var format = new CanvasTextFormat
-            {
-                FontFamily = fontFamily,
-                FontSize = fontSize,
-                WordWrapping = CanvasWordWrapping.Wrap,
-                HorizontalAlignment = CanvasHorizontalAlignment.Left,
-                VerticalAlignment = CanvasVerticalAlignment.Top,
-            };
-            using var layout = new CanvasTextLayout(
-                AnnotationRasterizer.SharedCanvasDevice, text, format, maxW, float.MaxValue);
-            return (float)layout.LayoutBounds.Height;
-        }
-        catch
-        {
-            // 每字符约 0.6 个字号的宽度估算 —— 只影响退路下的字号选择，不影响是否崩溃
-            int perLine = Math.Max(1, (int)(maxW / (fontSize * 0.6f)));
-            int lines = Math.Max(1, (text.Length + perLine - 1) / perLine);
-            return lines * fontSize * 1.2f;
-        }
+        return Math.Max(MinFontPx, startPx);
     }
 
     /// <summary>
@@ -151,22 +98,36 @@ internal static class OcrTextOverlay
     /// 块底中位色（BGRA 数组，坐标越界自动收拢）。字迹占比 &lt; 50% 时中位数即背景色
     /// —— 拿它当覆盖块的垫底色，块与周边图像融为一体，原字被干净盖掉。
     /// </summary>
+    /// <remarks>2026-11-11 性能审计：3×List&lt;byte&gt;+Sort 换成 stackalloc 直方图计数 ——
+    /// 零堆分配、O(256) 选取；中位语义与旧实现逐位一致（s[n/2]）。</remarks>
     public static (byte B, byte G, byte R) MedianBlockColor(
         byte[] px, int w, int h, int x0, int y0, int x1, int y1)
     {
         x0 = Math.Max(0, x0); y0 = Math.Max(0, y0);
         x1 = Math.Min(w, x1); y1 = Math.Min(h, y1);
-        var bs = new List<byte>(); var gs = new List<byte>(); var rs = new List<byte>();
+        Span<int> bc = stackalloc int[256], gc = stackalloc int[256], rc = stackalloc int[256];
+        int n = 0;
         for (int y = y0; y < y1; y += 2)
             for (int x = x0; x < x1; x += 2)
             {
                 int i = (y * w + x) * 4;
-                bs.Add(px[i]); gs.Add(px[i + 1]); rs.Add(px[i + 2]);
+                bc[px[i]]++; gc[px[i + 1]]++; rc[px[i + 2]]++;
+                n++;
             }
-        if (bs.Count == 0) return (0, 0, 0);
-        bs.Sort(); gs.Sort(); rs.Sort();
-        int m = bs.Count / 2;
-        return (bs[m], gs[m], rs[m]);
+        if (n == 0) return (0, 0, 0);
+        return (HistMedian(bc, n), HistMedian(gc, n), HistMedian(rc, n));
+    }
+
+    /// <summary>直方图第 n/2（0 基）小值 —— 与"排序取 s[n/2]"同义。</summary>
+    private static byte HistMedian(Span<int> hist, int n)
+    {
+        int half = n / 2, acc = 0;
+        for (int v = 0; v < 256; v++)
+        {
+            acc += hist[v];
+            if (acc > half) return (byte)v;
+        }
+        return 0;
     }
 
     /// <summary>不透明矩形填充（BGRA，越界自动收拢）。Compose 垫底用。</summary>
@@ -236,6 +197,27 @@ internal static class OcrTextOverlay
         return (x0, y0, x1 - x0, y1 - y0);
     }
 
+    /// <summary>一行的覆盖几何（估计扩块 / 实测墨迹 / 最终覆盖块 / 字号锚）。
+    /// 预览渲染时算好缓存，导出（<see cref="Compose"/>）直接复用 —— 同一行的这三个矩形
+    /// 只依赖像素与 det 框，两处各算一遍就是同一次全分辨率扫描白付两次（2026-11-11 审计）。</summary>
+    public sealed record LineGeometry(
+        (int X, int Y, int Width, int Height) Est,
+        (int X, int Y, int Width, int Height) Ink,
+        (int X, int Y, int Width, int Height) Cover,
+        float ReferencePx);
+
+    /// <summary>就地计算一行覆盖几何（预览缓存未命中时的退路）。
+    /// 函数与参数和预览逐字同一套：Expand → Measure(±10 横向窗) → pad → Union。</summary>
+    public static LineGeometry ComputeCover(byte[] px, int w, int h,
+        string originalText, (int X, int Y, int Width, int Height) rect0)
+    {
+        var est = ExpandRectToInk(originalText, rect0, imgH: h);
+        var ink = MeasureInkRect(px, w, h, (est.X - 10, est.Y, est.Width + 20, est.Height));
+        ink = (Math.Max(0, ink.X - PadPx), Math.Max(0, ink.Y - PadPx), ink.Width + PadPx * 2, ink.Height + PadPx * 2);
+        var cover = UnionRect(est, ink);
+        return new LineGeometry(est, ink, cover, EstimateOriginalFontPx(originalText, rect0.Width, rect0.Height));
+    }
+
     /// <summary>
     /// 把译文逐行画到 <paramref name="bgra"/> 的副本上并返回（不修改入参：调用方可能还要再存原图）。
     /// <para>2026-11-11 实机第二轮：先垫块底再画字。原先"只画文字、不画底块"时，译文与
@@ -244,10 +226,14 @@ internal static class OcrTextOverlay
     /// <para>必须跑在后台线程：4K 图一次 clone 33MB，Win2D 光栅化也不是零成本。</para>
     /// <para><paramref name="originalTexts"/> 是与 boxes 同序的原文文本，供字号锚反推原字号
     /// （2026-11-11 起覆盖字以原字号为下限；为 null 时退回框高×0.65 的旧锚）。</para>
+    /// <para><paramref name="precomputed"/> 是预览缓存的行几何（与 boxes 同序、可为 null 元素）。
+    /// 命中时跳过 Expand/Measure/Union 两次像素扫描 —— 预览已对同一 (像素, 框) 算过一遍；
+    /// 未命中（null 元素/越界）退回就地计算。</para>
     /// </summary>
     public static byte[] Compose(byte[] bgra, int w, int h,
         IReadOnlyList<(int X, int Y, int Width, int Height)> boxes,
-        IReadOnlyList<string> texts, string fontFamily, IReadOnlyList<string>? originalTexts = null)
+        IReadOnlyList<string> texts, string fontFamily, IReadOnlyList<string>? originalTexts = null,
+        IReadOnlyList<LineGeometry?>? precomputed = null)
     {
         var dst = (byte[])bgra.Clone();
         int count = Math.Min(boxes.Count, texts.Count);
@@ -257,18 +243,18 @@ internal static class OcrTextOverlay
                 ? originalTexts[i] : texts[i];
             if (string.IsNullOrWhiteSpace(original)) continue;
 
+            LineGeometry? cached = precomputed is not null && i < precomputed.Count
+                ? precomputed[i] : null;
             // det 框高缩水 ⇒ 先把块扩到罩住墨迹，垫底才有意义；再用像素实测墨迹包围盒
             // 校正（det 横向也缩水，估计值会短几个像素 ⇒ 原字从块边露细边）。
-            var cover = ExpandRectToInk(original, boxes[i], imgH: h);
-            var ink = MeasureInkRect(bgra, w, h,
-                (cover.X - 10, cover.Y, cover.Width + 20, cover.Height));
-            ink = (Math.Max(0, ink.X - PadPx), Math.Max(0, ink.Y - PadPx), ink.Width + PadPx * 2, ink.Height + PadPx * 2);
-            cover = UnionRect(cover, ink);
+            // 预览缓存命中时三个矩形与锚全部直接取缓存（同一批像素已扫过一遍）。
+            LineGeometry geo = cached ?? ComputeCover(bgra, w, h, original, boxes[i]);
+            var cover = geo.Cover;
             if (cover.Width <= 8 || cover.Height <= 8) continue;
             int maxW = cover.Width - PadPx * 2;
             int maxH = cover.Height - PadPx * 2;
 
-            float referencePx = EstimateOriginalFontPx(original, boxes[i].Width, boxes[i].Height);
+            float referencePx = geo.ReferencePx;
             float size = FitFontSize(texts[i], fontFamily, maxW, maxH, referencePx);
             if (AnnotationRasterizer.RasterizeText(texts[i], size, fontFamily, maxWidth: maxW)
                 is not { } glyphs) continue;

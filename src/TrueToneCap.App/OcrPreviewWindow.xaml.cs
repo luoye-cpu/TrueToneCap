@@ -239,6 +239,43 @@ public sealed partial class OcrPreviewWindow : Window
     private string EffectiveFontFamily => string.IsNullOrWhiteSpace(_fontFamily)
         ? FontLoader.DefaultFontFamily : _fontFamily;
 
+    // ═══ 2026-11-11 性能审计 P2：行几何缓存 ═══
+    // 每行的覆盖矩形 / 字号锚 / 原文垫底色只依赖 (_rawPixels, det 框, 原文文本) —— 与
+    // 显示缩放和"原文/译文"模式无关，单次 OCR 结果内完全静态。此前 resize（节流后仍
+    // ~10Hz）、模式切换、翻译完成的每次 RenderOverlay 都对每行重跑一次全分辨率墨迹
+    // 扫描 + 中位色采样（4K 30 行 ≈ 2-6M 像素/次，UI 线程 10-40ms）。缓存后这些路径
+    // 只剩 XAML 量测。缓存里的 LineGeometry 同时供导出（Compose）复用，一次扫描两处受益。
+    private sealed record PreviewLineGeom(OcrTextOverlay.LineGeometry Geom, Windows.UI.Color BgOriginal);
+    private List<PreviewLineGeom?>? _lineGeom;
+
+    /// <summary>惰性构建行几何缓存（首次 RenderOverlay 一次付清；此后 resize/切换零像素扫描）。</summary>
+    private List<PreviewLineGeom?> BuildLineGeometry()
+    {
+        var list = new List<PreviewLineGeom?>(_ocr.Lines.Count);
+        foreach (var line in _ocr.Lines)
+        {
+            var rect0 = LineRect(line);
+            if (rect0.Width <= 0 || rect0.Height <= 0) { list.Add(null); continue; }
+            // 字号锚与覆盖矩形：与 OcrTextOverlay.ComputeCover（Compose 的缓存退路）逐字同一套
+            // 函数与参数 —— 预览是事实源，导出未命中缓存时走同款计算，两处永不漂移。
+            float referencePx = OcrTextOverlay.EstimateOriginalFontPx(line.Text, rect0.Width, rect0.Height);
+            var est = OcrTextOverlay.ExpandRectToInk(line.Text, rect0, _imgH);
+            var ink = OcrTextOverlay.MeasureInkRect(_rawPixels, _imgW, _imgH,
+                (est.X - 10, est.Y, est.Width + 20, est.Height));
+            ink = (Math.Max(0, ink.X - 4), Math.Max(0, ink.Y - 4), ink.Width + 8, ink.Height + 8);
+            var rect = OcrTextOverlay.UnionRect(est, ink);
+            if (rect.Y + rect.Height > _imgH) rect.Height = _imgH - rect.Y;
+            // 原文垫底色：块内中位色按整窗暗化折算（darkOverlay 是 α90 黑 ⇒ 底色 ×165/255）
+            var bgRaw = OcrTextOverlay.MedianBlockColor(_rawPixels, _imgW, _imgH,
+                rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height);
+            var bg = Windows.UI.Color.FromArgb(255,
+                (byte)(bgRaw.R * 165 / 255), (byte)(bgRaw.G * 165 / 255), (byte)(bgRaw.B * 165 / 255));
+            list.Add(new PreviewLineGeom(
+                new OcrTextOverlay.LineGeometry(est, ink, rect, referencePx), bg));
+        }
+        return list;
+    }
+
     private void RenderOverlay()
     {
         OverlayCanvas.Children.Clear();
@@ -262,25 +299,16 @@ public sealed partial class OcrPreviewWindow : Window
         OverlayCanvas.Children.Add(darkOverlay);
 
         // ═══ 第二层：逐行文字覆盖 ═══
+        var lineGeoms = _lineGeom ??= BuildLineGeometry();
         for (int i = 0; i < _ocr.Lines.Count; i++)
         {
             var line = _ocr.Lines[i];
-            var rect0 = LineRect(line);
-            if (rect0.Width <= 0 || rect0.Height <= 0) continue;
+            var geom = lineGeoms[i];
+            if (geom is null) continue;
 
-            // ═══ 2026-11-11（实机排障）：字号锚 = EstimateOriginalFontPx 从【原文】反推 ═══
-            // 旧口径 0.65×框高让覆盖字恒为原字的 4~6 成（det 框高缩水实锚，见 OcrTextOverlay）；
-            // 新口径覆盖字 ≥ 原字（用户口径"至少应该不比原有的字体小"）。锚必须用 det 原框。
-            float referencePx = OcrTextOverlay.EstimateOriginalFontPx(line.Text, rect0.Width, rect0.Height);
-            // det 框高 ≈ 0.6×真实字高：块竖向/横向扩到罩住整段墨迹，垫底才盖得住原字（否则重影）
-            var est = OcrTextOverlay.ExpandRectToInk(line.Text, rect0, _imgH);
-            // det 横向也缩水 ⇒ 墨迹用像素实测（在扩展窗口内扫与底色对比超阈值的像素），
-            // 覆盖块 = 估计扩块 ∪ 实测墨迹+pad —— 不依赖字体度量常数，原字不露边。
-            var ink = OcrTextOverlay.MeasureInkRect(_rawPixels, _imgW, _imgH,
-                (est.X - 10, est.Y, est.Width + 20, est.Height));
-            ink = (Math.Max(0, ink.X - 4), Math.Max(0, ink.Y - 4), ink.Width + 8, ink.Height + 8);
-            var rect = OcrTextOverlay.UnionRect(est, ink);
-            if (rect.Y + rect.Height > _imgH) rect.Height = _imgH - rect.Y;
+            // 几何与锚、原文垫底色全部来自缓存（BuildLineGeometry，一次付清）
+            var rect = geom.Geom.Cover;
+            float referencePx = geom.Geom.ReferencePx;
 
             double cw = rect.Width * sx, ch = rect.Height * sy;
             // 快照式读取：译文与"是否显示译文"来自同一个不可变对象，不会再出现
@@ -299,8 +327,8 @@ public sealed partial class OcrPreviewWindow : Window
             // 高亮背景块：原文模式 = 采样局部底色的不透明垫底（盖掉原字防重影，色随底图融入）。
             // 2026-11-11 实机第二轮：α80 半透明让原字透出，与覆盖字叠成错位双影；
             // 实机第三轮：α245 仍有 3.9% 透出 —— 平坦底上 6 luma 的残影肉眼可辨（(510,145)=154
-            // 实测 = 0.961×160 的理论 bleed 值）⇒ 全不透明。垫底色取自 _rawPixels 后按整窗
-            // 暗化折算成呈现色（darkOverlay 是 α90 黑 ⇒ 底色 ×165/255），块与周边亮度一致。
+            // 实测 = 0.961×160 的理论 bleed 值）⇒ 全不透明。垫底色在 BuildLineGeometry 采样
+            // （×165/255 暗化折算，darkOverlay 是 α90 黑），此处只按垫底亮度取对比字色。
             byte fg;
             Windows.UI.Color bgColor;
             if (showTranslation)
@@ -310,10 +338,7 @@ public sealed partial class OcrPreviewWindow : Window
             }
             else
             {
-                var bgRaw = OcrTextOverlay.MedianBlockColor(_rawPixels, _imgW, _imgH,
-                    rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height);
-                bgColor = Windows.UI.Color.FromArgb(255,
-                    (byte)(bgRaw.R * 165 / 255), (byte)(bgRaw.G * 165 / 255), (byte)(bgRaw.B * 165 / 255));
+                bgColor = geom.BgOriginal;
                 int bgLuma = (bgColor.R * 299 + bgColor.G * 587 + bgColor.B * 114) / 1000;
                 fg = bgLuma >= 136 ? (byte)20 : (byte)240;
             }
@@ -846,9 +871,14 @@ DispatcherQueue.TryEnqueue(() =>
                 _showTranslation = true;
                 // 译文就绪 ⇒ 「保存译文图」才有意义（之前点它只会得到一条"还没有译文"）
                 SaveTranslatedBtn.IsEnabled = true;
+                // ═══ 2026-11-11 性能审计 P2：不要双渲染 ═══
+                // IsChecked 置 true 会同步 raise Checked → OnModeToggleChanged → RenderOverlay
+                // + UpdateInfo 各一次；原先紧随其后的显式 RenderOverlay() 是第二次全量重建。
+                // 只有"开关已在译文档"（重翻译场景）时事件不触发，才需要显式刷新新快照。
+                bool toggleWasChecked = ModeToggle.IsChecked == true;
                 ModeToggle.IsChecked = true;
                 ModeToggle.Content = "显示原文";
-                RenderOverlay();
+                if (toggleWasChecked) { RenderOverlay(); UpdateInfo(); }
                 var snap = _translation;
                 if (snap is null) return;                 // 理论不可达（上面刚赋值），但读快照而非字段更稳
                 int total = snap.Lines.Count;
@@ -949,9 +979,15 @@ DispatcherQueue.TryEnqueue(() =>
                 string font = EffectiveFontFamily;
                 var originals = new string[lines.Count];
                 for (int i = 0; i < lines.Count; i++) originals[i] = lines[i].Text;
+                // 2026-11-11 性能审计 P2：把预览缓存的行几何交给 Compose —— 同一批 (像素, det 框)
+                // 的墨迹扫描在预览已经付过一次，导出不再重复（未渲染过覆盖层时为 null，Compose 就地算）。
+                var geomForCompose = _lineGeom is null
+                    ? null
+                    : _lineGeom.Select(p => p?.Geom).ToList();
                 // 合成（clone + Win2D 光栅化 + 混合）整段放后台：4K 一次 clone 33MB，压 UI 线程会整窗无响应
                 composed = await Task.Run(() =>
-                    OcrTextOverlay.Compose(_rawPixels, _imgW, _imgH, boxes, snap.Lines, font, originals));
+                    OcrTextOverlay.Compose(_rawPixels, _imgW, _imgH, boxes, snap.Lines, font, originals,
+                        geomForCompose));
                 LogService.Info("OcrPreview", $"译文覆盖合成完成: {_imgW}x{_imgH} {boxes.Length} 行", LogCategory.UI);
             }
             else

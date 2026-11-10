@@ -1774,7 +1774,12 @@ public sealed partial class MainWindow : Window
                 // 能力判定（CanDeliverExtendedRange）跳过并负缓存 ⇒ 不会白付一次首帧超时。
                 // 输出位深是【另一件事】，由用户的位深下拉决定（见 ExecuteSilentEncodeAsync）。
                 PreferHdr = true,
-                FrameTimeoutMs = 3000
+                FrameTimeoutMs = 3000,
+                // ═══ 2026-11-11 性能审计 P1：帧像素必须私有 ═══
+                // 本方法把 captureResult 交给后台编码任务后立刻释放捕获锁（2026-08-25 模型），
+                // 而慢格式（JXL 24s）编码期间复用缓冲会被下一次捕获原地覆写 ⇒ 撕裂图被编码保存。
+                // 置位后帧像素走"每次新分配"，编码任务持有私有数组（该路径低频，分配代价可接受）。
+                WantPrivateFrame = true
             });
 
             // ═══ P0: 捕获降级给用户明确提示 ═══
@@ -2887,8 +2892,12 @@ public sealed partial class MainWindow : Window
                     else if (sharedAttached)
                     {
                         var swR = System.Diagnostics.Stopwatch.StartNew();
-                        hdrRegion = wgc.ReadSharedRegion(pendingSharedMonitor, true, sharedHandle,
-                            rx - vx, ry - vy, rw, rh);
+                        // ═══ 2026-11-11 性能审计 #2：回读外移到线程池 ═══
+                        // 本续体在 UI 线程；同步回读（最长 500ms GPU 锁等待 + 4K 全屏 132MB float
+                        // 转换）期间状态栏/托盘/热键全部冻结。此刻槽已冻结、窗口未关、_isCapturing
+                        // 仍持有，在线程池执行语义不变；await 完续体回 UI 线程。
+                        hdrRegion = await Task.Run(() => wgc.ReadSharedRegion(pendingSharedMonitor, true, sharedHandle,
+                            rx - vx, ry - vy, rw, rh));
                         if (hdrRegion is null)
                             LogService.Warn("MainWindow",
                                 $"选区回读失败 ({rx - vx},{ry - vy} {rw}x{rh}) ⇒ 本次只能退回 SDR 像素", LogCategory.Capture);
@@ -2907,8 +2916,9 @@ public sealed partial class MainWindow : Window
                     else if (pendingSdrShared != 0)
                     {
                         var swS = System.Diagnostics.Stopwatch.StartNew();
-                        sdrRegion = wgc.ReadSharedRegionSdr(pendingSdrSharedMonitor, pendingSdrShared,
-                            rx - vx, ry - vy, rw, rh);
+                        // 2026-11-11 性能审计 #2：SDR 腿同样外移（与 float 腿同段、同理由）。
+                        sdrRegion = await Task.Run(() => wgc.ReadSharedRegionSdr(pendingSdrSharedMonitor, pendingSdrShared,
+                            rx - vx, ry - vy, rw, rh));
                         if (sdrRegion is null)
                             LogService.Warn("MainWindow",
                                 $"选区 SDR 回读失败 ({rx - vx},{ry - vy} {rw}x{rh}) ⇒ 标注/复制/识字这一路没有 SDR 源", LogCategory.Capture);

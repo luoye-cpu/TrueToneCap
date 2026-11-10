@@ -4459,9 +4459,14 @@ public static class CorePipelineTests
         var update = src.Substring(upd, updEnd - upd);
         int guard = update.IndexOf("if (_sharedHeld", StringComparison.Ordinal);
         int copy = update.IndexOf("CopyResource(", StringComparison.Ordinal);
-        Assert($"③ 被取走时的早退排在拷贝之前（guard={guard} copy={copy}）",
-            guard >= 0 && copy > guard,
-            "少了这道闸 ⇒ 用户框选期间画面被后续帧换掉（探针臂④-3 会红，但那要真机跑才知道）");
+        // ═══ 2026-11-11 性能审计 #7：逐帧拷贝推迟到冻结时 ═══
+        // 旧判据"早退排在拷贝之前"对应逐帧 CopyResource 的时代；现在更新函数只建纹理+句柄，
+        // 拷贝统一挪进 TryFreezeShared（冻结那一刻付一次）。两条新不变量：
+        //   a) 更新函数内不再有 CopyResource（否则每帧白付 66-264MB 显存带宽的回归）；
+        //   b) 被取走的早退仍在最前（框选期间画面要冻住，这条永不变）。
+        Assert($"③ 被取走时早退在先，且逐帧路径不再拷贝（guard={guard} copy={copy}）",
+            guard >= 0 && copy < 0,
+            "更新函数里出现 CopyResource ⇒ 逐帧整屏拷贝回归（该成本已由 #7 推迟到冻结时）；少了早退闸 ⇒ 用户框选期间画面被后续帧换掉");
 
         // ④ 取走时若已 held 必须换新
         int take = src.IndexOf("internal bool TryFreezeShared(", StringComparison.Ordinal);
@@ -4553,7 +4558,9 @@ public static class CorePipelineTests
         if (cap < 0) return;
         var capBody = svc.Substring(cap, svc.IndexOf("private CaptureResult? OneShotCapture(", cap, StringComparison.Ordinal) - cap);
         int callTake = capBody.IndexOf("TryFreezeShared(", StringComparison.Ordinal);
-        int callLatest = capBody.IndexOf("GetLatestHdr(_reuseHdr)", StringComparison.Ordinal);
+        // 2026-11-11 性能审计 P1：HDR 取像素加了 WantPrivateFrame 三元（私有帧不进复用槽），
+        // 判据跟着函数名走（本体内 GetLatestHdr 只此一处）。
+        int callLatest = capBody.IndexOf("GetLatestHdr(", StringComparison.Ordinal);
         Assert($"① 先冻结、只有它没成时才走常规取像素（take={callTake} latest={callLatest}）",
             callTake >= 0 && callLatest > callTake,
             "顺序反了 ⇒ 像素先定、槽后取，两者之间必然夹着新帧（本机实测 38–63ms 一次）");
@@ -4639,8 +4646,12 @@ public static class CorePipelineTests
             mw.Contains("TTC_PREVIEW_SHARED", StringComparison.Ordinal));
 
         // ── ⑥ 选区定了只回读那一块（路线 B-3：保存链的像素来源）──
+        // 2026-11-11 性能审计 #2：回读挪进 Task.Run（UI 线程不再被 500ms GPU 锁 + 132MB 转换冻住），
+        // 判据跟着调用形态走 —— 匹配 lambda 里的调用，顺序不变（动作之后、保存分支之前）。
         int tcsDone = mw.IndexOf("var (action, rx, ry, rw, rh) = await tcs.Task;", StringComparison.Ordinal);
-        int regionRead = mw.IndexOf("hdrRegion = wgc.ReadSharedRegion(", StringComparison.Ordinal);
+        // 主路调用已包进 Task.Run（2026-11-11 审计 #2）；2828 行还有一个"共享纹理打不开"的
+        // 兜底 lambda 同名同参 —— 必须带上赋值与 Task.Run 前缀，否则 IndexOf 会先撞上兜底。
+        int regionRead = mw.IndexOf("hdrRegion = await Task.Run(() => wgc.ReadSharedRegion(pendingSharedMonitor, true, sharedHandle,", StringComparison.Ordinal);
         int saveCase = mw.IndexOf("case MainToolbarAction.Save:", StringComparison.Ordinal);
         Assert($"⑥ 选区回读排在用户动作之后、保存分支之前（tcs={tcsDone} read={regionRead} save={saveCase}）",
             tcsDone >= 0 && regionRead > tcsDone && saveCase > regionRead,
@@ -5174,8 +5185,10 @@ public static class CorePipelineTests
         if (rs >= 0)
         {
             var body = src.Substring(rs, Math.Min(900, src.Length - rs));
+            // 2026-11-11 性能审计 #3：会话引用在 _poolLock 内取出（out var → 外层声明），
+            // ReadSharedRegionBytes 在锁外调用 —— 判据只关心"池键 false + byte[] 出口"这两件事。
             Assert("⑤ SDR 回读打 SDR 会话（池键 false）且出 byte[]（不能借 HDR 那条 float 口）",
-                body.Contains("_sessionPool.TryGetValue((targetMonitor, false), out var session)", StringComparison.Ordinal)
+                body.Contains("_sessionPool.TryGetValue((targetMonitor, false), out session)", StringComparison.Ordinal)
                 && body.Contains("session.ReadSharedRegionBytes(expectedHandle, x, y, w, h)", StringComparison.Ordinal));
         }
         int rb = src.IndexOf("internal byte[]? ReadSharedRegionBytes(nint expectedHandle", StringComparison.Ordinal);
@@ -5214,13 +5227,16 @@ public static class CorePipelineTests
         Assert("⑥ 桌面像素有效性判据接受'只在槽里'那一档，同时不放过长度校验",
             mw.Contains("if ((desktopPixels is null && !sdrSlotUsable)", StringComparison.Ordinal)
             && mw.Contains("desktopPixels.Length != vw * vh * 4", StringComparison.Ordinal));
-        int read = mw.IndexOf("sdrRegion = wgc.ReadSharedRegionSdr(pendingSdrSharedMonitor, pendingSdrShared,", StringComparison.Ordinal);
+        // 2026-11-11 性能审计 #2：SDR 回读同样挪进 Task.Run（lambda 形态），顺序判据不变。
+        int read = mw.IndexOf("() => wgc.ReadSharedRegionSdr(pendingSdrSharedMonitor, pendingSdrShared,", StringComparison.Ordinal);
         int save = mw.IndexOf("case MainToolbarAction.Save:", StringComparison.Ordinal);
         Assert($"⑥ 选区 SDR 回读排在动作分派之前（read={read} save={save}）",
             read > 0 && read < save,
             "排在分派之后 ⇒ 标注/复制拿到的还是 null，回退到'空区域'路径");
+        // 2026-11-11 性能审计 #2：主路回读包进 Task.Run 后实参表以 `));` 收尾（lambda 闭合），
+        // 判据放宽到实参表达式本身（兜底 2844 行的同款坐标也一并覆盖，意图不变）。
         Assert("⑥ 坐标减显示器原点（槽是单屏纹理，窗口坐标是虚拟桌面坐标）",
-            mw.Contains("rx - vx, ry - vy, rw, rh);", StringComparison.Ordinal));
+            mw.Contains("rx - vx, ry - vy, rw, rh", StringComparison.Ordinal));
         int sdrRel = mw.IndexOf("_wgcService?.ReleaseSharedFrame(pendingSdrSharedMonitor, false)", StringComparison.Ordinal);
         int lockFree = sdrRel >= 0 ? mw.IndexOf("Interlocked.Exchange(ref _isCapturing, 0);", sdrRel, StringComparison.Ordinal) : -1;
         Assert($"⑥ finally 里交还 SDR 槽，且紧挨释放防重入锁（rel={sdrRel} lockFree={lockFree}）",

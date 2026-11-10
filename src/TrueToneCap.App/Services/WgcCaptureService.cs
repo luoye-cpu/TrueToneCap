@@ -52,6 +52,17 @@ public sealed record WgcCaptureConfig
     /// 分配 + CopyResource（4K 约 33MB 显存）。
     /// 默认 true = 现有调用方行为不变：静默截图/立即捕获仍走 GPU 直通编码。</summary>
     public bool WantGpuTexture { get; init; } = true;
+
+    /// <summary>把帧像素交给【生命周期超出本次捕获调用】的消费者时必须置 true（2026-11-11 性能审计 P1）。
+    /// <para>复用缓冲（<c>_reuseSdr/_reuseHdr</c>）的契约是"调用方拿到返回值后当场消费完，下一帧
+    /// 再进来时上一帧早已无人引用"。2026-08-25 的"后台持续编码"模型打破了这个契约：无感截图把
+    /// 缓冲引用交给后台编码任务后就释放捕获锁 —— 慢格式（JXL 实测可达 24s）编码期间任何一次
+    /// 新捕获都会把像素写进上一个编码任务正在读的数组 ⇒ 撕裂图被编码保存。</para>
+    /// <para>true = 本次帧像素走"每次新分配"（多屏拼接路径同款重载），不读也不更新复用槽，
+    /// 编码任务持有的是私有数组。代价是每张多付一次分配（4K 约 158MB LOH churn）—— 该路径
+    /// 本就低频，正确性优先。选区路径不需要置位：它全程持有捕获锁，且编码输入来自共享槽
+    /// 矩形回读（独立数组），与复用缓冲无交集。</para></summary>
+    public bool WantPrivateFrame { get; init; }
 }
 
 /// <summary>
@@ -118,7 +129,14 @@ public sealed partial class WgcCaptureService : IDisposable
     private readonly long[] _mPoolLockUs = new long[PoolLockSites];
     private readonly long[] _mPoolLockMaxUs = new long[PoolLockSites];
     private CancellationTokenSource? _idleStopCts;
-    private const int IdleStopDelayMs = 15000; // 15 秒无截图则自动停止会话
+    // ═══ 2026-11-11 性能审计 #9：15000 → 120000 ═══
+    // 15s 的原始依据是"保活窗口内逐帧整屏 CPU 回读占 43.4% 单核"（见 :275 注释）——
+    // P0-5 把逐帧回读收敛到消费者窗口、#7 又把逐帧 GPU 拷贝推迟到冻结时之后，
+    // 无消费者时保活的持续成本只剩 ~1.2fps 的显存内 CopyResource（静态桌面），已降两个数量级。
+    // 而把会话收掉的代价没变：首拍付会话启动（p50 51ms）+ SDR 等首帧（83ms）+ Float16 等帧（160ms）。
+    // 提到 2 分钟：超过 2 分钟间隔的截图才重付冷启动；SharedHeld 顺延保护不变（选区窗开着不收）。
+    // 显存代价（每会话 staging+latest+shared ≈ 40-140MB）由 #7 的削减对冲。
+    private const int IdleStopDelayMs = 120000; // 2 分钟无截图则自动停止会话
 
     /// <summary>结算一次 _poolLock 持有（在锁**外面**调用：先出锁再记账，绝不让仪表把临界区延长）。</summary>
     private void RecordPoolLock(int site, long t0)
@@ -983,11 +1001,17 @@ public sealed partial class WgcCaptureService : IDisposable
         // 单消费者是前提：今天由 MainWindow 的 _isCapturing 防重入闸保证（预览期间不会有第二次截图），
         // 与本文件 GetLatestHdr 那段"契约注释是错的"记的是同一条不变量。
 
-        /// <summary>建/更新共享槽（调用方须持 GPU 锁）。被取走时直接返回 —— 宁可少更新一帧，也不动别人拿着的那块。</summary>
+        /// <summary>确保共享槽纹理存在（调用方须持 GPU 锁）。被取走时直接返回 —— 不动别人拿着的那块。</summary>
+        /// <remarks>═══ 2026-11-11 性能审计 #7：逐帧 CopyResource 推迟到冻结时 ═══
+        /// 旧实现每帧把 _latestTexture 整屏拷进共享槽并置 _sharedValid —— 但槽只有在某一拍
+        /// TryFreezeShared 时才有人消费。静态桌面（~1.2fps）无感，动态内容 60fps 下这是每帧
+        /// 66-264MB 的纯多余显存带宽，还拉长每帧持锁时间。现在本方法只建纹理+句柄；
+        /// 冻结那一刻 TryFreezeShared 补一次 CopyResource —— "槽 = 冻结那一刻的帧"语义不变
+        /// （反而更准：以前是"最近一次更新到回调的帧"，现在严格是冻结瞬间的帧）。</remarks>
         private void UpdateSharedSlotLocked()
         {
             if (_sharedHeld || _latestTexture is null || !_latestTexValid) return;
-            string step = "?"; // 失败时点名到步：建纹理 / 建句柄 / 拷贝 三件都可能抛 E_INVALIDARG
+            string step = "?"; // 失败时点名到步：建纹理 / 建句柄 都可能抛 E_INVALIDARG
             try
             {
                 var desc = _latestTexture.Description;
@@ -997,9 +1021,7 @@ public sealed partial class WgcCaptureService : IDisposable
                     step = $"建纹理 {desc.Width}x{desc.Height} {desc.Format}";
                     CreateSharedTextureLocked(desc.Width, desc.Height, desc.Format);
                 }
-                step = "拷贝";
-                _d3dDevice.ImmediateContext.CopyResource(_sharedTex!, _latestTexture);
-                _sharedValid = true;
+                // 不拷贝、不置 _sharedValid：槽内容在冻结时才填充（TryFreezeShared）。
             }
             catch (Exception ex)
             {
@@ -1096,7 +1118,10 @@ public sealed partial class WgcCaptureService : IDisposable
             if (!Monitor.TryEnter(_gpuLock, 500)) { Log($"[Pool] {_hmonitor:X}: 取共享槽 GPU 锁超时 (500ms)"); return false; }
             try
             {
-                if (_sharedTex is null || _sharedHandle == 0 || !_sharedValid || _latestTexture is null) return false;
+                // 2026-11-11 审计 #7：槽内容改为冻结时填充 ⇒ 有效性判据从 _sharedValid（旧：
+                // 每帧更新后为真）换成 _latestTexValid（最新帧在GPU上就绪）。槽纹理只需存在
+                // 且与最新帧同格式，拷贝在下面统一做一次。
+                if (_sharedTex is null || _sharedHandle == 0 || _latestTexture is null || !_latestTexValid) return false;
                 // 格式闸认"会话自己的格式"，不再硬编码 Float16：槽本来就是按 desc.Format 建的
                 // （UpdateSharedSlotLocked → CreateSharedTextureLocked(desc.Format)），这里只要求
                 // 槽与当前帧同格式 —— 槽是上一帧建的、帧是这一帧，格式不一致说明槽还没跟上。
@@ -1108,9 +1133,11 @@ public sealed partial class WgcCaptureService : IDisposable
                     // 上一任没交还：换一块新的给它留住，这一块照常交出（纪律②）
                     Log($"[Pool] {_hmonitor:X}: 共享槽上一任未交还，换一块新纹理（旧那块留给持有者）");
                     CreateSharedTextureLocked((uint)_latestTexW, (uint)_latestTexH, _latestTexture.Description.Format);
-                    _d3dDevice.ImmediateContext.CopyResource(_sharedTex!, _latestTexture);
-                    _sharedValid = true;
                 }
+                // 冻结即填充（两条分支合流）：把【冻结瞬间】的最新帧整屏拷进槽 —— 每次截图
+                // 只付这一次，取代旧的逐帧拷贝（见 UpdateSharedSlotLocked 的 remarks）。
+                _d3dDevice.ImmediateContext.CopyResource(_sharedTex!, _latestTexture);
+                _sharedValid = true;
                 _sharedHeld = true;
                 handle = _sharedHandle; width = _sharedW; height = _sharedH;
                 return true;
@@ -1706,7 +1733,8 @@ public sealed partial class WgcCaptureService : IDisposable
         }
 
         var key = (hmonitor, true);
-        long tLock = PerfMeter.Now();   // F5 仪表：包住原有临界区（注意锁内还有 Dispose 等待回调，最长可到 2s）
+        long tLock = PerfMeter.Now();   // F5 仪表：包住原有临界区
+        PooledSession? stale = null;    // 2026-11-11 审计 #3：待释放的旧会话（Dispose 移出锁外）
         try
         {
             lock (_poolLock)
@@ -1727,7 +1755,8 @@ public sealed partial class WgcCaptureService : IDisposable
 
                 if (existing is not null)
                 {
-                    existing.Dispose();
+                    // Dispose 移出锁外（finally）：内含最长 2s 的回调排水，不该占着 _poolLock
+                    stale = existing;
                     _sessionPool.Remove(key);
                 }
 
@@ -1758,7 +1787,13 @@ public sealed partial class WgcCaptureService : IDisposable
                 return session;
             }
         }
-        finally { RecordPoolLock(LockGetHdr, tLock); }
+        finally
+        {
+            RecordPoolLock(LockGetHdr, tLock);
+            // 锁外释放（回调排水最长 2s）：无论走哪条返回路径都不可漏 —— 会话持着
+            // FramePool 订阅与非托管纹理，漏了就是资源泄漏。
+            stale?.Dispose();
+        }
     }
 
     /// <summary>
@@ -1850,13 +1885,16 @@ public sealed partial class WgcCaptureService : IDisposable
                             foreach (var s in _sessionPool.Values) { if (s.SharedHeld) { anyHeld = true; break; } }
                             if (anyHeld)
                             {
-                                Log("[WGC] 空闲回收到期，但冻结槽仍被选区窗持有 ⇒ 顺延一轮（15s 后再查）");
+                                Log($"[WGC] 空闲回收到期，但冻结槽仍被选区窗持有 ⇒ 顺延一轮（{IdleStopDelayMs / 1000}s 后再查）");
                                 ScheduleIdleStop();
                             }
                             else
                             {
-                                foreach (var s in _sessionPool.Values) s.Dispose();
+                                // 2026-11-11 审计 #3：Dispose（内含回调排水，最长 2s）移出锁外 ——
+                                // 先摘引用并清池，再逐个释放；与回读/取帧的并发安全由 _gpuLock 保证。
+                                var toDispose = _sessionPool.Values.ToList();
                                 _sessionPool.Clear();
+                                foreach (var s in toDispose) s.Dispose();
                                 Log("[WGC] 空闲超时，所有会话已自动停止");
                             }
                         }
@@ -1876,15 +1914,18 @@ public sealed partial class WgcCaptureService : IDisposable
     public void InvalidateSessions()
     {
         long tLock = PerfMeter.Now();   // F5 仪表
+        List<PooledSession> toDispose;
         try
         {
             lock (_poolLock)
             {
-                foreach (var s in _sessionPool.Values) s.Dispose();
+                // 2026-11-11 审计 #3：Dispose（最长 2s 回调排水）移出锁外，锁内只摘引用。
+                toDispose = _sessionPool.Values.ToList();
                 _sessionPool.Clear();
             }
         }
         finally { RecordPoolLock(LockInvalidate, tLock); }
+        foreach (var s in toDispose) s.Dispose();
         lock (s_hdrCapabilityCache) { s_hdrCapabilityCache.Clear(); }
         // 2026-09-19：软冷却的账也一起作废。显示器配置变了（插拔/切分辨率/休眠恢复）之后，
         // "这块屏之前一直没成帧"这件事已经没有参考价值 —— 让它重新试，而不是带着旧账继续跳过 Float16。
@@ -1958,21 +1999,29 @@ public sealed partial class WgcCaptureService : IDisposable
     internal float[]? ReadSharedRegion(nint targetMonitor, bool hdr, nint expectedHandle,
         int x, int y, int w, int h)
     {
-        long tLock = PerfMeter.Now();   // F5 仪表：这一段今天【整段在锁内做 GPU 回读】，持锁时长就是那条指控要的读数
+        long tLock = PerfMeter.Now();   // F5 仪表：2026-11-11 起此站只量"查表"——GPU 回读已移出 _poolLock
+        PooledSession? session;
         try
         {
             lock (_poolLock)
             {
-                if (_sessionPool.TryGetValue((targetMonitor, hdr), out var session))
-                    return session.ReadSharedRegion(expectedHandle, x, y, w, h);
-                // 2026-11-11 排障探针：查无会话原本也是静默 null —— 把查找键与池内实况一起打出来。
-                var poolKeys = new System.Text.StringBuilder();
-                foreach (var k in _sessionPool.Keys) poolKeys.Append($" {k.Item1:X}/{k.Item2}");
-                Log($"[Pool] 选区回读查无会话 key=({targetMonitor:X},{hdr}) 池内:{poolKeys}");
+                if (!_sessionPool.TryGetValue((targetMonitor, hdr), out session))
+                {
+                    // 2026-11-11 排障探针：查无会话原本也是静默 null —— 把查找键与池内实况一起打出来。
+                    var poolKeys = new System.Text.StringBuilder();
+                    foreach (var k in _sessionPool.Keys) poolKeys.Append($" {k.Item1:X}/{k.Item2}");
+                    Log($"[Pool] 选区回读查无会话 key=({targetMonitor:X},{hdr}) 池内:{poolKeys}");
+                    return null;
+                }
             }
         }
         finally { RecordPoolLock(LockReadHdr, tLock); }
-        return null;
+        // ═══ 2026-11-11 审计 #3：回读移出 _poolLock ═══
+        // 回读（内含最长 500ms GPU 锁等待 + 整选区拷贝/转换）只碰 _gpuLock 护住的资源；
+        // 会话 Dispose 的纹理销毁也在同一把 _gpuLock 内 ⇒ 与 Dispose 并发时要么它先完成
+        //（守卫见 null 返回），要么等回读退出后才销毁。不再让 _poolLock 被 10-500ms 的
+        // 回读占住（录制每 tick 的取帧、下一次截图的会话查找都被它卡过）。
+        return session.ReadSharedRegion(expectedHandle, x, y, w, h);
     }
 
     /// <summary>从 SDR 会话冻结的共享槽里只回读一个矩形的 8-bit 像素（路线 B-3 的 SDR 腿）。
@@ -1983,21 +2032,25 @@ public sealed partial class WgcCaptureService : IDisposable
     /// 按会话的 HDR 标志去猜返回类型。</remarks>
     internal byte[]? ReadSharedRegionSdr(nint targetMonitor, nint expectedHandle, int x, int y, int w, int h)
     {
-        long tLock = PerfMeter.Now();   // F5 仪表（SDR 腿，同上：回读整段在锁内）
+        long tLock = PerfMeter.Now();   // F5 仪表（SDR 腿，同 float：只量查表，回读在锁外）
+        PooledSession? session;
         try
         {
             lock (_poolLock)
             {
-                if (_sessionPool.TryGetValue((targetMonitor, false), out var session))
-                    return session.ReadSharedRegionBytes(expectedHandle, x, y, w, h);
-                // 2026-11-11 排障探针：查无会话原本也是静默 null（句式与 float 那条刻意不同）。
-                var poolKeysSdr = new System.Text.StringBuilder();
-                foreach (var k in _sessionPool.Keys) poolKeysSdr.Append($" {k.Item1:X}/{k.Item2}");
-                Log($"[Pool] 选区 SDR 回读查无会话 key=({targetMonitor:X},false) 池内:{poolKeysSdr}");
+                if (!_sessionPool.TryGetValue((targetMonitor, false), out session))
+                {
+                    // 2026-11-11 排障探针：查无会话原本也是静默 null（句式与 float 那条刻意不同）。
+                    var poolKeysSdr = new System.Text.StringBuilder();
+                    foreach (var k in _sessionPool.Keys) poolKeysSdr.Append($" {k.Item1:X}/{k.Item2}");
+                    Log($"[Pool] 选区 SDR 回读查无会话 key=({targetMonitor:X},false) 池内:{poolKeysSdr}");
+                    return null;
+                }
             }
         }
         finally { RecordPoolLock(LockReadSdr, tLock); }
-        return null;
+        // 锁外回读，安全性论证同 float 腿（ReadSharedRegion 处的注释）。
+        return session.ReadSharedRegionBytes(expectedHandle, x, y, w, h);
     }
 
     /// <summary>无锁读取最新帧（供录制器使用）。不获取 s_captureLock，不创建会话，
@@ -2006,25 +2059,27 @@ public sealed partial class WgcCaptureService : IDisposable
     /// 录制器用它接住"被判为未变化、随即丢弃"的帧 —— 静态画面下原先每 tick 都白分配一整帧。</param>
     public CaptureResult? TryGetLatestFrame(nint targetMonitor, byte[]? reuse = null)
     {
-        long tLock = PerfMeter.Now();   // F5 仪表：GetLatestSdr 可能在这里等 GPU 锁最多 500ms + 拷一整帧
+        long tLock = PerfMeter.Now();   // F5 仪表：2026-11-11 起只量查表——GetLatestSdr（GPU 锁 + 整帧拷贝）已移出
+        PooledSession? session;
         try
         {
             lock (_poolLock)
             {
-                var key = (targetMonitor, false);
-                if (!_sessionPool.TryGetValue(key, out var session) || !session.HasFrame)
+                if (!_sessionPool.TryGetValue((targetMonitor, false), out session) || !session.HasFrame)
                     return null;
-                var pixels = session.GetLatestSdr(reuse);
-                if (pixels is null) return null;
-                return new CaptureResult
-                {
-                    SdrPixels = pixels,
-                    Width = session.Width,
-                    Height = session.Height
-                };
             }
         }
         finally { RecordPoolLock(LockTryLatest, tLock); }
+        // 锁外取帧（2026-11-11 审计 #3）：录制器每 tick 都过这里，原先与选区回读互相卡。
+        // 安全性同 ReadSharedRegion：取帧只碰 _gpuLock 护住的资源，与 Dispose 串行于同一把锁。
+        var pixels = session.GetLatestSdr(reuse);
+        if (pixels is null) return null;
+        return new CaptureResult
+        {
+            SdrPixels = pixels,
+            Width = session.Width,
+            Height = session.Height
+        };
     }
 
     /// <summary>捕获主体（同步，在调用线程执行）。
@@ -2102,19 +2157,22 @@ public sealed partial class WgcCaptureService : IDisposable
 
         if (sharedPreviewSdr.Handle == 0)
         {
+            // 2026-11-11 审计 P1：调用方要私有帧时（后台编码长生命周期消费者）不进复用槽，
+            // 也不把私有数组记回复用槽 —— 见 WgcCaptureConfig.WantPrivateFrame 的完整说明。
+            bool useSdrReuse = !config.WantPrivateFrame;
             if (sdrSession.HasFrame)
             {
-                sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
+                sdrPixels = sdrSession.GetLatestSdr(useSdrReuse ? _reuseSdr : null);
             }
             else
             {
                 Log($"[WGC] SDR 等待首帧 (timeout={config.FrameTimeoutMs}ms)...");
                 if (sdrSession.WaitForFirstFrame(config.FrameTimeoutMs))
-                    sdrPixels = sdrSession.GetLatestSdr(_reuseSdr);
+                    sdrPixels = sdrSession.GetLatestSdr(useSdrReuse ? _reuseSdr : null);
             }
             // 记下这次实际用的缓冲：尺寸变了（切分辨率）时 GetLatestSdr 会另分配，
             // 这里跟着更新，下一帧就能继续复用，不会卡在旧尺寸上反复重分配。
-            _reuseSdr = sdrPixels;
+            if (useSdrReuse) _reuseSdr = sdrPixels;
 
             if (sdrPixels is null)
                 throw new TimeoutException($"SDR 捕获超时（{config.FrameTimeoutMs}ms）。");
@@ -2165,7 +2223,7 @@ public sealed partial class WgcCaptureService : IDisposable
                         }
                     }
                     if (!frozen)
-                        hdrPixels = hdrSession.GetLatestHdr(_reuseHdr);
+                        hdrPixels = hdrSession.GetLatestHdr(config.WantPrivateFrame ? null : _reuseHdr);
                 }
 
                 // ═══ 2026-09-15 P0-A 修复：HDR 会话与 SDR 会话尺寸校验 ═══
@@ -2183,7 +2241,8 @@ public sealed partial class WgcCaptureService : IDisposable
                 //   放前面也不会出错（GetLatestHdr 的 reuse 长度校验会挡住尺寸不符的复用），
                 //   但那等于让复用槽长期停在一个"每次都要重新分配"的尺寸上，白付分配。
                 //   只在"这份缓冲这次真被采用"时更新，槽才能一直跟住会话的真实尺寸。
-                if (hdrPixels is not null) _reuseHdr = hdrPixels;
+                //   2026-11-11 审计 P1：私有帧路径不更新（数组已归后台编码任务所有）。
+                if (hdrPixels is not null && !config.WantPrivateFrame) _reuseHdr = hdrPixels;
 
                 // ═══ 2026-09-19：软冷却记账。口径是「这次到底成没成帧」，不是「最后像素留没留下」═══
                 // 只有"没成帧"才会付满一次 FrameTimeoutMs，那正是冷却要治的东西；

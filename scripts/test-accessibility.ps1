@@ -1,4 +1,6 @@
 #!/usr/bin/env pwsh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
 # ═══ WCAG 2.1 AA Accessibility Validation Script ═══
 # 2026-11-08: Verify accessibility enhancements are correctly applied
 

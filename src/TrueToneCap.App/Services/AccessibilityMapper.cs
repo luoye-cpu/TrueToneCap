@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 TrueToneCap contributors
 // ═══ WCAG 2.1 AA Accessibility Mapping Service ═══
 // 2026-11-08: Centralized automation properties for all UI controls
 // This service provides non-breaking accessibility enhancements to existing XAML
