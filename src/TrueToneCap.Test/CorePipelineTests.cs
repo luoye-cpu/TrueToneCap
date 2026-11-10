@@ -5679,8 +5679,11 @@ public static class CorePipelineTests
             && CountOf(src, "FillRecognitionInput(bgra, imgW, imgH, boxes[offset + b], input, b)") == 1);
 
         // ── ② 合批契约 ──
-        Assert("② 合批张量是 [RecBatchSize,3,recH,recMaxW]（只改 batch 维，不改每个样本形状）",
-            CountOf(src, "new DenseTensor<float>([RecBatchSize, 3, recH, recMaxW])") == 1);
+        // 2026-11-11 性能审计 P2：张量宽从恒 RecImgMaxW 改为"批内最大自然 recW 收窄桶宽"（宽度维
+        // 逐批动态，DML 按形状缓存编译图；bench-ocr-rec 实测 1.59× 且文本逐批相同）。批内所有行
+        // 仍共享同一张量宽 —— "只改 batch 维、样本形状统一"的契约本体不变，字面量跟着实现走。
+        Assert("② 合批张量是 [RecBatchSize,3,recH,tensorW]（只改 batch 维，桶内样本形状统一）",
+            CountOf(src, "new DenseTensor<float>([RecBatchSize, 3, recH, tensorW])") == 1);
         Assert("② 合批入口存在且逐框解码",
             CountOf(src, "private string[] RunRecognitionBatch(") == 1
             && CountOf(src, "texts[b] = DecodeRecognitionRow(output, b);") == 1);

@@ -52,6 +52,8 @@ public static class OcrRecWidthBench
 
     public static int Run(string[] args)
     {
+        if (Array.IndexOf(args, "--switch-probe") >= 0) return RunSwitchProbe(args);
+
         string outDir = ResolveOut(args);
         int rows = Math.Max(4, GetIntOpt(args, "--rows", DefaultRows));
         int reps = Math.Max(3, GetIntOpt(args, "--reps", DefaultReps));
@@ -108,12 +110,16 @@ public static class OcrRecWidthBench
             natural[i] = NaturalRecW(boxes[i], imgW, imgH, recH, fixedMaxW);
 
         // ── 引擎按 (max side) 各一台：arm-fixed 一台，arm-narrow 每个量化宽度一台 ──
+        // ⚠ 2026-11-11 产品侧落了"张量宽=批内最大自然 recW 取整"（OnnxOcrEngine，默认步长 64）——
+        //   两臂若都用默认，fixed 臂也会收窄 ⇒ 两臂同形，判别批的 ms 拉不开，仪表按"非判别"退 1。
+        //   fixed 臂显式 RecWidthStep=0 钉住旧行为（恒按 RecImgMaxW=1280）；narrow 臂用 --step 本尊，
+        //   张量宽 = RoundUp(maxNatural, step) = narrowW，与上方臂定义逐字一致。
         var provider = wantCpu ? OnnxExecutionProvider.Cpu : OnnxExecutionProvider.DirectML;
         var engines = new Dictionary<int, OnnxOcrEngine>();
         OnnxOcrEngine GetEngine(int maxW)
         {
             if (engines.TryGetValue(maxW, out var e)) return e;
-            var cfg = defCfg with { RecImgMaxW = maxW };
+            var cfg = defCfg with { RecImgMaxW = maxW, RecWidthStep = maxW == fixedMaxW ? 0 : step };
             var created = new OnnxOcrEngine(provider, modelDir, cfg);
             if (!created.Info.IsAvailable)
             {
@@ -248,6 +254,106 @@ public static class OcrRecWidthBench
             + ".Where(d => d-1 < _dict.Length) 兜住的（模型第 18710 类 = 尾随特殊类）；"
             + "那道界一旦动，收窄就会把尾类暴露成文本差 —— 见 2026-10-31 仪表读数");
         return 0;
+    }
+
+    /// <summary>
+    /// 形状切换代价探针（2026-11-11）：【同一台引擎】上两种宽度桶交替 Run，逐次计时。
+    /// <para>背景：产品改"张量宽=批内最大自然 recW 取整"后，--ocr-bench 全程 A/B 反而慢了
+    /// 2.6s，且步长 64→128（形状数减半）耗时不变 —— 指向"DML 代价跟【形状切换】走，
+    /// 而不是按不同形状一次性缓存"。本探针直接量三样：各形状首跑（含编译）、各自稳态、
+    /// 以及"切走再切回"后的第一跑。判读：</para>
+    /// <para>· 切回 ≈ 稳态 ⇒ DML 按形状缓存，产品逐批收窄稳赢（2.6s 是一次性编译税）；</para>
+    /// <para>· 切回 ≈ 首跑 ⇒ 无缓存（或 LRU=1），逐批收窄在混宽场景是净亏，产品需要
+    ///   "每图一个宽度"之类的降切换策略。</para>
+    /// </summary>
+    private static int RunSwitchProbe(string[] args)
+    {
+        var defCfg = OcrModelConfig.Default;
+        int recH = defCfg.RecImgH;
+        int fixedMaxW = defCfg.RecImgMaxW;
+        string modelDir = GetOpt(args, "--models");
+        if (string.IsNullOrWhiteSpace(modelDir))
+            modelDir = OnnxOcrEngine.ResolveModelDir();
+        string recPath = Path.Combine(modelDir, defCfg.RecFileName);
+        if (!File.Exists(recPath))
+        {
+            Console.WriteLine($"⏭ SKIP —— rec 模型不齐（{recPath}）");
+            return 3;
+        }
+
+        var engineType = typeof(OnnxOcrEngine);
+        var boxType = engineType.GetNestedType("Box", BindingFlags.NonPublic)
+            ?? throw new MissingMethodException("OnnxOcrEngine+Box 不见了");
+        var runBatchMi = engineType.GetMethod("RunRecognitionBatch", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new MissingMethodException("RunRecognitionBatch 不见了");
+        int recBatch = (int)(engineType.GetField("RecBatchSize", BindingFlags.NonPublic | BindingFlags.Static)
+            ?.GetValue(null) ?? 4);
+
+        var (bgra, imgW, imgH, boxes) = BuildSyntheticPage(DefaultRows);
+        var natural = new int[boxes.Count];
+        for (int i = 0; i < boxes.Count; i++)
+            natural[i] = NaturalRecW(boxes[i], imgW, imgH, recH, fixedMaxW);
+
+        // 窄组 = 自然宽最小的 recBatch 个框；宽组 = 最大的 recBatch 个框（两组形状差越大越有判别力）
+        var byNat = Enumerable.Range(0, boxes.Count).OrderBy(i => natural[i]).ToList();
+        int n = Math.Min(recBatch, byNat.Count / 2);
+        var narrowIdx = byNat.Take(n).ToList();
+        var wideIdx = byNat.TakeLast(n).ToList();
+        var narrowList = MakeBoxListOf(boxType, boxes, narrowIdx);
+        var wideList = MakeBoxListOf(boxType, boxes, wideIdx);
+
+        var engine = new OnnxOcrEngine(OnnxExecutionProvider.DirectML, modelDir, defCfg);
+        Console.WriteLine($"═══ [switch-probe] 同引擎两形状交替 ═══ 引擎={engine.Info.Name}");
+        Console.WriteLine($"窄组 n={n} natural≈[{string.Join(',', narrowIdx.Select(i => natural[i]))}] "
+            + $"宽组 natural≈[{string.Join(',', wideIdx.Select(i => natural[i]))}]");
+
+        var times = new List<(string tag, long ms)>();
+        void RunOnce(string tag, object list, int count)
+        {
+            var sw = Stopwatch.StartNew();
+            Invoke(runBatchMi, engine, bgra, imgW, imgH, list, count);
+            sw.Stop();
+            times.Add((tag, sw.ElapsedMilliseconds));
+        }
+
+        RunOnce("窄首", narrowList, n);   // 各自首跑含 DML 编译
+        RunOnce("宽首", wideList, n);
+        for (int i = 0; i < 12; i++)
+        {
+            RunOnce("窄", narrowList, n);  // 每次都是"刚从宽形状切回"
+            RunOnce("宽", wideList, n);
+        }
+
+        long narrowFirst = times[0].ms, wideFirst = times[1].ms;
+        var narrowSteady = times.Where(t => t.tag == "窄").Skip(2).Select(t => t.ms).OrderBy(x => x).ToList();
+        var wideSteady = times.Where(t => t.tag == "宽").Skip(2).Select(t => t.ms).OrderBy(x => x).ToList();
+        var narrowPostSwitch = times.Where(t => t.tag == "窄").Skip(1).Select(t => t.ms).OrderBy(x => x).ToList();
+        long steadyN = narrowSteady[narrowSteady.Count / 2];
+        long steadyW = wideSteady[wideSteady.Count / 2];
+        long postN = narrowPostSwitch[narrowPostSwitch.Count / 2];
+        Console.WriteLine("序列: " + string.Join(' ', times.Select(t => $"{t.tag}{t.ms}")));
+        Console.WriteLine($"窄: 首跑={narrowFirst}ms 稳态中位={steadyN}ms 切回后中位={postN}ms 切换代价≈{postN - steadyN}ms");
+        Console.WriteLine($"宽: 首跑={wideFirst}ms 稳态中位={steadyW}ms");
+        bool cached = postN - steadyN <= Math.Max(5, steadyN / 10);
+        Console.WriteLine(cached
+            ? "✅ 切回≈稳态 ⇒ DML 按形状缓存编译图，产品逐批收窄的代价是一次性编译税（常驻进程摊销后净赢）"
+            : "❌ 切回≈首跑 ⇒ 无按形状缓存，逐批收窄在混宽流是净亏 —— 产品需要降切换策略（如每图一个宽度）");
+        return cached ? 0 : 1;
+    }
+
+    /// <summary>按给定下标集合构造 List&lt;Box&gt;（反射；MakeBoxList 的连续切片版不够用）。</summary>
+    private static object MakeBoxListOf(Type boxType,
+        List<(float X1, float Y1, float X2, float Y2)> boxes, List<int> indices)
+    {
+        var listType = typeof(List<>).MakeGenericType(boxType);
+        var list = (System.Collections.IList)Activator.CreateInstance(listType)!;
+        foreach (var i in indices)
+        {
+            var b = boxes[i];
+            list.Add(Activator.CreateInstance(boxType,
+                new object[] { b.X1, b.Y1, b.X2, b.Y2, false })!);
+        }
+        return list;
     }
 
     private static (long ms, string[] texts) Measure(MethodInfo runBatch, OnnxOcrEngine engine,

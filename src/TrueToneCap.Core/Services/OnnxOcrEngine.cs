@@ -35,7 +35,15 @@ public sealed record OcrModelConfig(
     float[]? RecMean = null,
     float[]? RecStd = null,
     float DetMaxBoxAspect = 400f,
-    float DetSplitBoxAspect = 90f)
+    float DetSplitBoxAspect = 90f,
+    // ═══ 2026-11-11 性能审计 P2：识别张量宽度收窄步长 ═══
+    // 张量宽 = 本批最大自然 recW 向上取整到该步长（上限仍 RecImgMaxW）。0 = 旧行为（恒 RecImgMaxW）。
+    // bench-ocr-rec 本机实测（PP-OCRv6 medium / DirectML，2026-11-11）：混合宽度分布收窄合计 1.557×、
+    // 判别批最高 3.33×、10 批文本逐批相同。步长取舍（--ocr-bench 全程 A/B 实测，短命进程视角）：
+    //   64  → 形状 ≤20，DML 编译税 2.6s（+11% 总耗时）；128 → 形状 ≤10，税约减半。
+    //   常驻进程税一次性摊销后只剩稳态赢（rec 段 ~1.5×），且收窄本身大幅提准（见 CHANGELOG）——
+    //   税只在"每个进程每种形状第一次 Run"付一次。取 128 平衡编译税与稳态浪费。
+    int RecWidthStep = 128)
 {
     public float[] DetMeanV => DetMean ?? [0.5f, 0.5f, 0.5f];
     public float[] DetStdV => DetStd ?? [0.5f, 0.5f, 0.5f];
@@ -128,6 +136,7 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     private static readonly bool s_recBatchEnabled =
         Environment.GetEnvironmentVariable("TTC_OCR_BATCH") != "0";
     private const int RecBatchSize = 4;
+    private int _recTensorW;   // 单框张量当前宽度（宽度桶变化时重建，同 det 池模式）
     private DenseTensor<float>? _recBatchTensor;
 
     // ═══ 2026-10-30 Span 读取 A/B 开关（TTC_OCR_SPAN=0 回到原多维索引器）═══
@@ -810,10 +819,19 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     {
         int recH = _config.RecImgH;
         int recMaxW = _config.RecImgMaxW;
+        // ═══ 2026-11-11 性能审计 P2：张量宽 = 本框自然 recW 取整，不再恒 1280 ═══
+        // 窄框（典型 300px）原先白付 ~4 倍 rec 算力；自然宽先于填张量算一次（几十次算术，可忽略）。
+        var crop = ComputeRecCrop(box, imgW, imgH);
+        if (crop is null) return "";
+        int tensorW = BucketRecWidth(crop.Value.RecW, recMaxW);
         DenseTensor<float> input;
         lock (_tensorLock)
         {
-            _recTensor ??= new DenseTensor<float>([1, 3, recH, recMaxW]);
+            if (_recTensor is null || _recTensorW != tensorW)
+            {
+                _recTensor = new DenseTensor<float>([1, 3, recH, tensorW]);
+                _recTensorW = tensorW;
+            }
             input = _recTensor;
             // 复用前清零：右侧 padding 与上一框残留都会污染推理
             input.Buffer.Span.Clear();
@@ -854,17 +872,27 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         var texts = new string[count];
         int recH = _config.RecImgH;
         int recMaxW = _config.RecImgMaxW;
+        // ═══ 2026-11-11 性能审计 P2：张量宽 = 批内最大自然 recW 取整（恒 1280 时窄框白付 2-6 倍算力）═══
+        // 批内取最大 ⇒ 每行的自然宽都装得下，"右侧零填充"语义与旧实现完全一致。
+        // 全部框无效时退一步宽（全零行解码为空文本，与旧行为相同——Fill 的 false 只影响单框路径）。
+        int maxNatural = 0;
+        for (int b = 0; b < count; b++)
+        {
+            var c = ComputeRecCrop(boxes[offset + b], imgW, imgH);
+            if (c is not null && c.Value.RecW > maxNatural) maxNatural = c.Value.RecW;
+        }
+        int tensorW = BucketRecWidth(maxNatural, recMaxW);   // maxNatural=0 ⇒ 钳到一步宽（全零行）
         DenseTensor<float> input;
         lock (_tensorLock)
         {
             if (_recBatchTensor is null
                 || _recBatchTensor.Dimensions[0] != RecBatchSize
                 || _recBatchTensor.Dimensions[2] != recH
-                || _recBatchTensor.Dimensions[3] != recMaxW)
-                _recBatchTensor = new DenseTensor<float>([RecBatchSize, 3, recH, recMaxW]);
+                || _recBatchTensor.Dimensions[3] != tensorW)
+                _recBatchTensor = new DenseTensor<float>([RecBatchSize, 3, recH, tensorW]);
             input = _recBatchTensor;
             // 只清本批要用的行；块内上一批残留与右侧 padding 都在这里归零
-            int rowFloats = 3 * recH * recMaxW;
+            int rowFloats = 3 * recH * tensorW;
             input.Buffer.Span[..(count * rowFloats)].Clear();
         }
         for (int b = 0; b < count; b++)
@@ -893,18 +921,26 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         return texts;
     }
 
-    /// <summary>
-    /// 把一个框的裁剪/缩放/归一化写进 <paramref name="input"/> 的第 <paramref name="batchIndex"/> 行。
-    /// <paramref name="input"/> 形状 [N,3,recH,recMaxW]，右侧不足 recW 的部分必须已清零。
-    /// </summary>
-    private bool FillRecognitionInput(byte[] bgra, int imgW, int imgH, Box box,
-        DenseTensor<float> input, int batchIndex)
+    /// <summary>把识别张量宽度取整到配置步长（下限一步，上限 <paramref name="cap"/>）。
+    /// 步长 0 = 旧行为（恒用 <paramref name="cap"/>，即配置的 RecImgMaxW）。</summary>
+    private int BucketRecWidth(int recW, int cap)
+    {
+        int step = _config.RecWidthStep;
+        if (step <= 0) return cap;
+        int bucket = (recW + step - 1) / step * step;
+        return Math.Clamp(bucket, step, cap);
+    }
+
+    /// <summary>识别裁剪几何：框 → 加边距裁剪 → 按高 RecImgH 保宽比的目标宽（自然 recW）。
+    /// 2026-11-11 性能审计 P2 起张量宽度由批内最大自然 recW 取整决定 ⇒ 同一份裁剪计算
+    /// 在"配张量"（批内取 max）与"填张量"两处都要用，抽成一份防止两处漂移。null = 框无效。</summary>
+    private (int CropX, int CropY, int CropW, int CropH, int RecW)? ComputeRecCrop(Box box, int imgW, int imgH)
     {
         int x = Math.Max(0, (int)box.X1);
         int y = Math.Max(0, (int)box.Y1);
         int bw = Math.Min(imgW - x, (int)(box.X2 - box.X1));
         int bh = Math.Min(imgH - y, (int)(box.Y2 - box.Y1));
-        if (bw <= 0 || bh <= 0) return false;
+        if (bw <= 0 || bh <= 0) return null;
 
         // ═══ 裁剪边距 padding（防止文字边缘被截断）═══
         // ⚠ 长行拆分出的子框不能用「框宽的 10%」做水平边距：相邻子框各自外扩 10%
@@ -926,15 +962,32 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         int cropY = Math.Max(0, y - padY);
         int cropW = Math.Min(imgW - cropX, bw + padX * 2);
         int cropH = Math.Min(imgH - cropY, bh + padY * 2);
-        if (cropW <= 0 || cropH <= 0) return false;
+        if (cropW <= 0 || cropH <= 0) return null;
 
         // ── PP-OCRv6 识别预处理 ──
         // crop → resize to H×W (keep aspect) → pad to MaxW → normalize → NCHW
-        int recH = _config.RecImgH;
-        int recMaxW = _config.RecImgMaxW;
         float aspect = (float)cropW / cropH;
-        int recW = Math.Min((int)Math.Ceiling(recH * aspect), recMaxW);
+        int recW = Math.Min((int)Math.Ceiling(_config.RecImgH * aspect), _config.RecImgMaxW);
         recW = Math.Max(4, recW);
+        return (cropX, cropY, cropW, cropH, recW);
+    }
+
+    /// <summary>
+    /// 把一个框的裁剪/缩放/归一化写进 <paramref name="input"/> 的第 <paramref name="batchIndex"/> 行。
+    /// <paramref name="input"/> 形状 [N,3,recH,tensorW]，右侧不足 recW 的部分必须已清零。
+    /// <para>2026-11-11 性能审计 P2：宽度上限取【张量实际宽度】而非配置 RecImgMaxW ——
+    /// 张量宽由批内最大自然 recW 收窄而来，调用方保证本行自然宽 ≤ 张量宽，此处钳制只是防御。</para>
+    /// </summary>
+    private bool FillRecognitionInput(byte[] bgra, int imgW, int imgH, Box box,
+        DenseTensor<float> input, int batchIndex)
+    {
+        var crop = ComputeRecCrop(box, imgW, imgH);
+        if (crop is null) return false;
+        int cropX = crop.Value.CropX, cropY = crop.Value.CropY;
+        int cropW = crop.Value.CropW, cropH = crop.Value.CropH;
+
+        int recH = input.Dimensions[2];
+        int recW = Math.Min(crop.Value.RecW, input.Dimensions[3]);
 
         float[] recMean = _config.RecMeanV;
         float[] recStd = _config.RecStdV;
