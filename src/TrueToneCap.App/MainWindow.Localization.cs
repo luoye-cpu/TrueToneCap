@@ -271,7 +271,7 @@ public sealed partial class MainWindow : Window
         // ⚠ 这些下拉共用同一组 Tag/文案，所以循环里是一次写六遍 —— 有意为之：
         //   一旦将来某个格式的档位含义分化（例如 WebP 只给两档），各自的文字就能独立改。
         // 两档格式（PNG/TIFF/WebP/JPEG LI）：均衡（默认，= 参数拉满）+ 快速
-        foreach (var effortCbo in new[] { EffortPngCbo, EffortTiffCbo, EffortWebpCbo, EffortJpegLiCbo })
+        foreach (var effortCbo in new[] { EffortPngCbo, EffortTiffCbo, EffortWebpCbo })
         {
             if (effortCbo is null) continue;
             SetComboItemText(effortCbo, "Smallest", LocaleManager.Tr("均衡"));
@@ -285,6 +285,10 @@ public sealed partial class MainWindow : Window
             SetComboItemText(effortCbo, "Balanced", LocaleManager.Tr("均衡"));
             SetComboItemText(effortCbo, "Fastest", LocaleManager.Tr("快速"));
         }
+        // JPEG LI 色彩空间（2026-11-12 用户拍板：xyb 不属于压缩强度，独立二态开关）。
+        // "XYB" 专名不翻；"传统" 走对照表。
+        SetComboItemText(JpegLiColorModelCbo, "Traditional", LocaleManager.Tr("传统"));
+        SetComboItemText(JpegLiColorModelCbo, "Xyb", "XYB");
 
         // AvifCodecCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。
         SetComboItemText(AvifCodecCbo, "Auto", LocaleManager.Tr("自动"));

@@ -157,7 +157,7 @@ public sealed class JpegLiEncoder : ImageEncoder
             if (!JpegLiNative.IsAvailable)
                 throw new InvalidOperationException("JPEG LI 编码需要 cjpegli.exe (Google jpegli)，请将 cjpegli.exe 放入 native/ 目录、PLAN/tools/ 目录或系统 PATH。");
 
-            var jpegBytes = JpegLiNative.Encode(px, w, h, s.Quality, s.ChromaSubsampling, icc, effort: s.Effort);
+            var jpegBytes = JpegLiNative.Encode(px, w, h, s.Quality, s.ChromaSubsampling, icc, xyb: s.JpegLiXyb);
             File.WriteAllBytes(path, jpegBytes);
         }, ct);
     }

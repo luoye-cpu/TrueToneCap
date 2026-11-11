@@ -359,7 +359,11 @@ public static class LocaleManager
             ["只影响编码耗时与文件体积，不影响质量。软件路改 avifenc 的 speed，硬件路改 NVENC 的 preset。"] = "Only encoding time and file size change; quality is untouched. The software path changes avifenc's speed, the hardware path NVENC's preset.",
             ["只影响压缩耗时，不影响质量。档位越高越慢，体积不一定更小。"] = "Only compression time changes; quality is untouched. Higher tiers are slower, and not necessarily smaller.",
             ["只影响压缩耗时与体积，不影响质量。均衡=-m 6，快速=-m 5。"] = "Only compression time and size change; quality is untouched. Balanced = -m 6, Fast = -m 5.",
-            ["均衡开 XYB 色彩空间，快速不开；两档质量相同。"] = "Balanced turns on the XYB colour space, Fast does not; both tiers keep the same quality.",
+            // ═══ JPEG LI 色彩空间（2026-11-12 用户拍板：xyb 不属于压缩强度，独立二态开关）═══
+            // 旧键「均衡开 XYB 色彩空间，快速不开；两档质量相同。」随该提示一并删除（行已不在界面）。
+            ["传统"] = "Traditional",
+            ["色彩空间"] = "Color Space",
+            ["传统（YCbCr）兼容性最好；XYB 体积通常更小，但少数软件可能无法正确解码。"] = "Traditional (YCbCr) has the best compatibility; XYB is usually smaller but some software may fail to decode it.",
             ["无损：只影响压缩耗时与文件体积，像素不变。均衡=压缩最强，快速=更快。"] = "Lossless: only compression time and file size change, pixels stay identical. Balanced = strongest compression, Fast = quicker.",
             ["额外添加 .png 后缀来提高兼容性"] = "Add .png suffix for compatibility",
             ["附带增益图（输出 Ultra HDR 照片）"] = "Attach gain map (Ultra HDR output)",

@@ -181,7 +181,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             byte[] sdrBgra = LinearToBgra8(sdrLinear, w, h);
             float distance = Math.Clamp(settings.Quality, 0.5f, 25.0f);
             byte[] jpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, distance,
-                baseIcc, settings.ChromaSubsampling, settings.Effort);
+                baseIcc, settings.ChromaSubsampling, settings.JpegLiXyb);
             File.WriteAllBytes(outputPath, jpegBytes);
         }, ct);
     }
@@ -218,7 +218,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             var icc = (settings.ColorSpaceTag is not (null or "System" or "sRGB")) ? settings.IccProfile : null;
             // settings.Quality 是 butteraugli 距离 (GetQualityRange: 0.5-3.0)，直接使用
             float distance = Math.Clamp(settings.Quality, 0.5f, 25.0f);
-            var jpegBytes = JpegLiNative.Encode(sdrPixels, width, height, distance, settings.ChromaSubsampling, icc, forceBaseline: true, effort: settings.Effort);
+            var jpegBytes = JpegLiNative.Encode(sdrPixels, width, height, distance, settings.ChromaSubsampling, icc, forceBaseline: true, xyb: settings.JpegLiXyb);
             File.WriteAllBytes(outputPath, jpegBytes);
         }, ct);
     }
@@ -269,7 +269,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             //       现在转换真的发生了，所以那句随之作废 —— 别再照它改回去。
             float baseDist = Math.Clamp(settings.Quality, 0.5f, 25.0f);
             byte[] baseJpegBytes = EncodeToJpegBytesSafe(sdrBgra, w, h, baseDist,
-                baseIcc, settings.ChromaSubsampling, settings.Effort);
+                baseIcc, settings.ChromaSubsampling, settings.JpegLiXyb);
             ct.ThrowIfCancellationRequested();
 
             // ── 4. 增益比计算（统一到 SDR 白点相对线性空间）──
@@ -293,7 +293,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
             float gmDistance = Math.Clamp(settings.Quality, 0.0f, 25.0f);
             byte[] gainMapScaled = RescaleGainMap(gainMapPixels, w, h, gainMapMode, out int gmSW, out int gmSH);
             byte[] gainMapJpegBytes = EncodeGainMapToJpegBytesSafe(gainMapScaled, gmSW, gmSH,
-                gainMapMode, gmDistance, settings.Effort);
+                gainMapMode, gmDistance);
             ct.ThrowIfCancellationRequested();
 
             // ── 6. MPF + 元数据封装（增益范围基于实际 headroom）──
@@ -457,19 +457,18 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// （交接 §27 未修清单第 1 条）。现在主路径与旁路同源。</para>
     /// </summary>
     private static byte[] EncodeToJpegBytesSafe(byte[] bgra, int w, int h, float distance, byte[]? icc, string chroma,
-        CompressionEffort effort = CompressionEffort.Balanced)
+        bool xyb = false)
     {
         var result = NativeEncoderGuard.TryEncode("GainMap_BaseJPEG", () =>
         {
-            return JpegLiNative.Encode(bgra, w, h, distance, chroma, icc, forceBaseline: true, effort: effort);
+            return JpegLiNative.Encode(bgra, w, h, distance, chroma, icc, forceBaseline: true, xyb: xyb);
         });
         if (result.Success) return result.Value!;
         throw new InvalidOperationException($"[GainMap] Base JPEG 编码失败: {result.Error?.Message}");
     }
 
     private static byte[] EncodeGainMapToJpegBytesSafe(byte[] pixels, int w, int h,
-        GainMapMode mode, float distance,
-        CompressionEffort effort = CompressionEffort.Balanced)
+        GainMapMode mode, float distance)
     {
         // ═══ 2026-08-10 修复: Gray 模式用真灰度 JPEG (YCbCr400 1 分量) ═══
         // 旧实现: Gray 像素复制到 RGB 三通道 + 彩色 444 编码 → 3 分量彩色 JPEG,
@@ -481,7 +480,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         {
             var result = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
             {
-                return JpegLiNative.EncodeGray(pixels, w, h, distance, forceBaseline: true, effort: effort);
+                return JpegLiNative.EncodeGray(pixels, w, h, distance, forceBaseline: true);
             });
             if (result.Success) return result.Value!;
             throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result.Error?.Message}");
@@ -504,7 +503,7 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         // JpegLiNative.Encode 内部已 clamp [0,25] (与 JXL 的 -d 修复一致)。
         var result2 = NativeEncoderGuard.TryEncode("GainMap_GainMapJPEG", () =>
         {
-            return JpegLiNative.Encode(bgra, w, h, distance, "444", null, forceBaseline: true, effort: effort);
+            return JpegLiNative.Encode(bgra, w, h, distance, "444", null, forceBaseline: true);
         });
         if (result2.Success) return result2.Value!;
         throw new InvalidOperationException($"[GainMap] Gain Map JPEG 编码失败: {result2.Error?.Message}");

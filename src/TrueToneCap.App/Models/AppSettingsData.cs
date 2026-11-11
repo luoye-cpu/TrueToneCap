@@ -163,30 +163,33 @@ public sealed class AppSettingsData
     //
     // ⚠ 两组格式的下拉【格数不同】（2026-10-29 用户口径原话："这4个格式是2档位，默认是最高参数
     //   拉满，有一个相对快速参数；其他的几个是3个档位，默认是个均衡，然后一个最大质量一个快速"）：
-    //   · 两档：PNG / TIFF / WebP / JPEG LI → 合法值 {Smallest, Quick}，默认 Smallest。
+    //   · 两档：PNG / TIFF / WebP → 合法值 {Smallest, Quick}，默认 Smallest。
     //   · 三档：AVIF / JPEG XL → 合法值 {Smallest, Balanced, Fastest}，默认 Balanced。
     //   白名单因此分两条通道下发，逐格式写死在 SettingsService.Normalize 里。
     //
     // 默认档的分布是 2026-10-29 用户逐条点的（"TIFF 默认回到最小体积，JPEG 和 PNG 等默认都是最小体积"，
     // 并确认 AVIF / JPEG XL 不动）：
-    //   · PNG / TIFF / WebP / JPEG LI → Smallest。PNG/TIFF 的这一档 == 它们 2026-10-29 之前
+    //   · PNG / TIFF / WebP → Smallest。PNG/TIFF 的这一档 == 它们 2026-10-29 之前
     //     硬编码的 CompressionLevel.SmallestSize ⇒ 产物逐字节回到改动前；WebP 的 -m 6 比默认 m4
-    //     小约 4%、慢约 0.2s；JPEG LI 的 Smallest 是 --xyb，2026-10-07 那批样本（两张真实截图 ×
-    //     整个质量区间 + GainMap Baseline 路）上一律更小 1.5%~4.7%，代价是编码时间 1.5~1.8 倍。
-    //     ⚠ 2026-10-29 换三张新截图复测出现反例（两张小 5.5%/10.4%、一张【大 3.0%】）⇒
-    //       "一律"这个词不再用，理由与数据见 CompressionEffortMap.JpegLiUseXyb。
+    //     小约 4%、慢约 0.2s。
     //   · AVIF / JPEG XL → Balanced。AVIF 的 Smallest 是 -s 0（实测 4K 约 0.3s → 7.1s，慢 24 倍换
     //     约 24% 体积），JPEG XL 的更高 effort 体积方向随内容正负不定（样张 A 省 5.4%、样张 B 涨 8.9%）
     //     ⇒ 这两条不把不确定/不成比例的代价设成默认。
+    //   · JPEG LI 曾在此列（2026-10-07~2026-11-12，唯一落点 --xyb）；2026-11-12 用户拍板
+    //     "xyb 不该放在压缩强度档位里"，退出本表，见下方 JpegLiColorModel。
     // ⚠ 界面下拉里 IsSelected 的那一项必须与这里的默认同源，判据
     //   CorePipelineTests.Test_PerfWiring_PngTiffEffortTiers 逐下拉对撞，改一边不改另一边会红。
     public string EffortAvif { get; set; } = "Balanced";
     public string EffortJpegXl { get; set; } = "Balanced";
     public string EffortWebp { get; set; } = "Smallest";
-    // JPEG LI 是 2026-10-07 后加的（用户据实测要求纳入）：它的 --xyb 在那批样本上一律更小，
-    // 但 2026-10-29 换三张新截图复测有一张反而大 3.0% ⇒ "唯一全正收益"的说法已收回，
-    // 完整数据与措辞见 CompressionEffortMap.JpegLiUseXyb。
-    public string EffortJpegLi { get; set; } = "Smallest";
+    // JPEG LI 的色彩空间（2026-11-12 用户拍板新增，替代原 EffortJpegLi 档位里暗藏的 --xyb）：
+    //   · "Traditional"（默认）= 传统 YCbCr，兼容最好 —— XYB 编码的 JPEG 会被小部分软件
+    //     解码出错（用户实测反馈），故默认传统。
+    //   · "Xyb" = XYB 感知色彩空间，体积通常更小（2026-10-07/10-29 实测：5 个样本里 4 个小
+    //     1.5%~10.4%，一个反例 +3.0%；代价约 1.2~1.3 倍时间，数据见 JpegLiNative.Encode 注释）。
+    // 增益图底图同用本开关（底图必须能被普通查看器当普通 JPEG 读）；增益图层恒传统。
+    // ⚠ 旧 EffortJpegLi 键（Smallest/Quick）自本版起不再被读取，留在 settings.json 里被静默忽略。
+    public string JpegLiColorModel { get; set; } = "Traditional";
     // PNG / TIFF 是 2026-10-29 加进来的（用户点名"编码速度相对过慢的几个要给档位"）。
     // 起初排除它们的理由是"无损压缩级别会与质量滑块打架"，但 PNG 的质量滑块恒锁在 100
     // （GetQualityRange = (100,100,100, LosslessFixed100)）⇒ 打架的对象不存在，这一档就是

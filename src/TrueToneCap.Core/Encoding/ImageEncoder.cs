@@ -46,6 +46,13 @@ public sealed class EncodingSettings
     public bool AvifPngSuffix { get; set; }
     /// <summary>是否为 JXL 文件添加 .png 后缀（兼容不支持 .jxl 的软件）。</summary>
     public bool JxlPngSuffix { get; set; }
+    /// <summary>JPEG LI 色彩空间：true = XYB（体积通常更小，但少数软件无法正确解码），
+    /// false = 传统 YCbCr（默认，兼容最好）。
+    /// <para>2026-11-12 用户拍板：xyb 不属于压缩强度档位（cjpegli 也没有别的 effort 旋钮），
+    /// 改为独立开关；对增益图的<b>底图</b>同样生效（底图必须能被普通查看器当普通 JPEG 读），
+    /// <b>增益图层</b>恒传统（libultrahdr 解析端按标准 JPEG 读它，XYB 徒增风险）。
+    /// App 侧来源：<c>AppSettingsData.JpegLiColorModel</c>（"Traditional" / "Xyb"）。</para></summary>
+    public bool JpegLiXyb { get; set; }
     /// <summary>色度采样: 420 / 422 / 444。适用于 AVIF/WebP/JPEG XL。默认 444。</summary>
     public string ChromaSubsampling { get; set; } = "444";
     /// <summary>

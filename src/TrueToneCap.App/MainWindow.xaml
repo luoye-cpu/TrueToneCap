@@ -165,30 +165,24 @@
                                 </Grid>
                                 <TextBlock x:Name="ChromaJpegLiNoteTxt" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
                                     Text="采样越高色度越准、体积越大：4:4:4 不压缩色度，4:2:0 体积最小。"/>
-                                <!-- 压缩强度（2026-10-07）：改 cjpegli 的 xyb 开关（色彩空间） -->
-                                <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
-                                    <ComboBox x:Name="EffortJpegLiCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="Smallest" IsSelected="True">均衡</ComboBoxItem>
-                                        <ComboBoxItem Tag="Quick">快速</ComboBoxItem>
+                                <!-- ═══ 色彩空间（2026-11-12 用户拍板）：xyb 不属于压缩强度 ═══
+                                     此前（2026-10-07~2026-11-12）xyb 挂在「压缩强度」两档上（均衡=开，
+                                     快速=关）—— cjpegli 没有别的 effort 旋钮，两档本质是同一开关的两半。
+                                     现改为显式二态开关，默认传统：XYB 编码的 JPEG 会被小部分软件
+                                     解码出错（用户实测反馈）。选 XYB 体积通常更小（5 个样本里 4 个小
+                                     1.5%~10.4%、一个反例 +3.0%，代价约 1.2~1.3 倍时间，
+                                     artifacts/tier_bench_2026-10-29.log）。
+                                     增益图底图同用本开关；增益图层恒传统（libultrahdr 解析端按标准
+                                     JPEG 读它）。参数拼装见 JpegLiNative.Encode。
+                                     ⚠ 注释里不能出现两个连续的减号（XML 规则），参数名写作 xyb。 -->
+                                <Grid ColumnDefinitions="120,*"><TextBlock Text="色彩空间" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="JpegLiColorModelCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Traditional" IsSelected="True">传统</ComboBoxItem>
+                                        <ComboBoxItem Tag="Xyb">XYB</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <!-- ═══ 2026-10-07：为什么 JPEG LI 也加这一栏（与"只有三个格式加"的初版口径不同）═══
-                                     初版把 JPEG LI 排除在外，理由写的是"它的压缩强度与质量是同一个旋钮"。
-                                     但 xyb 开关换的是**色彩空间**、不是质量 ⇒ 纳入。
-                                     ⚠ 2026-10-29 复测【推翻】了当年那句"一律更小，无一例外"：
-                                     那次的证据是两张 4K 截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 Baseline 路，
-                                     在【那些内容】上确实全为正向（1.5%~4.7%）。本轮换三张新的真实截图
-                                     （735x840 / 893x491 / 1000x700，-d 1.0，见
-                                     artifacts/tier_bench_2026-10-29.log）重测：开 xyb 的两张分别小
-                                     5.5% / 10.4%，第三张【反而大 3.0%】⇒ "无一例外"不再成立，
-                                     这里按复测改写。代价一侧也一并更正：本轮实测时间 1.2~1.3 倍
-                                     （当年记的是 1.5~1.8 倍，样本与距离都不同，两个数各归各的样本）。
-                                     档位含义不变，2026-10-29 同日只改显示名：Tag Smallest 显示「均衡」
-                                     （默认，= 开 xyb 开关），Tag Quick 显示「快速」（= 关 xyb）。
-                                     ⚠ 注释里不能出现两个连续的减号（XML 规则），所以全文写"xyb 开关"
-                                        而不是那个双连字符参数名 —— 参数串本身见 CompressionEffortMap。 -->
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="均衡开 XYB 色彩空间，快速不开；两档质量相同。"/>
+                                    Text="传统（YCbCr）兼容性最好；XYB 体积通常更小，但少数软件可能无法正确解码。"/>
                                 <!-- ═══ 增益图开关 ═══
                                      2026-09-26（用户口径）：GainMap 不再是输出格式下拉里的一项，
                                      而是"JPEG LI 的另一个形态"。打开后编码走 JPEG_GAINMAP 那条路，

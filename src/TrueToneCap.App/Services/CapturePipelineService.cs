@@ -277,6 +277,8 @@ public sealed class CapturePipelineService
         // PNG / TIFF 读它是因为它们是全仓最慢的两条，而这一档是它俩唯一的旋钮（质量滑块锁死在 100）。
         // 其余没列出的格式恒为 Balanced —— 编码器里根本没接这个值，给 Balanced 只是"不要传一个
         // 没意义的最慢档"（PNG/TIFF 自 2026-10-29 起是真接了）。
+        // JPEG LI 自 2026-11-12 起不在档位体系里（用户拍板：xyb 不属于压缩强度，独立成
+        // JpegLiColorModel 开关）⇒ 落到 _ 分支；EncodingSettings.Effort 对它只是占位。
         var effort = format switch
         {
             OutputFormat.AVIF => CompressionEffortMap.Parse(s.EffortAvif),
@@ -284,9 +286,6 @@ public sealed class CapturePipelineService
             OutputFormat.WebP => CompressionEffortMap.Parse(s.EffortWebp),
             OutputFormat.PNG => CompressionEffortMap.Parse(s.EffortPng),
             OutputFormat.TIFF => CompressionEffortMap.Parse(s.EffortTiff),
-            // JPEG LI 与增益图（= JPEG LI 的另一个形态）共用同一栏：增益图开与不开是同一个
-            // 格式下拉的两种形态，各设一个"压缩强度"就是刚被合并掉的那种分裂。
-            OutputFormat.JPEG_LI or OutputFormat.JPEG_GAINMAP => CompressionEffortMap.Parse(s.EffortJpegLi),
             _ => CompressionEffort.Balanced,
         };
 
@@ -298,6 +297,10 @@ public sealed class CapturePipelineService
             AvifEncoderKind = avifKind,
             AvifPngSuffix = s.AvifPngSuffix,
             JxlPngSuffix = s.JxlPngSuffix,
+            // JPEG LI 色彩空间（2026-11-12 用户拍板）：独立二态开关，替代原 EffortJpegLi 档位
+            // 里暗藏的 --xyb。底图（普通 JPEG LI 与增益图底图）同用；增益图层恒传统
+            //（在 JpegGainMapEncoder 内写死，不走本字段）。
+            JpegLiXyb = s.JpegLiColorModel == "Xyb",
             // 换格式保底的开关（2026-09-29 用户口径）。唯一写者就是这里 —— MainWindow 那份
             // BuildEncodingSettings 委托本方法之后再覆盖自己的 UI 特有位，【不】再覆盖这个字段，
             // 免得"开关"长出两个事实源（AvifPngSuffix 那种控件+快照双写就是前车之鉴）。

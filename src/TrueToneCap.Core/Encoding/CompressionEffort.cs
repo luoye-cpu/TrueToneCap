@@ -44,15 +44,14 @@ namespace TrueToneCap.Core.Encoding;
 /// 三档格式（AVIF/JPEG XL）用「极高 / 均衡 / 快速」⇒ <see cref="Smallest"/> 在两档菜单里
 /// 显示「均衡」（且是默认）、三档菜单里显示「极高」—— 两个菜单里的「均衡」<b>不是</b>
 /// 同一成员，三档菜单的「均衡」是 <see cref="Balanced"/>。</para>
-/// <para>⚠ <b>JPEG LI 是后来加进来的（2026-10-07，用户指出"--xyb 是正收益"）</b>：
-/// 它此前被排除在"压缩强度"之外（理由：它的压缩强度与质量是同一个旋钮）。
-/// 但 <c>--xyb</c> 并非质量旋钮 —— 它换的是色彩空间，实测在当年那批内容与质量上全都更小
-/// （2026-10-29 换三张新截图复测出现一个"反而大 3.0%"的反例，见
-///  <see cref="CompressionEffortMap.JpegLiUseXyb"/>），故按用户口径纳入。</para>
-/// <para>⚠ <b>PNG / TIFF 也是后来加进来的（2026-10-29，用户点名"编码速度相对过慢的几个要给档位"）</b>：
+/// <para>⚠ <b>JPEG LI 曾在档位体系里（2026-10-07~2026-11-12），现已退出</b>：
+/// 当年它在这张映射上的唯一落点是 <c>--xyb</c>（用户据实测纳入，"均衡"=开、"快速"=关）。
+/// 2026-11-12 用户拍板：xyb 换的是色彩空间、不是压缩强度，不该藏在档位里 ——
+/// 改为独立的「色彩空间」开关（传统默认，见 <c>EncodingSettings.JpegLiXyb</c>），
+/// JPEG LI 从此没有压缩强度栏。</para>
+/// <para>⚠ <b>PNG / TIFF 是后来加进来的（2026-10-29，用户点名"编码速度相对过慢的几个要给档位"）</b>：
 /// 起初排除它们的理由是"会与质量滑块打架"，而 PNG 的质量滑块恒锁在 100（<c>LosslessFixed100</c>），
-/// 打架的前提不成立 ⇒ 纳入，见 <see cref="CompressionEffortMap.PngTiffDeflateLevel"/>。
-/// JPEG LI 仍只有一个旋钮（质量），不给它第二个入口。</para></summary>
+/// 打架的前提不成立 ⇒ 纳入，见 <see cref="CompressionEffortMap.PngTiffDeflateLevel"/>。</para></summary>
 public enum CompressionEffort
 {
     /// <summary><b>压缩力度最大的那一档</b>：各编码器的 effort/deflate 参数拉到最拼、编码最慢、
@@ -61,13 +60,12 @@ public enum CompressionEffort
     /// avifenc/cwebp 的 <c>-q</c>、cjxl/cjpegli 的 <c>-d</c> 质量距离、NVENC 的 RC 全部不变；
     /// PNG/TIFF 走无损 deflate，解压逐字节相同。把本档误解成"最低质量"并据此调低编码器
     /// 质量参数，是本文件明令禁止的错误。</para>
-    /// <para>⚠ <b>它同时是两档格式的「均衡」默认档</b>：PNG / TIFF / WebP / JPEG LI 的菜单只有两格，
-    /// 显示名「均衡」的就是本成员（也是 <c>AppSettingsData</c> 的 EffortWebp / EffortJpegLi /
+    /// <para>⚠ <b>它同时是两档格式的「均衡」默认档</b>：PNG / TIFF / WebP 的菜单只有两格，
+    /// 显示名「均衡」的就是本成员（也是 <c>AppSettingsData</c> 的 EffortWebp /
     /// EffortPng / EffortTiff 默认值）——"均衡"指"菜单里的默认那一格"，<b>不</b>指参数取中点；
     /// 在 AVIF / JPEG XL 的三档菜单里它显示「极高」，那边默认档是 <see cref="Balanced"/>。</para>
     /// <para>本档的逐编码器落点（均不改质量旋钮；映射唯一出处 <see cref="CompressionEffortMap"/>）：
     /// AVIF = <c>-s 0</c> + <c>-a tune=ssim</c>、JPEG XL = <c>-e 7</c>、WebP = <c>-m 6</c>、
-    /// JPEG LI = <b>加</b> <c>--xyb</c>（色彩空间开关，<c>-d</c> 不变）、
     /// PNG/TIFF = zlib level 9（无损）、NVENC = preset P7。</para></summary>
     Smallest = 0,
 
@@ -78,7 +76,7 @@ public enum CompressionEffort
     Fastest = 2,
 
     /// <summary>Tag <c>Quick</c>，界面显示「快速」（2026-10-29 用户口径新增）：<b>只比拉满档稍微放宽一点参数</b>的那一档。
-    /// <para>为什么要有它：用户给 PNG / TIFF / WebP / JPEG LI 定的菜单是<b>两档</b> ——
+    /// <para>为什么要有它：用户给 PNG / TIFF / WebP 定的菜单是<b>两档</b> ——
     /// 「均衡」作默认（= Tag <c>Smallest</c> = <b>压缩力度最大的那一档</b>，参数拉满；
     /// <b>名字里的"均衡"指"菜单里的默认那一格"，不指参数在中点，也绝不是"最低质量"
     /// —— 与 <see cref="Smallest"/> 的 summary 同一口径</b>）
@@ -92,10 +90,9 @@ public enum CompressionEffort
     /// <b>WebP = -m 5</b> —— 端到端快 1.2~1.5×、体积 +0.1%~+1.7%（该耗时含启动 cwebp 与写临时
     /// PNG 的固定开销，两档同量 ⇒ 比值是被压低的下界；2026-10-07 的 CLI 裸测是 179ms/29166B →
     /// 158ms/29650B）。
-    /// <b>JPEG LI = 不加 --xyb</b> —— 快 1.2~1.3×，体积两张 +5.9%/+11.6%、一张 −2.9%
-    /// （它只有布尔开关，两档就是开/关）。
     /// AVIF / JPEG XL / NVENC 的界面仍是三档，这一格在它们那里<b>不可达但必须有定义</b>
-    /// （否则 switch 的默认分支会让"选了 Quick"变成静默等效于均衡）。</para>
+    /// （否则 switch 的默认分支会让"选了 Quick"变成静默等效于均衡）。
+    /// JPEG LI 自 2026-11-12 起不在档位体系里（色彩空间独立成栏），这一格对它同样不可达。</para>
     /// <para>⚠ 枚举数值只追加不重排：持久化写的是字符串，但任何把枚举当整数落盘/传参的地方
     /// 都经不起静默改序。</para></summary>
     Quick = 3,
@@ -208,28 +205,10 @@ public static class CompressionEffortMap
         _ => 4,
     };
 
-    /// <summary>「最小体积」档是否给 cjpegli 加 <c>--xyb</c>（JPEG LI）。
-    /// <para><b>为什么加</b>：2026-10-07 实测（两张真实截图 × 整个质量区间 + GainMap 的 Baseline 路）
-    /// 在那批内容上<b>全部更小</b>，无一例外：</para>
-    /// <list type="bullet">
-    /// <item>样张 A：-d 0.5 <b>−4.7%</b>、-d 1.0 −2.9%、-d 2.0 −3.8%、-d 3.0 <b>−4.6%</b></item>
-    /// <item>样张 B：-d 0.5 −4.0%、-d 1.0 −2.4%、-d 3.0 −3.5%</item>
-    /// <item>GainMap 的 Baseline 路（<c>-p 0</c>）：−1.5%（同样有效）</item>
-    /// </list>
-    /// <para>⚠ <b>2026-10-29 换一批新样张复测，"无一例外"这个全称断言被推翻了</b>
-    /// （三张新的真实截图、-d 1.0，原始数据 <c>artifacts/tier_bench_2026-10-29.log</c>）：
-    /// 开 <c>--xyb</c> 的两张分别小 <b>5.5% / 10.4%</b>，第三张【反而大 <b>3.0%</b>】。
-    /// ⇒ 正确的说法是"在 5 个测过的样本里 4 个更小，收益 −1.5%~−10.4%，代价约 1.2~1.3 倍时间"，
-    /// 而不是"一律更小"。当年那两个数（1.5%~4.7%、1.5~1.8 倍）仍然成立，只是各自只描述当年那批内容。
-    /// 机理不变：XYB 是感知均匀的色彩空间，量化误差按人眼敏感度分布 ⇒ 同等感知质量下通常更省码率，
-    /// 但"通常"不等于"总是"，这里就是一个反例。</para>
-    /// <para>⚠ <b>只在「最小体积」档加</b>：它是极限档的一部分。若写死则连别的档一起变。</para>
-    /// <para>⚠ 与 AVIF 的 <c>tune=ssim</c> 不同，<c>--xyb</c> 是 cjpegli 的**顶层开关**，
-    /// 不需要"仅在某 codec 下"的前置判断。</para></summary>
-    public static bool JpegLiUseXyb(CompressionEffort e) => e == CompressionEffort.Smallest;
-
-    /// <summary>JPEG LI 的 <c>--xyb</c> 参数串（空串 = 不加）。</summary>
-    public static string JpegLiXybArg(CompressionEffort e) => JpegLiUseXyb(e) ? " --xyb" : "";
+    // ═══ 2026-11-12：JpegLiUseXyb / JpegLiXybArg 两格已删（用户拍板：xyb 换的是色彩空间，
+    // 不属于压缩强度）═══ JPEG LI 的 --xyb 现由独立的「色彩空间」用户开关决定
+    //（EncodingSettings.JpegLiXyb，App 侧来源 AppSettingsData.JpegLiColorModel），
+    // 参数拼装见 JpegLiNative.Encode（历史实测数据与 artifacts 指针留在那边的注释里）。
 
     /// <summary>PNG / TIFF 的无损 deflate 档位（2026-10-29 用户口径新增，同日定为两档）。
     /// <para><b>为什么这两个格式要这一档</b>：它们是全仓最慢的两条，而慢就慢在 deflate 一步。

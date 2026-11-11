@@ -3989,9 +3989,9 @@ public static class CorePipelineTests
             "仍残留硬编码档位，或映射函数没被调用");
 
         // ── ④ 设置侧：字段默认、下拉格数、管线按格式读、界面接线，以及"两处默认值事实源必须同源" ──
-        // 默认档与格数的分布是 2026-10-29 用户逐条点定的（PNG/TIFF/WebP/JPEG LI = 两档、默认那格显示
+        // 默认档与格数的分布是 2026-10-29 用户逐条点定的（PNG/TIFF/WebP = 两档、默认那格显示
         // 「均衡」但 Tag 仍是 Smallest=拉满；
-        // AVIF/JXL = 三档、默认均衡）。
+        // AVIF/JXL = 三档、默认均衡；JPEG LI 已于 2026-11-12 退出档位体系，见下方 ④c）。
         // 差集序列化不会把"等于默认"的键写进文件 ⇒ 这里的默认值对老用户真的生效，
         // 所以"字段默认 == 下拉 IsSelected"这条对撞不是形式：不一致时界面显示一档、实际跑另一档。
         // nTiers 那一列同样不是形式：两档下拉多出/少掉一格，白名单与配置文件的值域就与界面不一致，
@@ -4003,7 +4003,6 @@ public static class CorePipelineTests
             ("EffortPngCbo",     "EffortPng",     "Smallest", 2),
             ("EffortTiffCbo",    "EffortTiff",    "Smallest", 2),
             ("EffortWebpCbo",    "EffortWebp",    "Smallest", 2),
-            ("EffortJpegLiCbo",  "EffortJpegLi",  "Smallest", 2),
             ("EffortAvifCbo",    "EffortAvif",    "Balanced", 3),
             ("EffortJpegXlCbo",  "EffortJpegXl",  "Balanced", 3),
         };
@@ -4020,6 +4019,23 @@ public static class CorePipelineTests
                 && fld.Groups[1].Value == tier,
                 $"IsSelected={(sel.Success ? sel.Groups[1].Value : "无")} / 字段默认={(fld.Success ? fld.Groups[1].Value : "解析不到")}");
         }
+        // ── ④c JPEG LI 色彩空间（2026-11-12 用户拍板：xyb 不属于压缩强度，独立二态开关）──
+        // 同一条"字段默认 == 下拉 IsSelected"的对撞纪律：默认 Traditional（兼容优先，
+        // XYB 编码的 JPEG 会被小部分软件解码出错）。
+        int jcmAt = xm.IndexOf(@"x:Name=""JpegLiColorModelCbo""", StringComparison.Ordinal);
+        string jcmBlk = jcmAt < 0 ? "" : xm[jcmAt..xm.IndexOf("</ComboBox>", jcmAt, StringComparison.Ordinal)];
+        var jcmSel = Regex.Match(jcmBlk, @"Tag=""(\w+)""[^>]*IsSelected=""True""");
+        var jcmFld = Regex.Match(m, @"public string JpegLiColorModel \{ get; set; \} = ""(\w+)""");
+        Assert("JpegLiColorModel: 下拉恰 2 格（传统/XYB 二态，多一格=值域与界面分裂）",
+            Regex.Matches(jcmBlk, @"<ComboBoxItem ").Count == 2, $"实得 {Regex.Matches(jcmBlk, @"<ComboBoxItem ").Count}");
+        Assert("JpegLiColorModel: 字段默认与下拉 IsSelected 同源，且落在默认的 Traditional",
+            jcmSel.Success && jcmFld.Success && jcmSel.Groups[1].Value == jcmFld.Groups[1].Value
+            && jcmFld.Groups[1].Value == "Traditional",
+            $"IsSelected={(jcmSel.Success ? jcmSel.Groups[1].Value : "无")} / 字段默认={(jcmFld.Success ? jcmFld.Groups[1].Value : "解析不到")}");
+        var lccJcm = CodeOf(loc);
+        Assert("JpegLiColorModel: Localization 逐 Tag 点名两格（缺格=英文界面留中文）",
+            lccJcm.Contains(@"SetComboItemText(JpegLiColorModelCbo, ""Traditional""")
+            && lccJcm.Contains(@"SetComboItemText(JpegLiColorModelCbo, ""Xyb"""));
         // ── ④b 逐档点名：每个下拉的【每一格】都必须被 Localization 按 Tag 改写 ──
         // 为什么不能只像以前那样"确认这个下拉出现在某个清单里"：两档与三档两组用的是不同的 Tag 集合
         // （Smallest+Quick vs Smallest+Balanced+Fastest），而卡片默认 Collapsed ⇒ 项不在可视树里、
@@ -7100,8 +7116,10 @@ public static class CorePipelineTests
 
         // ═══ 压缩强度档位（2026-10-07 起；2026-10-29 分成两组，格数不同）═══
         // 三档：AVIF / JPEG XL（显示 极高/均衡/快速，默认均衡）；
-        // 两档：WebP / JPEG LI / PNG / TIFF（显示 均衡/快速，默认那格的 Tag 仍是 Smallest = 参数拉满）。
-        // 六个下拉各有各的字段但同组共享同一组 Tag ⇒ 逐个对撞。
+        // 两档：WebP / PNG / TIFF（显示 均衡/快速，默认那格的 Tag 仍是 Smallest = 参数拉满）。
+        // （JPEG LI 曾在此列——它的"两档"就是 xyb 开关的两半；2026-11-12 用户拍板后退出
+        //   档位体系，见下方 JpegLiColorModelCbo 独立轴。）
+        // 五个下拉各有各的字段但同组共享同一组 Tag ⇒ 逐个对撞。
         // 这条判据在这里格外值钱：同一组里的下拉长得一样，若某个分支漏写或写错字段名，
         // 界面看起来"改成功了"而管线读的是另一个字段（本仓 ChromaAvif 那次就是这形状）。
         // ⚠ expectTags 现在分两种：写错的那一格会表现为"下拉 2 格 / 白名单 3 值"或反过来，
@@ -7109,8 +7127,9 @@ public static class CorePipelineTests
         CheckWhitelistEqualsTags(xaml, srv, "EffortAvifCbo", "s.EffortAvif", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "EffortJpegXlCbo", "s.EffortJpegXl", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "EffortWebpCbo", "s.EffortWebp", expectTags: 2);
-        // JPEG LI 是后来纳入的（用户据 --xyb 实测要求）——增益图与它共用同一栏。
-        CheckWhitelistEqualsTags(xaml, srv, "EffortJpegLiCbo", "s.EffortJpegLi", expectTags: 2);
+        // JPEG LI 的压缩强度栏已删（2026-11-12 用户拍板：xyb 换的是色彩空间、不属于压缩强度，
+        // 且 cjpegli 没有别的 effort 旋钮 ⇒ 那一栏从来只是 xyb 开关的两半）。独立开关如下一条。
+        CheckWhitelistEqualsTags(xaml, srv, "JpegLiColorModelCbo", "s.JpegLiColorModel", expectTags: 2);
         // PNG / TIFF 于 2026-10-29 纳入（用户点名"编码速度相对过慢的几个要给档位"）。
         CheckWhitelistEqualsTags(xaml, srv, "EffortPngCbo", "s.EffortPng", expectTags: 2);
         CheckWhitelistEqualsTags(xaml, srv, "EffortTiffCbo", "s.EffortTiff", expectTags: 2);
@@ -7220,22 +7239,35 @@ public static class CorePipelineTests
             && CompressionEffortMap.Parse("") == CompressionEffort.Balanced
             && CompressionEffortMap.Parse("wat") == CompressionEffort.Balanced);
 
-        // ── JPEG LI 的 --xyb（2026-10-07 用户据实测要求纳入；2026-10-29 该格式定为两档）──
-        // 2026-10-07 实测（两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）在那批内容上
-        // 小 1.5%~4.7%；2026-10-29 换三张新截图复测（-d 1.0）两张小 5.5%/10.4%、一张【大 3.0%】
-        // ⇒ "唯一在所有测过的内容与质量上都为正"这句全称断言已收回，措辞见 JpegLiUseXyb 的备注。
-        // 本判据钉的是【档位 → 开关】的映射，不是体积收益：Smallest 开、其余关。
-        // 它只有布尔开关 ⇒ 两档菜单就是开/关：Smallest 开、Quick 关。
-        Assert("压缩强度/JPEG LI 最小体积档带 --xyb",
-            CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Smallest)
-            && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Smallest) == " --xyb");
-        Assert("压缩强度/JPEG LI「快速」档（Tag Quick）不带 --xyb（这就是两档里'放宽'的全部内容）",
-            !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Quick)
-            && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Quick) == "");
-        Assert("压缩强度/JPEG LI 均衡/最快档不带 --xyb（这两格在该格式的界面里不可达）",
-            !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Balanced)
-            && !CompressionEffortMap.JpegLiUseXyb(CompressionEffort.Fastest)
-            && CompressionEffortMap.JpegLiXybArg(CompressionEffort.Balanced) == "");
+        // ── JPEG LI 的 --xyb（2026-11-12 用户拍板：xyb 换的是色彩空间，不属于压缩强度）──
+        // 旧钉（档位映射 JpegLiUseXyb / JpegLiXybArg：Smallest 开、其余关）随映射一并删除。
+        // 现在钉三件事，防两个方向的回归：① 档位映射不再偷偷长出 xyb；
+        // ② 编码器参数串由显式 bool 决定（不是从档位推导）；
+        // ③ App→Core 的翻译点唯一（CapturePipelineService 把 JpegLiColorModel 译成 JpegLiXyb，
+        //    增益图底图同用；增益图层在 JpegGainMapEncoder 内恒 false，不走用户开关）。
+        var jpeLiCePath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "CompressionEffort.cs"));
+        Assert("压缩强度/JPEG LI: 档位映射文件存在", jpeLiCePath is not null);
+        if (jpeLiCePath is not null)
+        {
+            var ce = StripLineComments(File.ReadAllText(jpeLiCePath));
+            Assert("压缩强度/JPEG LI: 档位映射不再含 xyb（色彩空间独立成栏后不许回挂）",
+                !ce.Contains("xyb", StringComparison.OrdinalIgnoreCase),
+                "档位映射里出现了 xyb ⇒ 有人把色彩空间又塞回了档位（2026-11-12 用户口径明令禁止）");
+        }
+        var jpeLiNativePath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "JpegLiNative.cs"));
+        Assert("JPEG LI: JpegLiNative.cs 存在", jpeLiNativePath is not null);
+        if (jpeLiNativePath is not null)
+        {
+            var jlnBody = MethodBodyOf(StripLineComments(File.ReadAllText(jpeLiNativePath)),
+                "public static byte[] Encode(byte[] bgra");
+            Assert("JPEG LI: xyb 参数串由显式 bool 三元决定（不再从档位推导）",
+                jlnBody is not null && jlnBody.Contains("string xybArg = xyb ? \" --xyb\" : \"\";"),
+                "拼装形态变了 ⇒ 先核对 cjpegli 参数再改判据");
+        }
+        var cpsLi = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "CapturePipelineService.cs"))!);
+        Assert("JPEG LI: App→Core 的色彩空间翻译点唯一且形状钉死（Traditional 之外只有 Xyb 生效）",
+            cpsLi.Contains("JpegLiXyb = s.JpegLiColorModel == \"Xyb\""),
+            "翻译点漂移 ⇒ 界面选了传统/XYB 而编码器收不到（ChromaAvif 那次失效的同形状）");
 
         // ── Tag 往返必须逐档位一一对上 ──
         // 这条在 Quick 出现之前是三条断言写死三个名字；现在按枚举全集走，新增成员自动进表。
@@ -7348,12 +7380,13 @@ public static class CorePipelineTests
     /// </summary>
     static void Test_SettingsEffort_TwoTierMenuAndMigration(string srv)
     {
-        var two = new[] { "EffortWebp", "EffortJpegLi", "EffortPng", "EffortTiff" };
+        var two = new[] { "EffortWebp", "EffortPng", "EffortTiff" };
         var three = new[] { "EffortAvif", "EffortJpegXl" };
 
-        // ── ① 四个两档调用点确实走 FitTwoTierEffort（缺席证明的正向活体：数得到 4 处）──
+        // ── ① 三个两档调用点确实走 FitTwoTierEffort（缺席证明的正向活体：数得到 3 处）──
+        // （EffortJpegLi 曾是第四个，2026-11-12 退出档位体系后收口通道不再有它。）
         int twoTierCalls = Regex.Matches(srv, @"\bFitTwoTierEffort\(s\.").Count;
-        Assert($"两档收口通道被 4 个字段调用（实得 {twoTierCalls}）", twoTierCalls == 4,
+        Assert($"两档收口通道被 3 个字段调用（实得 {twoTierCalls}）", twoTierCalls == 3,
             "少一处 = 那个格式还在用三档白名单 FitTag，盘上能留着一个界面上没有的档");
 
         foreach (var f in two)

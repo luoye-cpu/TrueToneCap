@@ -92,13 +92,14 @@ public static class JpegLiNative
     /// <param name="chromaSubsampling">色度采样: "444" / "422" / "420"。</param>
     /// <param name="iccProfile">可选 ICC Profile。</param>
     /// <param name="forceBaseline">强制 Baseline Sequential (SOF0)。Gain Map Base JPEG 需要此模式。</param>
-    /// <param name="effort">压缩强度档位。只有「最小体积」档会加 <c>--xyb</c>（2026-10-07 那批样本
-    /// 上小 2.4–4.7%、代价约 1.5–1.8× 时间；2026-10-29 换样本复测出现"反而大 3.0%"的反例，
-    /// 完整数据见 <see cref="CompressionEffortMap.JpegLiUseXyb"/>）。</param>
+    /// <param name="xyb">色彩空间开关：true = XYB（体积通常更小，但少数软件无法正确解码），
+    /// false = 传统 YCbCr（默认，兼容最好）。2026-11-12 用户拍板：xyb 不属于压缩强度档位
+    ///（2026-10-07~2026-11-12 间它挂在档位映射上，「最小体积」档恒加），
+    /// 改为独立的「色彩空间」用户开关；增益图底图同样适用，增益图层恒 false。</param>
     /// <returns>JPEG 字节流 (FFD8...FFD9)。</returns>
     public static byte[] Encode(byte[] bgra, int width, int height, float distance = 1.0f,
         string chromaSubsampling = "444", byte[]? iccProfile = null, bool forceBaseline = false,
-        CompressionEffort effort = CompressionEffort.Balanced)
+        bool xyb = false)
     {
         var exePath = GetExePath();
 
@@ -151,17 +152,16 @@ public static class JpegLiNative
             // --progressive_level 0: Baseline，Gain Map 兼容性要求
             string progArg = forceBaseline ? " --progressive_level 0" : ""; // 默认 Progressive(2) 更省体积
 
-            // ═══ 2026-10-07：「最小体积」档加 --xyb ═══
-            // 实测（2026-10-07：两张真实截图 × -d 0.5/1.0/2.0/3.0 + GainMap 的 -p 0 路）在那批内容上全更小：
-            //   样张 A −4.7% / −2.9% / −3.8% / −4.6%   样张 B −4.0% / −2.4% / −3.5%
-            //   GainMap Baseline 路 −1.5%
-            // ⚠ 2026-10-29 换三张新截图复测（-d 1.0）：两张 −5.5% / −10.4%，第三张【+3.0%】
-            //   ⇒ 收回"在所有测过的内容与质量上都为正"这句全称断言；改为"5 个测过的样本里 4 个更小"。
-            //   数据见 artifacts/tier_bench_2026-10-29.log 与 CompressionEffortMap.JpegLiUseXyb。
+            // ═══ 2026-11-12：--xyb 改由独立的「色彩空间」开关决定（用户拍板）═══
+            // 此前（2026-10-07~2026-11-12）它挂在压缩强度档位映射上：「最小体积」档恒加。
+            // 实测数据（保留备查）：2026-10-07 两张真实截图 × -d 0.5/1.0/2.0/3.0 全更小
+            //   （样张 A −4.7%/−2.9%/−3.8%/−4.6%，样张 B −4.0%/−2.4%/−3.5%）；
+            //   2026-10-29 换三张复测（-d 1.0）：−5.5% / −10.4% / 【+3.0%】反例 ⇒"一律更小"不成立，
+            //   数据见 artifacts/tier_bench_2026-10-29.log。代价约 1.2~1.3× 时间。
             // 机理：XYB 是感知均匀色彩空间，量化误差按人眼敏感度分布 ⇒ 同感知质量下通常更省码率。
-            // ⚠ 只在最小体积档：本轮实测约 1.2~1.3× 时间（当年那批测到 1.5~1.8×），
-            //   且默认档必须与改动前逐字节一致。
-            string xybArg = CompressionEffortMap.JpegLiXybArg(effort);
+            // ⚠ 兼容性：XYB 编码的 JPEG 会被小部分软件解码出错（用户实测反馈）⇒ 默认传统，
+            //   XYB 由用户显式选入。
+            string xybArg = xyb ? " --xyb" : "";
 
             // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
             var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
@@ -304,7 +304,7 @@ public static class JpegLiNative
     /// 输入: 单通道灰度像素 (每像素 1 byte), 写 PPM P5 → cjpegli 输出 YCbCr400。</summary>
     public static byte[] EncodeGray(byte[] gray, int width, int height,
         float distance = 1.0f, bool forceBaseline = false,
-        CompressionEffort effort = CompressionEffort.Balanced)
+        bool xyb = false)
     {
         var exePath = GetExePath();
         var tmpPpm = Path.Combine(Path.GetTempPath(), $"ttc_jpegli_gray_{Guid.NewGuid():N}.pgm");
@@ -328,8 +328,9 @@ public static class JpegLiNative
             // 下方 JPEGLI_GRAY 命令行日志里的 --distance 会显出异常值作间接痕迹。
             float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
             string progArg = forceBaseline ? " --progressive_level 0" : "";
-            // 增益图（灰度）同样受益：实测 -p 0 路 --xyb 省 1.5%
-            string xybArg = CompressionEffortMap.JpegLiXybArg(effort);
+            // 增益图层（灰度/彩色）恒传统 YCbCr：调用方不传 xyb（libultrahdr 解析端按标准
+            // JPEG 读增益图，XYB 徒增解码风险；2026-10-07 实测 -p 0 路省 1.5%，收益不值得）。
+            string xybArg = xyb ? " --xyb" : "";
 
             // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
             var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);

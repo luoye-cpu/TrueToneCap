@@ -573,9 +573,12 @@ public sealed class SettingsService
         FitTag(s.EffortAvif, v => s.EffortAvif = v, dft.EffortAvif, "Smallest", "Balanced", "Fastest");
         FitTag(s.EffortJpegXl, v => s.EffortJpegXl = v, dft.EffortJpegXl, "Smallest", "Balanced", "Fastest");
         FitTwoTierEffort(s.EffortWebp, v => s.EffortWebp = v, dft.EffortWebp, "Smallest", "Quick");
-        FitTwoTierEffort(s.EffortJpegLi, v => s.EffortJpegLi = v, dft.EffortJpegLi, "Smallest", "Quick");
         FitTwoTierEffort(s.EffortPng, v => s.EffortPng = v, dft.EffortPng, "Smallest", "Quick");
         FitTwoTierEffort(s.EffortTiff, v => s.EffortTiff = v, dft.EffortTiff, "Smallest", "Quick");
+        // JPEG LI 色彩空间（2026-11-12 用户拍板新增）：xyb 不属于压缩强度档位（cjpegli 也无别的
+        // effort 旋钮），独立二态开关；默认 Traditional —— XYB 编码的 JPEG 会被小部分软件解码出错。
+        // 旧 EffortJpegLi 键（Smallest/Quick）自本版起不被读取，留在盘上静默忽略。
+        FitTag(s.JpegLiColorModel, v => s.JpegLiColorModel = v, dft.JpegLiColorModel, "Traditional", "Xyb");
     }
 
     /// <summary>
@@ -739,7 +742,8 @@ public sealed class SettingsService
     /// <para><b>映射口径：不是 Tag <c>Smallest</c>（界面那格叫「均衡」）⇒ 折到 Tag <c>Quick</c>（界面叫「快速」）。</b>
     /// 之所以敢这样折，是因为"这个键在文件里"
     /// 本身就说明它是用户选的：差集序列化（2026-09-24 起）不写等于默认的键，而
-    /// <c>EffortWebp</c> / <c>EffortJpegLi</c> 是 2026-10-07 才有的字段 —— 早于差集改造、
+    /// <c>EffortWebp</c> 是 2026-10-07 才有的字段（同批的 <c>EffortJpegLi</c> 已于 2026-11-12
+    /// 退役为色彩空间开关，不再走本通道）—— 早于差集改造、
     /// 因而可能被全量序列化钉死的那批文件里根本没有这两个键。于是盘上的 "Balanced"/"Fastest"
     /// 只能来自"当年那三格里点了它"，而这三格表达的共性正是"我不要最慢那一档"；
     /// 新菜单里承接这个意图的只有 Quick。把它折回默认档（Smallest）是反向的 ——

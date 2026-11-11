@@ -1334,6 +1334,7 @@ public static class SelfTest
             ("BitDepthWebP", "10"), ("BitDepthTiff", "10"), ("BitDepthGainMap", "12"),
             ("ChromaAvif", "\"999\""), ("ChromaJpegXl", "\"422\""), ("ChromaJpegLi", "\"42\""), ("ChromaGainMap", "\"0\""),
             ("ThemeMode", "\"neon\""), ("Language", "\"fr\""), ("OcrEngineMode", "\"DirectX\""),
+            ("JpegLiColorModel", "\"Lab\""),
             ("GainMapMode", "\"Mono\""), ("ArchiveMode", "\"Week\""), ("ToastPosition", "\"Middle\""),
             ("AvifEncoder", "\"Nvidia\"")));
         if (oob is null) return (Note, "fail", "反序列化越界夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
@@ -1367,6 +1368,8 @@ public static class SelfTest
         Expect("越界", "ChromaGainMap", "0", oob.ChromaGainMap, "420");
         Expect("越界", "ThemeMode", "neon", oob.ThemeMode, "Default");
         Expect("越界", "Language", "fr", oob.Language, "auto");  // 2026-11-11 语言自动化：默认 auto，越界随之回落
+        // 2026-11-12 用户拍板：xyb 不属于压缩强度档位，JPEG LI 色彩空间独立二态开关（默认 Traditional）
+        Expect("越界", "JpegLiColorModel", "Lab", oob.JpegLiColorModel, "Traditional");
         Expect("越界", "OcrEngineMode", "DirectX", oob.OcrEngineMode, "OnnxGpu");
         Expect("越界", "GainMapMode", "Mono", oob.GainMapMode, "Gray");
         Expect("越界", "ArchiveMode", "Week", oob.ArchiveMode, "Month");  // 界面从来没有这一项（2026-09-29 摘掉）
@@ -1382,6 +1385,7 @@ public static class SelfTest
             ("BitDepthPng", "10"), ("BitDepthAvif", "10"), ("BitDepthJpegXl", "16"), ("BitDepthTiff", "8"),
             ("ChromaAvif", "\"422\""), ("ChromaJpegXl", "\"420\""), ("ChromaJpegLi", "\"444\""),
             ("ThemeMode", "\"OLED\""), ("OcrEngineMode", "\"WindowsOcr\""), ("GainMapMode", "\"Rgb\""),
+            ("JpegLiColorModel", "\"Xyb\""),
             ("ArchiveMode", "\"Day\""), ("ToastPosition", "\"WindowsNotify\""), ("AvifEncoder", "\"SvtAv1\"")));
         if (keep is null) return (Note, "fail", "反序列化合法夹具失败（返回 null）", sw.ElapsedMilliseconds, "");
         SettingsService.Normalize(keep);
@@ -1405,6 +1409,7 @@ public static class SelfTest
         Expect("合法", "ThemeMode", "OLED", keep.ThemeMode, "OLED");
         Expect("合法", "OcrEngineMode", "WindowsOcr", keep.OcrEngineMode, "WindowsOcr");
         Expect("合法", "GainMapMode", "Rgb", keep.GainMapMode, "Rgb");
+        Expect("合法", "JpegLiColorModel", "Xyb", keep.JpegLiColorModel, "Xyb");   // 显式选 XYB 必须活着
         Expect("合法", "ArchiveMode", "Day", keep.ArchiveMode, "Day");
         Expect("合法", "ToastPosition", "WindowsNotify", keep.ToastPosition, "WindowsNotify");
         Expect("合法", "AvifEncoder", "SvtAv1", keep.AvifEncoder, "SvtAv1");

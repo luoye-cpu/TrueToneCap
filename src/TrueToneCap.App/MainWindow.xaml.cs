@@ -3623,19 +3623,22 @@ public sealed partial class MainWindow : Window
             else if (cb.Name == nameof(AvifChromaCbo)) _settings.ChromaAvif = tag;
             else if (cb.Name == nameof(ChromaJpegXlCbo)) _settings.ChromaJpegXl = tag;
             else if (cb.Name == nameof(ChromaJpegLiCbo)) _settings.ChromaJpegLi = tag;
-            // ═══ 2026-10-07：压缩强度三档（AVIF / JPEG XL / WebP / JPEG LI）
+            // ═══ 2026-10-07：压缩强度三档（AVIF / JPEG XL / WebP）
             //     2026-10-29 扩到 PNG / TIFF ═══
-            // ⚠ 必须写管线真正读的那几个字段（EffortAvif / EffortJpegXl / EffortWebp / EffortJpegLi /
+            // ⚠ 必须写管线真正读的那几个字段（EffortAvif / EffortJpegXl / EffortWebp /
             //   EffortPng / EffortTiff）—— 写个同义的别名字段就会重现上面 ChromaAvif 那次
             //   "改成功了但不生效"的失效。
             //   写坏值不抛：CompressionEffortMap.Parse 回落到均衡档，不会变成最慢档。
+            //   JPEG LI 的压缩强度栏已删（2026-11-12 用户拍板：xyb 不属于压缩强度，
+            //   cjpegli 也无别的 effort 旋钮 ⇒ 该栏对它从来只有一个开关的两半），
+            //   改走下方 JpegLiColorModelCbo 独立开关。
             else if (cb.Name == nameof(EffortAvifCbo)) _settings.EffortAvif = tag;
             else if (cb.Name == nameof(EffortJpegXlCbo)) _settings.EffortJpegXl = tag;
             else if (cb.Name == nameof(EffortWebpCbo)) _settings.EffortWebp = tag;
-            // JPEG LI 与增益图共用这一栏（管线对 JPEG_GAINMAP 也读 EffortJpegLi）
-            else if (cb.Name == nameof(EffortJpegLiCbo)) _settings.EffortJpegLi = tag;
             else if (cb.Name == nameof(EffortPngCbo)) _settings.EffortPng = tag;
             else if (cb.Name == nameof(EffortTiffCbo)) _settings.EffortTiff = tag;
+            // JPEG LI 色彩空间（传统/XYB）：底图与增益图底图同用；增益图层恒传统。
+            else if (cb.Name == nameof(JpegLiColorModelCbo)) _settings.JpegLiColorModel = tag;
             // 2026-09-26：原 GainMapChromaCbo 分支已删除 —— 增益图并入 JPEG LI 后不再另设色度下拉。
             //   2026-11-04 更新：增益图态底图【恒 444，由管线硬编码】，ChromaJpegLiCbo 这一条
             //   只服务普通 JPEG LI 照片档（开启增益图时该下拉被禁用，见 UpdateQualityPanelCore）。
