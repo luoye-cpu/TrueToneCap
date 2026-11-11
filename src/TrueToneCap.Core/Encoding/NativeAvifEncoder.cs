@@ -286,6 +286,16 @@ public static class NativeAvifEncoder
 
     /// <summary>把 BGRA 像素编码成 PNG 流写入 avifenc 的 stdin，并等待其完成。</summary>
     private static void RunPngViaStdin(string exePath, string arguments, byte[] bgra, int w, int h, string path)
+        => RunStdinCore(exePath, arguments, s => ManagedPngEncoder.EncodeFast(bgra, w, h, s, null), path);
+
+    /// <summary>
+    /// stdin 管道的公共骨架：起进程 → <paramref name="writePng"/> 把完整 PNG 写进 stdin →
+    /// 异步排空 stderr/stdout → 等退出并校验产物存在。
+    /// <para>2026-11-11 性能审计 P2：从 RunPngViaStdin 抽出 —— 16-bit 路（<see cref="EncodeStdin16"/>）
+    /// 复用同一套进程/排水/超时骨架，只换"往 stdin 里写什么"（Encode16 流式写 16-bit PNG）。
+    /// 临时 PNG 文件 I/O（4K 16-bit 约 66MB 写+读）就此归零。</para>
+    /// </summary>
+    private static void RunStdinCore(string exePath, string arguments, Action<Stream> writePng, string avifPath)
     {
         var psi = new System.Diagnostics.ProcessStartInfo
         {
@@ -315,7 +325,7 @@ public static class NativeAvifEncoder
         {
             var stdin = proc.StandardInput.BaseStream;
             // 注意: ICC 通过命令行 --icc 传递，PNG 流中不嵌 iCCP (避免重复)
-            ManagedPngEncoder.EncodeFast(bgra, w, h, stdin, null);
+            writePng(stdin);
             proc.StandardInput.Flush();
             proc.StandardInput.Close();
         }
@@ -334,7 +344,7 @@ public static class NativeAvifEncoder
         var stderr = stderrTask.Result;
         _ = stdoutTask.Result;
 
-        if (proc.ExitCode != 0 || !File.Exists(path))
+        if (proc.ExitCode != 0 || !File.Exists(avifPath))
             throw new InvalidOperationException($"[AVIF] avifenc 失败 (exit={proc.ExitCode}) {stderr.Trim()}");
     }
 
@@ -386,6 +396,49 @@ public static class NativeAvifEncoder
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
 
         var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
+        string args = BuildAvifencArgs(crf, chroma, cicp, colorSpaceTag, peakNits, codec, bitDepth,
+            iccProfile, effort, out string? tmpIccPath);
+
+        // ═══ 2026-11-08: P0 Security Fix - Sanitize all file paths before encoding ═══
+        var (safePngPath, safeAvifPath) = Core.Security.PathSanitizer.SanitizePair(pngPath, avifPath);
+
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = exePath,
+            Arguments = $"{args} \"{safePngPath}\" \"{safeAvifPath}\"".Trim(),
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+
+        // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
+        CoreLog.Debug("AVIF", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+
+        try
+        {
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc is null) throw new InvalidOperationException("无法启动 avifenc");
+        // 排空两条管道与等超时同时发生（缓冲区满不死锁，进程不退出也拿得到超时）
+        var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "avifenc");
+        if (exitCode != 0 || !File.Exists(avifPath))
+            throw new InvalidOperationException($"[AVIF] avifenc 失败 (exit={exitCode}) {stderr.Trim()}");
+        }
+        finally
+        {
+            if (tmpIccPath is not null) try { File.Delete(tmpIccPath); } catch { }
+        }
+    }
+
+    /// <summary>构建 avifenc 公共参数串（质量/速度/编码器/色度/CICP/ICC/clli/位深/aom 高级项）。
+    /// <para>2026-11-11 性能审计 P2 起从 EncodeFile 抽出：<see cref="EncodeStdin16"/>（16-bit stdin 路）
+    /// 必须与文件路逐字同一套参数 —— 色彩声明写两份迟早漂移（本仓反复付过学费的形态）。</para>
+    /// <para>尾部不带输入/输出路径；icc/clli/depth/adv 片段各带前导空格（沿用旧拼接约定，空串无尾随空格）。
+    /// <paramref name="tmpIccPath"/> 非 null 时调用方负责在 finally 里删除。</para></summary>
+    private static string BuildAvifencArgs(int crf, string chroma, byte[]? cicp, string? colorSpaceTag,
+        float peakNits, string codec, int bitDepth, byte[]? iccProfile, CompressionEffort effort,
+        out string? tmpIccPath)
+    {
         int q = CrfToQuality(crf);
 
         // cicp 参数缺省值（sRGB）：下面两条分支会按需覆盖 —— 有 cicp 四元组 ⇒ 按数组拼（HDR/SDR 看 transfer 槽）；
@@ -464,7 +517,7 @@ public static class NativeAvifEncoder
         //   而硬件路同一设置写的是 prof + nclx —— 同一张图两条路声明不同，采信 ICC 的
         //   查看器（Windows 照片等）对软件产物就只能按码点猜。
         string iccArg = "";
-        string? tmpIccPath = null;
+        tmpIccPath = null;
         if (FormatHelper.IsEmbeddableIcc(iccProfile))
         {
             tmpIccPath = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
@@ -479,30 +532,41 @@ public static class NativeAvifEncoder
             }
         }
 
-        // ═══ 2026-11-08: P0 Security Fix - Sanitize all file paths before encoding ═══
-        var (safePngPath, safeAvifPath) = Core.Security.PathSanitizer.SanitizePair(pngPath, avifPath);
+        return $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} {chromaArg} {cicpArgs}{iccArg}{clliArg}{depthArg}{advArg}";
+    }
 
-        var psi = new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = exePath,
-            Arguments = $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} {chromaArg} {cicpArgs}{iccArg}{clliArg}{depthArg}{advArg} \"{safePngPath}\" \"{safeAvifPath}\"".Trim(),
-            UseShellExecute = false,
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            CreateNoWindow = true
-        };
+    /// <summary>
+    /// 16-bit BGRA（大端，同 <see cref="ManagedPngEncoder.Encode16"/> 输入布局）→ PNG 流 → avifenc stdin。
+    /// <para>2026-11-11 性能审计 P2：HDR-PQ 软件路 / SDR ≥10-bit 路 / GainMap 16-bit 底图原先各写一个
+    /// 临时 16-bit PNG 再 <see cref="EncodeFile"/> 读回（4K 单次约 66MB 写+读+删）；本方法走 stdin
+    /// 管道零磁盘 I/O。色彩/位深/质量参数与文件路同出一处（<see cref="BuildAvifencArgs"/>）⇒
+    /// 容器元数据逐字一致。16-bit PNG 经 --stdin 可行性已实测（2026-11-11：rgb48 源 +
+    /// --depth 10 ⇒ ffprobe yuv444p10le，见审计报告附录 A）。</para>
+    /// </summary>
+    public static void EncodeStdin16(byte[] bgra16, int w, int h, string avifPath, int crf,
+        byte[]? cicp = null, string? colorSpaceTag = null, float peakNits = 0, string chroma = "444",
+        string codec = "Auto", int bitDepth = 10, byte[]? iccProfile = null,
+        CompressionEffort effort = CompressionEffort.Balanced, bool omitAlpha = false)
+    {
+        if (!IsAvailable)
+            throw new DllNotFoundException("[AVIF] avifenc 不可用");
 
-        // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
-        CoreLog.Debug("AVIF", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+        var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
+        string args = BuildAvifencArgs(crf, chroma, cicp, colorSpaceTag, peakNits, codec, bitDepth,
+            iccProfile, effort, out string? tmpIccPath);
+        FormatHelper.ValidateNativePath(avifPath, nameof(avifPath));
+        var safeAvifPath = Core.Security.PathSanitizer.SanitizeForEncoding(avifPath);
+        string arguments = $"{args} --stdin --input-format png \"{safeAvifPath}\"".Trim();
 
         try
         {
-        using var proc = System.Diagnostics.Process.Start(psi);
-        if (proc is null) throw new InvalidOperationException("无法启动 avifenc");
-        // 排空两条管道与等超时同时发生（缓冲区满不死锁，进程不退出也拿得到超时）
-        var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "avifenc");
-        if (exitCode != 0 || !File.Exists(avifPath))
-            throw new InvalidOperationException($"[AVIF] avifenc 失败 (exit={exitCode}) {stderr.Trim()}");
+            // cICP 照旧嵌进 PNG 流（与旧临时文件内容一致）；ICC 走 --icc
+            //（avifenc 不从 PNG 继承 iCCP，2026-09-20 实测）。
+            // omitAlpha 直通：GainMap 16-bit 底图必须写 RGB（color type 2），见 FormatEncoders 调用点。
+            RunStdinCore(exePath, arguments,
+                s => ManagedPngEncoder.Encode16(bgra16, w, h, s, cicp: cicp, iccProfile: null,
+                    bitDepth: bitDepth, fastest: true, omitAlpha: omitAlpha),
+                avifPath);
         }
         finally
         {

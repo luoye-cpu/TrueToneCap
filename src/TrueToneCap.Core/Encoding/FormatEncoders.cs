@@ -425,29 +425,22 @@ public sealed class AvifEncoder : ImageEncoder
                 byte[] cicpHdr = FormatHelper.BuildHdrCicp(csTag); // PQ transfer=16, matrix=identity（AVIF 侧换成 9，见 FormatHelper.AvifMatrixCoefficients）
                 // ═══ 2026-08-09 修复: HDR 不嵌 ICC (同 PNG, CICP 优先声明) ═══
                 byte[]? iccHdr = null;
-                var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_avif_hdr_{Guid.NewGuid():N}.png");
-                try
-                {
-                    // fastest: true —— 这个 PNG 只是交给 avifenc 的中转文件，用完即删。
-                    // 压缩率不影响最终 AVIF 质量，用快速压缩可省下数秒（实测 4K HDR AVIF
-                    // 的前处理开销主要就耗在这里）。
-                    ManagedPngEncoder.Encode16(bgra16, f.Width, f.Height, tmpPng, cicp: cicpHdr, iccProfile: iccHdr, fastest: true);
-                    // ═══ 2026-08-10 修复: AVIF HDR clli = 显示器 HDR 峰值 (同 JXL) ═══
-                    // MaxCLL 语义 = 内容亮度上限 = 显示器峰值。恒 10000 → SDR 内容极暗。
-                    // 2026-09-20：这条口径搬进 FormatHelper.AvifHdrPeakNits，硬件路用同一个函数。
-                    float peakNits = FormatHelper.AvifHdrPeakNits(
-                        s, FormatHelper.ComputePeakNits(p16));
-                    // ═══ 2026-09-17→18：HDR 的色度与编码器选择真实生效 ═══
-                    // 色度：直通用户设置，EncodeFile 会拼成 --yuv。
-                    // 编码器：上方已优先尝试 NVENC 硬件直通（PQ 10-bit + colr PQ 声明）；
-                    //   走到这里说明硬件不可用或用户明确选了软件 —— avifenc 16-bit PNG
-                    //   中转是兜底路径（cICP 已带 PQ 声明，无"HDR 被当 SDR"问题）。
-                    NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicpHdr, csTag, peakNits,
-                        chroma: s.ChromaSubsampling,
-                        codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
-                        bitDepth: hdrDepth, effort: s.Effort);
-                }
-                finally { try { File.Delete(tmpPng); } catch { } }
+                // ═══ 2026-08-10 修复: AVIF HDR clli = 显示器 HDR 峰值 (同 JXL) ═══
+                // MaxCLL 语义 = 内容亮度上限 = 显示器峰值。恒 10000 → SDR 内容极暗。
+                // 2026-09-20：这条口径搬进 FormatHelper.AvifHdrPeakNits，硬件路用同一个函数。
+                float peakNits = FormatHelper.AvifHdrPeakNits(s, FormatHelper.ComputePeakNits(p16));
+                // ═══ 2026-09-17→18：HDR 的色度与编码器选择真实生效 ═══
+                // 色度：直通用户设置；编码器：上方已优先尝试 NVENC 硬件直通（PQ 10-bit + colr PQ 声明）；
+                //   走到这里说明硬件不可用或用户明确选了软件 —— avifenc 16-bit PNG 兜底
+                //   （cICP 已带 PQ 声明，无"HDR 被当 SDR"问题）。
+                // ═══ 2026-11-11 性能审计 P2：中转 PNG 改走 stdin（零临时文件 I/O）═══
+                // 原先 4K 一次 66MB 临时 PNG 写+读+删；16-bit PNG 经 --stdin 已实测可行（附录 A）。
+                // 参数与 EncodeFile 同出一处（BuildAvifencArgs）⇒ 容器元数据逐字一致。
+                NativeAvifEncoder.EncodeStdin16(bgra16, f.Width, f.Height, path, (int)s.Quality,
+                    cicp: cicpHdr, colorSpaceTag: csTag, peakNits: peakNits,
+                    chroma: s.ChromaSubsampling,
+                    codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
+                    bitDepth: hdrDepth, iccProfile: iccHdr, effort: s.Effort);
             }, ct);
         }
         else
@@ -491,22 +484,18 @@ public sealed class AvifEncoder : ImageEncoder
                     //     （同函数已做 ICC 兜底；AdobeRGB 返回 null = 只靠 ICC 声明，见 BuildSdrCicp）
                     byte[]? icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
                     byte[]? cicpSdr = FormatHelper.BuildSdrCicp(s.ColorSpaceTag);
-                    var tmpPng = Path.Combine(Path.GetTempPath(), $"ttc_avif_sdr16_{Guid.NewGuid():N}.png");
-                    try
-                    {
-                        ManagedPngEncoder.Encode16(px16, f.Width, f.Height, tmpPng, cicp: cicpSdr, iccProfile: icc, fastest: true);
-                        // ═══ 2026-10-08 修复(P1①): 位深真实生效 ═══
-                        // 此前 EncodeFile 未传位深 → avifenc 默认 8-bit 处理高位深输入。
-                        NativeAvifEncoder.EncodeFile(tmpPng, path, (int)s.Quality, cicp: cicpSdr,
-                            colorSpaceTag: s.ColorSpaceTag ?? "sRGB", chroma: s.ChromaSubsampling,
-                            codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
-                            bitDepth: avifDepth,
-                            effort: s.Effort,
-                            // ⚠ 必须显式传：avifenc【不会】从中转 PNG 的 iCCP 继承 ICC（2026-09-20 实测），
-                            //   漏传就等于软件路的广色域 AVIF 只剩 nclx，与硬件路的 prof+nclx 不一致。
-                            iccProfile: icc);
-                    }
-                    finally { try { File.Delete(tmpPng); } catch { } }
+                    // ═══ 2026-10-08 修复(P1①): 位深真实生效（bitDepth 显式传，见 EncodeStdin16/BuildAvifencArgs）═══
+                    // ═══ 2026-11-11 性能审计 P2：中转 PNG 改走 stdin（零临时文件 I/O，4K 66MB 写+读+删归零）═══
+                    // ⚠ ICC 必须经参数显式传（--icc）：avifenc【不会】从中转 PNG 的 iCCP 继承 ICC
+                    //   （2026-09-20 实测），漏传就等于软件路的广色域 AVIF 只剩 nclx，
+                    //   与硬件路的 prof+nclx 不一致。
+                    NativeAvifEncoder.EncodeStdin16(px16, f.Width, f.Height, path, (int)s.Quality,
+                        cicp: cicpSdr,
+                        colorSpaceTag: s.ColorSpaceTag ?? "sRGB", chroma: s.ChromaSubsampling,
+                        codec: AvifEncoderSelector.ResolveAvifencCodec(s.AvifEncoderKind),
+                        bitDepth: avifDepth,
+                        effort: s.Effort,
+                        iccProfile: icc);
                 }, ct);
                 return;
             }
@@ -630,30 +619,34 @@ public sealed class AvifEncoder : ImageEncoder
                 // ⚠ 底图按 baseDepth 走：>8 必须经 16-bit PNG 中转（Encode16，大端 BGRA16），
                 //   8-bit 才走 EncodeFast。avifenc 侧靠 bitDepth 参数补 --depth，
                 //   否则它会按 8-bit 处理高位深输入（这正是 2026-10-08 修过的那个坑）。
+                // ═══ 2026-11-11 性能审计 P2：16-bit 底图改走 EncodeStdin16（stdin 管道，
+                //   4K 底图 66MB 临时 PNG 写+读+删归零）；8-bit 底图与增益层维持
+                //   EncodeFast 临时文件 + EncodeFile —— Encode 的 tag 建 CICP 与
+                //   EncodeFile 的数组/缺省分支口径不同（增益层缺省要 --cicp 1/13/6），
+                //   硬换线会漂移容器元数据，不动。
                 byte[]? embedIccOk = FormatHelper.IsEmbeddableIcc(embedIcc) ? embedIcc : null;
                 if (baseDepth > 8)
                 {
                     byte[] baseBgra16 = JpegGainMapEncoder.LinearToBgra16(sdrLinear, w, h, baseDepth);
-                    // omitAlpha: true —— 必须写 RGB（color type 2）。
-                    //   实测：avifenc 对【16-bit PNG】输入一律按"带 alpha"处理，即便 alpha 全满值
-                    //   也会产出 alpha 副 item（infe=2 + auxC）；而增益图容器只搬主图，
-                    //   底图一旦带副 item 就被写出器的"底图含副 item"门拒写（本轮实测卡在这里）。
+                    // omitAlpha 语义（原临时 PNG 路实测）：avifenc 对 16-bit PNG 输入一律按
+                    // "带 alpha"处理，产出 alpha 副 item ⇒ 增益图容器的"底图含副 item"门拒写。
                     //   截图恒不透明 ⇒ 丢 alpha 通道零信息损失。
-                    ManagedPngEncoder.Encode16(baseBgra16, w, h, tmpBase, cicp: baseCicp, iccProfile: embedIccOk, bitDepth: baseDepth, fastest: true, omitAlpha: true);
+                    NativeAvifEncoder.EncodeStdin16(baseBgra16, w, h, outBaseAvif, quality,
+                        cicp: baseCicp, colorSpaceTag: widePixels ? "BT2020" : "sRGB",
+                        chroma: s.ChromaSubsampling, codec: codec, bitDepth: baseDepth,
+                        iccProfile: embedIcc, effort: s.Effort, omitAlpha: true);
                 }
                 else
                 {
                     byte[] baseBgra8 = JpegGainMapEncoder.LinearToBgra8(sdrLinear, w, h);
                     ManagedPngEncoder.EncodeFast(baseBgra8, w, h, tmpBase, iccProfile: embedIccOk, cicp: baseCicp);
+                    NativeAvifEncoder.EncodeFile(tmpBase, outBaseAvif, quality, cicp: baseCicp,
+                        colorSpaceTag: widePixels ? "BT2020" : "sRGB",
+                        chroma: s.ChromaSubsampling, codec: codec,
+                        bitDepth: baseDepth, effort: s.Effort, iccProfile: embedIcc);
                 }
-                // 增益层恒 8-bit（ISO 21496-1 的比值图惯例：8-bit 足够，且兼容性最好）
-                ManagedPngEncoder.EncodeFast(gmBgra, gmW, gmH, tmpGm);
-                // 增益图恒 --yuv 444（3 平面）与"声明 3 参数集"成套；底图按用户色度
-                NativeAvifEncoder.EncodeFile(tmpBase, outBaseAvif, quality, cicp: baseCicp,
-                    colorSpaceTag: widePixels ? "BT2020" : "sRGB",
-                    chroma: s.ChromaSubsampling, codec: codec,
-                    bitDepth: baseDepth, effort: s.Effort, iccProfile: embedIcc);
                 // 增益层恒 8-bit（比值图惯例；与上面 EncodeFast 的 8-bit PNG 输入一致）
+                ManagedPngEncoder.EncodeFast(gmBgra, gmW, gmH, tmpGm);
                 NativeAvifEncoder.EncodeFile(tmpGm, outGmAvif, quality, chroma: "444", codec: codec, bitDepth: 8, effort: s.Effort);
 
                 byte[] baseAvif = File.ReadAllBytes(outBaseAvif);

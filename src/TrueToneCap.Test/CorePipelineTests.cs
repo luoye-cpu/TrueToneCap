@@ -3957,9 +3957,19 @@ public static class CorePipelineTests
             $"数到 {lastResort.Count} 条保底 PNG 出口");
 
         // ── ② 中转出口不许被档位牵连：它们要的是"最快"，与用户档位无关 ──
-        var fastestLines = e.Split('\n').Where(l => l.Contains("fastest: true")).ToList();
-        Assert("中转用的 Encode16(fastest: true) 站点存在（找不到 = 本判据瞎了）",
-            fastestLines.Count >= 2, $"只数到 {fastestLines.Count} 处");
+        // 2026-11-11 性能审计 P2：FormatEncoders 的 16-bit 中转站点（HDR-PQ / SDR≥10-bit / GainMap
+        // 16-bit 底图）连同临时 PNG 一起搬进了 NativeAvifEncoder.EncodeStdin16（stdin 化，实测见
+        // 审计报告附录 A）—— fastest 判据跟着实现走：stdin16 路必须保留 fastest 且不带用户档位。
+        var avifEncFile = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeAvifEncoder.cs"));
+        Assert("找到 NativeAvifEncoder.cs（缺=本条失明）", avifEncFile is not null);
+        if (avifEncFile is null) return;
+        var avifEnc = CodeOf(avifEncFile);
+        var stdin16Lines = avifEnc.Split('\n')
+            .Where(l => l.Contains("fastest: true") && l.Contains("omitAlpha: omitAlpha")).ToList();
+        Assert("16-bit 中转的 stdin 路（EncodeStdin16）保留 fastest: true（找不到 = 本判据瞎了）",
+            stdin16Lines.Count == 1, $"只数到 {stdin16Lines.Count} 处");
+        var fastestLines = e.Split('\n').Where(l => l.Contains("fastest: true"))
+            .Concat(stdin16Lines).ToList();
         Assert("中转站点一律不带用户档位（那是用完即删的入口，压缩率毫无意义）",
             fastestLines.All(l => !l.Contains("effort:")),
             "有中转站点被顺手接上了档位：" + fastestLines.FirstOrDefault(l => l.Contains("effort:"))?
