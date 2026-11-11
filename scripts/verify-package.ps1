@@ -169,6 +169,10 @@ $nativeTools = @(
     @{ File = "cjpegli.exe"; Min = 256KB },    # 实测 ~0.72 MB（自编译，不链 libpng/libjpeg-turbo）
     @{ File = "cjxl.exe";    Min = 1MB },      # 实测 ~5.0 MB（libjxl 预编译件）
     @{ File = "cwebp.exe";   Min = 64KB },     # 实测 ~0.71 MB
+    # 2026-11-12：JPEG LI 进程内主路径（google/jpegli 自编译 shim，scripts/build-cjpegli.py
+    # 产出并强制逐字节对照门禁）。缺了程序仍能跑（回退 cjpegli.exe 子进程），
+    # 但随包承诺是"有它"（2-3× 提速 + 零临时文件）⇒ 尺寸下限照查；启动探针不适用（DLL）。
+    @{ File = "ttc_jpegli.dll"; Min = 256KB }, # 实测 731,136 B（静态闭合 jpegli+extras+cms+hwy+lcms）
     # 2026-10-31：可选无损压缩后端（libdeflate 1.26 自编译）。它缺了程序仍能跑（自动回退内置 zlib-ng），
     # 但随包承诺是"有它" ⇒ 尺寸下限照查；启动探针不适用（不是 exe），见下面的跳过分支。
     @{ File = "deflate.dll"; Min = 128KB }     # 实测 183,808 B

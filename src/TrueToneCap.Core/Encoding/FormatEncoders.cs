@@ -2,7 +2,7 @@
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/FormatEncoders.cs
 // 全部编码器 — 零 Magick.NET 依赖
-// PNG: 托管编码器 | JPEG LI: jpegli P/Invoke | JXL: cjxl | AVIF: libavif/硬件 | WebP: libwebp | TIFF: 托管
+// PNG: 托管编码器 | JPEG LI: ttc_jpegli.dll P/Invoke 主路径 + cjpegli.exe 回退（2026-11-12，注释此前写"P/Invoke"是超前描述，今天起名实相符）| JXL: cjxl | AVIF: libavif/硬件 | WebP: libwebp | TIFF: 托管
 // （2026-09-26 删除 BMP 托管编码器：`OutputFormat` 里没有 BMP、工厂与界面下拉都没有它，
 //   唯一调用点是门禁自己的两个专项测试 —— 一个没有产品入口的格式不构成"支持的格式"。）
 using System.Threading.Tasks;
@@ -155,7 +155,7 @@ public sealed class JpegLiEncoder : ImageEncoder
             var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
 
             if (!JpegLiNative.IsAvailable)
-                throw new InvalidOperationException("JPEG LI 编码需要 cjpegli.exe (Google jpegli)，请将 cjpegli.exe 放入 native/ 目录、PLAN/tools/ 目录或系统 PATH。");
+                throw new InvalidOperationException("JPEG LI 编码需要 ttc_jpegli.dll 或 cjpegli.exe (Google jpegli)，请将其放入 native/ 目录、PLAN/tools/ 目录或系统 PATH。");
 
             var jpegBytes = JpegLiNative.Encode(px, w, h, s.Quality, s.ChromaSubsampling, icc, xyb: s.JpegLiXyb);
             File.WriteAllBytes(path, jpegBytes);

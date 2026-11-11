@@ -359,8 +359,8 @@
     </ItemGroup>
     <Error Text="Core/Resources/ 下应有 4 枚原生编码器 exe（实得 @(TtcNativeTools->Count())）⇒ 布局或检出坏了，native/ 不许静默少拷"
            Condition="'@(TtcNativeTools->Count())' != '4'" />
-    <Error Text="Core/Resources/ 下应有 deflate.dll（实得 @(TtcNativeLibs->Count())）⇒ 可选后端会静默退回内置，随包分发承诺失真"
-           Condition="'@(TtcNativeLibs->Count())' != '1'" />
+    <Error Text="Core/Resources/ 下应有 deflate.dll 与 ttc_jpegli.dll 两枚 DLL（实得 @(TtcNativeLibs->Count())）⇒ 可选后端会静默退回内置 / JPEG LI 静默退回子进程，随包分发承诺失真"
+           Condition="'@(TtcNativeLibs->Count())' != '2'" />
     <Copy SourceFiles="@(TtcNativeTools)"
           DestinationFolder="$(OutDir)native"
           SkipUnchangedFiles="true"

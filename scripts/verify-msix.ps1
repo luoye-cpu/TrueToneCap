@@ -100,6 +100,12 @@ $deflate = Join-Path $tmp "native\deflate.dll"
 if (Test-Path $deflate) { Ok ("native\{0,-14} {1,8:N2} MB" -f "deflate.dll", ((Get-Item $deflate).Length / 1MB)) }
 else { Fail "native\deflate.dll 缺失 ⇒ 无损压缩只会走内置 zlib-ng（DeflateZlib 可回退，但随包承诺失真）" }
 
+# 2026-11-12：JPEG LI 进程内主路径（P/Invoke shim）。缺了会静默回退 cjpegli.exe 子进程，
+# 功能不坏但 2-3× 提速与零临时文件收益消失 ⇒ 随包承诺"带它"，缺失判失败。
+$shimDll = Join-Path $tmp "native\ttc_jpegli.dll"
+if (Test-Path $shimDll) { Ok ("native\{0,-14} {1,8:N2} MB" -f "ttc_jpegli.dll", ((Get-Item $shimDll).Length / 1MB)) }
+else { Fail "native\ttc_jpegli.dll 缺失 ⇒ JPEG LI 会静默退回 cjpegli.exe 子进程（可跑，但随包承诺失真）" }
+
 # OCR 模型 + 字典：缺了 OCR 直接不可用
 $models = @(
     @{ Path = "data\Models\PP-OCRv6_medium_det.onnx"; Min = 10MB },

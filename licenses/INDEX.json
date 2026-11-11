@@ -135,22 +135,22 @@
       "project": "libjxl (JPEG XL)",
       "version": "0.11.2",
       "spdx": "BSD-3-Clause",
-      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "shippedIn": ["cjxl.exe", "cjpegli.exe", "ttc_jpegli.dll"],
       "sourceKind": "downloaded",
       "sourcePathOrUrl": "https://api.github.com/repos/libjxl/libjxl/contents/LICENSE?ref=v0.11.2",
       "sha256": "8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede",
-      "obligationNote": "BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。"
+      "obligationNote": "BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（google/jpegli 同文本族 BSD-3，JPEG LI 进程内库）。"
     },
     {
       "file": "libjxl-LicenseRef-Google-Patent-Grant.txt",
       "project": "libjxl (JPEG XL)",
       "version": "0.11.2",
       "spdx": "LicenseRef-Google-BSD-plus-Patents",
-      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "shippedIn": ["cjxl.exe", "cjpegli.exe", "ttc_jpegli.dll"],
       "sourceKind": "downloaded",
       "sourcePathOrUrl": "https://api.github.com/repos/libjxl/libjxl/contents/PATENTS?ref=v0.11.2",
       "sha256": "91915f8ae056a68a3c5bdf05d9f6f78bb6903e27a8ca3a8434c9e4ac87300575",
-      "obligationNote": "Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。"
+      "obligationNote": "Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（jpegli 树内 PATENTS 与本文本族同源）。"
     },
     {
       "file": "brotli-MIT.txt",
@@ -168,11 +168,11 @@
       "project": "Google Highway (hwy, libjxl SIMD 抽象层)",
       "version": "libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag）",
       "spdx": "Apache-2.0",
-      "shippedIn": ["cjxl.exe", "cjpegli.exe"],
+      "shippedIn": ["cjxl.exe", "cjpegli.exe", "ttc_jpegli.dll"],
       "sourceKind": "downloaded",
       "sourcePathOrUrl": "https://api.github.com/repos/google/highway/contents/LICENSE?ref=457c891775a7397bdb0376bb1031e6e027af1c48",
       "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1",
-      "obligationNote": "Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。"
+      "obligationNote": "Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（SIMD 抽象层，静态链入进程内库）。"
     },
     {
       "file": "skcms-BSD-3-Clause.txt",
@@ -344,11 +344,11 @@
       "project": "Little CMS (lcms2) — 经 google/jpegli 的 third_party/lcms submodule 静态链入 cjpegli.exe",
       "version": "取自 google/jpegli 的 submodule 提交 mm2/Little-CMS（2026-10-07 clone 时点，上游未给该 submodule tag）",
       "spdx": "MIT",
-      "shippedIn": ["cjpegli.exe"],
+      "shippedIn": ["cjpegli.exe", "ttc_jpegli.dll"],
       "sourceKind": "local-tree",
       "sourcePathOrUrl": "C:\\Users\\20210\\AppData\\Local\\Temp\\jpegli-src\\third_party\\lcms\\LICENSE",
       "sha256": "bc1ba06a8fdf54466daa2b9a927fdca7c4d626a598045b2da62494a556491af6",
-      "obligationNote": "MIT：Copyright (c) 2023 Marti Maria Saguer。二进制再分发须保留版权声明与许可全文。 ⚠️ 2026-10-07 新增：cjpegli 由 libjxl 预编译件改为从 google/jpegli 自编译后，链接集合发生变化 —— 新增 lcms（经 jpegli_cms.lib），同时**不再**链接 sjpeg / skcms / brotli / libpng / libjpeg-turbo（二进制内实测 0 处相关符号，体积亦从 5.13 MB 降至 0.72 MB）。故本条为新增义务；sjpeg 等旧条目对 cjpegli 的适用范围相应收窄（见 tools-manifest.json 的 cjpegli buildNotes）。"
+      "obligationNote": "MIT：Copyright (c) 2023 Marti Maria Saguer。二进制再分发须保留版权声明与许可全文。 ⚠️ 2026-10-07 新增：cjpegli 由 libjxl 预编译件改为从 google/jpegli 自编译后，链接集合发生变化 —— 新增 lcms（经 jpegli_cms.lib），同时**不再**链接 sjpeg / skcms / brotli / libpng / libjpeg-turbo（二进制内实测 0 处相关符号，体积亦从 5.13 MB 降至 0.72 MB）。故本条为新增义务；sjpeg 等旧条目对 cjpegli 的适用范围相应收窄（见 tools-manifest.json 的 cjpegli buildNotes）。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（jpegli_cms 的 CMS 后端，静态链入进程内库）。"
     },
     {
       "file": "microsoft-winml-LicenseRef-Microsoft-EULA.txt",
@@ -514,6 +514,17 @@
       "sourcePathOrUrl": "C:\\PLAN\\libdeflate-bench\\COPYING",
       "sha256": "41b60f2caab6bffdd5ba360687bd23ca653c0a1235c00380ecffc939b4cd8d75",
       "obligationNote": "MIT：Copyright 2016 Eric Biggers / 2024 Google LLC。二进制再分发须随包保留版权声明与许可全文（本文件）。DLL 为自编译件，未静态链入任何第三方库，故本条即全部义务。"
+    },
+    {
+      "file": "apngdis-Zlib.txt",
+      "project": "APNG Disassembler 2.8 (google/jpegli third_party/apngdis) — jpegli_extras 内置 APNG 解码器",
+      "version": "2.8",
+      "spdx": "Zlib",
+      "shippedIn": ["cjpegli.exe", "ttc_jpegli.dll"],
+      "sourceKind": "local-tree",
+      "sourcePathOrUrl": "C:\\PLAN\\jpegli-lib\\jpegli\\third_party\\apngdis\\LICENSE",
+      "sha256": "834dc4de27509c0fb5f4ef65671dd7bf96c80ad6079cc293ab134a9f1a125f2f",
+      "obligationNote": "Zlib license：再分发须保留版权声明（Copyright (c) 2010-2015 Max Stepin）与许可全文。⚠ 2026-11-12 补审计：jpegli_extras-internal 的 JPEGLI_EXTRAS_CORE_SOURCES 无条件编入 apngdis dec.cc/enc.cc，经 DecodeBytes 分派表静态链入 cjpegli.exe 与 ttc_jpegli.dll —— 2026-10-07 的 cjpegli 许可审计漏记了这一项，本次随 ttc_jpegli.dll 采纳一并补上（cjpegli.exe 的 shippedIn 同时回补）。"
     }
   ],
   "notLocated": [

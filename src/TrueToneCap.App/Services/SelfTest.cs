@@ -662,7 +662,7 @@ public static class SelfTest
         {
             (OutputFormat.PNG,     ".png",  "托管 PNG 编码器"),
             (OutputFormat.TIFF,    ".tiff", "托管 TIFF 编码器"),
-            (OutputFormat.JPEG_LI, ".jpg",  "native jpegli (jxl.dll)"),
+            (OutputFormat.JPEG_LI, ".jpg",  "jpegli (ttc_jpegli.dll 主路径 / cjpegli.exe 回退)"),
             (OutputFormat.JPEG_XL, ".jxl",  "native cjxl 子进程"),
             (OutputFormat.AVIF,    ".avif", "native avifenc 子进程"),
             (OutputFormat.WebP,    ".webp", "native cwebp 子进程"),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/NativeLibraryResolver.cs
-// 原生工具链（avifenc / cwebp / cjpegli / cjxl）就位解析器
+// 原生工具链（avifenc / cwebp / cjpegli / cjxl + deflate.dll / ttc_jpegli.dll）就位解析器
 //
 // ⚠ 2026-10-01 更正本文件头与类注释的口径：这些 exe **不是嵌入资源**。
 //   TrueToneCap.Core.csproj 里【没有任何 EmbeddedResource 条目】，Core.dll 内也没有这四枚文件
@@ -23,7 +23,8 @@ namespace TrueToneCap.Core.Services;
 /// <summary>
 /// <summary>
 /// 原生可执行文件解析器 — 从嵌入资源提取到 native/ 目录。
-/// 支持: avifenc.exe (AVIF), cjxl.exe (JPEG XL), cjpegli.exe (JPEG LI), cwebp.exe (WebP)
+/// 支持: avifenc.exe (AVIF), cjxl.exe (JPEG XL), cjpegli.exe (JPEG LI), cwebp.exe (WebP),
+///       deflate.dll (libdeflate), ttc_jpegli.dll (JPEG LI 进程内主路径，2026-11-12)
 /// <para>⚠️ 2026-10-07 商店上架核查时确认：本类会<b>尝试写入</b> <c>BaseDirectory\native</c>，
 /// 而 MSIX 包目录是<b>只读</b>的（官方："Write inside the package — Not allowed."）。
 /// 在打包形态下这不会出问题，理由是<b>两个条件同时成立</b>：
@@ -63,8 +64,10 @@ public static class NativeLibraryResolver
         }
     }
 
-    /// <summary>需要提取的原生可执行文件清单。</summary>
-    private static readonly string[] EmbeddedExeNames = ["avifenc.exe", "cwebp.exe", "cjpegli.exe", "cjxl.exe"];
+    /// <summary>需要就位的原生件清单（4 枚编码器 exe + 2 枚 DLL；都是 Content 随包分发，
+    /// 文件系统回退链对 exe 与 dll 同样生效）。</summary>
+    private static readonly string[] EmbeddedExeNames =
+        ["avifenc.exe", "cwebp.exe", "cjpegli.exe", "cjxl.exe", "deflate.dll", "ttc_jpegli.dll"];
 
     static NativeLibraryResolver()
     {

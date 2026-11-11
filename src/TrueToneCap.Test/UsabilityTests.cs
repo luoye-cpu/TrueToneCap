@@ -148,6 +148,7 @@ public static class UsabilityTests
         Jpeg_AllQualityLevels();
         Jpeg_Chroma_420_422_444();
         Jpeg_IccLargeProfile();
+        Jpeg_IccSrgbEmbedContractOnLibPath();
         Jpeg_EncodeToBytes_ValidJpeg();
         Jpeg_Streaming_Valid();
 
@@ -1229,12 +1230,158 @@ public static class UsabilityTests
     /// ICC；③ 段长字段自洽；④ 位置在 APP0(JFIF) 之后。另有真正的大 profile（&gt;65519B 载荷上限）
     /// 走分块：段数、seq 递增、每段 cnt 相同、拼回后与输入逐字节相同。</para>
     /// </summary>
+    /// <summary>
+    /// 最小合法非 sRGB RGB 矩阵 ICC v2 profile（自定义原色矩阵 + γ2.2 曲线）。
+    /// <para>2026-11-12 起本测试必须用【非 sRGB】profile：JPEG LI 的 lib 主路径
+    /// （ttc_jpegli.dll → jpegli EncodeJpeg）带 IsSRGB() 优化——识别为 sRGB 的
+    /// profile 直接省略 APP2 嵌入（sRGB 是 JPEG 隐含默认，不写省体积），这是
+    /// 上游 cjpegli 同款行为；用 sRGB profile 断"必须出现 APP2"会误判库正确。
+    /// γ2.2 曲线 + 自定义矩阵 ⇒ ColorEncoding 不可能被识别成参数化 sRGB。
+    /// 结构上恰好满足 FormatHelper.IsEmbeddableIcc 的结构判据（rXYZ/gXYZ/bXYZ/
+    /// wtpt 的 'XYZ ' 数据 + 三条 TRC），与产品真实嵌入路径同门禁。</para>
+    /// </summary>
+    static byte[] MakeNonSrgbTestIcc()
+    {
+        void PutXYZ(byte[] buf, int at, double x, double y, double z)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(buf.AsSpan(at), (int)Math.Round(x * 65536));
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(buf.AsSpan(at + 4), (int)Math.Round(y * 65536));
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(buf.AsSpan(at + 8), (int)Math.Round(z * 65536));
+        }
+
+        byte[] XyzTag(string sig, double x, double y, double z)
+        {
+            var b = new byte[20];
+            System.Text.Encoding.ASCII.GetBytes(sig).CopyTo(b, 0);
+            PutXYZ(b, 8, x, y, z);
+            return b;
+        }
+
+        byte[] CurvTag(double gamma)
+        {
+            var b = new byte[16];                       // 'curv'(4) + 保留(4) + count(4) + u8f8(2) + 对齐(2)
+            System.Text.Encoding.ASCII.GetBytes("curv").CopyTo(b, 0);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(8), 1);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(b.AsSpan(12), (ushort)Math.Round(gamma * 256));
+            return b;
+        }
+
+        byte[] DescTag(string name)
+        {
+            var ascii = System.Text.Encoding.ASCII.GetBytes(name);
+            var b = new byte[(12 + ascii.Length + 1 + 8 + 3 + 67 + 3) & ~3];
+            System.Text.Encoding.ASCII.GetBytes("desc").CopyTo(b, 0);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(8), ascii.Length + 1);
+            ascii.CopyTo(b, 12);
+            b[12 + ascii.Length] = 0;                   // ascii 串以 \0 结尾
+            // unicode 语言码/计数（4+4B 全 0）+ scriptcode 域（2+1B + 67B 全 0）天然为零
+            return b;
+        }
+
+        byte[] TextTag(string s)
+        {
+            var ascii = System.Text.Encoding.ASCII.GetBytes(s + "\0");
+            var b = new byte[(8 + ascii.Length + 3) & ~3];
+            System.Text.Encoding.ASCII.GetBytes("text").CopyTo(b, 0);
+            ascii.CopyTo(b, 8);
+            return b;
+        }
+
+        var tags = new (string Sig, byte[] Data)[]
+        {
+            ("desc", DescTag("TrueToneCap jpegli shim test profile")),
+            ("wtpt", XyzTag("XYZ ", 0.9642, 1.0000, 0.8249)),           // D50 白点
+            ("rXYZ", XyzTag("XYZ ", 0.4360747, 0.3850649, 0.1430804)),  // sRGB 原色（D50 适配）
+            ("gXYZ", XyzTag("XYZ ", 0.2225045, 0.7168786, 0.0606529)),
+            ("bXYZ", XyzTag("XYZ ", 0.0139322, 0.0971045, 0.7141733)),
+            ("rTRC", CurvTag(2.2)),                                     // γ2.2 ⇒ 非 sRGB 参数化 TRC
+            ("gTRC", CurvTag(2.2)),
+            ("bTRC", CurvTag(2.2)),
+            ("cprt", TextTag("Public domain")),
+        };
+
+        int offset = 128 + 4 + 12 * tags.Length;
+        var table = new byte[4 + 12 * tags.Length];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(table.AsSpan(0), tags.Length);
+        var chunks = new List<byte[]>();
+        for (int i = 0; i < tags.Length; i++)
+        {
+            var sigAscii = System.Text.Encoding.ASCII.GetBytes(tags[i].Sig);
+            sigAscii.CopyTo(table, 4 + 12 * i);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(table.AsSpan(4 + 12 * i + 4), offset);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(table.AsSpan(4 + 12 * i + 8), tags[i].Data.Length);
+            chunks.Add(tags[i].Data);
+            offset += tags[i].Data.Length;
+        }
+
+        var profile = new byte[offset];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(profile.AsSpan(0), offset);   // 0: 自洽 size
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(profile.AsSpan(8), 0x02400000); // 8: v2.4
+        System.Text.Encoding.ASCII.GetBytes("mntr").CopyTo(profile, 12);  // 12: device class
+        System.Text.Encoding.ASCII.GetBytes("RGB ").CopyTo(profile, 16);  // 16: color space
+        System.Text.Encoding.ASCII.GetBytes("XYZ ").CopyTo(profile, 20);  // 20: PCS
+        System.Text.Encoding.ASCII.GetBytes("acsp").CopyTo(profile, 36);  // 36: magic
+        PutXYZ(profile, 68, 0.9642, 1.0, 0.8249);                         // 68: 照明体 D50
+        table.CopyTo(profile, 128);
+        int at = 128 + table.Length;
+        foreach (var c in chunks) { c.CopyTo(profile, at); at += c.Length; }
+        return profile;
+    }
+
+    /// <summary>
+    /// lib 主路径的 sRGB ICC 嵌入契约钉（2026-11-12）。
+    /// <para>jpegli 的 EncodeJpeg 对 IsSRGB() 的 profile <b>省略</b> APP2 嵌入（sRGB 是
+    /// JPEG 隐含默认，上游 cjpegli 同款优化）；产品契约是「调用方给了 ICC 就必须嵌」
+    /// ——GainMap 底图恒嵌标准 sRGB ICC，GainMapColorProductProbe 逐字节钉着
+    /// （2026-09-20 嵌入纪律）。⇒ C# 层在 lib 产物缺 ICC 时用同一个注入器补嵌。
+    /// 本判据防止上游优化把产品契约静默改掉。</para>
+    /// </summary>
+    static void Jpeg_IccSrgbEmbedContractOnLibPath()
+    {
+        var bgra = new byte[16 * 16 * 4];
+        for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 64; bgra[i + 1] = 128; bgra[i + 2] = 255; bgra[i + 3] = 255; }
+
+        var icc = ColorProfileProvider.GetDefaultSRgbIcc();
+        var data = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", icc);
+        Assert("JPEG ICC sRGB 契约: 编码产出可用", data.Length > 200 && data[0] == 0xFF && data[1] == 0xD8,
+            $"实得 {data.Length}B");
+
+        var segs = JpegAppSegments(data);
+        var iccSegs = segs.Where(s => s.Marker == 0xE2 && s.Payload.StartsWith(IccProfileId)).ToList();
+        Assert("JPEG ICC sRGB 契约: sRGB profile 也必须嵌进 APP2（lib 的 IsSRGB 省略不适用于产品）",
+            iccSegs.Count == 1, $"实得 {iccSegs.Count} 段");
+        if (iccSegs.Count != 1) return;
+        Assert("JPEG ICC sRGB 契约: 单块 seq/cnt == 01 01 且载荷与传入 profile 逐字节相同",
+            iccSegs[0].Payload[12] == 1 && iccSegs[0].Payload[13] == 1
+            && iccSegs[0].Payload.AsSpan(14).SequenceEqual(icc));
+
+        // 嵌入位置契约：ICC 排在 APP0/JFIF 之后（2026-09-20 修复的同一口径）
+        int iccPos = -1, app0Pos = -2;
+        for (int i = 2; i + 4 <= data.Length && iccPos < 0; i++)
+        {
+            if (data[i] != 0xFF) continue;
+            if (data[i + 1] == 0xE2 && data.AsSpan(i + 4, 12).SequenceEqual(IccProfileId)) iccPos = i;
+            else if (data[i + 1] == 0xE0) app0Pos = i;
+        }
+        Assert("JPEG ICC sRGB 契约: 若产物带 APP0/JFIF，ICC 段排在它之后",
+            app0Pos == -2 || iccPos > app0Pos, $"app0={app0Pos} icc={iccPos}");
+
+        // XYB 模式例外：库恒写 XYB ICC，此时不得出现两条 APP2 链（旧 exe 路径的坏形态）
+        var xybData = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", icc, xyb: true);
+        var xybIccSegs = JpegAppSegments(xybData)
+            .Where(s => s.Marker == 0xE2 && s.Payload.StartsWith(IccProfileId)).ToList();
+        Assert("JPEG ICC sRGB 契约: XYB+ICC 只保留库写的 XYB profile（单链，不复活双链坏形态）",
+            xybIccSegs.Count == 1, $"实得 {xybIccSegs.Count} 段");
+    }
+
     static void Jpeg_IccLargeProfile()
     {
         var bgra = new byte[16 * 16 * 4];
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 128; bgra[i + 1] = 128; bgra[i + 2] = 128; bgra[i + 3] = 255; }
 
-        var icc = ColorProfileProvider.GetDefaultSRgbIcc();
+        // ⚠ 必须【非 sRGB】profile（理由见 MakeNonSrgbTestIcc）：lib 主路径对 sRGB
+        // profile 走 IsSRGB() 省略嵌入，是上游正确行为而非回归。
+        var icc = MakeNonSrgbTestIcc();
         var data = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", icc);
         bool valid = data.Length > 200 && data[0] == 0xFF && data[1] == 0xD8;
         Assert($"JPEG ICC: 编码产出可用（{data.Length}B）", valid);

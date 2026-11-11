@@ -1,25 +1,61 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Encoding/JpegLiNative.cs
-// Google jpegli 编码器 — 通过 cjpegli 命令行工具编码
-// 内嵌在 Resources/cjpegli.exe，运行时自动提取到 native/ 目录
-// 与现有 avifenc.exe/cwebp.exe 相同的嵌入式工具链模式
+// Google jpegli 编码器 —— 双路径：
+//   主路径: ttc_jpegli.dll（P/Invoke 进程内编码，2026-11-12 起引入）
+//           shim 源码在 scripts/jpegli-shim/，构建配方 scripts/build-cjpegli.py；
+//           shim 内部走 DecodeBytes → EncodeJpeg，与 cjpegli.exe 完全同一条上游
+//           代码路径，且采纳前有逐字节对照硬门禁（12 参数组合 + ICC 回读）。
+//           附带收益：零临时文件 I/O（旧路径要写 11MB PPM 到 %TEMP%）、
+//           2-3× 端到端提速（87ms vs 249ms @2560×1440 d0.5）、ICC 原生嵌入。
+//   回退:   cjpegli.exe 子进程（与 avifenc/cwebp 相同的嵌入式工具链模式，
+//           崩溃隔离）。DLL 缺失/装载失败/编码异常时自动落回此路。
+// 产物一致性：lib 与 exe 同参数输出逐字节相同（门禁保证）；回退路径产出的
+//   JPEG 仍合法，仅当回退件与 DLL 的 jpegli commit 不同时字节可能有微差。
 
+using System.Runtime.InteropServices;
 using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Services;
 
 namespace TrueToneCap.Core.Encoding;
 
 /// <summary>
-/// jpegli 编码器 — 通过 cjpegli 命令行工具编码。
-/// 内嵌在 Resources/cjpegli.exe，启动时自动提取到 native/ 目录。
-/// 与 avifenc 相同的子进程调用模式，保证了崩溃隔离和兼容性。
+/// jpegli 编码器 —— ttc_jpegli.dll 进程内编码为主，cjpegli.exe 子进程为回退。
+/// DLL 与 exe 同由 scripts/build-cjpegli.py 从 google/jpegli 源码树产出并嵌入
+/// Resources/（经 NativeLibraryResolver 提取到 native/ 目录）。
 /// </summary>
 public static class JpegLiNative
 {
-    private static bool? _available;
+    private static bool? _available;      // lib 或 exe 任一可用
+    private static bool? _libAvailable;   // ttc_jpegli.dll 装载成功
+    private static readonly object _libLock = new();
+    private static IntPtr _libHandle;
 
-    /// <summary>检测 cjpegli 是否可用（先在 native 目录查找，再回退到 PATH）。</summary>
+    // ── ttc_jpegli.dll 的 C-ABI 绑定（scripts/jpegli-shim/ttc_shim.cc）──
+    // 输出缓冲在本 DLL 内 malloc，必须经 ttc_jpegli_free 归还（同 CRT）；
+    // 失败详情经 ttc_jpegli_error 取回（单线程语义，编码调用天然串行）。
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int EncodeRgbFn(byte[] rgb, int w, int h, float distance,
+        [MarshalAs(UnmanagedType.LPStr)] string chroma, int progressiveLevel,
+        int xyb, byte[]? icc, nuint iccLen, out IntPtr jpeg, out nuint jpegLen);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int EncodeGrayFn(byte[] gray, int w, int h, float distance,
+        int progressiveLevel, int xyb, out IntPtr jpeg, out nuint jpegLen);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void FreeFn(IntPtr p);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate IntPtr ErrFn();
+
+    private static EncodeRgbFn? _encodeRgb;
+    private static EncodeGrayFn? _encodeGray;
+    private static FreeFn? _free;
+    private static ErrFn? _error;
+
+    /// <summary>检测 JPEG LI 编码是否可用（lib 主路径或 exe 回退任一）。</summary>
     public static bool IsAvailable
     {
         get
@@ -27,7 +63,13 @@ public static class JpegLiNative
             if (_available.HasValue) return _available.Value;
             try
             {
-                NativeLibraryResolver.Initialize();
+                if (TryLoadLib()) { _available = true; return true; }
+            }
+            catch { /* 落到 exe 探针 */ }
+
+            // exe 回退探针（原逻辑保留）：cjpegli.exe 先在 native 目录找，再回退 PATH。
+            try
+            {
                 var exePath = GetExePath();
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
@@ -50,13 +92,100 @@ public static class JpegLiNative
         }
     }
 
+    /// <summary>ttc_jpegli.dll 是否装载成功（进程内主路径在用）。
+    /// 测试与自检用它区分「真走了主路径」与「静默回退到 exe」——
+    /// 行为级测试若不知情地落在回退路径上，等于永远测不到产品主路径（假绿）。</summary>
+    public static bool IsLibAvailable => TryLoadLib();
+
     /// <summary>初始化检测。</summary>
     public static void Initialize()
     {
-        if (IsAvailable)
-            CoreLog.Info("JpegLiNative", "cjpegli 就绪", LogCategory.Encoding);
+        if (TryLoadLib())
+        {
+            string? ver = _version is null ? null : Marshal.PtrToStringAnsi(_version());
+            CoreLog.Info("JpegLiNative",
+                $"ttc_jpegli.dll 就绪（进程内主路径{(ver is null ? "" : $"，shim {ver}")}）",
+                LogCategory.Encoding);
+        }
+        else if (IsAvailable)
+            CoreLog.Info("JpegLiNative", "cjpegli.exe 就绪（DLL 不可用，子进程回退模式）",
+                LogCategory.Encoding);
         else
-            CoreLog.Warn("JpegLiNative", "cjpegli 不可用，JPEG 编码将失败", LogCategory.Encoding);
+            CoreLog.Warn("JpegLiNative", "JPEG LI 编码器不可用（DLL 与 exe 均缺失）",
+                LogCategory.Encoding);
+    }
+
+    private static VersionFn? _version;
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate IntPtr VersionFn();
+
+    /// <summary>
+    /// 装载 ttc_jpegli.dll 并解析全部导出（幂等；任一导出缺失视为不可用并卸载）。
+    /// 只在 native 目录找——shim 与产品同仓发布，不走 PATH 兜底（exe 才有 PATH 回退）。
+    /// </summary>
+    private static bool TryLoadLib()
+    {
+        if (_libAvailable.HasValue) return _libAvailable.Value;
+        lock (_libLock)
+        {
+            if (_libAvailable.HasValue) return _libAvailable.Value;
+            _libAvailable = false;
+            try
+            {
+                NativeLibraryResolver.Initialize();
+                string dllPath = Path.Combine(NativeLibraryResolver.GetNativeDirectory(),
+                    "ttc_jpegli.dll");
+                if (File.Exists(dllPath)
+                    && NativeLibrary.TryLoad(dllPath, out IntPtr h)
+                    && ResolveExports(h))
+                {
+                    _libHandle = h;
+                    _libAvailable = true;
+                }
+            }
+            catch { _libAvailable = false; }
+
+            if (_libAvailable.Value)
+                CoreLog.Info("JpegLiNative", "ttc_jpegli.dll 就绪（进程内主路径）",
+                    LogCategory.Encoding);
+            else
+                CoreLog.Info("JpegLiNative",
+                    "ttc_jpegli.dll 不可用，JPEG LI 编码走 cjpegli.exe 子进程回退",
+                    LogCategory.Encoding);
+            return _libAvailable.Value;
+        }
+    }
+
+    private static bool ResolveExports(IntPtr handle)
+    {
+        _encodeRgb = GetProc<EncodeRgbFn>(handle, "ttc_jpegli_encode_rgb");
+        _encodeGray = GetProc<EncodeGrayFn>(handle, "ttc_jpegli_encode_gray");
+        _free = GetProc<FreeFn>(handle, "ttc_jpegli_free");
+        _error = GetProc<ErrFn>(handle, "ttc_jpegli_error");
+        _version = GetProc<VersionFn>(handle, "ttc_jpegli_version");
+        bool ok = _encodeRgb is not null && _encodeGray is not null
+                  && _free is not null && _error is not null;
+        if (!ok)
+        {
+            _encodeRgb = null; _encodeGray = null; _free = null; _error = null; _version = null;
+            NativeLibrary.Free(handle);
+            CoreLog.Warn("JpegLiNative", "ttc_jpegli.dll 导出不全，拒载", LogCategory.Encoding);
+        }
+        return ok;
+    }
+
+    private static T? GetProc<T>(IntPtr handle, string name) where T : class
+    {
+        try
+        {
+            IntPtr p = NativeLibrary.GetExport(handle, name);
+            return Marshal.GetDelegateForFunctionPointer(p, typeof(T)) as T;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string GetExePath()
@@ -101,6 +230,172 @@ public static class JpegLiNative
         string chromaSubsampling = "444", byte[]? iccProfile = null, bool forceBaseline = false,
         bool xyb = false)
     {
+        // ═══ 参数规范化（lib/exe 两路径共用；门禁钉住这些代码形态）═══
+        // cjpegli 的 --distance 参数是 butteraugli distance（浮点，越小画质越好），
+        // 官方允许范围 [0.0, 25.0]；产品档位是 UI 滑块的 0.5-3.0（默认 0.5 —— 2026-11-06
+        // 用户拍板由 1.0 收紧，物证见 quality-chain-evidence §JPEG LI：420 色度下 d=1.0 重度块效应）。
+        // ⚠ 2026-11-06 量纲注释更正：上游（FormatEncoders / JpegGainMapEncoder）传的是
+        //   每格式质量字段 QualityJpegLi —— 量纲即 distance（AppSettingsQuality.GetQuality）。
+        //   旧注释"调用方可能传 quality 值 (0-100)"描述的是滑块覆盖时代（MainWindow
+        //   BuildEncodingSettings 的二源覆盖）的形态，该覆盖已收口删除，不再成立。
+        //   传整数 90 仍会被解释为 d90.000（超出范围导致错误），故保留 Clamp[0,25] 防御；
+        //   钳制发生（输入 <0 或 >25，必然同时超出产品档位 0.5-3.0）必属量纲异常 ⇒
+        //   Warn 留痕：把"静默钳到 25 = 最差画质"（2026-11-06 探针实测：PNG 量纲 100 →
+        //   d25.0000，产物仅为 d0.5 的 1/4.25）变成"留痕钳制"。正常档位不会触发。
+        float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
+        if (distance < 0.0f || distance > 25.0f)
+        {
+            CoreLog.Warn("JPEGLI",
+                $"distance {distance:F4} 超出 cjpegli 合法范围 [0,25]，已钳到 {clampedDist:F4}"
+                + "（超出产品档位 0.5-3.0 ⇒ 疑似量纲错位，请检查上游质量来源）", LogCategory.Encoding);
+        }
+        string distArg = $"{clampedDist:F4}";
+        string chromaArg = chromaSubsampling switch
+        {
+            "420" => " --chroma_subsampling 420",
+            "422" => " --chroma_subsampling 422",
+            _ => "" // 444 默认
+        };
+        // Gain Map 需要 Baseline (SOF0)，常规 JPEG 用 Progressive (SOF2) 获得更小体积
+        // --progressive_level 2: 默认 Progressive，体积小 5-10%
+        // --progressive_level 0: Baseline，Gain Map 兼容性要求
+        string progArg = forceBaseline ? " --progressive_level 0" : ""; // 默认 Progressive(2) 更省体积
+        // ═══ 2026-11-12：--xyb 改由独立的「色彩空间」开关决定（用户拍板）═══
+        // 此前（2026-10-07~2026-11-12）它挂在压缩强度档位映射上：「最小体积」档恒加。
+        // 实测数据（保留备查）：2026-10-07 两张真实截图 × -d 0.5/1.0/2.0/3.0 全更小
+        //   （样张 A −4.7%/−2.9%/−3.8%/−4.6%，样张 B −4.0%/−2.4%/−3.5%）；
+        //   2026-10-29 换三张复测（-d 1.0）：−5.5% / −10.4% / 【+3.0%】反例 ⇒"一律更小"不成立，
+        //   数据见 artifacts/tier_bench_2026-10-29.log。代价约 1.2~1.3× 时间。
+        // 机理：XYB 是感知均匀色彩空间，量化误差按人眼敏感度分布 ⇒ 同感知质量下通常更省码率。
+        // ⚠ 兼容性：XYB 编码的 JPEG 会被小部分软件解码出错（用户实测反馈）⇒ 默认传统，
+        //   XYB 由用户显式选入。
+        string xybArg = xyb ? " --xyb" : "";
+        // 两条路径共用的参数语义串：exe 路径逐字进命令行，lib 路径逐字进 Debug 留痕。
+        // Test_QualityChain_JpegLiDistanceVerbatim 行为腿咬住 --distance <F4> 的逐字出现。
+        string argsFragment = $"--distance {distArg}{progArg}{xybArg}{chromaArg}";
+
+        // 注意: exe 回退路径不支持 --icc_profile，ICC 通过后处理注入（InjectIccIntoJpeg）；
+        //       lib 主路径把 ICC 直传 shim，由库原生按 ICC.1 分块写 APP2，无需注入。
+        bool hasNonSrgbIcc = FormatHelper.IsEmbeddableIcc(iccProfile);
+
+        // ═══ 主路径：ttc_jpegli.dll 进程内编码（2026-11-12）═══
+        if (TryLoadLib())
+        {
+            try
+            {
+                CoreLog.Debug("JPEGLI", $"lib: {argsFragment}", LogCategory.Encoding);
+                return EncodeViaLib(bgra, width, height, clampedDist, chromaSubsampling,
+                    forceBaseline, xyb, hasNonSrgbIcc ? iccProfile : null);
+            }
+            catch (Exception ex)
+            {
+                CoreLog.Warn("JPEGLI", "ttc_jpegli.dll 编码失败，回退 cjpegli.exe 子进程",
+                    ex, LogCategory.Encoding);
+            }
+        }
+
+        // ═══ 回退路径：cjpegli.exe 子进程 ═══
+        return EncodeViaExe(bgra, width, height, argsFragment, hasNonSrgbIcc, iccProfile);
+    }
+
+    /// <summary>lib 主路径：BGRA→RGB24 内存转换后直调 shim（零临时文件）。</summary>
+    private static byte[] EncodeViaLib(byte[] bgra, int width, int height, float distance,
+        string chromaSubsampling, bool forceBaseline, bool xyb, byte[]? icc)
+    {
+        var rgb = ConvertBgraToRgb(bgra, width, height);
+        // chroma 归一化：shim 只认 444/440/422/420，其余（含 null/空/未知）按 444，
+        // 与 exe 路径的 switch 默认分支同语义。
+        string chroma = chromaSubsampling switch
+        {
+            "420" => "420",
+            "422" => "422",
+            "440" => "440",
+            _ => "444"
+        };
+        int rc = _encodeRgb!(rgb, width, height, distance, chroma,
+            forceBaseline ? 0 : 2, xyb ? 1 : 0,
+            icc, icc is null ? NUInt0 : (nuint)icc.Length,
+            out IntPtr jpegPtr, out nuint jpegLen);
+        if (rc != 0)
+        {
+            string err = Marshal.PtrToStringAnsi(_error!()) ?? "";
+            throw new InvalidOperationException(
+                $"[jpegli] ttc_jpegli.dll 编码失败 (rc={rc}) {err.Trim()}");
+        }
+        try
+        {
+            var jpeg = new byte[checked((int)jpegLen)];
+            Marshal.Copy(jpegPtr, jpeg, 0, jpeg.Length);
+            // ═══ ICC 契约对齐（2026-11-12）═══ jpegli 的 EncodeJpeg 对 IsSRGB() 的
+            // profile 直接省略 APP2 嵌入（sRGB 是 JPEG 隐含默认，上游优化行为）；
+            // 但产品契约是「调用方给了 ICC 就必须嵌」——GainMap 底图恒嵌标准 sRGB ICC，
+            // 有专门判据逐字节钉着（GainMapColorProductProbe，2026-09-20 嵌入纪律）。
+            // ⇒ lib 产物不带 ICC 而调用方给了时，用与 exe 回退路径同一个 C# 注入器补嵌
+            //   （同 ICC.1 规范 APP2 分块，插在 APP0 之后）。
+            // XYB 模式例外：库恒写 XYB 色彩空间 ICC（上游语义），此时不补——
+            //   两个 APP2 链并存正是旧 exe 路径 XYB+ICC 的坏形态，不复活。
+            if (icc is not null && !JpegHasIcc(jpeg))
+            {
+                CoreLog.Debug("JPEGLI", "lib 省略了 sRGB ICC 嵌入（IsSRGB 优化），按产品契约补嵌",
+                    LogCategory.Encoding);
+                jpeg = InjectIccIntoJpeg(jpeg, icc);
+            }
+            return jpeg;
+        }
+        finally
+        {
+            _free!(jpegPtr);
+        }
+    }
+
+    /// <summary>JPEG 流里是否已存在 ICC 的 APP2 段（ICC.1 分块链任一段即算）。</summary>
+    private static bool JpegHasIcc(byte[] jpeg)
+    {
+        if (jpeg.Length < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return false;
+        int pos = 2;
+        while (pos + 4 <= jpeg.Length)
+        {
+            if (jpeg[pos] != 0xFF) return false;
+            int marker = jpeg[pos + 1];
+            if (marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7)) { pos += 2; continue; }
+            if (marker == 0xD9) return false;
+            int segLen = (jpeg[pos + 2] << 8) | jpeg[pos + 3];
+            if (segLen < 2 || pos + 2 + segLen > jpeg.Length) return false;
+            if (marker == 0xE2 && segLen > 16 && pos + 18 <= jpeg.Length
+                && jpeg[pos + 4] == 'I' && jpeg[pos + 5] == 'C' && jpeg[pos + 6] == 'C'
+                && jpeg[pos + 7] == '_')
+                return true;
+            if (marker == 0xDA) return false; // SOS 之后不再扫
+            pos += 2 + segLen;
+        }
+        return false;
+    }
+
+    private static readonly nuint NUInt0 = 0;
+
+    /// <summary>BGRA8 → 紧凑 RGB24（与 WriteBgraToPpm 的行转换同构，改为内存版）。</summary>
+    private static byte[] ConvertBgraToRgb(byte[] bgra, int w, int h)
+    {
+        var rgb = new byte[w * h * 3];
+        for (int y = 0; y < h; y++)
+        {
+            int src = y * w * 4;
+            int dst = y * w * 3;
+            for (int x = 0; x < w; x++)
+            {
+                rgb[dst++] = bgra[src + 2]; // R
+                rgb[dst++] = bgra[src + 1]; // G
+                rgb[dst++] = bgra[src];     // B
+                src += 4;
+            }
+        }
+        return rgb;
+    }
+
+    /// <summary>cjpegli.exe 子进程回退路径（原实现原样保留）。</summary>
+    private static byte[] EncodeViaExe(byte[] bgra, int width, int height,
+        string argsFragment, bool hasNonSrgbIcc, byte[]? iccProfile)
+    {
         var exePath = GetExePath();
 
         // 写入临时 PPM 文件（cjpegli 支持 PPM 输入）
@@ -111,65 +406,19 @@ public static class JpegLiNative
         try
         {
             WriteBgraToPpm(bgra, width, height, tmpPpm);
-
-            // cjpegli 的 --distance 参数是 butteraugli distance（浮点，越小画质越好），
-            // 官方允许范围 [0.0, 25.0]；产品档位是 UI 滑块的 0.5-3.0（默认 0.5 —— 2026-11-06
-            // 用户拍板由 1.0 收紧，物证见 quality-chain-evidence §JPEG LI：420 色度下 d=1.0 重度块效应）。
-            // ⚠ 2026-11-06 量纲注释更正：上游（FormatEncoders / JpegGainMapEncoder）传的是
-            //   每格式质量字段 QualityJpegLi —— 量纲即 distance（AppSettingsQuality.GetQuality）。
-            //   旧注释"调用方可能传 quality 值 (0-100)"描述的是滑块覆盖时代（MainWindow
-            //   BuildEncodingSettings 的二源覆盖）的形态，该覆盖已收口删除，不再成立。
-            //   传整数 90 仍会被解释为 d90.000（超出范围导致错误），故保留 Clamp[0,25] 防御；
-            //   钳制发生（输入 <0 或 >25，必然同时超出产品档位 0.5-3.0）必属量纲异常 ⇒
-            //   Warn 留痕：把"静默钳到 25 = 最差画质"（2026-11-06 探针实测：PNG 量纲 100 →
-            //   d25.0000，产物仅为 d0.5 的 1/4.25）变成"留痕钳制"。正常档位不会触发。
-            float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
-            if (distance < 0.0f || distance > 25.0f)
-            {
-                CoreLog.Warn("JPEGLI",
-                    $"distance {distance:F4} 超出 cjpegli 合法范围 [0,25]，已钳到 {clampedDist:F4}"
-                    + "（超出产品档位 0.5-3.0 ⇒ 疑似量纲错位，请检查上游质量来源）", LogCategory.Encoding);
-            }
-            string distArg = $"{clampedDist:F4}";
-            string chromaArg = chromaSubsampling switch
-            {
-                "420" => " --chroma_subsampling 420",
-                "422" => " --chroma_subsampling 422",
-                _ => "" // 444 默认
-            };
-
-            // 注意: 此版本 cjpegli 不支持 --icc_profile 参数
-            // ICC 通过后处理注入: 编码后读回 JPEG 字节流，插入 APP2 段（见 InjectIccIntoJpeg）
-            bool hasNonSrgbIcc = FormatHelper.IsEmbeddableIcc(iccProfile);
             if (hasNonSrgbIcc)
             {
                 tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
                 File.WriteAllBytes(tmpIcc, iccProfile!);
             }
 
-            // Gain Map 需要 Baseline (SOF0)，常规 JPEG 用 Progressive (SOF2) 获得更小体积
-            // --progressive_level 2: 默认 Progressive，体积小 5-10%
-            // --progressive_level 0: Baseline，Gain Map 兼容性要求
-            string progArg = forceBaseline ? " --progressive_level 0" : ""; // 默认 Progressive(2) 更省体积
-
-            // ═══ 2026-11-12：--xyb 改由独立的「色彩空间」开关决定（用户拍板）═══
-            // 此前（2026-10-07~2026-11-12）它挂在压缩强度档位映射上：「最小体积」档恒加。
-            // 实测数据（保留备查）：2026-10-07 两张真实截图 × -d 0.5/1.0/2.0/3.0 全更小
-            //   （样张 A −4.7%/−2.9%/−3.8%/−4.6%，样张 B −4.0%/−2.4%/−3.5%）；
-            //   2026-10-29 换三张复测（-d 1.0）：−5.5% / −10.4% / 【+3.0%】反例 ⇒"一律更小"不成立，
-            //   数据见 artifacts/tier_bench_2026-10-29.log。代价约 1.2~1.3× 时间。
-            // 机理：XYB 是感知均匀色彩空间，量化误差按人眼敏感度分布 ⇒ 同感知质量下通常更省码率。
-            // ⚠ 兼容性：XYB 编码的 JPEG 会被小部分软件解码出错（用户实测反馈）⇒ 默认传统，
-            //   XYB 由用户显式选入。
-            string xybArg = xyb ? " --xyb" : "";
-
             // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
             var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
-            
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {distArg}{progArg}{xybArg}{chromaArg} \"{safeTmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"{argsFragment} \"{safeTmpPpm}\" \"{tmpPpm}.jpg\"",
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -225,6 +474,7 @@ public static class JpegLiNative
     /// profile 可以超过 64KB ⇒ 超过就必须切成多段，每段的 cnt 等于总段数、seq 从 1 递增。</para>
     /// <para>插入位置在 APP0(JFIF) 之后：JFIF 要求 APP0 紧跟 SOI，ICC 惯例排在 APP0 后面，
     /// 旧实现直接插在 SOI 之后会把 cjpegli 自带的 APP0 挤到 ICC 之后。</para>
+    /// <para>⚠ 2026-11-12 起 exe 回退路径专用；lib 主路径由 jpegli 原生嵌入（同规范）。</para>
     /// </remarks>
     internal static byte[] InjectIccIntoJpeg(byte[] jpeg, byte[] iccProfile)
     {
@@ -271,7 +521,7 @@ public static class JpegLiNative
         return at;
     }
 
-    /// <summary>将 BGRA8 像素写入 PPM 文件（彩色 P6 格式）。</summary>
+    /// <summary>将 BGRA8 像素写入 PPM 文件（彩色 P6 格式）。exe 回退路径专用。</summary>
     private static void WriteBgraToPpm(byte[] bgra, int w, int h, string path)
     {
         // 逐字节 WriteByte 在 4K 上是 2490 万次调用；按行组一个 RGB 缓冲一次写出。
@@ -301,11 +551,58 @@ public static class JpegLiNative
     /// 解码器 (MS Photos/Android) 按 JPEG 分量数判断增益图通道数:
     ///   - 1 分量灰度 → 单通道增益, 应用到所有通道 (规范要求!)
     ///   - 3 分量 RGB → 每通道独立增益 (即使像素相等也可能被当作多通道处理 → 偏色)
-    /// 输入: 单通道灰度像素 (每像素 1 byte), 写 PPM P5 → cjpegli 输出 YCbCr400。</summary>
+    /// 输入: 单通道灰度像素 (每像素 1 byte)。</summary>
     public static byte[] EncodeGray(byte[] gray, int width, int height,
         float distance = 1.0f, bool forceBaseline = false,
         bool xyb = false)
     {
+        // 最终防线（2026-11-06 裁决：不加 Warn 留痕）：上游唯一调用链
+        // JpegGainMapEncoder 主路已 Clamp(settings.Quality, 0.0f, 25.0f) 后传入，
+        // 输出域恰好等于这里的 [0,25] ⇒ 本 Clamp 理论不可达，Warn 将是死代码。
+        // 主路 Encode 的调用面宽（FormatEncoders 直链在调用点级无钳制，只靠字段级
+        // Normalize 兜底），那里的 Warn 哨兵有真实价值；灰度路若上游契约真被破坏，
+        // 下方 JPEGLI_GRAY 留痕里的 --distance 会显出异常值作间接痕迹。
+        float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
+        string progArg = forceBaseline ? " --progressive_level 0" : "";
+        // 增益图层（灰度/彩色）恒传统 YCbCr：调用方不传 xyb（libultrahdr 解析端按标准
+        // JPEG 读增益图，XYB 徒增解码风险；2026-10-07 实测 -p 0 路省 1.5%，收益不值得）。
+        string xybArg = xyb ? " --xyb" : "";
+
+        // ═══ 主路径：ttc_jpegli.dll（灰度直传 shim，PGM 容器在 shim 内构造）═══
+        if (TryLoadLib())
+        {
+            try
+            {
+                CoreLog.Debug("JPEGLI_GRAY",
+                    $"lib: --distance {clampedDist:F4}{progArg}{xybArg}", LogCategory.Encoding);
+                int rc = _encodeGray!(gray, width, height, clampedDist,
+                    forceBaseline ? 0 : 2, xyb ? 1 : 0,
+                    out IntPtr jpegPtr, out nuint jpegLen);
+                if (rc != 0)
+                {
+                    string err = Marshal.PtrToStringAnsi(_error!()) ?? "";
+                    throw new InvalidOperationException(
+                        $"[jpegli] ttc_jpegli.dll 灰度编码失败 (rc={rc}) {err.Trim()}");
+                }
+                try
+                {
+                    var jpeg = new byte[checked((int)jpegLen)];
+                    Marshal.Copy(jpegPtr, jpeg, 0, jpeg.Length);
+                    return jpeg;
+                }
+                finally
+                {
+                    _free!(jpegPtr);
+                }
+            }
+            catch (Exception ex)
+            {
+                CoreLog.Warn("JPEGLI_GRAY", "ttc_jpegli.dll 灰度编码失败，回退 cjpegli.exe 子进程",
+                    ex, LogCategory.Encoding);
+            }
+        }
+
+        // ═══ 回退路径：cjpegli.exe 子进程 ═══
         var exePath = GetExePath();
         var tmpPpm = Path.Combine(Path.GetTempPath(), $"ttc_jpegli_gray_{Guid.NewGuid():N}.pgm");
 
@@ -320,25 +617,10 @@ public static class JpegLiNative
                 fs.Write(gray, 0, gray.Length);
             }
 
-            // 最终防线（2026-11-06 裁决：不加 Warn 留痕）：上游唯一调用链
-            // JpegGainMapEncoder 主路已 Clamp(settings.Quality, 0.0f, 25.0f) 后传入，
-            // 输出域恰好等于这里的 [0,25] ⇒ 本 Clamp 理论不可达，Warn 将是死代码。
-            // 主路 Encode 的调用面宽（FormatEncoders 直链在调用点级无钳制，只靠字段级
-            // Normalize 兜底），那里的 Warn 哨兵有真实价值；灰度路若上游契约真被破坏，
-            // 下方 JPEGLI_GRAY 命令行日志里的 --distance 会显出异常值作间接痕迹。
-            float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
-            string progArg = forceBaseline ? " --progressive_level 0" : "";
-            // 增益图层（灰度/彩色）恒传统 YCbCr：调用方不传 xyb（libultrahdr 解析端按标准
-            // JPEG 读增益图，XYB 徒增解码风险；2026-10-07 实测 -p 0 路省 1.5%，收益不值得）。
-            string xybArg = xyb ? " --xyb" : "";
-
-            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
-            var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
-            
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {clampedDist:F4}{progArg}{xybArg} \"{safeTmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
+                Arguments = $"--distance {clampedDist:F4}{progArg}{xybArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

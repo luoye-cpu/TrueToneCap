@@ -224,9 +224,12 @@ $modelsSrc = Join-Path $RepoRoot "src\TrueToneCap.App\Models"
 
 $toolFiles = [ordered]@{
     "avifenc.exe" = "AVIF 编码器"
-    "cjpegli.exe" = "JPEG LI 编码器"
+    "cjpegli.exe" = "JPEG LI 编码器（子进程回退路径）"
     "cwebp.exe"   = "WebP 编码器"
     "cjxl.exe"    = "JPEG XL 编码器"
+    # 2026-11-12：JPEG LI 进程内主路径（P/Invoke shim，与 cjpegli.exe 同配方同树产出）。
+    # 缺它程序自动回退 cjpegli.exe 子进程，但随包分发的承诺是"有它"。
+    "ttc_jpegli.dll" = "JPEG LI 编码器（进程内主路径）"
     # 2026-10-31：可选无损压缩后端。缺它程序自动回退内置 zlib-ng，
     # 但随包分发的承诺是"有它" ⇒ 这里仍按必需件检查/复制/校验哈希。
     "deflate.dll" = "无损压缩（libdeflate）"

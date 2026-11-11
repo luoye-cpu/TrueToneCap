@@ -121,6 +121,12 @@
     <None Include="$(MSBuildThisFileDirectory)src\TrueToneCap.Core\Resources\*.exe"
           Link="Resources\%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- 2026-11-12：DLL 同步跟进（deflate.dll + ttc_jpegli.dll）。ttc_jpegli.dll 是 JPEG LI
+         主路径，测试必须能走到它，否则行为级测试全在测 exe 回退路径——与产品实际运行的
+         主路径脱节（假绿来源，与上面 exe 那条教训同形状）。 -->
+    <None Include="$(MSBuildThisFileDirectory)src\TrueToneCap.Core\Resources\*.dll"
+          Link="Resources\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

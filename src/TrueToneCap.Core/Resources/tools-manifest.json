@@ -56,8 +56,23 @@
       "sha256": "0dd93d725a330d2b9b2062e6c2bdf0b8ee0701ed6cf4de398bfac189e3fb46ed",
       "sizeBytes": 759808,
       "license": "BSD-3-Clause AND IJG AND MIT AND Zlib AND libpng-2.0 AND Apache-2.0 AND LicenseRef-Google-BSD-plus-Patents",
-      "licenseDetail": "以 licenses/INDEX.json 为准。⚠️ 2026-10-07 起 cjpegli 由 libjxl 预编译件改为**从 google/jpegli 自编译**，链接集合随之变化，本字段已按新构建实测收敛: 【仍链接】libjxl/jpegli 本体 BSD-3-Clause（其『Additional IP Rights Grant (Patents)』是独立一节，见 licenses/libjxl-LicenseRef-Google-Patent-Grant.txt）、highway = Apache-2.0、**lcms = MIT（新增义务）**。【**不再链接**】sjpeg、skcms、brotli、libpng、libjpeg-turbo —— 实测二进制内 0 处相关符号（旧件含 `libjpeg-turbo version 3.1.2` 与 `1.6.50`，新件两者皆无）。因此上面 licenseFiles 已删去 sjpeg/brotli 及 libjxl-pin 的 libpng/zlib/libjpeg-turbo 各项，并加入 lcms-MIT.txt。 ⚠ 那些文件**仍保留在 licenses/**（avifenc 与 cjxl 仍引用其中多份），此处的删减只表示『不再适用于 cjpegli』，不是删除文件。",
-      "licenseFiles": ["libjxl-BSD-3-Clause.txt", "libjxl-LicenseRef-Google-Patent-Grant.txt", "highway-Apache-2.0.txt", "lcms-MIT.txt"]
+      "licenseDetail": "以 licenses/INDEX.json 为准。⚠️ 2026-10-07 起 cjpegli 由 libjxl 预编译件改为**从 google/jpegli 自编译**，链接集合随之变化，本字段已按新构建实测收敛: 【仍链接】libjxl/jpegli 本体 BSD-3-Clause（其『Additional IP Rights Grant (Patents)』是独立一节，见 licenses/libjxl-LicenseRef-Google-Patent-Grant.txt）、highway = Apache-2.0、**lcms = MIT（新增义务）**。【**不再链接**】sjpeg、skcms、brotli、libpng、libjpeg-turbo —— 实测二进制内 0 处相关符号（旧件含 `libjpeg-turbo version 3.1.2` 与 `1.6.50`，新件两者皆无）。因此上面 licenseFiles 已删去 sjpeg/brotli 及 libjxl-pin 的 libpng/zlib/libjpeg-turbo 各项，并加入 lcms-MIT.txt。 ⚠ 那些文件**仍保留在 licenses/**（avifenc 与 cjxl 仍引用其中多份），此处的删减只表示『不再适用于 cjpegli』，不是删除文件。 [2026-11-12 补审计] jpegli_extras-internal 无条件编入的 apngdis（APNG 解码器，zlib license）经 DecodeBytes 分派表实际链入本二进制 —— 2026-10-07 审计漏记，随 ttc_jpegli.dll 采纳一并回补（licenseFiles 同步加 apngdis-Zlib.txt）。",
+      "licenseFiles": ["libjxl-BSD-3-Clause.txt", "libjxl-LicenseRef-Google-Patent-Grant.txt", "highway-Apache-2.0.txt", "lcms-MIT.txt", "apngdis-Zlib.txt"]
+    },
+    {
+      "file": "ttc_jpegli.dll",
+      "project": "jpegli (google/jpegli) — TrueToneCap C-ABI shim",
+      "version": "0.12.0-dev (commit 031a007)",
+      "versionDetail": "JPEG LI 编码器进程内库（P/Invoke 主路径）。shim 层（scripts/jpegli-shim/ttc_shim.cc）是本项目自研的 C-ABI 薄包装：内部走 jpegli::extras::DecodeBytes → EncodeJpeg，与 cjpegli.exe 完全同一条上游代码路径；采纳前由 scripts/build-cjpegli.py 强制跑逐字节对照门禁（12 参数组合 + ICC 原生嵌入回读，2026-11-12 实测 15/15 PASS）。上游 commit 031a0077（google/jpegli 2026-06 时点，无 release tag）。⚠ jpegli 上游无版本号约定，版本字段取 shim 自报 ttc_jpegli_version()（\"0.12.0-shim1\"）+ commit 短哈希。",
+      "versionSource": "二进制导出 ttc_jpegli_version()（shim 自报）；上游源码 commit 由 clone 时点决定。构建配方 scripts/build-cjpegli.py（同树同参产出 cjpegli.exe 与本 DLL，末尾强制字节门禁，不一致即非零退出、产物不得采纳）。",
+      "upstream": "自编译（非预编译发布件）: https://github.com/google/jpegli —— 上游无任何 GitHub Release，无预编译件可取。",
+      "buildRecipe": "scripts/build-cjpegli.py",
+      "buildNotes": "═══ 2026-11-12 新增：JPEG LI 从子进程主路径改为进程内 DLL 主路径 ═══ 背景: cjpegli.exe 子进程路径要写 11MB 临时 PPM + 进程启动开销（2560×1440 d0.5 全程 249ms）；DLL 进程内编码同参数 87ms（2-3× 提速）且零临时文件。改动方式: shim 走与 cjpegli.exe 相同的 extras 层（DecodeBytes→EncodeJpeg），不绕过任何上游编码逻辑 ⇒ 行为可由逐字节对照门禁闭环（同参数必须产出相同 JPEG，否则不得采纳；12 参数组合 = 444/420 × XYB ± × Progressive/Baseline × 彩色/灰度，外加 ICC 回读 3 例）。链接闭包（build.ninja 实测）: jpegli-static + jpegli_extras-internal + jpegli_threads + jpegli_cms + hwy + lcms2，无 sjpeg/libpng/zlib/libjpeg-turbo/brotli/skcms（开关集与 cjpegli 配方一致）。依赖漂移扫描: 二进制内 0 处 libpng/libjpeg-turbo 版本串。⚠ cjpegli.exe 保留为回退路径（在库件仍为 2026-10-07 build，与本 DLL 的 jpegli commit 不同 ⇒ 回退产物字节可能微差，均合法 JPEG，已在 JpegLiNative.cs 注释记明）。",
+      "sha256": "da28244cd38f23670d3ef8416d25b44c6750414ebb55e4c1ef11ca590be8efd1",
+      "sizeBytes": 731136,
+      "license": "BSD-3-Clause AND Apache-2.0 AND MIT AND Zlib AND LicenseRef-Google-BSD-plus-Patents",
+      "licenseDetail": "以 licenses/INDEX.json 为准。链接闭包实测（build.ninja）: jpegli 本体 BSD-3-Clause（jpegli-static/jpegli_extras-internal/jpegli_threads/jpegli_cms）+ Google 专利授权（jpegli 树内 PATENTS，文本族同 libjxl 的 LicenseRef-Google-BSD-plus-Patents）+ highway Apache-2.0 + lcms2 MIT + apngdis zlib license（extras 内置 APNG 解码器，2026-11-12 补审计：cjpegli.exe 同链路此前漏记）。",
+      "licenseFiles": ["libjxl-BSD-3-Clause.txt", "libjxl-LicenseRef-Google-Patent-Grant.txt", "highway-Apache-2.0.txt", "lcms-MIT.txt", "apngdis-Zlib.txt"]
     },
     {
       "file": "cjxl.exe",

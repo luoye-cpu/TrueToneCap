@@ -86,21 +86,22 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 
 | 组件 | 版本 | SPDX | 许可全文 | 再分发义务 |
 |---|---|---|---|---|
-| Google Highway (hwy, libjxl SIMD 抽象层) | libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag） | `Apache-2.0` | `licenses/highway-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。 |
+| APNG Disassembler 2.8 (google/jpegli third_party/apngdis) — jpegli_extras 内置 APNG 解码器 | 2.8 | `Zlib` | `licenses/apngdis-Zlib.txt` | Zlib license：再分发须保留版权声明（Copyright (c) 2010-2015 Max Stepin）与许可全文。⚠ 2026-11-12 补审计：jpegli_extras-internal 的 JPEGLI_EXTRAS_CORE_SOURCES 无条件编入 apngdis dec.cc/enc.cc，经 DecodeBytes 分派表静态链入 cjpegli.exe 与 ttc_jpegli.dll —— 2026-10-07 的 cjpegli 许可审计漏记了这一项，本次随 ttc_j... |
+| Google Highway (hwy, libjxl SIMD 抽象层) | libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag） | `Apache-2.0` | `licenses/highway-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（SIMD 抽象层，静态链入进程内库）。 |
 | Little CMS (lcms2) — 经 google/jpegli 的 third_party/lcms submodule 静态链入 cjpegli.exe | 取自 google/jpegli 的 submodule 提交 mm2/Little-CMS（2026-10-07 clone 时点，上游未给该 submodule tag） | `MIT` | `licenses/lcms-MIT.txt` | MIT：Copyright (c) 2023 Marti Maria Saguer。二进制再分发须保留版权声明与许可全文。 ⚠️ 2026-10-07 新增：cjpegli 由 libjxl 预编译件改为从 google/jpegli 自编译后，链接集合发生变化 —— 新增 lcms（经 jpegli_cms.lib），同时**不再**链接 sjpeg / skcms / brotli / libpng / libjpeg-turbo（二进制内实测 0 处相关符号，体积亦从 5.13 MB 降至 0.72 M... |
-| libjxl (JPEG XL) | 0.11.2 | `BSD-3-Clause` | `licenses/libjxl-BSD-3-Clause.txt` | BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。 |
-| libjxl (JPEG XL) | 0.11.2 | `LicenseRef-Google-BSD-plus-Patents` | `licenses/libjxl-LicenseRef-Google-Patent-Grant.txt` | Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。 |
+| libjxl (JPEG XL) | 0.11.2 | `BSD-3-Clause` | `licenses/libjxl-BSD-3-Clause.txt` | BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（google/jpegli 同文本族 BSD-3，JPEG LI 进程内库）。 |
+| libjxl (JPEG XL) | 0.11.2 | `LicenseRef-Google-BSD-plus-Patents` | `licenses/libjxl-LicenseRef-Google-Patent-Grant.txt` | Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（jpegli 树内 PATENTS 与本文本族同源）。 |
 
 ### JPEG XL 工具 cjxl.exe
 
 | 组件 | 版本 | SPDX | 许可全文 | 再分发义务 |
 |---|---|---|---|---|
-| Google Highway (hwy, libjxl SIMD 抽象层) | libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag） | `Apache-2.0` | `licenses/highway-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。 |
+| Google Highway (hwy, libjxl SIMD 抽象层) | libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag） | `Apache-2.0` | `licenses/highway-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发须附带 LICENSE 副本、改动文件须加显著标注、并保留原始 NOTICE/版权与引用信息；二进制里 HWY_DYNAMIC_DISPATCH 符号确认已链入。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（SIMD 抽象层，静态链入进程内库）。 |
 | brotli (libjxl 编入的容器压缩) | libjxl v0.11.2 的 submodule gitlink 36533a866ed1ca4b75cf049f4521e4ec5fe24727（未解析成 tag） | `MIT` | `licenses/brotli-MIT.txt` | MIT：随拷贝保留版权声明与许可声明；cjxl/cjpegli 里有 BrotliEncoder* 符号，确认静态链入。 |
 | libjpeg-turbo (libjxl 编入) | libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1（未解析成 tag） | `BSD-3-Clause` | `licenses/libjpeg-turbo-libjxl-pin-BSD-3-Clause.txt` | 同 avifenc 那份的 roll-up 义务：静态链接发行时文档须写 “This software is based in part on the work of the Independent JPEG Group” 并附 Modified BSD 全文。 |
 | libjpeg-turbo / IJG 基础代码 (libjxl 编入) | libjxl v0.11.2 的 submodule gitlink 8ecba3647edb6dd940463fedf38ca33a8e2a73d1 | `IJG` | `licenses/libjpeg-turbo-libjxl-pin-IJG.txt` | IJG 第 2 条（只分发可执行代码时须在文档声明基于 IJG 工作）；与 libavif 的 3.1.4.1 版本分属不同 revision，故各留一份。 |
-| libjxl (JPEG XL) | 0.11.2 | `BSD-3-Clause` | `licenses/libjxl-BSD-3-Clause.txt` | BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。 |
-| libjxl (JPEG XL) | 0.11.2 | `LicenseRef-Google-BSD-plus-Patents` | `licenses/libjxl-LicenseRef-Google-Patent-Grant.txt` | Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。 |
+| libjxl (JPEG XL) | 0.11.2 | `BSD-3-Clause` | `licenses/libjxl-BSD-3-Clause.txt` | BSD-3 第 2/3 条：二进制再分发须复制 “Copyright (c) the JPEG XL Project Authors.” 的声明与免责，且不得用项目/作者名义背书。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（google/jpegli 同文本族 BSD-3，JPEG LI 进程内库）。 |
+| libjxl (JPEG XL) | 0.11.2 | `LicenseRef-Google-BSD-plus-Patents` | `licenses/libjxl-LicenseRef-Google-Patent-Grant.txt` | Google 对该实现给出仅覆盖必然被侵权专利 claims 的免费专利授权，并对发起专利诉讼的一方自动终止；这是 LICENSE 之外的额外授权，分发时应一并放出。 [2026-11-12] 新增随 ttc_jpegli.dll 分发（jpegli 树内 PATENTS 与本文本族同源）。 |
 | libpng (libjxl 编入，PNG 输入) | libjxl v0.11.2 的 submodule gitlink 872555f4ba910252783af1507f9e7fe1653be252（glennrp/libpng）；文本内版权年份 1995-2025，未解析成 tag | `libpng-2.0` | `licenses/libpng-libjxl-pin-libpng-2.0.txt` | libpng License v2 第 3 条：版权声明不得从再分发中移除或改动；二进制内有 png_write_info 符号，确认链入。 |
 | sjpeg (libjxl 编入的 JPEG 编码器) | libjxl v0.11.2 的 submodule gitlink 94e0df6d0f8b44228de5be0ff35efb9f946a13c9（未解析成 tag） | `Apache-2.0` | `licenses/sjpeg-Apache-2.0.txt` | Apache-2.0 第 4 条：再分发须附许可副本、保留 NOTICE 与源文件里的版权头、改动须标注；⚠️ 该仓 COPYING 是未填年份的 Apache 模板（无项目专属 Copyright 行），真正的版权头在 src/*.h 里，署名时不能只引这份文件。 |
 | skcms (libjxl 的 ICC 色彩变换) | libjxl v0.11.2 的 submodule gitlink b2e692629c1fb19342517d7fb61f1cf83d075492 | `BSD-3-Clause` | `licenses/skcms-BSD-3-Clause.txt` | BSD-3：二进制再分发须复制 “Copyright (c) 2018 Google Inc.” 声明与免责；⚠️ 上游 remote 是 skia.googlesource.com（本环境不可达），全文取自 GitHub 上的 google/skcms 同一 commit 镜像。 |
@@ -157,6 +158,7 @@ TrueToneCap / 真色截图 自身以 Apache License 2.0 发布，见 [LICENSE](.
 |---|---|
 | `avifenc.exe` | `BSD-2-Clause AND BSD-3-Clause AND BSD-3-Clause-Clear AND IJG AND MIT AND Zlib AND libpng-2.0 AND LicenseRef-AOM-Standard-Patent-License-1.0` |
 | `cjpegli.exe` | `BSD-3-Clause AND IJG AND MIT AND Zlib AND libpng-2.0 AND Apache-2.0 AND LicenseRef-Google-BSD-plus-Patents` |
+| `ttc_jpegli.dll` | `BSD-3-Clause AND Apache-2.0 AND MIT AND Zlib AND LicenseRef-Google-BSD-plus-Patents` |
 | `cjxl.exe` | `BSD-3-Clause AND IJG AND MIT AND Zlib AND libpng-2.0 AND Apache-2.0 AND LicenseRef-Google-BSD-plus-Patents` |
 | `cwebp.exe` | `BSD-3-Clause AND LicenseRef-Google-WebM-Patent-Grant` |
 | `deflate.dll` | `MIT` |
@@ -1544,10 +1546,49 @@ Copyright notice:
 
 ---
 
+### APNG Disassembler 2.8 (google/jpegli third_party/apngdis) — jpegli_extras 内置 APNG 解码器 — Zlib
+
+- 版本：2.8
+- 随包于：cjpegli.exe, ttc_jpegli.dll
+- 来源：上游源码树内的 `LICENSE`（libavif v1.4.2 的 CMake FetchContent 拉取的固定版本，各依赖的 tag 见 `src/TrueToneCap.Core/Resources/tools-manifest.json` 的 upstream 字段）
+- 本地副本：`licenses/apngdis-Zlib.txt`（SHA256 `834dc4de27509c0fb5f4ef65671dd7bf96c80ad6079cc293ab134a9f1a125f2f`）
+
+~~~text
+APNG Disassembler 2.8
+
+Deconstructs APNG files into individual frames.
+
+http://apngdis.sourceforge.net
+
+Copyright (c) 2010-2015 Max Stepin
+maxst at users.sourceforge.net
+
+zlib license
+------------
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+~~~
+
+---
+
 ### Google Highway (hwy, libjxl SIMD 抽象层) — Apache-2.0
 
 - 版本：libjxl v0.11.2 的 submodule gitlink 457c891775a7397bdb0376bb1031e6e027af1c48（未解析成 tag）
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe, cjpegli.exe, ttc_jpegli.dll
 - 来源：https://api.github.com/repos/google/highway/contents/LICENSE?ref=457c891775a7397bdb0376bb1031e6e027af1c48
 - 本地副本：`licenses/highway-Apache-2.0.txt`（SHA256 `43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1`）
 
@@ -1760,7 +1801,7 @@ Copyright notice:
 ### Little CMS (lcms2) — 经 google/jpegli 的 third_party/lcms submodule 静态链入 cjpegli.exe — MIT
 
 - 版本：取自 google/jpegli 的 submodule 提交 mm2/Little-CMS（2026-10-07 clone 时点，上游未给该 submodule tag）
-- 随包于：cjpegli.exe
+- 随包于：cjpegli.exe, ttc_jpegli.dll
 - 来源：上游源码树内的 `LICENSE`（libavif v1.4.2 的 CMake FetchContent 拉取的固定版本，各依赖的 tag 见 `src/TrueToneCap.Core/Resources/tools-manifest.json` 的 upstream 字段）
 - 本地副本：`licenses/lcms-MIT.txt`（SHA256 `bc1ba06a8fdf54466daa2b9a927fdca7c4d626a598045b2da62494a556491af6`）
 
@@ -1794,7 +1835,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ### libjxl (JPEG XL) — BSD-3-Clause
 
 - 版本：0.11.2
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe, cjpegli.exe, ttc_jpegli.dll
 - 来源：https://api.github.com/repos/libjxl/libjxl/contents/LICENSE?ref=v0.11.2
 - 本地副本：`licenses/libjxl-BSD-3-Clause.txt`（SHA256 `8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede`）
 
@@ -1833,7 +1874,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### libjxl (JPEG XL) — LicenseRef-Google-BSD-plus-Patents
 
 - 版本：0.11.2
-- 随包于：cjxl.exe, cjpegli.exe
+- 随包于：cjxl.exe, cjpegli.exe, ttc_jpegli.dll
 - 来源：https://api.github.com/repos/libjxl/libjxl/contents/PATENTS?ref=v0.11.2
 - 本地副本：`licenses/libjxl-LicenseRef-Google-Patent-Grant.txt`（SHA256 `91915f8ae056a68a3c5bdf05d9f6f78bb6903e27a8ca3a8434c9e4ac87300575`）
 

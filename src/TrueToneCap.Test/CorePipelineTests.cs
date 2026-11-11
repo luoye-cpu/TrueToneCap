@@ -208,6 +208,7 @@ public static class CorePipelineTests
         // 质量链路回归判据（2026-11-06 交接待办#5）：非默认质量值必须逐字抵达编码器参数
         // （落点 / 参数换算 / 二源防复活 / 量纲防御，实现见 Test_Settings_QualityDefaultsSingleSource 之后那一段）
         Test_QualityChain_PerFormatNonDefaultLandsInPipeline();
+        Test_QualityChain_JpegLiLibPathDeliveryChain();
         Test_QualityChain_JpegLiDistanceVerbatim();
         Test_QualityChain_AvifCrfConversionDirection();
         Test_QualityChain_WebpQualityVerbatim();
@@ -10281,6 +10282,146 @@ public static class CorePipelineTests
     /// 需要 Diagnose 档）。cjpegli 不在位时 Skip 行为级（仓库范式：先判可用性再 Skip），
     /// 源码形态钉照常执行 —— 它不需要 exe。</para>
     /// </summary>
+    /// <summary>
+    /// JPEG LI 进程内主路径（ttc_jpegli.dll）的交付链判据（2026-11-12）。
+    /// <para>背景：JPEG LI 从「cjpegli.exe 子进程单路径」升级为「ttc_jpegli.dll 进程内
+    /// 主路径 + exe 回退」。shim 的正确性论证是"与 cjpegli.exe 走完全相同的上游代码
+    /// 路径"，该论证由 scripts/build-cjpegli.py 末尾的逐字节对照门禁闭环（12 参数组合
+    /// + ICC 原生嵌入回读，不一致即非零退出、产物不得采纳）。本判据钉住交付链不被
+    /// 静默拆掉：DLL 实件 / manifest 条目 / Resolver 清单 / csproj 拷贝计数 / 打包脚本 /
+    /// shim 源码在仓 / 许可条目——任何一环缺失都意味着"主路径在，但没人给用户兑现"。</para>
+    /// </summary>
+    static void Test_QualityChain_JpegLiLibPathDeliveryChain()
+    {
+        // ① DLL 实件在库（单一事实源 Core/Resources/）
+        var dllPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Resources", "ttc_jpegli.dll"));
+        Assert("JPEG LI lib: ttc_jpegli.dll 实件在 Core/Resources/", dllPath is not null);
+        if (dllPath is null) return;
+        Assert("JPEG LI lib: DLL 体积在正常量级（截断/占位即红）",
+            new FileInfo(dllPath).Length is > 256 * 1024 and < 16 * 1024 * 1024,
+            $"实得 {new FileInfo(dllPath).Length}B（2026-11-12 实测 731,136B）");
+
+        // ①b 主路径真的装载成功（本进程内）——否则下面所有行为级测试都在静默测 exe
+        // 回退路径，与产品实际运行的主路径脱节（假绿；Directory.Build.props 里 DLL
+        // 不随流那次就是同形状教训）。
+        Assert("JPEG LI lib: 测试进程内 ttc_jpegli.dll 装载成功（主路径在用，非静默回退）",
+            JpegLiNative.IsLibAvailable,
+            "装载失败 ⇒ 检查 Test 输出目录 native/ 的就位与 DLL 的导出集");
+
+        // ② manifest 条目（Publish [0/6] 的 sha256 校验输入）
+        var manifestPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Resources", "tools-manifest.json"));
+        Assert("JPEG LI lib: tools-manifest.json 可读", manifestPath is not null);
+        if (manifestPath is not null)
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(manifestPath));
+                var tools = doc.RootElement.GetProperty("tools");
+                bool found = false;
+                foreach (var t in tools.EnumerateArray())
+                {
+                    if (t.GetProperty("file").GetString() != "ttc_jpegli.dll") continue;
+                    found = true;
+                    var sha = t.GetProperty("sha256").GetString();
+                    Assert("JPEG LI lib: manifest 条目带 64 位十六进制 sha256",
+                        sha is not null && sha.Length == 64
+                        && sha.All(c => Uri.IsHexDigit(c)));
+                    Assert("JPEG LI lib: manifest 条目指向自编译配方",
+                        t.GetProperty("buildRecipe").GetString()!.Contains("build-cjpegli.py"));
+                }
+                Assert("JPEG LI lib: manifest 含 ttc_jpegli.dll 条目", found);
+            }
+            catch (Exception ex)
+            {
+                Assert("JPEG LI lib: manifest 解析", false, $"tools-manifest.json 解析失败: {ex.Message}");
+            }
+        }
+
+        // ③ 编码器源码：主路径（P/Invoke）与回退路径（exe）并存在位
+        var jlnPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "JpegLiNative.cs"));
+        Assert("JPEG LI lib: JpegLiNative.cs 可读", jlnPath is not null);
+        if (jlnPath is not null)
+        {
+            var jln = StripLineComments(File.ReadAllText(jlnPath));
+            Assert("JPEG LI lib: 主路径 P/Invoke 入口在位（ttc_jpegli_encode_rgb）",
+                jln.Contains("ttc_jpegli_encode_rgb") && jln.Contains("TryLoadLib"));
+            Assert("JPEG LI lib: exe 回退路径保留（EncodeViaExe）——回退是崩溃隔离的兜底，不许顺手删",
+                jln.Contains("EncodeViaExe"));
+        }
+
+        // ④ Resolver 就位清单含 DLL
+        var resolverPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "NativeLibraryResolver.cs"));
+        Assert("JPEG LI lib: NativeLibraryResolver.cs 可读", resolverPath is not null);
+        if (resolverPath is not null)
+            Assert("JPEG LI lib: Resolver 清单含 ttc_jpegli.dll（否则 native/ 不给 DLL 就位）",
+                StripLineComments(File.ReadAllText(resolverPath)).Contains("\"ttc_jpegli.dll\""));
+
+        // ⑤ App.csproj：DLL 拷贝计数 = 2（deflate + shim）
+        var csprojPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "TrueToneCap.App.csproj"));
+        Assert("JPEG LI lib: App.csproj 可读", csprojPath is not null);
+        if (csprojPath is not null)
+            Assert("JPEG LI lib: csproj 的 TtcNativeLibs 计数断言为 2（deflate + ttc_jpegli）",
+                File.ReadAllText(csprojPath).Contains("'@(TtcNativeLibs->Count())' != '2'"),
+                "少拷不拦 ⇒ native/ 静默缺 DLL，JPEG LI 静默退回子进程而无人知晓");
+
+        // ⑥ 打包链三脚本都在场
+        foreach (var (rel, needle) in new[]
+        {
+            (Path.Combine("scripts", "verify-package.ps1"), "ttc_jpegli.dll"),
+            (Path.Combine("scripts", "verify-msix.ps1"), "ttc_jpegli.dll"),
+            ("Publish.ps1", "ttc_jpegli.dll"),
+        })
+        {
+            var p = FindRepoFile(rel);
+            Assert($"JPEG LI lib: {rel.Replace('\\', '/')} 可读且含 ttc_jpegli.dll",
+                p is not null && File.ReadAllText(p).Contains("ttc_jpegli.dll"));
+        }
+
+        // ⑦ shim 源码在仓 + 配方含强制逐字节门禁
+        foreach (var f in new[] { "CMakeLists.txt", "ttc_shim.cc", "ttc_selftest.cc" })
+        {
+            var p = FindRepoFile(Path.Combine("scripts", "jpegli-shim", f));
+            Assert($"JPEG LI lib: scripts/jpegli-shim/{f} 在仓", p is not null);
+        }
+        var recipePath = FindRepoFile(Path.Combine("scripts", "build-cjpegli.py"));
+        Assert("JPEG LI lib: build-cjpegli.py 可读", recipePath is not null);
+        if (recipePath is not null)
+        {
+            var recipe = File.ReadAllText(recipePath);
+            Assert("JPEG LI lib: 配方同树产出 shim 三目标",
+                recipe.Contains("SHIM_TARGETS") && recipe.Contains("ttc_jpegli"));
+            Assert("JPEG LI lib: 配方末尾强制逐字节对照门禁（门禁不在 = 可采纳未验证的二进制）",
+                recipe.Contains("byte-identity gate"));
+        }
+
+        // ⑧ 许可清单：apngdis 条目在位（2026-10-07 审计漏项，随 DLL 采纳补上）+ DLL 入 shippedIn
+        var indexPath = FindRepoFile(Path.Combine("licenses", "INDEX.json"));
+        Assert("JPEG LI lib: licenses/INDEX.json 可读", indexPath is not null);
+        if (indexPath is not null)
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(indexPath));
+            var licenses = doc.RootElement.GetProperty("licenses");
+            bool apngOk = false;
+            int shippedCount = 0;
+            foreach (var e in licenses.EnumerateArray())
+            {
+                var file = e.TryGetProperty("file", out var fEl) ? fEl.GetString() : null;
+                if (file == "apngdis-Zlib.txt")
+                {
+                    var shipped = e.GetProperty("shippedIn").EnumerateArray()
+                                    .Select(s => s.GetString()).ToList();
+                    apngOk = shipped.Contains("cjpegli.exe") && shipped.Contains("ttc_jpegli.dll");
+                }
+                if (file is not null && e.GetProperty("shippedIn").EnumerateArray()
+                        .Any(s => s.GetString() == "ttc_jpegli.dll"))
+                    shippedCount++;
+            }
+            Assert("JPEG LI lib: apngdis-Zlib 条目在位且 shippedIn 覆盖 exe+DLL", apngOk);
+            Assert("JPEG LI lib: shippedIn 含 ttc_jpegli.dll 的条目 ≥ 5（jpegli/hwy/lcms/patent/apngdis）",
+                shippedCount >= 5, $"实得 {shippedCount}");
+        }
+    }
+
     static void Test_QualityChain_JpegLiDistanceVerbatim()
     {
         // ① 源码形态钉（常绿）：distArg 直接来自 clampedDist，无中间换算、无方向反转

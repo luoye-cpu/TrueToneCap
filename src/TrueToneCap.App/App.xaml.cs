@@ -192,7 +192,7 @@ public partial class App : Application
             catch (Exception ex) { LogService.Warn("App", $"OCR 初始化异常: {ex.Message}"); }
         });
 
-        // ── 初始化 jpegli 编码器（jxl.dll）──
+        // ── 初始化 jpegli 编码器（ttc_jpegli.dll 主路径 / cjpegli.exe 回退）──
         _ = Task.Run(() =>
         {
             try { JpegLiNative.Initialize(); LogService.Info("App", "jpegli 编码器初始化"); }
