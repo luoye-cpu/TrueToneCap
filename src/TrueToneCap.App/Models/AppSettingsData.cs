@@ -481,7 +481,11 @@ public sealed class AppSettingsData
     public int DisplayMaxNits { get; set; } = 1000;
 
     // ── 界面 ──
-    public string Language { get; set; } = "zh";
+    /// <summary>界面语言："auto"（默认）= 跟随系统 —— 系统 UI 语言是中文（简/繁）出中文，
+    /// 其余出英文（LocaleManager.SystemLanguageIsChinese 判定）；"zh"/"en" 为显式选择。
+    /// 2026-11-11 起 默认从 "zh" 改为 "auto"：显式选过中文/英文的用户（文件里有该键）不受影响；
+    /// 从未动过语言设置的用户在非中文系统上自动获得英文界面（语言自动化的本意）。</summary>
+    public string Language { get; set; } = "auto";
     public string OcrEngineMode { get; set; } = "OnnxGpu";
     public string ThemeMode { get; set; } = "Default";
     public bool EnableUiAnimations { get; set; } = true;

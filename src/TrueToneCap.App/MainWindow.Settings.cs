@@ -461,7 +461,7 @@ public sealed partial class MainWindow : Window
             _settings.ShowPreview = PreviewChk.IsChecked == true;
             _settings.OcrEngineMode = (OcrEngineCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "OnnxGpu";
             _settings.ThemeMode = (ThemeCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Default";
-            _settings.Language = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh";
+            _settings.Language = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "auto";
 
             // 字体
             var fontTag = (FontCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";

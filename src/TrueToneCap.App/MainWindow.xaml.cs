@@ -372,7 +372,8 @@ public sealed partial class MainWindow : Window
         // LocaleManager.CapabilityDetect 的【中文那一支】，之后再没人重刷 ⇒
         // 英文模式下状态栏启动那几秒一直是「能力检测中...」（15:23 UIA 实测抓到）。
         // 挪到这里即可：LocaleManager.LanguageChanged 全仓零订阅，早发一次没有副作用。
-        LocaleManager.SetLanguage(_settings.Language == "en" ? AppLanguage.English : AppLanguage.Chinese);
+        // ═══ 2026-11-11 语言自动化："auto"（新默认）= 跟随系统，见 ResolveUiLanguage ═══
+        LocaleManager.SetLanguage(ResolveUiLanguage(_settings.Language));
 
         SetStatus(LocaleManager.CapabilityDetect);   // 原先直写中文，绕过了表里已有的一条
 
@@ -3662,12 +3663,22 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>语言设置值 → AppLanguage。2026-11-11 语言自动化：
+    /// "zh"/"en" 为用户显式选择，照旧直译；"auto"（新默认）与其余未知值交给
+    /// <see cref="LocaleManager.SystemLanguageIsChinese"/> 判定——系统 UI 语言
+    /// 是中文（简/繁，zh* 全命中）出中文，其余出英文。</summary>
+    private static AppLanguage ResolveUiLanguage(string setting) => setting switch
+    {
+        "en" => AppLanguage.English,
+        "zh" => AppLanguage.Chinese,
+        _ => LocaleManager.SystemLanguageIsChinese() ? AppLanguage.Chinese : AppLanguage.English,
+    };
+
     private void OnLanguageChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_uiReady) return;
-        var tag = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "zh";
-        var lang = tag == "en" ? AppLanguage.English : AppLanguage.Chinese;
-        LocaleManager.SetLanguage(lang);
+        var tag = (LanguageCbo.SelectedItem as ComboBoxItem)?.Tag as string ?? "auto";
+        LocaleManager.SetLanguage(ResolveUiLanguage(tag));
         _settings.Language = tag;
         ApplyLocale();
         UpdateQualityPanel();

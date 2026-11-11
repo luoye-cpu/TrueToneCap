@@ -69,7 +69,7 @@ public static class AccessibilityMapper
             "选择深色/浅色/OLED 灰应用外观");
         
         Register("LanguageCbo", "界面语言选择器",
-            "切换程序显示的中文/English");
+            "切换界面语言：跟随系统/中文/English（跟随系统 = 系统语言是中文则中文，否则英文）");
         
         Register("ToastPositionCbo", "通知位置选择器",
             "选择提示弹窗的四个角位置");

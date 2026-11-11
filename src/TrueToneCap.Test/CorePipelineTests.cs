@@ -7091,7 +7091,7 @@ public static class CorePipelineTests
         // 值一路活到界面，下拉却匹配不到任何项 ⇒ 空白 + 下次保存被兜底值覆盖。
         // 原先只钉 OcrEngineMode / AvifEncoder 两项，其余五项从来没有这一层对照。
         CheckWhitelistEqualsTags(xaml, srv, "ThemeCbo", "s.ThemeMode", expectTags: 4);
-        CheckWhitelistEqualsTags(xaml, srv, "LanguageCbo", "s.Language", expectTags: 2);
+        CheckWhitelistEqualsTags(xaml, srv, "LanguageCbo", "s.Language", expectTags: 3);  // 2026-11-11 语言自动化：auto/zh/en
         CheckWhitelistEqualsTags(xaml, srv, "GainMapModeCbo", "s.GainMapMode", expectTags: 2);
         // GainMapMetadataCbo 交叉行已删（2026-11-03 二次收口：元数据不做用户抉择，下拉退役）
         CheckWhitelistEqualsTags(xaml, srv, "AvifHdrModeCbo", "s.AvifHdrMode", expectTags: 2);

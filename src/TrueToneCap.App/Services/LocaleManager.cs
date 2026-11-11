@@ -24,6 +24,26 @@ public static class LocaleManager
         LanguageChanged?.Invoke();
     }
 
+    /// <summary>
+    /// 系统 UI 语言是否为中文（简体/繁体任意变体，zh* 全命中）。
+    /// <para>2026-11-11 语言自动化：语言设置新增"跟随系统"档（<c>auto</c>，新默认）——
+    /// 系统 UI 语言是中文（简/繁）⇒ 中文界面，其余 ⇒ 英文界面。取值首选 Windows 的
+    /// 用户首选语言第一位（即用户在系统设置里排最前的显示语言，最能代表意图）；
+    /// WinRT 投影不可用（老系统/受限环境）时退回 .NET 线程 UI 文化。</para>
+    /// </summary>
+    public static bool SystemLanguageIsChinese()
+    {
+        try
+        {
+            var langs = Windows.System.UserProfile.GlobalizationPreferences.Languages;
+            if (langs is { Count: > 0 })
+                return langs[0].StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { /* 投影不可用 ⇒ 走下面的回退 */ }
+        return System.Globalization.CultureInfo.CurrentUICulture.Name
+            .StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+    }
+
     // ── 导航 ──
     public static string NavOutput => s_lang == AppLanguage.Chinese ? "输出设置" : "Output";
     public static string NavColor => s_lang == AppLanguage.Chinese ? "色彩管理" : "Color";
@@ -798,6 +818,7 @@ public static class LocaleManager
     public static string ThemeOled => s_lang == AppLanguage.Chinese ? "OLED 灰" : "OLED Gray";
 
     // ── 语言选项 ──
+    public static string LangAuto => s_lang == AppLanguage.Chinese ? "跟随系统" : "Follow system";
     public static string LangChinese => s_lang == AppLanguage.Chinese ? "中文" : "Chinese";
     public static string LangEnglish => "English";
 

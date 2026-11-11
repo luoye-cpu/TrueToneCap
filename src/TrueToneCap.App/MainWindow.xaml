@@ -722,7 +722,9 @@
                                 </Grid>
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="语言" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="LanguageCbo" Grid.Column="1" SelectionChanged="OnLanguageChanged">
-                                        <ComboBoxItem Tag="zh" IsSelected="True">中文</ComboBoxItem>
+                                        <!-- 2026-11-11 语言自动化：auto = 跟随系统（新默认），选中项由设置回填决定 -->
+                                        <ComboBoxItem Tag="auto">跟随系统</ComboBoxItem>
+                                        <ComboBoxItem Tag="zh">中文</ComboBoxItem>
                                         <ComboBoxItem Tag="en">English</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>

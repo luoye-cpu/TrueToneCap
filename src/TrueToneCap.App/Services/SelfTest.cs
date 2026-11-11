@@ -1366,7 +1366,7 @@ public static class SelfTest
         Expect("越界", "ChromaJpegLi", "42", oob.ChromaJpegLi, "444");
         Expect("越界", "ChromaGainMap", "0", oob.ChromaGainMap, "420");
         Expect("越界", "ThemeMode", "neon", oob.ThemeMode, "Default");
-        Expect("越界", "Language", "fr", oob.Language, "zh");
+        Expect("越界", "Language", "fr", oob.Language, "auto");  // 2026-11-11 语言自动化：默认 auto，越界随之回落
         Expect("越界", "OcrEngineMode", "DirectX", oob.OcrEngineMode, "OnnxGpu");
         Expect("越界", "GainMapMode", "Mono", oob.GainMapMode, "Gray");
         Expect("越界", "ArchiveMode", "Week", oob.ArchiveMode, "Month");  // 界面从来没有这一项（2026-09-29 摘掉）

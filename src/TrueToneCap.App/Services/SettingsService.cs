@@ -503,7 +503,8 @@ public sealed class SettingsService
         //   这条等式由 CorePipelineTests 的「设置白名单 == XAML Tag」逐轴对撞，7 个轴全在内。
         //   默认值一律取 CreateDefaults()，与上面质量轴同一条纪律（不得再写字面量）。
         FitTag(s.ThemeMode, v => s.ThemeMode = v, dft.ThemeMode, "Default", "Light", "Dark", "OLED");
-        FitTag(s.Language, v => s.Language = v, dft.Language, "zh", "en");
+        // 2026-11-11 语言自动化：Language 新增 "auto"（跟随系统）档并成为默认，白名单随之
+        FitTag(s.Language, v => s.Language = v, dft.Language, "auto", "zh", "en");
         // ═══ 2026-09-15 修复：白名单与 XAML 实际 Tag 不一致 ═══
         // 原白名单为 "Windows"/"Acme"，而 MainWindow.xaml:325-327 的 ComboBoxItem Tag
         // 实为 "OnnxGpu"/"OnnxCpu"/"WindowsOcr" ⇒ 用户选"Windows OCR"存下的 "WindowsOcr"

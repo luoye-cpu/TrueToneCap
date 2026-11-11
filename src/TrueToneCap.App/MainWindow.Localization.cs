@@ -180,7 +180,8 @@ public sealed partial class MainWindow : Window
         SetComboItemText(ThemeCbo, "Dark", LocaleManager.ThemeDark);
         SetComboItemText(ThemeCbo, "OLED", LocaleManager.ThemeOled);
 
-        // LanguageCbo: "zh" ↔ "Chinese", "en" ↔ "English"
+        // LanguageCbo: "auto" ↔ "跟随系统/Follow system", "zh" ↔ "Chinese", "en" ↔ "English"
+        SetComboItemText(LanguageCbo, "auto", LocaleManager.LangAuto);
         SetComboItemText(LanguageCbo, "zh", LocaleManager.LangChinese);
         SetComboItemText(LanguageCbo, "en", LocaleManager.LangEnglish);
 
