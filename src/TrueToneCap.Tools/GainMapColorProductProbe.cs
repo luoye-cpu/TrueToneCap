@@ -13,9 +13,11 @@
 //      任一自检不过 ⇒ 报"探针读错"，不把结论甩给产物。
 //
 // 三格对照（这是判据的全部力量所在）：
-//   默认（tag=sRGB）           ⇒ base 原色 ≈ 709/sRGB
-//   显式 BT.2020               ⇒ base 原色 ≈ BT.2020，且与默认那枚字节不同
-//   tag=BT2020 但非显式(自动)   ⇒ 必须回到 sRGB base（Ultra HDR 默认形状不许被 P3 屏自动解锁）
+//   默认（tag=sRGB）           ⇒ base 不嵌 ICC（2026-11-12 用户拍板：sRGB 是 JPEG 隐含默认，
+//                                 嵌 2100B 标准 profile 纯增体积；对齐 BakeIccToTarget / AVIF 侧
+//                                 既有的"sRGB 不嵌 ICC"契约），像素 ≈ 709/sRGB
+//   显式 BT.2020               ⇒ base 原色 ≈ BT.2020 且嵌仓库标准 2020 profile，与默认那枚字节不同
+//   tag=BT2020 但非显式(自动)   ⇒ 必须回到 sRGB base（Ultra HDR 默认形状不许被 P3 屏自动解锁），同样不嵌 ICC
 //
 // 退出码约定与 scripts/precision/precision_env.py 一致（门禁靠它区分三种结局，别改）：
 //   0 = 判了且全部通过 / 1 = 判红 / 3 = 前置条件不满足 ⇒ SKIP，含义是"这一层本轮没判"，
@@ -123,9 +125,17 @@ public static class GainMapColorProductProbe
         }
 
         Console.WriteLine("\n=== 自检（先怀疑探针，再怀疑产物）===");
-        foreach (var (name, icc, _, _) in results)
+        for (int i = 0; i < results.Count; i++)
         {
-            if (!icc.Found) { Console.WriteLine($"  ❌ {name}: 没取到 ICC ⇒ 探针或封装读错"); fail++; continue; }
+            var (name, icc, _, _) = results[i];
+            bool expectIcc = i == 1;   // 只有显式 BT.2020 那格该嵌 ICC（2026-11-12 契约）
+            if (!expectIcc)
+            {
+                if (icc.Found)
+                { Console.WriteLine($"  ❌ {name}: sRGB 底图不该嵌 ICC（2026-11-12 用户拍板：sRGB 是 JPEG 隐含默认，嵌纯增体积）"); fail++; }
+                continue;
+            }
+            if (!icc.Found) { Console.WriteLine($"  ❌ {name}: 广色域底图必须有 ICC（广色域唯一声明通道）"); fail++; continue; }
             if (icc.Len != icc.Declared)
             { Console.WriteLine($"  ❌ {name}: ICC 取到 {icc.Len} B 但自报 {icc.Declared} B ⇒ 探针读错，下面结论不作数"); fail++; }
             double dw = Math.Sqrt(Math.Pow(icc.Wx - 0.3127, 2) + Math.Pow(icc.Wy - 0.3290, 2));
@@ -135,27 +145,40 @@ public static class GainMapColorProductProbe
         if (results.Count == 3)
         {
             var (def, exp, auto) = (results[0], results[1], results[2]);
-            // ⚠ 参照系陷阱（本轮自己踩的）：ICC 的 rXYZ/gXYZ/bXYZ 存的是 **D50 PCS、已做色度适应**
-            //   的三刺激值，不是色度学课本上的 D65 原色坐标。拿 (0.30,0.60) 去比 sRGB 会误判成"探针错"：
-            //   实测解出 G=(0.3212,0.5979) 恰好等于标准 sRGB ICC 的 gXYZ=(0.385,0.7169,0.0971) 列归一化值。
-            //   ⇒ 判据只能在【同一适配空间】里比：方向 + 间距 + 与仓库自己那份标准 profile 逐字节相等。
-            static double Dg(double[] xy) => Math.Sqrt(Math.Pow(xy[2] - 0.30, 2) + Math.Pow(xy[3] - 0.60, 2));
-            if (Dg(def.icc.Xy) > 0.05)
-            { Console.WriteLine($"  ❌ 默认模式绿点间距 {Dg(def.icc.Xy):F4} ≥ 0.05 ⇒ 默认 base 不是 sRGB/709 一档"); fail++; }
-            else Console.WriteLine($"  ✅ 默认模式绿点间距 {Dg(def.icc.Xy):F4}（D50-PCS 空间，与标准 sRGB ICC 一致）");
-            if (Dg(exp.icc.Xy) <= Dg(def.icc.Xy) + 0.03)
-            { Console.WriteLine($"  ❌ 显式 BT.2020 的绿点没比默认更宽（{Dg(exp.icc.Xy):F4} vs {Dg(def.icc.Xy):F4}）"); fail++; }
-            else Console.WriteLine($"  ✅ 显式 BT.2020 绿点确实更宽：ΔG {Dg(def.icc.Xy):F4} → {Dg(exp.icc.Xy):F4}");
-            if (!(exp.icc.Xy[2] < def.icc.Xy[2] && exp.icc.Xy[3] > def.icc.Xy[3]))
-            { Console.WriteLine("  ❌ 2020 的绿点方向不对（x 应更小、y 应更大）"); fail++; }
 
-            // 与仓库自己生成的标准 profile 逐字节对得上 ⇒ 证明"模式挑中的就是那一份"
-            if (!BytesOf(def).SequenceEqual(ColorProfileProvider.GetDefaultSRgbIcc()))
-            { Console.WriteLine("  ❌ 默认 base 嵌的不是那份 sRGB 标准 ICC"); fail++; }
+            // ═══ sRGB 底图契约（2026-11-12 用户拍板）═══ 默认与自动两枚都不嵌 ICC。
+            if (def.icc.Found)
+            { Console.WriteLine("  ❌ 默认 base 嵌了 ICC ⇒ sRGB 底图不嵌契约被破坏（纯增体积）"); fail++; }
+            else Console.WriteLine("  ✅ 默认 base 不嵌 ICC（sRGB 隐含默认，省 2100B）");
+            if (auto.icc.Found)
+            { Console.WriteLine("  ❌ 自动 BT.2020（回退 sRGB）base 嵌了 ICC ⇒ 同上，契约被破坏"); fail++; }
+            else Console.WriteLine("  ✅ 自动 BT.2020（非显式）base 同样不嵌 ICC");
+
+            // ═══ 广色域声明 ═══ 显式 2020 必须嵌，且就是仓库那份标准 2020 profile（逐字节）
+            // ⇒ 证明"模式挑中的就是那一份"。
             var std2020 = ColorProfileProvider.GetStandardIccProfile("BT2020");
             if (std2020 is null || !BytesOf(exp).SequenceEqual(std2020))
             { Console.WriteLine("  ❌ 显式 2020 base 嵌的不是那份 BT.2020 标准 ICC"); fail++; }
-            else Console.WriteLine("  ✅ 两枚 base 各自嵌的 ICC 与仓库标准 profile 逐字节相等");
+            else Console.WriteLine("  ✅ 显式 2020 base 嵌的 ICC 与仓库标准 profile 逐字节相等");
+
+            // ⚠ 参照系陷阱（2026-09-22 轮自己踩的）：ICC 的 rXYZ/gXYZ/bXYZ 存的是 **D50 PCS、
+            //   已做色度适应**的三刺激值。sRGB 底图现在不嵌 ICC 了，绿点判据改与【sRGB 的
+            //   D50-PCS 标准值】比：标准 sRGB ICC 的 gXYZ=(0.3851,0.7169,0.0971) 列归一化后
+            //   G=(0.3212,0.5979)（2026-09-22 轮实测值）。2020 的绿必须更宽（离 (0.30,0.60)
+            //   更远）且方向正确（x 更小、y 更大）。
+            static double Dg(double[] xy) => Math.Sqrt(Math.Pow(xy[2] - 0.30, 2) + Math.Pow(xy[3] - 0.60, 2));
+            const double SrgbGx = 0.3212, SrgbGy = 0.5979;
+            if (!exp.icc.Found)
+            { Console.WriteLine("  ❌ 显式 2020 没有 ICC，绿点判据无从谈起"); fail++; }
+            else
+            {
+                if (Dg(exp.icc.Xy) < 0.10)
+                { Console.WriteLine($"  ❌ 显式 BT.2020 绿点间距 {Dg(exp.icc.Xy):F4} < 0.10 ⇒ 像是 sRGB 一档而非 2020"); fail++; }
+                else Console.WriteLine($"  ✅ 显式 BT.2020 绿点确实更宽：D50-PCS 距 (0.30,0.60) {Dg(exp.icc.Xy):F4}（sRGB 参考 ≈0.0213）");
+                if (!(exp.icc.Xy[2] < SrgbGx && exp.icc.Xy[3] > SrgbGy))
+                { Console.WriteLine("  ❌ 2020 的绿点方向不对（相对 sRGB 参考：x 应更小、y 应更大）"); fail++; }
+                else Console.WriteLine("  ✅ 2020 的绿点方向正确（x 更小、y 更大，比 sRGB 更\"绿\"）");
+            }
 
             if (auto.hash != def.hash)
             { Console.WriteLine($"  ❌ 自动解析出的 BT.2020 也升级了整张增益图（{auto.hash} ≠ 默认 {def.hash}）"); fail++; }

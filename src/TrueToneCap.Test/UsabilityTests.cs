@@ -148,7 +148,7 @@ public static class UsabilityTests
         Jpeg_AllQualityLevels();
         Jpeg_Chroma_420_422_444();
         Jpeg_IccLargeProfile();
-        Jpeg_IccSrgbEmbedContractOnLibPath();
+        Jpeg_IccEmbedOnlyForNonSrgb();
         Jpeg_EncodeToBytes_ValidJpeg();
         Jpeg_Streaming_Valid();
 
@@ -1232,13 +1232,12 @@ public static class UsabilityTests
     /// </summary>
     /// <summary>
     /// 最小合法非 sRGB RGB 矩阵 ICC v2 profile（自定义原色矩阵 + γ2.2 曲线）。
-    /// <para>2026-11-12 起本测试必须用【非 sRGB】profile：JPEG LI 的 lib 主路径
-    /// （ttc_jpegli.dll → jpegli EncodeJpeg）带 IsSRGB() 优化——识别为 sRGB 的
-    /// profile 直接省略 APP2 嵌入（sRGB 是 JPEG 隐含默认，不写省体积），这是
-    /// 上游 cjpegli 同款行为；用 sRGB profile 断"必须出现 APP2"会误判库正确。
-    /// γ2.2 曲线 + 自定义矩阵 ⇒ ColorEncoding 不可能被识别成参数化 sRGB。
-    /// 结构上恰好满足 FormatHelper.IsEmbeddableIcc 的结构判据（rXYZ/gXYZ/bXYZ/
-    /// wtpt 的 'XYZ ' 数据 + 三条 TRC），与产品真实嵌入路径同门禁。</para>
+    /// <para>2026-11-12 起本测试必须用【非 sRGB】profile：JPEG LI 的 ICC 口径是
+    /// "只有非 sRGB 才嵌"（见 <see cref="Jpeg_IccEmbedOnlyForNonSrgb"/>），sRGB
+    /// profile 走的是"不嵌"契约腿。γ2.2 曲线 + 自定义矩阵 ⇒ ColorEncoding 不可能
+    /// 被识别成参数化 sRGB。结构上恰好满足 FormatHelper.IsEmbeddableIcc 的结构
+    /// 判据（rXYZ/gXYZ/bXYZ/wtpt 的 'XYZ ' 数据 + 三条 TRC），与产品真实嵌入
+    /// 路径同门禁。</para>
     /// </summary>
     static byte[] MakeNonSrgbTestIcc()
     {
@@ -1329,49 +1328,64 @@ public static class UsabilityTests
     }
 
     /// <summary>
-    /// lib 主路径的 sRGB ICC 嵌入契约钉（2026-11-12）。
-    /// <para>jpegli 的 EncodeJpeg 对 IsSRGB() 的 profile <b>省略</b> APP2 嵌入（sRGB 是
-    /// JPEG 隐含默认，上游 cjpegli 同款优化）；产品契约是「调用方给了 ICC 就必须嵌」
-    /// ——GainMap 底图恒嵌标准 sRGB ICC，GainMapColorProductProbe 逐字节钉着
-    /// （2026-09-20 嵌入纪律）。⇒ C# 层在 lib 产物缺 ICC 时用同一个注入器补嵌。
-    /// 本判据防止上游优化把产品契约静默改掉。</para>
+    /// JPEG LI 的 ICC 嵌入口径契约（2026-11-12 用户拍板：<b>只有非 sRGB 才嵌</b>）。
+    /// <para>sRGB 是 JPEG 的隐含默认，嵌 2100B 标准 profile 纯增体积（小图上占比可达
+    /// 数十个百分点）——与全仓既有契约同向（BakeIccToTarget 的 sRGB 目标不嵌、AVIF
+    /// 增益图底图"sRGB 不嵌 ICC"）。实现：Encode 入口把与仓库标准 sRGB profile 逐字节
+    /// 相同的 ICC 归一化为 null（lib/exe 两路径同吃这一份决定）；非标准字形的 sRGB-ish
+    /// profile 由上游 jpegli 的 IsSRGB() 语义兜底省略。非 sRGB 照旧嵌（库原生 APP2 分块），
+    /// 广色域声明是硬需求（2026-09-20 纪律）。</para>
     /// </summary>
-    static void Jpeg_IccSrgbEmbedContractOnLibPath()
+    static void Jpeg_IccEmbedOnlyForNonSrgb()
     {
         var bgra = new byte[16 * 16 * 4];
         for (int i = 0; i < bgra.Length; i += 4) { bgra[i] = 64; bgra[i + 1] = 128; bgra[i + 2] = 255; bgra[i + 3] = 255; }
 
-        var icc = ColorProfileProvider.GetDefaultSRgbIcc();
-        var data = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", icc);
-        Assert("JPEG ICC sRGB 契约: 编码产出可用", data.Length > 200 && data[0] == 0xFF && data[1] == 0xD8,
-            $"实得 {data.Length}B");
+        // ① sRGB 契约：传入仓库标准 sRGB profile ⇒ 产物【不】带 ICC（省体积是目的本身）
+        var srgb = ColorProfileProvider.GetDefaultSRgbIcc();
+        var srgbData = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", srgb);
+        Assert("JPEG ICC 口径: sRGB 传入编码产出可用", srgbData.Length > 200 && srgbData[0] == 0xFF && srgbData[1] == 0xD8,
+            $"实得 {srgbData.Length}B");
+        var srgbIccSegs = JpegAppSegments(srgbData)
+            .Where(s => s.Marker == 0xE2 && s.Payload.StartsWith(IccProfileId)).ToList();
+        Assert("JPEG ICC 口径: sRGB profile 不嵌 ICC（2026-11-12 用户拍板，嵌=纯增体积）",
+            srgbIccSegs.Count == 0, $"实得 {srgbIccSegs.Count} 段 ⇒ sRGB 又被塞 ICC 了");
 
-        var segs = JpegAppSegments(data);
-        var iccSegs = segs.Where(s => s.Marker == 0xE2 && s.Payload.StartsWith(IccProfileId)).ToList();
-        Assert("JPEG ICC sRGB 契约: sRGB profile 也必须嵌进 APP2（lib 的 IsSRGB 省略不适用于产品）",
-            iccSegs.Count == 1, $"实得 {iccSegs.Count} 段");
-        if (iccSegs.Count != 1) return;
-        Assert("JPEG ICC sRGB 契约: 单块 seq/cnt == 01 01 且载荷与传入 profile 逐字节相同",
-            iccSegs[0].Payload[12] == 1 && iccSegs[0].Payload[13] == 1
-            && iccSegs[0].Payload.AsSpan(14).SequenceEqual(icc));
+        // ② 非 sRGB 契约：传入真广色域 profile ⇒ 必须嵌，且逐字节回读一致
+        var wide = MakeNonSrgbTestIcc();
+        var wideData = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", wide);
+        var wideSegs = JpegAppSegments(wideData)
+            .Where(s => s.Marker == 0xE2 && s.Payload.StartsWith(IccProfileId)).ToList();
+        Assert("JPEG ICC 口径: 非 sRGB profile 必须嵌（广色域唯一声明通道）",
+            wideSegs.Count == 1, $"实得 {wideSegs.Count} 段");
+        if (wideSegs.Count == 1)
+            Assert("JPEG ICC 口径: 非 sRGB 单块 seq/cnt == 01 01 且载荷逐字节一致",
+                wideSegs[0].Payload[12] == 1 && wideSegs[0].Payload[13] == 1
+                && wideSegs[0].Payload.AsSpan(14).SequenceEqual(wide));
 
-        // 嵌入位置契约：ICC 排在 APP0/JFIF 之后（2026-09-20 修复的同一口径）
+        // ③ 嵌入位置契约：ICC 排在 APP0/JFIF 之后（2026-09-20 修复的同一口径）
         int iccPos = -1, app0Pos = -2;
-        for (int i = 2; i + 4 <= data.Length && iccPos < 0; i++)
+        for (int i = 2; i + 4 <= wideData.Length && iccPos < 0; i++)
         {
-            if (data[i] != 0xFF) continue;
-            if (data[i + 1] == 0xE2 && data.AsSpan(i + 4, 12).SequenceEqual(IccProfileId)) iccPos = i;
-            else if (data[i + 1] == 0xE0) app0Pos = i;
+            if (wideData[i] != 0xFF) continue;
+            if (wideData[i + 1] == 0xE2 && wideData.AsSpan(i + 4, 12).SequenceEqual(IccProfileId)) iccPos = i;
+            else if (wideData[i + 1] == 0xE0) app0Pos = i;
         }
-        Assert("JPEG ICC sRGB 契约: 若产物带 APP0/JFIF，ICC 段排在它之后",
+        Assert("JPEG ICC 口径: 若产物带 APP0/JFIF，ICC 段排在它之后",
             app0Pos == -2 || iccPos > app0Pos, $"app0={app0Pos} icc={iccPos}");
 
-        // XYB 模式例外：库恒写 XYB ICC，此时不得出现两条 APP2 链（旧 exe 路径的坏形态）
-        var xybData = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", icc, xyb: true);
+        // ④ XYB 例外形态：库恒写 XYB 色彩空间 ICC（解码端靠它识别 XYB），单链，
+        //    且 sRGB 传入不会叠出第二条链（不复活旧 exe 路径的双链坏形态）
+        var xybData = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", srgb, xyb: true);
         var xybIccSegs = JpegAppSegments(xybData)
             .Where(s => s.Marker == 0xE2 && s.Payload.StartsWith(IccProfileId)).ToList();
-        Assert("JPEG ICC sRGB 契约: XYB+ICC 只保留库写的 XYB profile（单链，不复活双链坏形态）",
+        Assert("JPEG ICC 口径: XYB+sRGB 传入 ⇒ 只有库写的 XYB profile 单链",
             xybIccSegs.Count == 1, $"实得 {xybIccSegs.Count} 段");
+        var xybWideData = JpegLiNative.Encode(bgra, 16, 16, 1.0f, "444", wide, xyb: true);
+        var xybWideIccSegs = JpegAppSegments(xybWideData)
+            .Where(s => s.Marker == 0xE2 && s.Payload.StartsWith(IccProfileId)).ToList();
+        Assert("JPEG ICC 口径: XYB+非 sRGB 传入 ⇒ 同样只有 XYB profile 单链（display profile 让位）",
+            xybWideIccSegs.Count == 1, $"实得 {xybWideIccSegs.Count} 段");
     }
 
     static void Jpeg_IccLargeProfile()

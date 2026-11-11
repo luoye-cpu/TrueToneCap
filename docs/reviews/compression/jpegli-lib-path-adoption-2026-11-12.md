@@ -52,21 +52,35 @@ C# 侧 catch 后自动回退 exe 路径；jpegli 自身错误走 setjmp（上游
   （依赖漂移哨兵，配方内置）。
 - 性能基准（同一门禁运行顺带产出，768×512）：shim 8-58ms vs exe 79-268ms。
 
-## 4. ICC 契约：上游优化与产品纪律的边界（重要决策）
+## 4. ICC 口径（2026-11-12 用户拍板，当日二次裁决）：只有非 sRGB 才嵌
 
-上游 `EncodeJpeg` 对 `IsSRGB()` 的 profile **直接省略** APP2 嵌入（sRGB 是 JPEG
-隐含默认，cjpegli 同款）。但产品契约是「调用方给了 ICC 就必须嵌」——
-GainMap 底图恒嵌标准 sRGB ICC，`GainMapColorProductProbe` 逐字节钉着
-（2026-09-20 嵌入纪律：广色域读取链只认 ICC 声明）。
+上游 `EncodeJpeg` 对 `IsSRGB()` 的 profile **直接省略** APP2 嵌入。集成首日曾把这
+判成"上游行为≠产品契约"并在 C# 边界补嵌（GainMap 底图恒嵌标准 sRGB ICC 的旧
+形态），**同日被用户推翻**：sRGB 是 JPEG 的隐含默认，嵌 2100B 标准 profile 纯增
+体积——GainMap 底图实测 2953B→835B（16×16 极端样张 2532B→414B），"体积异常"
+正是这么来的。
 
-**决策：在 C# 边界补嵌，不改上游语义。** `EncodeViaLib` 产物缺 ICC 而调用方给了
-⇒ 用与 exe 路径同一个 `InjectIccIntoJpeg` 补嵌（同 ICC.1 分块规范，插在 APP0 后）。
-XYB 模式例外：库恒写 XYB ICC，此时不补——两条 APP2 链并存是旧 exe 路径
-XYB+ICC 的坏形态，不复活。
+**最终口径：只有非 sRGB 才嵌 ICC。** 这其实是把 JPEG 侧对齐到全仓既有契约——
+`BakeIccToTarget` 的 sRGB 目标刻意不嵌、AVIF 增益图底图明确写着"sRGB 不嵌 ICC"
+（FormatEncoders 同款注释，2026-11-03 审查轮）——JPEG GainMap 底图是最后一个
+还嵌 sRGB ICC 的出口。实现两层：
 
-门禁：`UsabilityTests.Jpeg_IccSrgbEmbedContractOnLibPath`（sRGB 嵌入 + 单块 +
-位置 + XYB 单链四断言）。这次 verify 首跑抓到的 6 红（色彩管线套件）就是
-本契约——上游行为≠产品契约的实例，修在 C# 边界而非放宽探针。
+1. **意图层**：`PrepareGainMapColorSpace` sRGB 腿改回 `null`（不再递 sRGB profile）；
+2. **收口层**：`Encode` 入口把与仓库标准 sRGB profile 逐字节相同的 ICC 归一化为
+   null（lib/exe 两路径同吃同一份决定，防"谁再塞回来"）。
+
+非 sRGB 照旧嵌：库原生按 ICC.1 规范分块写 APP2（广色域声明是硬需求，
+2026-09-20 纪律不变）。语义兜底：非标准字形的 sRGB-ish profile 由上游
+`IsSRGB()` 判定省略——上游行为与产品口径在这里天然同向。
+
+XYB 模式：库恒写 XYB 色彩空间 ICC（解码端靠它识别 XYB），单链；
+sRGB 传入不会叠出第二条链（旧 exe 路径 XYB+ICC 双链坏形态不复活）。
+
+门禁：`UsabilityTests.Jpeg_IccEmbedOnlyForNonSrgb`（sRGB 不嵌 + 非 sRGB 嵌入
+回读 + 位置 + XYB 单链×2）+ `GainMapColorProductProbe` 三格重写（默认/自动
+断言 ICC **缺席**，显式 2020 逐字节相等；绿点判据改与 sRGB 的 D50-PCS 标准值
+(0.3212, 0.5979) 比方向与间距）。集成首跑的 6 红正是旧契约探针撞上新库行为
+——两次裁决方向相反，最终以用户口径收口。
 
 ## 5. 交付与回退
 
@@ -86,7 +100,7 @@ XYB+ICC 的坏形态，不复活。
 ## 6. 门禁同步清单（本次动过的判据面）
 
 - `Test_QualityChain_JpegLiLibPathDeliveryChain`（新增）：8 环交付链 + 主路径装载判据。
-- `UsabilityTests.Jpeg_IccSrgbEmbedContractOnLibPath`（新增）：§4 契约。
+- `UsabilityTests.Jpeg_IccEmbedOnlyForNonSrgb`（新增）：§4 口径。
 - `Test_QualityChain_JpegLiDistanceVerbatim` / `DimensionClampWarn` /
   `Test_SettingsWhitelist` 的 xyb 三元钉：**代码形态刻意保留**——参数规范化
   （Clamp/distArg/chromaArg/progArg/xybArg）仍是 Encode 方法体的公共前缀，

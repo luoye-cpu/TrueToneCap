@@ -14,6 +14,7 @@
 //   JPEG 仍合法，仅当回退件与 DLL 的 jpegli commit 不同时字节可能有微差。
 
 using System.Runtime.InteropServices;
+using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Services;
 
@@ -219,7 +220,9 @@ public static class JpegLiNative
     /// <param name="height">高度。</param>
     /// <param name="distance">butteraugli 距离 (0.5~=无损, 1.0=高质量, 3.0=低质量)。</param>
     /// <param name="chromaSubsampling">色度采样: "444" / "422" / "420"。</param>
-    /// <param name="iccProfile">可选 ICC Profile。</param>
+    /// <param name="iccProfile">可选 ICC Profile。<b>只有非 sRGB 会嵌入</b>：与仓库标准
+    /// sRGB profile 相同的字节一律不嵌（sRGB 是 JPEG 隐含默认，嵌纯增体积；
+    /// 2026-11-12 用户拍板，lib 主路径由上游 IsSRGB 语义兜底）。</param>
     /// <param name="forceBaseline">强制 Baseline Sequential (SOF0)。Gain Map Base JPEG 需要此模式。</param>
     /// <param name="xyb">色彩空间开关：true = XYB（体积通常更小，但少数软件无法正确解码），
     /// false = 传统 YCbCr（默认，兼容最好）。2026-11-12 用户拍板：xyb 不属于压缩强度档位
@@ -274,9 +277,21 @@ public static class JpegLiNative
         // Test_QualityChain_JpegLiDistanceVerbatim 行为腿咬住 --distance <F4> 的逐字出现。
         string argsFragment = $"--distance {distArg}{progArg}{xybArg}{chromaArg}";
 
-        // 注意: exe 回退路径不支持 --icc_profile，ICC 通过后处理注入（InjectIccIntoJpeg）；
-        //       lib 主路径把 ICC 直传 shim，由库原生按 ICC.1 分块写 APP2，无需注入。
-        bool hasNonSrgbIcc = FormatHelper.IsEmbeddableIcc(iccProfile);
+        // ═══ ICC 嵌入口径（2026-11-12 用户拍板）：只有非 sRGB 才嵌 ═══
+        // sRGB 是 JPEG 的隐含默认，嵌 2100B 标准 profile 纯增体积（小图上占比可达数十个百分点）。
+        // 归一化做在 Encode 入口，lib 主路径与 exe 回退路径吃到同一份决定 ⇒ 两路径产物形态一致：
+        //   · 与仓库标准 sRGB profile 逐字节相等 ⇒ 视同未传（产品的 sRGB 判据）；
+        //   · 其余 profile 交给结构判据 IsEmbeddableIcc 过筛（CMYK/残件拒嵌）后嵌入；
+        //   · 语义层的兜底在 lib 侧：非标准字形的 sRGB-ish profile 由上游 IsSRGB() 判定省略。
+        // 唯一给 Encode 传标准 sRGB ICC 的调用方是 GainMap 底图（PrepareGainMapColorSpace），
+        // 该处已改为直传 null（同一拍板）；这里的归一化是防"谁再塞回来"的收口闸。
+        byte[]? iccToEmbed = null;
+        if (iccProfile is not null
+            && !iccProfile.AsSpan().SequenceEqual(ColorProfileProvider.GetDefaultSRgbIcc()))
+        {
+            iccToEmbed = iccProfile;
+        }
+        bool hasNonSrgbIcc = iccToEmbed is not null && FormatHelper.IsEmbeddableIcc(iccToEmbed);
 
         // ═══ 主路径：ttc_jpegli.dll 进程内编码（2026-11-12）═══
         if (TryLoadLib())
@@ -285,7 +300,7 @@ public static class JpegLiNative
             {
                 CoreLog.Debug("JPEGLI", $"lib: {argsFragment}", LogCategory.Encoding);
                 return EncodeViaLib(bgra, width, height, clampedDist, chromaSubsampling,
-                    forceBaseline, xyb, hasNonSrgbIcc ? iccProfile : null);
+                    forceBaseline, xyb, hasNonSrgbIcc ? iccToEmbed : null);
             }
             catch (Exception ex)
             {
@@ -295,7 +310,7 @@ public static class JpegLiNative
         }
 
         // ═══ 回退路径：cjpegli.exe 子进程 ═══
-        return EncodeViaExe(bgra, width, height, argsFragment, hasNonSrgbIcc, iccProfile);
+        return EncodeViaExe(bgra, width, height, argsFragment, hasNonSrgbIcc, iccToEmbed);
     }
 
     /// <summary>lib 主路径：BGRA→RGB24 内存转换后直调 shim（零临时文件）。</summary>
@@ -326,49 +341,16 @@ public static class JpegLiNative
         {
             var jpeg = new byte[checked((int)jpegLen)];
             Marshal.Copy(jpegPtr, jpeg, 0, jpeg.Length);
-            // ═══ ICC 契约对齐（2026-11-12）═══ jpegli 的 EncodeJpeg 对 IsSRGB() 的
-            // profile 直接省略 APP2 嵌入（sRGB 是 JPEG 隐含默认，上游优化行为）；
-            // 但产品契约是「调用方给了 ICC 就必须嵌」——GainMap 底图恒嵌标准 sRGB ICC，
-            // 有专门判据逐字节钉着（GainMapColorProductProbe，2026-09-20 嵌入纪律）。
-            // ⇒ lib 产物不带 ICC 而调用方给了时，用与 exe 回退路径同一个 C# 注入器补嵌
-            //   （同 ICC.1 规范 APP2 分块，插在 APP0 之后）。
-            // XYB 模式例外：库恒写 XYB 色彩空间 ICC（上游语义），此时不补——
-            //   两个 APP2 链并存正是旧 exe 路径 XYB+ICC 的坏形态，不复活。
-            if (icc is not null && !JpegHasIcc(jpeg))
-            {
-                CoreLog.Debug("JPEGLI", "lib 省略了 sRGB ICC 嵌入（IsSRGB 优化），按产品契约补嵌",
-                    LogCategory.Encoding);
-                jpeg = InjectIccIntoJpeg(jpeg, icc);
-            }
+            // ICC 口径（2026-11-12 用户拍板）：上游 EncodeJpeg 对 IsSRGB() 的 profile
+            // 省略 APP2 嵌入——这正是产品要的行为（sRGB 不嵌，非 sRGB 由库原生按
+            // ICC.1 规范分块写 APP2）。sRGB 判据已在 Encode 入口归一化
+            // （标准 sRGB 字节 → null），这里不需要也不许再补嵌。
             return jpeg;
         }
         finally
         {
             _free!(jpegPtr);
         }
-    }
-
-    /// <summary>JPEG 流里是否已存在 ICC 的 APP2 段（ICC.1 分块链任一段即算）。</summary>
-    private static bool JpegHasIcc(byte[] jpeg)
-    {
-        if (jpeg.Length < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return false;
-        int pos = 2;
-        while (pos + 4 <= jpeg.Length)
-        {
-            if (jpeg[pos] != 0xFF) return false;
-            int marker = jpeg[pos + 1];
-            if (marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7)) { pos += 2; continue; }
-            if (marker == 0xD9) return false;
-            int segLen = (jpeg[pos + 2] << 8) | jpeg[pos + 3];
-            if (segLen < 2 || pos + 2 + segLen > jpeg.Length) return false;
-            if (marker == 0xE2 && segLen > 16 && pos + 18 <= jpeg.Length
-                && jpeg[pos + 4] == 'I' && jpeg[pos + 5] == 'C' && jpeg[pos + 6] == 'C'
-                && jpeg[pos + 7] == '_')
-                return true;
-            if (marker == 0xDA) return false; // SOS 之后不再扫
-            pos += 2 + segLen;
-        }
-        return false;
     }
 
     private static readonly nuint NUInt0 = 0;

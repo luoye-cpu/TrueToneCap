@@ -18,7 +18,7 @@
 
 ## [未发布] — JPEG LI 编码改进程内库主路径（2026-11-12）
 
-- **⚡ JPEG LI 编码提速 2-3×、零临时文件**：编码从「写 11MB 临时 PPM → 启动 cjpegli.exe 子进程 → 读回」改为 **ttc_jpegli.dll 进程内直编**（P/Invoke）。2560×1440 d0.5 实测 87ms（原 exe 路径 249ms，还省掉临时文件 I/O）；ICC 嵌入改由库原生按 ICC.1 规范写 APP2（与此前 C# 手工注入同规范）。产物与 cjpegli.exe **逐字节相同**——shim 走与 cjpegli.exe 完全相同的上游代码路径，且构建配方（`scripts/build-cjpegli.py`）末尾强制跑逐字节对照门禁（12 参数组合 + ICC 回读，15/15 通过），不一致即不得发布。**cjpegli.exe 保留为回退路径**（DLL 缺失/装载失败/编码异常时自动落回，子进程模式崩溃隔离语义不变）。新增许可义务：apngdis（zlib license，2026-10-07 审计漏项，随本次补记）。
+- **⚡ JPEG LI 编码提速 2-3×、零临时文件、sRGB 产物瘦身**：编码从「写 11MB 临时 PPM → 启动 cjpegli.exe 子进程 → 读回」改为 **ttc_jpegli.dll 进程内直编**（P/Invoke）。2560×1440 d0.5 实测 87ms（原 exe 路径 249ms，还省掉临时文件 I/O）。**ICC 口径收口（2026-11-12 用户拍板）：只有非 sRGB 才嵌**——sRGB 是 JPEG 的隐含默认，嵌 2100B 标准 profile 纯增体积（GainMap 底图实测 2953B→835B），非 sRGB 照旧嵌（库原生按 ICC.1 规范分块写 APP2）；这把 JPEG 侧对齐到全仓既有契约（BakeIccToTarget 的 sRGB 目标不嵌、AVIF 增益图底图"sRGB 不嵌 ICC"）。产物与 cjpegli.exe **逐字节相同**——shim 走与 cjpegli.exe 完全相同的上游代码路径，且构建配方（`scripts/build-cjpegli.py`）末尾强制跑逐字节对照门禁（12 参数组合 + ICC 回读，15/15 通过），不一致即不得发布。**cjpegli.exe 保留为回退路径**（DLL 缺失/装载失败/编码异常时自动落回，子进程模式崩溃隔离语义不变）。新增许可义务：apngdis（zlib license，2026-10-07 审计漏项，随本次补记）。
 - **工程侧**：单测 2070 断言全绿（新增「交付链」判据 8 环：DLL 实件/manifest/Resolver 清单/csproj 拷贝计数/打包脚本/shim 源码在仓/配方强制门禁/许可闭合 + 「主路径真的装载成功」防假绿判据）；shim 源码入仓 `scripts/jpegli-shim/`；`Directory.Build.props` DLL 随流到测试输出（行为级测试从此测的是产品主路径而非回退路径）。
 
 ## [未发布] — JPEG LI 色彩空间开关（2026-11-12）

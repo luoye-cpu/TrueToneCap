@@ -132,12 +132,15 @@ public sealed class JpegGainMapEncoder : ImageEncoder
     /// </summary>
     /// <param name="requireExplicit">true = 只有用户显式选广色域才升级整条增益图；
     /// false = 解析后的目标是广色域就搬（无增益图的普通 JPEG 路 + AVIF 增益图档）。</param>
-    /// <returns>要参与后续色调映射的线性 float[]（可能就是一个新数组）+ 调用方该嵌的 ICC +
+    /// <returns>要参与后续色调映射的线性 float[]（可能就是一个新数组）+ 调用方该嵌的 ICC
+    /// （<b>null = sRGB，不嵌</b>——sRGB 是 JPEG 的隐含默认，嵌标准件纯增体积；
+    /// 2026-11-12 用户拍板，对齐全仓既有契约：BakeIccToTarget 的 sRGB 目标不嵌、
+    /// AVIF 增益图底图"sRGB 不嵌 ICC"。非 sRGB 照旧嵌，广色域声明是硬需求）+
     /// <c>WideApplied</c>（<b>像素是否真的被搬进 BT.2020</b>）。
     /// ⚠ <c>WideApplied</c> 存在的唯一理由：本函数在"取不到可嵌 2020 ICC"时会静默退回 sRGB 像素；
     /// 有两条声明通道的调用方（AVIF 的 nclx + ICC）必须据它决定声明，否则会写出
     /// "声明 2020、像素 709"的错件。JPEG 侧只有 ICC 一条通道，直接用返回的 BaseIcc 即自洽。</returns>
-    internal static (float[] Linear, byte[] BaseIcc, bool WideApplied) PrepareGainMapColorSpace(
+    internal static (float[] Linear, byte[]? BaseIcc, bool WideApplied) PrepareGainMapColorSpace(
         float[] scrgbLinear, int w, int h, EncodingSettings settings, bool requireExplicit = true)
     {
         bool wideTarget = settings.ColorSpaceTag == "BT2020";
@@ -159,7 +162,13 @@ public sealed class JpegGainMapEncoder : ImageEncoder
         }
         // WideApplied=false 是给 AVIF 那类"有两种声明通道"的调用方看的：
         // 像素没搬走，声明就必须跟着像素走 sRGB，不许按 tag 写 9/13/9（否则是错件）。
-        return (scrgbLinear, ColorProfileProvider.GetDefaultSRgbIcc(), false);
+        // ═══ 2026-11-12 用户拍板：sRGB base 不嵌 ICC ═══ sRGB 是 JPEG 的隐含默认，
+        // 嵌 2100B 标准 profile 纯增体积（小图上占比可达数十个百分点）。对齐全仓
+        // 既有契约——BakeIccToTarget 的 sRGB 目标不嵌、AVIF 增益图底图
+        // "sRGB 不嵌 ICC"（FormatEncoders 同款注释）——JPEG GainMap 底图是最后一个
+        // 还嵌 sRGB ICC 的出口，本次收口。非 sRGB（2020 搬迁成功）照旧嵌，
+        // 广色域声明是硬需求（2026-09-20 嵌入纪律）。
+        return (scrgbLinear, null, false);
     }
 
     /// <summary>仅编码 Base JPEG（无增益图）——HDR 关闭时的降级路径。
