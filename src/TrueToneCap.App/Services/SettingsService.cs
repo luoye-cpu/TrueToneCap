@@ -576,8 +576,9 @@ public sealed class SettingsService
         FitTwoTierEffort(s.EffortPng, v => s.EffortPng = v, dft.EffortPng, "Smallest", "Quick");
         FitTwoTierEffort(s.EffortTiff, v => s.EffortTiff = v, dft.EffortTiff, "Smallest", "Quick");
         // JPEG LI 色彩空间（2026-11-12 用户拍板新增）：xyb 不属于压缩强度档位（cjpegli 也无别的
-        // effort 旋钮），独立二态开关；默认 Traditional —— XYB 编码的 JPEG 会被小部分软件解码出错。
-        // 旧 EffortJpegLi 键（Smallest/Quick）自本版起不被读取，留在盘上静默忽略。
+        // effort 旋钮），独立二态开关；默认 Xyb（体积优先，与改栏前的默认输出一致），
+        // Traditional 是兼容回退档。旧 EffortJpegLi 键（Smallest/Quick）自本版起不被读取，
+        // 留在盘上静默忽略。
         FitTag(s.JpegLiColorModel, v => s.JpegLiColorModel = v, dft.JpegLiColorModel, "Traditional", "Xyb");
     }
 

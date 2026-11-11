@@ -168,17 +168,18 @@
                                 <!-- ═══ 色彩空间（2026-11-12 用户拍板）：xyb 不属于压缩强度 ═══
                                      此前（2026-10-07~2026-11-12）xyb 挂在「压缩强度」两档上（均衡=开，
                                      快速=关）—— cjpegli 没有别的 effort 旋钮，两档本质是同一开关的两半。
-                                     现改为显式二态开关，默认传统：XYB 编码的 JPEG 会被小部分软件
-                                     解码出错（用户实测反馈）。选 XYB 体积通常更小（5 个样本里 4 个小
-                                     1.5%~10.4%、一个反例 +3.0%，代价约 1.2~1.3 倍时间，
-                                     artifacts/tier_bench_2026-10-29.log）。
+                                     现改为显式二态开关，默认 XYB（体积优先，与 2026-11-12 前的默认
+                                     输出一致）；传统 YCbCr 作回退档：XYB 编码的 JPEG 会被小部分
+                                     软件解码出错（用户实测反馈），遇到时显式切传统。
+                                     XYB 体积通常更小（5 个样本里 4 个小 1.5%~10.4%、一个反例 +3.0%，
+                                     代价约 1.2~1.3 倍时间，artifacts/tier_bench_2026-10-29.log）。
                                      增益图底图同用本开关；增益图层恒传统（libultrahdr 解析端按标准
                                      JPEG 读它）。参数拼装见 JpegLiNative.Encode。
                                      ⚠ 注释里不能出现两个连续的减号（XML 规则），参数名写作 xyb。 -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="色彩空间" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="JpegLiColorModelCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
-                                        <ComboBoxItem Tag="Traditional" IsSelected="True">传统</ComboBoxItem>
-                                        <ComboBoxItem Tag="Xyb">XYB</ComboBoxItem>
+                                        <ComboBoxItem Tag="Xyb" IsSelected="True">XYB</ComboBoxItem>
+                                        <ComboBoxItem Tag="Traditional">传统</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"

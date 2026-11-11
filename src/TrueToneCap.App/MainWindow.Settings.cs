@@ -421,7 +421,7 @@ public sealed partial class MainWindow : Window
             // （原 ChromaPng 硬编码赋值已删除：该字段于 2026-09-15 清理，
             //   PNG 为 RGB 无损格式，本就不支持色度子采样）
             _settings.ChromaJpegLi = (ChromaJpegLiCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "444"; // JPEG LI 色度
-            _settings.JpegLiColorModel = (JpegLiColorModelCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Traditional"; // JPEG LI 色彩空间
+            _settings.JpegLiColorModel = (JpegLiColorModelCbo?.SelectedItem as ComboBoxItem)?.Tag as string ?? "Xyb"; // JPEG LI 色彩空间（兜底=字段默认，见 2026-11-04 哨兵）
             // 兜底值必须与 AppSettingsData 的字段默认一致 —— 下拉还没回填的那一瞬保存下去的就是这个兜底值。
             // ⚠ 接线审查抓到本轮漏改：AVIF 默认已于 2026-11-04 改为 444，这里一度还停在 ?? "420"
             //   （原注释写"2026-09-19 改回 420"也过期了）。兜底漂回 420 ⇒ 控件未回填那一瞬会把默认漂错。

@@ -183,13 +183,14 @@ public sealed class AppSettingsData
     public string EffortJpegXl { get; set; } = "Balanced";
     public string EffortWebp { get; set; } = "Smallest";
     // JPEG LI 的色彩空间（2026-11-12 用户拍板新增，替代原 EffortJpegLi 档位里暗藏的 --xyb）：
-    //   · "Traditional"（默认）= 传统 YCbCr，兼容最好 —— XYB 编码的 JPEG 会被小部分软件
-    //     解码出错（用户实测反馈），故默认传统。
-    //   · "Xyb" = XYB 感知色彩空间，体积通常更小（2026-10-07/10-29 实测：5 个样本里 4 个小
-    //     1.5%~10.4%，一个反例 +3.0%；代价约 1.2~1.3 倍时间，数据见 JpegLiNative.Encode 注释）。
+    //   · "Xyb"（默认）= XYB 感知色彩空间，体积通常更小（2026-10-07/10-29 实测：5 个样本里
+    //     4 个小 1.5%~10.4%，一个反例 +3.0%；代价约 1.2~1.3 倍时间，数据见 JpegLiNative.Encode
+    //     注释）。同日二次拍板：默认回到 XYB（体积优先，与 2026-11-12 前的默认输出一致）。
+    //   · "Traditional" = 传统 YCbCr 回退档：XYB 编码的 JPEG 会被小部分软件解码出错
+    //     （用户实测反馈），遇到此类软件的用户显式切到这里。
     // 增益图底图同用本开关（底图必须能被普通查看器当普通 JPEG 读）；增益图层恒传统。
     // ⚠ 旧 EffortJpegLi 键（Smallest/Quick）自本版起不再被读取，留在 settings.json 里被静默忽略。
-    public string JpegLiColorModel { get; set; } = "Traditional";
+    public string JpegLiColorModel { get; set; } = "Xyb";
     // PNG / TIFF 是 2026-10-29 加进来的（用户点名"编码速度相对过慢的几个要给档位"）。
     // 起初排除它们的理由是"无损压缩级别会与质量滑块打架"，但 PNG 的质量滑块恒锁在 100
     // （GetQualityRange = (100,100,100, LosslessFixed100)）⇒ 打架的对象不存在，这一档就是

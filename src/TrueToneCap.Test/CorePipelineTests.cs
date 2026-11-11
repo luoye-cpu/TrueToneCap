@@ -4020,17 +4020,17 @@ public static class CorePipelineTests
                 $"IsSelected={(sel.Success ? sel.Groups[1].Value : "无")} / 字段默认={(fld.Success ? fld.Groups[1].Value : "解析不到")}");
         }
         // ── ④c JPEG LI 色彩空间（2026-11-12 用户拍板：xyb 不属于压缩强度，独立二态开关）──
-        // 同一条"字段默认 == 下拉 IsSelected"的对撞纪律：默认 Traditional（兼容优先，
-        // XYB 编码的 JPEG 会被小部分软件解码出错）。
+        // 同一条"字段默认 == 下拉 IsSelected"的对撞纪律：默认 Xyb（体积优先，与 2026-11-12
+        // 前的默认输出一致）；Traditional 是兼容回退档（XYB 编码的 JPEG 会被小部分软件解码出错）。
         int jcmAt = xm.IndexOf(@"x:Name=""JpegLiColorModelCbo""", StringComparison.Ordinal);
         string jcmBlk = jcmAt < 0 ? "" : xm[jcmAt..xm.IndexOf("</ComboBox>", jcmAt, StringComparison.Ordinal)];
         var jcmSel = Regex.Match(jcmBlk, @"Tag=""(\w+)""[^>]*IsSelected=""True""");
         var jcmFld = Regex.Match(m, @"public string JpegLiColorModel \{ get; set; \} = ""(\w+)""");
         Assert("JpegLiColorModel: 下拉恰 2 格（传统/XYB 二态，多一格=值域与界面分裂）",
             Regex.Matches(jcmBlk, @"<ComboBoxItem ").Count == 2, $"实得 {Regex.Matches(jcmBlk, @"<ComboBoxItem ").Count}");
-        Assert("JpegLiColorModel: 字段默认与下拉 IsSelected 同源，且落在默认的 Traditional",
+        Assert("JpegLiColorModel: 字段默认与下拉 IsSelected 同源，且落在默认的 Xyb",
             jcmSel.Success && jcmFld.Success && jcmSel.Groups[1].Value == jcmFld.Groups[1].Value
-            && jcmFld.Groups[1].Value == "Traditional",
+            && jcmFld.Groups[1].Value == "Xyb",
             $"IsSelected={(jcmSel.Success ? jcmSel.Groups[1].Value : "无")} / 字段默认={(jcmFld.Success ? jcmFld.Groups[1].Value : "解析不到")}");
         var lccJcm = CodeOf(loc);
         Assert("JpegLiColorModel: Localization 逐 Tag 点名两格（缺格=英文界面留中文）",
