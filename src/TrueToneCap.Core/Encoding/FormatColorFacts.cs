@@ -205,7 +205,7 @@ public static class FormatColorFacts
 
             OutputFormat.WebP =>
                 L("WebP：同样只有 ICC 一条通道 —— ")
-                + (wide ? L("{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。", TargetName())
+                + (wide ? L("{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在）。", TargetName())
                         : L("{0} 目标【什么都不写】（实测对照组无 ICCP）。", TargetName()))
                 // ═══ 2026-10-06：与 JPEG 同一条默认口径，两处必须说成同一件事 ═══
                 // 为什么和 JPEG 分开写而不是抽公共句：两者的"什么都不写"细节不同

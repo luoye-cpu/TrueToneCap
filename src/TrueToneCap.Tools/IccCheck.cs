@@ -63,6 +63,19 @@ public static class IccCheck
             Console.WriteLine();
         }
 
+        // ═══ 2026-11-12 ICC 瘦身（用户拍板）：TRC 共享 offset 后的尺寸台账 ═══
+        // SDR 标准件此前 2100B（256 点 sRGB 曲线写了三遍），共享后减半；PQ 件此前
+        // 4096 点曲线三遍（25104B），共享后 8696B、省 16408B。尺寸随构建器走，这里只台账不钉死——
+        // 别把字节数抄进文案/判据（2026-11-12 教训：WebP 句里的"2100 字节"过期才被发现）。
+        Console.WriteLine("══════════ 自产 profile 尺寸台账（TRC 共享 offset）══════════\n");
+        foreach (var cs in new[] { "sRGB", "DisplayP3", "BT2020", "AdobeRGB" })
+        {
+            var icc = ColorProfileProvider.GetStandardIccProfile(cs);
+            Console.WriteLine($"  SDR {cs,-10} {icc?.Length ?? 0,7} B");
+        }
+        var pq = ColorProfileProvider.GetHdrStandardIccProfile("DisplayP3");
+        Console.WriteLine($"  HDR PQ (P3)  {pq?.Length ?? 0,7} B  (4096 点 PQ 曲线共享×3)");
+
         Console.WriteLine("══════════════ 验证完成 ══════════════");
 
         // ═══ §31.3-9：真机 / 现网 profile 过不过新的结构判据 ═══

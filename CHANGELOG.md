@@ -16,6 +16,12 @@
 ---
 
 
+## [未发布] — 自产 ICC 瘦身（TRC 共享 offset，2026-11-12）
+
+- **📉 无码点容器与码点盲空间的产物再瘦身一半**：自产 ICC 原先给 `rTRC/gTRC/bTRC` 各写一份完全相同的曲线，现改为三条 tag 表项指向**同一个数据块偏移**（ICC 规范允许，Windows 系统自带的 sRGB profile 也是这个布局）。SDR 标准件 2100 B → **1052 B**，HDR PQ 件约 25.1 KB → **8696 B**（省 16.4 KB）。曲线字节一个没变，色彩语义、`PatchSrgbPrimaries` 按签名打补丁、跨格式"同 tag 同一份 profile"全部原样成立；上次 CICP 优先之后每条产物最多嵌一份 ICC，本轮只影响 JPEG 家族 / WebP / TIFF 与 AdobeRGB 旁路。
+- **工程侧**：lcms2 独立裁判读回 1052 B profile 并成功 `buildTransform`，灰阶 256 级双向 Δmax=0；更激进的两档只留实验记录不进产品——64 点 curv（668 B，lcms 8-bit 双向 Δ=0，但 16 位插值误差 0.78→6.32 LSB）与 para type-3（560 B，v4 专有 tag 类型写进 v2.1 件属规范越界）。外部规范查证：ICC White Paper 58（2026-03）明确 Matrix/TRC 紧凑件的官方目标就是「约 1 KB」，且明确允许多个 tag 共用同一 offset、建议 8-bit 数据配 256 点曲线（详见 `docs/ledger/handoff-icc-slim-cicp-first-2026-11-12.md` §6）。界面文案删掉已过期的「profile 2100 字节」字面量（三处级联同步）。
+- **工程侧（判据卫生）**：独立裁判与变体实验脚本都改为按修改时间取最新夹具（旧轮次 GUID 文件会残留，按名字排序会拿过期字节测出假结果）；台账只记录尺寸、不把字节数抄进文案或判据。
+
 ## [未发布] — 色彩声明 CICP 优先（2026-11-12）
 
 - **🎨 广色域产物全面瘦身**：凡容器有码点通道（PNG cICP / AVIF colr(nclx) / JPEG XL color fields），代码点可声明的空间（Rec.709 / Rec.2020 / Display P3）一律**只写码点、不再嵌 ICC**——两条通道声明的是同一套原色，ICC 纯增体积（Rec.2020 标准件约 2.9KB，此前随每张广色域图白付一份）。ICC 收缩为两处：**码点盲空间 AdobeRGB**（H.273 无其原色码，写码点会被当成 Rec.2020 错标，ICC 是唯一诚实声明）与**没有码点通道的容器**（JPEG 家族 / WebP / TIFF，行为不变）。动图按容器能力分派：APNG 只写 cICP；WebP 无码点通道，非 sRGB 照旧嵌 ICC；AVIF 增益图底图（sRGB/Rec.2020）不再嵌 ICC。HDR 声明不变；JPEG XL 的 P3+PQ 例外保留 PQ-TRC ICC（Rec2100PQ 枚举硬编码 Rec.2020 原色，P3 是码点盲区）。色域映射卡文案同步改为如实反映单通道声明。

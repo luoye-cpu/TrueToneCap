@@ -685,7 +685,7 @@ public static class LocaleManager
             ["只有用户把目标【显式】选成 Rec.2020 时才会写出 Rec.2020 原色。"] = "Rec.2020 primaries are written only when the user picks Rec.2020 [explicitly] as the target.",
             ["容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。"] = "The container has no HDR channel, so the switch falls back to 8-bit SDR; that is a separate question from whether Rec.2020 primaries can be declared.",
             ["WebP：同样只有 ICC 一条通道 —— "] = "WebP: likewise ICC is the only channel - ",
-            ["{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。"] = "The {0} primaries are carried through the intermediate PNG's iCCP, and cwebp gets -metadata icc (measured output has the ICCP chunk, a 2100-byte profile).",
+            ["{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在）。"] = "The {0} primaries are carried through the intermediate PNG's iCCP, and cwebp gets -metadata icc (measured output contains the ICCP chunk).",
             ["{0} 目标【什么都不写】（实测对照组无 ICCP）。"] = "The {0} target writes nothing at all (the measured control group had no ICCP).",
             ["本格式的默认目标同样是 Rec.709：跟随显示器或默认档都只给 Rec.709，"] = "This format's default target is likewise Rec.709: Follow display and the default tier both give Rec.709 only, ",
             ["要 Rec.2020 得由用户【显式】指定 —— 与 JPEG 同一条规则，两族格式不再各自为政。"] = "and Rec.2020 has to be [explicitly] specified by the user - the same rule as JPEG, so the two families no longer go their own way.",

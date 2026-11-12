@@ -762,7 +762,7 @@ public sealed partial class MainWindow : Window
         // 撤掉了，因为实测把前提打掉了：JPEG LI 与 WebP 确实【没有】HDR 通道（SupportsHdr=false，
         // HDR 开关会落空成 8-bit SDR），但它们都有一条能用的【广色域 SDR】声明通道 ——
         // 取 artifacts/precision/cicp 那组产品自己产出的样张读字节：
-        //   cc_webp_bt2020.webp  2644 B，ICCP 块在偏移 30，里面 2100 字节 profile（acsp 在 74）
+        //   cc_webp_bt2020.webp  2644 B，ICCP 块在偏移 30，里面是自产 ICC profile，字节数随构建器变化，别抄进文案（acsp 在 74）
         //   cc_webp_srgb.webp     524 B，无 ICCP（sRGB 目标本来就不该写，这一格是对照组）
         //   cc_jpegli_bt2020.jpg 2949 B，APP2/ICC_PROFILE + acsp 在 56
         //   cc_jpegli_srgb.jpg    833 B，无 ICC
@@ -1412,7 +1412,7 @@ public sealed partial class MainWindow : Window
         "只有用户把目标【显式】选成 Rec.2020 时才会写出 Rec.2020 原色。",
         "容器无 HDR 通道 ⇒ 开关会落空成 8-bit SDR；这与【能否声明 Rec.2020 原色】是两件事。",
         "WebP：同样只有 ICC 一条通道 —— ",
-        "{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在，profile 2100 字节）。",
+        "{0} 原色经中转 PNG 的 iCCP 带过去，并给 cwebp 传 -metadata icc（实测产物 ICCP 块在）。",
         "{0} 目标【什么都不写】（实测对照组无 ICCP）。",
         "本格式的默认目标同样是 Rec.709：跟随显示器或默认档都只给 Rec.709，",
         "要 Rec.2020 得由用户【显式】指定 —— 与 JPEG 同一条规则，两族格式不再各自为政。",

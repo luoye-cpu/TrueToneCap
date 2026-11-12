@@ -129,7 +129,9 @@ def max_delta(a: Image.Image, b: Image.Image) -> int:
 
 
 def main() -> int:
-    srgb_tiffs = sorted(_glob.glob(SRGB_TIFF_GLOB))
+    # ⚠ 按修改时间取最新：夹具名带随机 GUID 后缀，旧轮次文件会留在目录里，
+    #   按名字排序会拿到过期字节（如旧 2100B profile），测出假结果。
+    srgb_tiffs = sorted(_glob.glob(SRGB_TIFF_GLOB), key=os.path.getmtime, reverse=True)
     missing = []
     if not srgb_tiffs:
         missing.append(f"{SRGB_TIFF_GLOB}（由 Tiff_EmbedsIccEvenForSrgb 产出）")

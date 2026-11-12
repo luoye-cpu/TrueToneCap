@@ -200,6 +200,7 @@ scripts/Check*.ps1
 # ── 工作台数据 (项目记忆/会话数据, 不上传 GitHub) ──
 #   注意: 只忽略跟踪，【不要删除该目录】—— 它存放项目长期记忆。
 .workbuddy-ai/
+.workbuddy/
 
 # ── Temp / Test outputs ──
 TestResults/

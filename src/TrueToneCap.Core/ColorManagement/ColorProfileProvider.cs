@@ -237,12 +237,25 @@ public static partial class ColorProfileProvider
             ("bXYZ", bXYZData), ("rTRC", trcData), ("gTRC", trcData), ("bTRC", trcData),
         };
 
-        // 写入 tag table + 计算偏移
+        // 写入 tag table + 计算偏移。
+        // ═══ 2026-11-12 ICC 瘦身（用户拍板）：相同字节的 tag 共享同一数据块 ═══
+        // ICC 规范允许多个 tag entry 指向同一 offset（微软系统 sRGB 件与 Apple 自家
+        // profile 都是这么写的），解析器读 tag 表按 offset 取数——同一 offset 就是同一份
+        // 字节，读回/判据/字节一致性全部不受影响。此前 rTRC/gTRC/bTRC 把同一份 256 点
+        // sRGB 曲线【写了三遍】（524B×3=1572B，占 2100B 的 75%）；共享后 2100B→1052B。
+        // 微软系统件 17 标签同样共享 TRC（实测 rTRC==gTRC==bTRC offset）⇒ 兼容性有实锚。
         int curOffset = dataStart;
         var offsets = new int[tagCount];
+        var blockOffsets = new Dictionary<byte[], int>(ReferenceEqualityComparer.Instance);
         for (int i = 0; i < tagCount; i++)
         {
+            if (blockOffsets.TryGetValue(tags[i].data, out int shared))
+            {
+                offsets[i] = shared;
+                continue;
+            }
             offsets[i] = curOffset;
+            blockOffsets[tags[i].data] = curOffset;
             curOffset += (tags[i].data.Length + 3) & ~3; // 4 字节对齐
         }
 
@@ -256,9 +269,11 @@ public static partial class ColorProfileProvider
         // 填充到 dataStart
         while (ms.Position < dataStart) bw.Write((byte)0);
 
-        // 写入 tag 数据
+        // 写入 tag 数据（共享同一数据块的 tag 只写一次）
+        var writtenBlocks = new HashSet<byte[]>(ReferenceEqualityComparer.Instance);
         for (int i = 0; i < tagCount; i++)
         {
+            if (!writtenBlocks.Add(tags[i].data)) continue;
             bw.Write(tags[i].data);
             while (ms.Position % 4 != 0) bw.Write((byte)0);
         }
@@ -999,8 +1014,23 @@ public static partial class ColorProfileProvider
         int headerSize = 128, tagTableSize = 4 + tags.Length * 12;
         int Align4(int v) => (v + 3) / 4 * 4;
         int off = headerSize + tagTableSize;
+        // ═══ 2026-11-12 ICC 瘦身（用户拍板）：相同字节的 tag 共享同一数据块（ICC 规范允许多个
+        //     tag entry 指向同一 offset；此前 rTRC/gTRC/bTRC 把同一份曲线写了三遍——
+        //     PQ 件每遍 8204B，全 profile 25104B→8696B（--icc-check 实测），省 16408B）═══
         var blocks = new List<(int o, byte[] d)>();
-        foreach (var t in tags) { blocks.Add((off, t.data)); off += Align4(t.data.Length); }
+        var blockOffsets = new Dictionary<byte[], int>(ReferenceEqualityComparer.Instance);
+        var uniqueBlocks = new List<byte[]>();
+        foreach (var t in tags)
+        {
+            if (!blockOffsets.TryGetValue(t.data, out int shared))
+            {
+                shared = off;
+                blockOffsets[t.data] = shared;
+                off += Align4(t.data.Length);
+                uniqueBlocks.Add(t.data);
+            }
+            blocks.Add((shared, t.data));
+        }
         int total = off;
 
         using var ms = new MemoryStream(total);
@@ -1028,10 +1058,10 @@ public static partial class ColorProfileProvider
         {
             W32(bw, tags[i].sig); W32(bw, (uint)blocks[i].o); W32(bw, (uint)tags[i].data.Length);
         }
-        foreach (var b in blocks)
+        foreach (var d in uniqueBlocks)
         {
-            bw.Write(b.d);
-            int pad = Align4(b.d.Length) - b.d.Length;
+            bw.Write(d);
+            int pad = Align4(d.Length) - d.Length;
             if (pad > 0) bw.Write(new byte[pad]);
         }
         bw.Flush();
@@ -1799,8 +1829,24 @@ public static class IccProfileBuilder
         int headerSize = 128, tagTableSize = 4 + tags.Length * 12;
         int Align4(int v) => (v + 3) / 4 * 4;
         int off = headerSize + tagTableSize;
+        // ═══ 2026-11-12 ICC 瘦身（用户拍板）：相同字节的 tag 共享同一数据块 ═══
+        // 此处是判据样张构建器：三条 TRC 共用同一份 20B para 曲线（γ2.2），
+        // 与 BuildValidSrgbIcc / BuildHdrPqIcc 同机制，只是块更小（省 2×20B + 对齐）。
+        // 别把 PQ 件的 4096 点 / 8204B 说明抄过来——那个数只属于 BuildHdrPqIcc。
         var blocks = new List<(int o, byte[] d)>();
-        foreach (var t in tags) { blocks.Add((off, t.data)); off += Align4(t.data.Length); }
+        var blockOffsets = new Dictionary<byte[], int>(ReferenceEqualityComparer.Instance);
+        var uniqueBlocks = new List<byte[]>();
+        foreach (var t in tags)
+        {
+            if (!blockOffsets.TryGetValue(t.data, out int shared))
+            {
+                shared = off;
+                blockOffsets[t.data] = shared;
+                off += Align4(t.data.Length);
+                uniqueBlocks.Add(t.data);
+            }
+            blocks.Add((shared, t.data));
+        }
         int total = off;
 
         using var ms = new System.IO.MemoryStream(total);
@@ -1822,7 +1868,7 @@ public static class IccProfileBuilder
             WriteBE(w, (uint)blocks[i].o);
             WriteBE(w, (uint)tags[i].data.Length);
         }
-        foreach (var b in blocks) { w.Write(b.d); int padLen = Align4(b.d.Length) - b.d.Length; if (padLen > 0) w.Write(new byte[padLen]); }
+        foreach (var d in uniqueBlocks) { w.Write(d); int padLen = Align4(d.Length) - d.Length; if (padLen > 0) w.Write(new byte[padLen]); }
         w.Flush();
         return ms.ToArray();
     }
