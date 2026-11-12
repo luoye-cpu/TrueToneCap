@@ -571,6 +571,10 @@ if ($SkipPrecision) {
             Write-Host "     ⚠️ 跳过 (SKIP) —— 前置条件不满足，这轮没判" -ForegroundColor Yellow
             $why = ($r.Text -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 3) -join "`n"
             if ($why) { Write-Host $why -ForegroundColor Yellow }
+            # 与上面 $checks 循环同口径（2026-11-13 补齐）：SKIP 必须进末屏"本轮判据未覆盖"清单。
+            # 此前这四条 extra 判据的 rc=3 只在滚屏里留一行黄字，既不进 GateGaps 也不进结论行的
+            # "另有 N 处未判" ⇒ 一条没人跑的判据会被换机器的人读成判过。
+            $script:GateGaps += "[1.7/2] $(Split-Path $extra.Script -Leaf)（$($extra.What)）跳过 ⇒ 该层本轮未判"
         } else {
             Write-Host "     ❌ 判据不通过 (退出码 $($r.Code))" -ForegroundColor Red
             $tail = ($r.Text -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 10) -join "`n"
@@ -609,6 +613,8 @@ if ($SkipPrecision) {
             Write-Host "     ✅ 通过（硬件按声明的矩阵与摆幅转换）"
         } elseif ($r.Code -eq 3) {
             Write-Host "     ⚠️ 跳过 (SKIP) —— 本机无 NVENC 样张（无 N 卡或硬件编码被关）" -ForegroundColor Yellow
+            # 同 $checks 循环口径：硬件矩阵这一层本轮没判，必须进末屏台账，不能只留一行黄字。
+            $script:GateGaps += "[1.7/2] nvenc_matrix_probe.py 跳过（本机无 NVENC 样张）⇒ 硬件矩阵/摆幅层本轮未判"
         } else {
             Write-Host "     ❌ 实测矩阵/摆幅与容器声明不一致 (退出码 $($r.Code))" -ForegroundColor Red
             $tail = ($r.Text -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 14) -join "`n"
@@ -895,9 +901,11 @@ Write-Host ""
 #  [1.95/2] 闸门接线自检：commit / push 时这两道究竟会不会跑
 # ══════════════════════════════════════════════════════════════
 # 起因（2026-09-29 审查轮 §11.6，当场量到）：README:153-154 与 :335 承诺 pre-commit 挡编译、
-# pre-push 挡测试，而本机 core.hooksPath 指向 .git\hooks（那里只有 Qoder 的 post-* 跟踪钩子），
-# 仓库自带的两个钩子在 scripts\git-hooks 里躺着【一个都不执行】⇒ 除了手工敲这条脚本，
-# 今天没有任何自动闸门。"钩子还在仓里"与"钩子在跑"是两件事，后者必须被判而不是被相信。
+# pre-push 挡测试，而当时本机 core.hooksPath 指向 .git\hooks（那里只有 Qoder 的 post-* 跟踪钩子），
+# 仓库自带的两个钩子在 scripts\git-hooks 里躺着【一个都不执行】⇒ 当时除手工敲这条脚本外
+# 没有任何自动闸门。该状态已闭环：2026-11-12 实测 core.hooksPath=scripts\git-hooks，
+# pre-commit / pre-push 均生效，本格判 ✅。下面仍保留这层自检 ——
+# "钩子还在仓里"与"钩子在跑"是两件事，后者必须被判而不是被相信。
 $hooksWant = Join-Path $RepoRoot 'scripts\git-hooks'
 $hooksNow = ''
 try { $hooksNow = (& git -C $RepoRoot config --local --get core.hooksPath 2>$null) | Out-String } catch { }

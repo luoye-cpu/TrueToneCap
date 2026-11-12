@@ -15,9 +15,13 @@
 - 决策文档：`docs/reviews/pipeline-review/cicp-first-color-declaration-2026-11-12.md`
   （§3 = 两档×全格式最终产物形态表；§4 = AdobeRGB 分支定位；§5 = 外部裁判同步记录）
 - 总判据：`FormatHelper.CicpDeclarable(tag)`（== "AdobeRGB" 即码点盲），doc 注释写明两档契约。
-- 记忆已同步：`truetonecap-repo-gates.md` 的「CICP 优先口径」条。
+- 记忆已同步：`.workbuddy/memory/2026-11-12.md` 的「CICP 优先口径」条
+  （全仓不存在 `truetonecap-repo-gates.md`，旧交接此处指向失准，2026-11-13 订正）。
 
-## 2. 工作区未提交改动（git status 实录）
+## 2. 交接时点的工作区快照（现已在 `401271d` 提交，git status 已干净）
+
+> 下面是 2026-11-12 交接时的 `git status` 实录，**是历史快照、不是当前状态**；
+> 这些改动连同文案修正、实验脚本、文档回填已在续作中收口为本地提交 `401271d`（未 push，见 §3）。
 
 ```
  M src/TrueToneCap.Core/ColorManagement/ColorProfileProvider.cs   ← 三处 ICC 构建器 TRC 共享 offset
@@ -118,7 +122,8 @@ PQ 件不在变体范围：ST.2084 不是幂函数形，para 表达不了；4096
 ## 4. 雷区（下一次继续必读）
 
 - **目录里旧夹具**：`%TEMP%/TrueToneCap_ColorTest/` 有 25+ 个历史 GUID 文件。任何从那里
-  读产物的脚本必须按 mtime 取最新（referee 待改）。
+  读产物的脚本必须按 mtime 取最新（`icc_selfbuilt_referee.py` 与 `icc_slim_variants.py`
+  **均已改**，见 §3 第 1、2 项）。
 - **字节数不进文案/判据**：WebP 句的"2100 字节"就是上一个雷（今天刚过期）。IccCheck 台账
   注释里已写明这条纪律。
 - **产品形状钉**：`Test_QualityChain_JpegLiLibPathDeliveryChain` 等对 JpegLiNative 参数串的
@@ -213,3 +218,40 @@ profile compression … under evaluation"*（E2）。iccMAX 的 `'cenc'` 指向�
 **结论**：不存在可直接换用的「ICC 官方更小的 sRGB 嵌入件」；WP58 针对的是 CMYK output 件。
 官方对紧凑 Matrix/TRC 件的目标就是 ~1KB，且明文认可共享 offset、建议 8-bit 配 256 点曲线
 ——**A（1052B）已在官方推荐形态上，B/C 都不采纳**。
+
+## 7. 2026-11-13 续作：门禁台账收口 + 完整门禁复测（A 档不动）
+
+本轮**只改判据台账与文档**，产物代码与 ICC 曲线字节一个没动（A = 1052B 保持不变）。
+
+- **修了什么**：`verify.ps1` 的 `[1.7/2]` 里，附加四条判据（含 `icc_profile_id_check`）与
+  `nvenc_matrix_probe` 在 rc=3 SKIP 时原本只打一行黄字，不写 `GateGaps` ⇒ 既不进末屏
+  「本轮判据未覆盖」清单，也不计入结论行「另有 N 处未判」。现与 `$checks` 循环同口径逐条点名。
+  `GateGaps` 不参与 exit code（`:1471`），故**阻断行为零变化**。
+- **文档订正**：§1 记忆路径、§2 标题、§4:121 的 `referee 待改`；`scripts/precision/README.md:98`
+  的「递空表 ⇒ HDR 层恒 SKIP」（`:708`/`:737` 早已接线）；`verify.ps1` 的 hooksPath 历史注释
+  （实测 `core.hooksPath=scripts/git-hooks`）。
+- **单条完整门禁实测（2026-11-13）**：`verify.ps1 -Configuration Release -WriteGateBaseline`
+  ⇒ 构建 **0 警告 0 错误**、`[1.6/2]` ✅、`[1.7/2]` 前 9 条 checks + extra 四条 + NVENC
+  **全部判绿**，但第 10 条 `wg_container_roundtrip.py` **判红（rc=1）** ⇒ 整条 `exit 1`；
+  `-WriteGateBaseline` 按脚本保护**没有写基线**，复核 `gate-baseline.json` 仍是
+  `2625 / 2026-11-05 20:17:13`，未被污染。
+- **根因（E1，实证）**：日志里 wg 的 stdout 停在 patch 值表中段、**没有一致性表格和 `[RESULT]`**
+  ⇒ 子进程被中途截断，不是判据判红。机制是 `wg_container_roundtrip.py:43` 与
+  `audit_roundtrip.py:44` 都在 `artifacts/precision/decode` 里逐文件 `os.remove(raw)`
+  （36 + 20 次），叠加样张生成的目录清空，单次工具调用累计删除越过 WorkBuddy
+  `[safe-delete]` ≥50 阈值 ⇒ 静默截断。用**同一批样张、同一个 `--samples` 参数单独复跑**
+  `wg_container_roundtrip.py` ⇒ `rc=0`，`[RESULT] 不一致容器数 = 0，解码失败/全黑 = 0`，
+  30 组跨容器比对全部 ✅（最大差 0..3，容差 1/8）。**判据本身没问题，不是产物回归**。
+- **补跑后的完整证据**：`verify.ps1 -Configuration Release -SkipPrecision` ⇒
+  8 套件 **2730 断言 / 0 失败**、`VERIFY_LASTEXIT=0`，末屏如实列出 2 处未判；
+  这两格用同一批新鲜样张分组补跑：8 条样张判据 rc=0、`audit_roundtrip`（20 文件 0 问题）
+  rc=0、`wg_container_roundtrip` rc=0、`tiff_png_referee`（13 条判据 0 不过）rc=0；
+  完整门禁那轮里 `gen-third-party-notices --check`、`combo_locale`、
+  `icc_selfbuilt_referee`（lcms PASS）、`nvenc_matrix_probe` 均 ✅；
+  唯一 rc=3 SKIP 是 `icc_profile_id_check`（本机无带非零 ProfileID 的真实 profile，长期已知）。
+- **仍未闭环、如实留账**：① 单条完整 `verify.ps1` 全绿在 WorkBuddy 会话内仍拿不到；
+  ② `gate-baseline.json` 保持 2625 未收编——脚本要求「完整且合法的一轮」才允许
+  `-WriteGateBaseline`，`-SkipPrecision` 轮不算，本轮完整轮又 `exit 1`。下一轮拿到合法完整绿
+  再收编 2730（差 105 条：unit +96 / color +1 / usability +8）。③ 上面 §3 第 5 项与 §4 的
+  `[safe-delete]` 雷区继续有效，**不要据此改产品或判据容差**。
+- **提交**：本地提交，未 push；不建 tag、不发版。

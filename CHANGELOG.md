@@ -16,6 +16,12 @@
 ---
 
 
+## [未发布] — 门禁台账口径与文档订正（2026-11-13）
+
+- **工程侧（判据卫生）**：`verify.ps1` 的 `[1.7/2]` 里，附加的四条判据与 `nvenc_matrix_probe` 在退出码 3（前置条件缺失 ⇒ SKIP）时此前**只在滚屏里留一行黄字**，既不进末屏「本轮判据未覆盖」清单，也不计入结论行的「另有 N 处未判」。现与上方 `$checks` 循环同口径，逐条写进台账 ⇒ 换机器时不会把一条没人跑的判据读成判过。仅改台账呈现，`GateGaps` 本就不参与退出码，**不改变任何阻断行为**；产物代码与 ICC profile 字节一个没动（A 档 1052 B 保持不变）。
+- **工程侧（文档一致性）**：订正交接文档里三处已过期表述（记忆路径指向、§2 标题「工作区未提交改动」、`referee 待改`）、`scripts/precision/README.md` 里「`verify.ps1` 对色彩管线 ③ 递空表 ⇒ HDR 层恒 SKIP」的旧说明（代码早已在 `:708`/`:737` 接线），以及 `verify.ps1` 里描述「本机钩子没接」的历史注释（实测 `core.hooksPath=scripts/git-hooks` 已生效）。
+- **验收说明**：`-SkipPrecision` 单条门禁 8 套件 **2730 断言 / 0 失败**、`exit 0`；被跳过的 `[1.7/2]` 与 `[2.5/2]` 用同一批新鲜样张分组补跑，全部 rc=0（唯一 rc=3 是 `icc_profile_id_check` 本机缺带非零 ProfileID 的真实 profile，长期已知）。**单条完整门禁仍未拿到**：`wg_container_roundtrip` 被 WorkBuddy `[safe-delete]` 累计删除阈值静默截断，单独复跑同批样张 rc=0（不一致容器数 0、解码失败 0），非产物回归；因此 `scripts/gate-baseline.json` 保持 2625 未收编，留待一轮合法完整绿。详见 `docs/ledger/handoff-icc-slim-cicp-first-2026-11-12.md` §7。
+
 ## [未发布] — 自产 ICC 瘦身（TRC 共享 offset，2026-11-12）
 
 - **📉 无码点容器与码点盲空间的产物再瘦身一半**：自产 ICC 原先给 `rTRC/gTRC/bTRC` 各写一份完全相同的曲线，现改为三条 tag 表项指向**同一个数据块偏移**（ICC 规范允许，Windows 系统自带的 sRGB profile 也是这个布局）。SDR 标准件 2100 B → **1052 B**，HDR PQ 件约 25.1 KB → **8696 B**（省 16.4 KB）。曲线字节一个没变，色彩语义、`PatchSrgbPrimaries` 按签名打补丁、跨格式"同 tag 同一份 profile"全部原样成立；上次 CICP 优先之后每条产物最多嵌一份 ICC，本轮只影响 JPEG 家族 / WebP / TIFF 与 AdobeRGB 旁路。
