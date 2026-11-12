@@ -82,7 +82,28 @@ Check '旧 ICC 说法：sRGB 目标不嵌入 ICC（通用默认）' $app 'sRGB �
 
 Write-Host "`n[5] XAML 文本在 .xbf 里（不在 DLL 里）⇒ 同容器对照"
 Check 'xbf 对照组：色彩与 HDR' $xbf '色彩与 HDR' 'unicode' $true
-Check 'xbf 新句：色域映射按当前格式说' $xbf '色域映射」按当前格式说' 'unicode' $true
+# 2026-11-13 订正：这里的正样本原是 7fff1f0（v0.3.6-beta）那一轮的 XAML 长句尾串
+# '色域映射」按当前格式说'。14d0254 把整句缩成「目标色域同时决定像素与容器声明。」
+# 后该串已从源码消失，本判据自此对【每一枚】包恒红 —— 实测已上架的 0.3.11 包
+# 同样 ❌，0.3.15 包也是 ❌，属判据过期而非产物回归。改成同一次 14d0254 引入、
+# 至今仍在 MainWindow.xaml（Text="广色域自动缩限到目标色域。"）与 .xbf 里的当前句。
+# 严格性没有降低：仍是「新句在 / 旧句不在 / 同容器对照组」三件套。
+#
+# ⚠ 防再次静默过期：正样本必须【同时在源码和 .xbf 里】。只查包而不查源码，
+#   文案改版后这条会退化成"永远红"，且伪装成"本轮代码没进包"，与它要防的
+#   假绿正好相反。源码里找不到 ⇒ 明确报"判据与源码脱节，请更新本脚本"。
+$xamlNeedle = '广色域自动缩限到目标色域'
+$xamlRepoRoot = (& git -C $Pkg rev-parse --show-toplevel 2>$null | Select-Object -First 1)
+$xamlSource = if ($xamlRepoRoot) { Join-Path $xamlRepoRoot 'src\TrueToneCap.App\MainWindow.xaml' } else { '' }
+if (-not $xamlSource -or -not (Test-Path $xamlSource)) {
+    Write-Host "  ❌ 定位不到 MainWindow.xaml ⇒ 正样本这一层没判"
+    $fail++
+} elseif ((Find-Ascii $xamlSource $xamlNeedle) -lt 0) {
+    Write-Host "  ❌ 正样本 '$xamlNeedle' 已不在源码 ⇒ 判据与源码脱节，须更新本脚本（不是产物回归）"
+    $fail++
+} else {
+    Check 'xbf 新句：广色域自动缩限到目标色域' $xbf $xamlNeedle 'unicode' $true
+}
 Check 'xbf 旧句：非 sRGB 色域自动嵌入标准 ICC' $xbf '非 sRGB 色域自动嵌入标准 ICC' 'unicode' $false
 
 Write-Host "`n[6] 时间戳与新鲜度"
