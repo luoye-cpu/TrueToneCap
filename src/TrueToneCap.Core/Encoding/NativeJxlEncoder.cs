@@ -200,12 +200,17 @@ public static class NativeJxlEncoder
             float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
 
             // 色彩空间参数
+            // ═══ 2026-11-12 CICP 优先（用户口径）：color fields 能枚举的空间（sRGB/P3/2020）
+            //     一律走 fields，不再交 icc_pathname —— ICC 与 fields 二选一（都给时 ICC 压 fields），
+            //     而两者声明的是同一套原色，ICC 纯增体积。ICC 只留给码点盲空间：
+            //     AdobeRGB（libjxl 无其枚举，ICC 是唯一诚实声明；入口是否真给 ICC 由上游
+            //     FormatEncoders 的 CicpDeclarable 门决定）。HDR 的 P3+PQ 也是盲区，
+            //     但那在 HDR 分支自有所属（见 EncodeHdr）。
             // 能不能嵌只问一个地方：FormatHelper.IsEmbeddableIcc（cjxl / avifenc 同判据，见 §31.3-9）
-            // 有 ICC ⇒ 只给 ICC（ICC 会覆盖 color fields，同时给两个是自相矛盾）
             // 没 ICC ⇒ 按【目标标签】选 IDE 名，不再一律回落 sRGB（回落 sRGB 曾把 BT.2020 的产物
             //           主动声明成 sRGB，是"写错"而不是"没写"）
             string colorArg;
-            if (FormatHelper.IsEmbeddableIcc(iccProfile))
+            if (FormatHelper.IsEmbeddableIcc(iccProfile) && !FormatHelper.CicpDeclarable(colorSpaceTag))
             {
                 tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
                 File.WriteAllBytes(tmpIcc, iccProfile);
@@ -310,9 +315,10 @@ public static class NativeJxlEncoder
             // ═══ 照抄 Encode：clamp butteraugli distance 到 cjxl 合法范围 [0,25] ═══
             float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
 
-            // ═══ 与 Encode 同一份规则（helper 只有一份）═══
+            // ═══ 与 Encode 同一份规则（helper 只有一份）：color fields 能枚举的空间不再交
+            //     icc_pathname（2026-11-12 CICP 优先，ICC 只留码点盲空间 AdobeRGB）═══
             string colorArg;
-            if (FormatHelper.IsEmbeddableIcc(iccProfile))
+            if (FormatHelper.IsEmbeddableIcc(iccProfile) && !FormatHelper.CicpDeclarable(colorSpaceTag))
             {
                 tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
                 File.WriteAllBytes(tmpIcc, iccProfile);

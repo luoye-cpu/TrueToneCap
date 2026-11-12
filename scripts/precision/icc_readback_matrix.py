@@ -17,6 +17,12 @@
       ⑤ 不同目标色域的 profile 必须两两不同 —— 抓"广色域矩阵/换 profile 那一步没落地"；
       ⑥ 反空转：样张里一个 ICC 都没读到 ⇒ 直接失败，不许"都没测到所以都通过"。
 
+  ═══ 2026-11-12 CICP 优先（用户口径）后的分工收缩 ═══
+  PNG / AVIF 有码点通道（cICP / colr(nclx)），广色域样张（p3 / bt2020 / adobe——后者已被
+  MapAdobeTargetToWide 收口成 bt2020）按新契约【只写码点、不嵌 ICC】⇒ 本判据对这两类容器
+  只要求"读不到 ICC = 预期形态"，码点本体的正确性由 cicp_consistency.py 判。
+  ICC 内容层判据（①-⑥）收缩到无码点容器：JPEG 家族 / TIFF / WebP —— 那里 ICC 是唯一声明通道。
+
 JXL 容器本机没有外部解码器（`djxl` 不在、Pillow 无 JXL 插件），只做①②的自洽检查并注明；
 跨格式同源那条不参与 JXL —— 拿自家解析器凑"外部实现"是本项目明确禁止的。
 
@@ -303,10 +309,16 @@ def main() -> int:
 
         prof, note = SCANNERS[ext](p)
         if prof is None:
-            wide = any(t in name.lower() for t in ("p3", "bt2020", "adobe"))
-            if wide:
+            stem = name.lower()
+            wide = any(t in stem for t in ("p3", "bt2020", "adobe"))
+            # ═══ 2026-11-12 CICP 优先：容器有没有码点通道决定"无 ICC"是预期还是缺陷 ═══
+            # PNG/AVIF 广色域走码点单通道（判据在 cicp_consistency.py）；JPEG/TIFF/WebP
+            # 无码点通道 ⇒ 广色域读不到 ICC 照旧是缺陷（ICC 是唯一声明）。
+            if wide and ext not in (".png", ".avif"):
                 print(f"  ❌ {name}: 广色域样张却读不到 ICC —— {note}")
                 bad += 1
+            elif wide:
+                print(f"  ℹ️  {name}: 无 ICC（预期：广色域声明走码点，码点判据见 cicp_consistency.py；{note}）")
             else:
                 print(f"  ℹ️  {name}: 无 ICC（{note}）")
             continue

@@ -922,9 +922,10 @@ if (args.Length >= 1 && args[0] == "--param-sweep")
         ("cs_png_bt2020", OutputFormat.PNG, "png",  AvifEncoderKind.Auto, 100f, "444", 10, "BT2020"),
         ("cs_png_adobe",  OutputFormat.PNG, "png",  AvifEncoderKind.Auto, 100f, "444", 10, "AdobeRGB"),
         ("cs_avif_p3",    OutputFormat.AVIF, "avif", AvifEncoderKind.LibAom, 60f, "444", 10, "DisplayP3"),
-        // ⚠ 关键一格：AdobeRGB 在 H.273 无码点 ⇒ 软件路径故意跳过 --cicp，色彩只能靠 ICC 声明。
-        //   而 NativeAvifEncoder.EncodeFile 没有 iccProfile 形参，ICC 只在 16-bit 中转 PNG 里
-        //   ⇒ 若 avifenc 不把中转 PNG 的 iCCP 带进容器，这张图就【完全没有色彩声明】。
+        // ⚠ 名字里叫 adobe，但 ColorSpaceTag 在下面被 MapAdobeTargetToWide 收口成 BT2020
+        //   （2026-09-27 用户口径；AdobeRGB 不是产品的可输出色域）—— 这张样张验的是
+        //   "收口链没漏"。2026-11-12 CICP 优先起它按 BT2020 只写 colr(nclx) 9/13/9、不嵌 ICC
+        //   （判据见 cicp_consistency.py / icc_readback_matrix.py 的 CICP 优先分工）。
         ("cs_avif_adobe", OutputFormat.AVIF, "avif", AvifEncoderKind.LibAom, 60f, "444", 10, "AdobeRGB"),
     };
 

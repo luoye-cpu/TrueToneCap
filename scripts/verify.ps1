@@ -553,8 +553,9 @@ if ($SkipPrecision) {
     #     这条【没有 SKIP 分支】：它是阻断项。
     #   · icc_profile_id_check.py —— ICC ProfileID 配方对真实 profile 的实证；本机找不到
     #     可比对的 v4 profile 时脚本自己报 3=SKIP（那是"这轮没判"，不是通过）。
-    #   · icc_selfbuilt_referee.py —— 用 lcms2 读回产品真正嵌进 PNG 的自产 profile（含
-    #     "字节序改回小端必须失效"的反证）；缺 --color-tests 样张时同样报 SKIP。
+    #   · icc_selfbuilt_referee.py —— 用 lcms2 读回产品真正嵌进容器的自产 profile（2026-11-12
+    #     CICP 优先起输入为 TIFF-sRGB + PNG-AdobeRGB 两格——PNG 里仍嵌 ICC 的只剩码点盲空间；
+    #     含"字节序改回小端必须失效"的反证）；缺 --color-tests 样张时同样报 SKIP。
     $probeDir = Join-Path $RepoRoot "scripts\probes"
     foreach ($extra in @(
         @{ Script = (Join-Path $RepoRoot "scripts\gen-third-party-notices.py"); Params = @("--check"); What = "许可清单与全文同步" },

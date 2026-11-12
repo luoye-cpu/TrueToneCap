@@ -67,7 +67,7 @@ public static class ColorPipelineTests
         // ─── 5. 编码文件色彩标记验证 ───
         Console.WriteLine("\n── 5. 编码文件色彩标记 ──");
         EncodedPng_CicpChunk_Valid();
-        EncodedPng_IccpChunk_Valid();
+        EncodedPng_Iccp_CicpFirst();
         AvifPngFallback_KeepsDeclarationAndNotice();
         WebPFallback_WhenBackendFails_StillDeliversPngAndNotice();
         JpegLiAndJxl_BackendFailure_NeverClaimsSuccess();
@@ -518,7 +518,8 @@ public static class ColorPipelineTests
         Assert($"PNG cICP: fullRange=1，实际 {cicp[3]}", cicp[3] == 1);
 
         // sRGB 是隐含默认色域 ⇒ 除 cICP 外不应再嵌 iCCP 与之竞争声明
-        // （对照 EncodedPng_IccpChunk_Valid：非 sRGB 才必须有 iCCP）。
+        // （对照 EncodedPng_Iccp_CicpFirst：2026-11-12 CICP 优先起，码点可声明的空间
+        // 一律不嵌 iCCP，ICC 通道只剩码点盲空间 AdobeRGB）。
         Assert("PNG cICP: sRGB 档不嵌 iCCP", FindPngChunk(chunks, "iCCP") is null);
     }
 
@@ -793,9 +794,12 @@ public static class ColorPipelineTests
             $"实得 {FormatHelper.ResolveActualPath(webpPath)}");
     }
 
-    static void EncodedPng_IccpChunk_Valid()
+    static void EncodedPng_Iccp_CicpFirst()
     {
-        // 非 sRGB 色域 → 应嵌入 iCCP chunk
+        // ═══ 2026-11-12 CICP 优先（用户口径）反向钉：码点可声明的空间（DisplayP3）只写 cICP、
+        // 不再嵌 iCCP —— 旧契约"两条通道同一套原色"让广色域 PNG 白背一份 profile；
+        // ICC 通道从此只剩码点盲空间（AdobeRGB，见 FormatHelper.CicpDeclarable）。
+        // 刻意喂真 ICC：证明是门在丢弃它，不是"没有可嵌的 ICC"。
         var bgra = GeneratePattern(8, 8);
         string path = Path.Combine(OutDir, "iccp_test.png");
         if (File.Exists(path)) File.Delete(path);
@@ -809,8 +813,13 @@ public static class ColorPipelineTests
         };
         encoder.EncodeSdrAsync(bgra, 8, 8, settings, path).GetAwaiter().GetResult();
 
-        bool hasIccp = CheckPngChunk(path, "iCCP");
-        Assert("PNG iCCP: 非 sRGB 色域嵌入 ICC", hasIccp);
+        var chunks = ReadPngChunks(path);
+        byte[]? cicp = FindPngChunk(chunks, "cICP");
+        Assert("PNG cICP: DisplayP3 目标仍写 cICP [12,13,0,1]",
+            cicp is { Length: 4 } && cicp[0] == 12 && cicp[1] == 13 && cicp[2] == 0 && cicp[3] == 1,
+            cicp is null ? "缺 cICP" : $"实得 [{string.Join(",", cicp!)}]");
+        bool hasIccp = FindPngChunk(chunks, "iCCP") is not null;
+        Assert("PNG iCCP: 码点可声明的空间不再嵌 ICC（CICP 优先，即便喂了真 ICC）", !hasIccp);
     }
 
     static void EncodedPng_HdrCicp_Bt2020Pq()
@@ -1117,11 +1126,11 @@ public static class ColorPipelineTests
                 Assert("AVIF 增益图档[BT2020]: 底图 nclx = 9/13/9（原色随目标、matrix 跟原色）",
                     nclx is not null && nclx[0] == 9 && nclx[1] == 13 && nclx[2] == 9,
                     nclx is null ? "无 colr(nclx)" : $"实得 {nclx[0]}/{nclx[1]}/{nclx[2]}");
-                // ICC 的存在用 acsp 判（ICC profile 的 magic，任何真 profile 必含）——
-                // 不能用 'prof'/'iCCP'：后者是 PNG 的块名，AVIF 里 ICC 是 colr(rICC) 盒。
-                // 2026-11-03 审查轮：本判据首版用 'prof' 侥幸过，但那是撞运气；acsp 才是硬证据。
-                Assert("AVIF 增益图档[BT2020]: 底图嵌 ICC（广色域唯一依据，acsp magic 在）",
-                    ContainsAscii(wd, "acsp"), "没找到 acsp ⇒ 2020 像素没有 ICC 声明通道");
+                // ═══ 2026-11-12 CICP 优先：底图不嵌 ICC（nclx 9/13/9 已完整声明 2020；
+                //     旧形态恒嵌 2.9KB 标准件 = 同义重复）。acsp 是 ICC profile 的 magic，
+                //     缺席 = 没嵌 —— 现在缺席才是正确形态（与 sRGB 目标那条同判据）。
+                Assert("AVIF 增益图档[BT2020]: 底图不嵌 ICC（nclx 已完整声明，CICP 优先口径）",
+                    !ContainsAscii(wd, "acsp"), "产物含 acsp ⇒ 底图又背上了同义重复的 ICC 标准件");
                 var alt = AlternateNclxOf(wd);
                 Assert("AVIF 增益图档[BT2020]: 替代图 nclx = 9/16/9（PQ + 同一 matrix 来源）",
                     alt is not null && alt[0] == 9 && alt[1] == 16 && alt[2] == 9,
@@ -1935,21 +1944,23 @@ public static class ColorPipelineTests
         }
 
         // ── 端到端：查真正落到用户产物上的那一份，而不是内存里的中间品 ──
-        string path = Path.Combine(OutDir, "provenance_p3.png");
+        // 2026-11-12 CICP 优先：码点可声明的空间（P3/2020/sRGB）的 PNG 已不嵌 ICC ⇒
+        // 端到端出口改走 AdobeRGB（码点盲空间，ICC 是唯一声明通道，iCCP 仍在）。
+        string path = Path.Combine(OutDir, "provenance_adobe.png");
         if (File.Exists(path)) File.Delete(path);
         var encoder = EncoderFactory.Create(OutputFormat.PNG);
         var settings = new EncodingSettings
         {
             Format = OutputFormat.PNG, Quality = 100, HdrOutput = false,
-            ColorSpaceTag = "DisplayP3", OutputBitDepth = 8,
-            IccProfile = ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.DisplayP3, "Display P3"),
+            ColorSpaceTag = "AdobeRGB", OutputBitDepth = 8,
+            IccProfile = ColorProfileProvider.PatchSrgbPrimaries(IccPrimaries.AdobeRGB, "Adobe RGB (1998)"),
         };
         encoder.EncodeSdrAsync(GeneratePattern(8, 8), 8, 8, settings, path).GetAwaiter().GetResult();
 
         var iccp = FindPngChunk(ReadPngChunks(path), "iCCP");
         if (iccp is null)
         {
-            Assert("端到端 PNG: 有 iCCP 可查", false, "写入器没嵌 ICC ⇒ 本组判据失去出口");
+            Assert("端到端 PNG: 有 iCCP 可查（AdobeRGB=码点盲空间）", false, "写入器没嵌 ICC ⇒ 本组判据失去出口");
         }
         else
         {

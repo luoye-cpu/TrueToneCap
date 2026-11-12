@@ -293,7 +293,11 @@ public sealed class JpegXlEncoder : ImageEncoder
                 await Task.Run(() =>
                 {
                     ct.ThrowIfCancellationRequested();
-                    var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
+                    // ═══ 2026-11-12 CICP 优先：cjxl 的 color fields 能枚举 sRGB/P3/2020 ⇒ 不再交
+                    //     icc_pathname（ICC 与 fields 二选一且 ICC 压 fields——同义声明不值一份体积）。
+                    //     ICC 只留给码点盲空间（AdobeRGB 在 libjxl 无枚举，ICC 是唯一诚实声明——
+                    //     但浮点入口上面对 AdobeRGB 已收口成 BT2020 并清了 ICC ⇒ 实际恒走 fields）。
+                    var icc = FormatHelper.CicpDeclarable(s.ColorSpaceTag) ? null : s.IccProfile;
                     // ═══ 2026-09-19：色度开关此前从未抵达 cjxl（本仓库默认位深 10 ⇒ 走的就是这条），
                     // 界面上的 4:4:4 / 4:2:0 改了产物字节完全相同。映射见 NativeJxlEncoder.BuildResamplingArg。
                     NativeJxlEncoder.Encode16Bgra16(px16, f.Width, f.Height, path, s.Quality, s.OutputBitDepth, icc, s.ChromaSubsampling, s.ColorSpaceTag, s.Effort);
@@ -328,9 +332,11 @@ public sealed class JpegXlEncoder : ImageEncoder
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
-            var icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
-            // 有可嵌 ICC 就走 ICC；没有时由 NativeJxlEncoder 按【目标标签】选 cjxl 的 color_space
-            // IDE 名（过去这里等价于"没 ICC 就一律声明 sRGB"，会把 BT.2020 的产物主动写错）。
+            // ═══ 2026-11-12 CICP 优先：color fields 能枚举的空间（sRGB/P3/2020）不再交 icc_pathname；
+            //     ICC 只留给码点盲空间（AdobeRGB——libjxl 无其枚举，ICC 是唯一诚实声明）。
+            //     没交 ICC 时由 NativeJxlEncoder 按【目标标签】选 cjxl 的 color_space
+            //     IDE 名（过去这里等价于"没 ICC 就一律声明 sRGB"，会把 BT.2020 的产物主动写错）。
+            var icc = FormatHelper.CicpDeclarable(s.ColorSpaceTag) ? null : s.IccProfile;
             NativeJxlEncoder.Encode(px, w, h, path, s.Quality, s.OutputBitDepth, icc, s.ChromaSubsampling, s.ColorSpaceTag, s.Effort);
         }, ct);
     }
@@ -481,8 +487,10 @@ public sealed class AvifEncoder : ImageEncoder
                 {
                     ct.ThrowIfCancellationRequested();
                     // ═══ 广色域 tag 已由 PrepareSdr16Pixels 保留 ⇒ 容器标记必须与像素一致
-                    //     （同函数已做 ICC 兜底；AdobeRGB 返回 null = 只靠 ICC 声明，见 BuildSdrCicp）
-                    byte[]? icc = (s.ColorSpaceTag is not (null or "System" or "sRGB")) ? s.IccProfile : null;
+                    // ═══ 2026-11-12 CICP 优先：nclx 能完整声明的空间（sRGB/P3/2020）不再交 --icc
+                    //     （与 nclx 同义，ICC 纯增体积）；ICC 只留码点盲空间 AdobeRGB
+                    //     （BuildSdrCicp 对它返回 null = 无码点，靠 ICC 声明）
+                    byte[]? icc = FormatHelper.CicpDeclarable(s.ColorSpaceTag) ? null : s.IccProfile;
                     byte[]? cicpSdr = FormatHelper.BuildSdrCicp(s.ColorSpaceTag);
                     // ═══ 2026-10-08 修复(P1①): 位深真实生效（bitDepth 显式传，见 EncodeStdin16/BuildAvifencArgs）═══
                     // ═══ 2026-11-11 性能审计 P2：中转 PNG 改走 stdin（零临时文件 I/O，4K 66MB 写+读+删归零）═══
@@ -536,21 +544,19 @@ public sealed class AvifEncoder : ImageEncoder
 
             int w = f.Width, h = f.Height;
             // 0. 色彩模式（与 JPEG 出口同一函数、同一判据）
-            //    ⚠ 必须用返回的 baseIcc（2026-11-03 审查轮修）：这个函数在"显式 Rec.2020"时
-            //      会把像素搬到 2020 原色并返回 2020 的 ICC；此前这里丢掉返回值、改从
-            //      s.IccProfile 重算 —— 拿到的是用户 profile（可能是显示器 ICC 或 null），
-            //      与已经搬过的像素不是一套 ⇒ 产物要么标签错、要么回落到 sRGB ICC 而像素是 2020。
-            //      JPEG 出口一直用的是这个返回值，AVIF 侧没有理由各算一份。
+            //    ⚠ ICC 返回值（baseIcc）2026-11-12 起【不再用于 AVIF】：CICP 优先口径下底图
+            //      只有 sRGB / BT.2020 两种落点，nclx 都能完整声明 ⇒ 不嵌 ICC（JPEG 出口
+            //      没有码点通道，那边仍然用这份 ICC——两边各自对齐自己的容器能力）。
             //    ⚠ requireExplicit: false（2026-11-04）：HDR 输出的 BT.2020 是【标准色域】，
             //      不是"用户偏好广色域"——决策层在 HDR 下就是这么解析的（ColorDecision: hdr ⇒ target=BT2020）。
             //      此前沿用默认"必须显式"门，导致【跟随显示器 + HDR 屏】这一最常见组合下
-            //      像素留在 sRGB/709，而容器 nclx 照样写 9/13/9、还嵌了一份 sRGB ICC ⇒ 三处矛盾
+            //      像素留在 sRGB/709，而容器 nclx 照样写 9/13/9 ⇒ 声明与像素两处矛盾
             //      （实测 avifdec：Primaries 9 而 ICC desc = "sRGB IEC61966-2.1"）。
             //      增益图档必须与 PQ 档交付同一套原色，否则"底图是 SDR"会退化成"底图还更窄"。
             //    ⚠ WideApplied（2026-11-04 深夜审查轮）：函数在"取不到可嵌 2020 ICC"时会【静默
             //      退回 sRGB 像素】——那种情况像素没搬，声明就必须跟着像素写 sRGB；否则又是
-            //      "nclx 9/13/9 + sRGB ICC + sRGB 像素"的错件（与上面刚修的同一个病，只是换了触发条件）。
-            var (hdrPixels, baseIcc, wideApplied) = JpegGainMapEncoder.PrepareGainMapColorSpace(
+            //      "nclx 9/13/9 + sRGB 像素"的错件（与上面刚修的同一个病，只是换了触发条件）。
+            var (hdrPixels, _, wideApplied) = JpegGainMapEncoder.PrepareGainMapColorSpace(
                 f.Pixels, w, h, s, requireExplicit: false);
             // 1. 白点 / headroom
             var (hdrPeakNits, sdrWhiteNits, sdrWhiteScrgb, headroom) = JpegGainMapEncoder.ComputeWhitePoint(s);
@@ -597,17 +603,16 @@ public sealed class AvifEncoder : ImageEncoder
             var outGmAvif = Path.Combine(Path.GetTempPath(), $"ttc_gm_gain_{Guid.NewGuid():N}.avif");
             try
             {
-                // 底图声明：CICP 与 ICC 都必须跟着【像素实际所在的色域】说话，而不是跟着 tag。
-                // ⚠ ICC 只在【真的搬成广色域】时嵌（2026-11-03 审查轮）：sRGB 目标下 cicp 1/13/1
-                //   已经把话说全了，再塞 2100B 的 sRGB ICC 既违背 8-bit SDR 路的既有契约
-                //   （"sRGB 不嵌 ICC"），也让能力卡文案对不上产物。广色域必须嵌，
-                //   而且必须用 PrepareGainMapColorSpace 返回的那一份 —— 像素已被它搬到 2020，
-                //   ICC 必须与像素同一套原色（不能用调用方随手给的 profile）。
+                // 底图声明：跟着【像素实际所在的色域】说话，而不是跟着 tag。
+                // ⚠ 2026-11-12 CICP 优先（用户口径）：底图 ICC 恒 null —— 底图只有 sRGB /
+                //   BT.2020 两种落点，colr(nclx) 都能完整声明，再嵌 ICC 就是同义重复纯增体积
+                //   （旧形态广色域底图恒嵌 2.9KB 标准件，与 2026-11-12「sRGB 不嵌 ICC」收口同源）。
+                //   ICC 通道从此只留给码点盲空间（AdobeRGB），底图永远到不了那里。
                 // ⚠ wideApplied（2026-11-04 深夜审查轮）：只有它才代表"像素真的搬了"。
                 //   若 tag 是 BT2020 但 2020 ICC 不可用，函数会退回 sRGB 像素 ⇒ 此处必须同步
-                //   退回 sRGB 声明，绝不能出现"nclx 9/13/9 + sRGB ICC"的错件。
+                //   退回 sRGB 声明（这条纪律现在只约束 CICP，ICC 已恒 null）。
                 bool widePixels = wideApplied;
-                byte[]? embedIcc = widePixels ? baseIcc : null;
+                byte[]? embedIcc = null;
                 byte[]? baseCicp = FormatHelper.BuildSdrCicp(widePixels ? "BT2020" : "sRGB");
                 if (s.ColorSpaceTag == "BT2020" && !widePixels)
                     CoreLog.Warn("GainMap-AVIF",
@@ -624,7 +629,6 @@ public sealed class AvifEncoder : ImageEncoder
                 //   EncodeFast 临时文件 + EncodeFile —— Encode 的 tag 建 CICP 与
                 //   EncodeFile 的数组/缺省分支口径不同（增益层缺省要 --cicp 1/13/6），
                 //   硬换线会漂移容器元数据，不动。
-                byte[]? embedIccOk = FormatHelper.IsEmbeddableIcc(embedIcc) ? embedIcc : null;
                 if (baseDepth > 8)
                 {
                     byte[] baseBgra16 = JpegGainMapEncoder.LinearToBgra16(sdrLinear, w, h, baseDepth);
@@ -639,7 +643,7 @@ public sealed class AvifEncoder : ImageEncoder
                 else
                 {
                     byte[] baseBgra8 = JpegGainMapEncoder.LinearToBgra8(sdrLinear, w, h);
-                    ManagedPngEncoder.EncodeFast(baseBgra8, w, h, tmpBase, iccProfile: embedIccOk, cicp: baseCicp);
+                    ManagedPngEncoder.EncodeFast(baseBgra8, w, h, tmpBase, iccProfile: embedIcc, cicp: baseCicp);
                     NativeAvifEncoder.EncodeFile(tmpBase, outBaseAvif, quality, cicp: baseCicp,
                         colorSpaceTag: widePixels ? "BT2020" : "sRGB",
                         chroma: s.ChromaSubsampling, codec: codec,
@@ -1011,7 +1015,8 @@ public sealed class LibAomAvifBackend : IAvifEncoder
         await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
-            var icc = (colorSpaceTag is not (null or "System" or "sRGB")) ? iccProfile : null;
+            // ═══ 2026-11-12 CICP 优先：nclx 能完整声明的空间不再交 prof/ICC；ICC 只留 AdobeRGB ═══
+            var icc = FormatHelper.CicpDeclarable(colorSpaceTag) ? null : iccProfile;
             NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag, codec: _codec, effort: effort);
         }, ct);
     }
@@ -1917,7 +1922,8 @@ file static class AvifFallbackHelper
         ct.ThrowIfCancellationRequested();
         try
         {
-            var icc = (colorSpaceTag is not (null or "System" or "sRGB")) ? iccProfile : null;
+            // ═══ 2026-11-12 CICP 优先：nclx 能完整声明的空间不再交 prof/ICC；ICC 只留 AdobeRGB ═══
+            var icc = FormatHelper.CicpDeclarable(colorSpaceTag) ? null : iccProfile;
             NativeAvifEncoder.Encode(bgra, w, h, path, crf, isHdr: false, chroma: chroma, bitDepth: displayBitDepth, iccProfile: icc, colorSpaceTag: colorSpaceTag, effort: effort);
         }
         catch (Exception ex)
@@ -2340,6 +2346,26 @@ public static class FormatHelper
         return [primaries, transfer, CicpMatrixIdentity, CicpFullRangeFlag];
     }
 
+    /// <summary>
+    /// 该色彩空间在 H.273（CICP）里有自己的 primaries 码点 ⇒ 容器可只凭码点完整声明它。
+    /// <para><b>产品输出契约（2026-11-12 用户口径「优先写入 CICP」，同日三次确认）</b>：
+    /// 用户目标只有两档 —— <b>广色域 ⇒ Rec.2020（tag=BT2020，码点 9）、sRGB ⇒ Rec.709（tag=sRGB，码点 1）</b>
+    /// —— 在有码点通道的容器里<b>一律只写码点、不再嵌 ICC</b>（两条通道同义，ICC 纯增体积）；
+    /// 每个容器对这两档的实际产物形态见 <see cref="BuildSdrCicp"/> / <see cref="BuildHdrCicp"/> /
+    /// <see cref="AvifMatrixCoefficients"/> 与色域映射卡文案（<c>FormatColorFacts.Declaration</c>）。</para>
+    /// <para><b>AdobeRGB 分支不是功能、是旁路防御</b>（2026-11-12 用户确认：软件【不输出】AdobeRGB——
+    /// UI 可选面已被 <c>CollapseSelectableTag</c> 全量收口成 sRGB/BT2020 两档）：它只服务于
+    /// 绕过 UI 的调用（判据样张宿主直赋 ColorSpaceTag、编码器被直接调用），与仓库既有的
+    /// 7 处 AdobeRGB 防御点（BuildSdrCicp 返 null / IvfWriter 跳 nclx / avifenc 跳 --cicp /
+    /// HdrDeclarableTag 收口等）同源同向 —— H.273 Table 2 无 AdobeRGB 的 primaries 码，
+    /// 硬写 9 会被当成 BT.2020 错标 ⇒ 这种标签来一次就 fail-closed 一次（只嵌 ICC，不冒充码点）。
+    /// 删掉它的代价是"旁路标签来了 = 零声明错件"，换不来任何真实产物变化。</para>
+    /// <para>⚠ HDR 的 P3+PQ 也是码点盲区（Rec2100PQ 硬编码 2020 原色），但那条路继续走
+    /// PQ-TRC ICC、不经本判据（HDR 分支自有所属）。ICC 的另一处保留地是
+    /// 没有码点通道的容器（JPEG 家族 / WebP / TIFF，走 <see cref="IsEmbeddableIcc"/> 那条规则）。</para>
+    /// </summary>
+    public static bool CicpDeclarable(string? colorSpaceTag) => colorSpaceTag != "AdobeRGB";
+
     /// <summary>HDR 的 CICP 四元组（PQ transfer；PNG cICP 形态 matrix=identity，AVIF 侧由
     /// <see cref="AvifMatrixCoefficients"/> 换成 YUV 矩阵）。HDR 一律不嵌 ICC（见各格式 2026-08-09 备注）。</summary>
     public static byte[] BuildHdrCicp(string? colorSpaceTag)
@@ -2406,9 +2432,12 @@ public static class FormatHelper
     internal static (byte[]? icc, byte[]? cicp) GetColorMetadata(string? colorSpaceTag, byte[]? iccProfile)
     {
         bool isSRgb = colorSpaceTag is null or "System" or "sRGB";
-        byte[]? icc = (!isSRgb && IsEmbeddableIcc(iccProfile)) ? iccProfile : null;
-        // ═══ AdobeRGB 无标准 CICP primaries code (ITU-T H.273 Table 2) ═══
-        // 详见 BuildSdrCicp：误标的 cICP 会覆盖 AdobeRGB iCCP → 色彩丢失，故只靠 ICC 声明。
+        // ═══ 2026-11-12 用户口径「优先写入 CICP」：码点可声明的空间（sRGB/P3/2020）只写 cICP，
+        //     不再嵌 iCCP（两通道同义，旧形态"两条都写"让广色域 PNG 白背一份 700B+ 的 profile）。
+        //     ICC 只留给码点盲空间（AdobeRGB——H.273 Table 2 无其原色码，cICP 硬写 9 会错标成
+        //     BT.2020）；sRGB 仍按既有契约不嵌（隐含色域，见 2026-11-12 ICC 口径收口）。
+        byte[]? icc = (!isSRgb && !CicpDeclarable(colorSpaceTag) && IsEmbeddableIcc(iccProfile))
+            ? iccProfile : null;
         var cicp = BuildSdrCicp(colorSpaceTag);
         return (icc, cicp);
     }

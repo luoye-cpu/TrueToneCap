@@ -1010,14 +1010,15 @@ public static class UsabilityTests
                 // "ICC 嵌入"这个名字与嵌入与否无关。PNG 用本文件自带的独立解析器逐字节回读。
                 var png = TryReadPng(path, $"ICC {fmt}");
                 if (png is null) continue;
-                Assert("ICC PNG: iCCP 解出的 profile 与传入的逐字节相同",
-                    IccpRoundtrips(png.Find("iCCP"), srgbIcc),
-                    png.Find("iCCP") is null ? "缺 iCCP" : $"iCCP {png.Find("iCCP")!.Length}B");
-                // DisplayP3 → CICP primaries=12（ColorProfileProvider.GetCicpPrimaries），
-                // SDR transfer=13 / matrix=identity=0 / fullRange=1。
+                // ═══ 2026-11-12 CICP 优先：DisplayP3 是码点可声明空间 ⇒ PNG 不再嵌 iCCP，
+                //     cICP [12,13,0,1] 独挑声明（ICC 通道只剩码点盲空间 AdobeRGB）。
+                //     JPEG/WebP 无码点通道 ⇒ 那两路的 ICC 照旧嵌（本用例名字里的"ICC 嵌入"在那边仍成立）。
                 byte[] wantP3Cicp = [12, 13, 0, 1];
-                Assert("ICC PNG: cICP == [12,13,0,1]（DisplayP3 声明与 iCCP 并存）",
+                Assert("ICC PNG[DisplayP3]: cICP == [12,13,0,1]（CICP 优先：码点可声明 ⇒ 不嵌 iCCP）",
                     CicpMatches(png.Find("cICP"), wantP3Cicp), CicpText(png.Find("cICP")));
+                Assert("ICC PNG[DisplayP3]: iCCP 不再写（旧形态两通道同义双嵌 = 白背 profile）",
+                    png.Find("iCCP") is null,
+                    png.Find("iCCP") is null ? "" : $"多出 iCCP {png.Find("iCCP")!.Length}B");
             }
             catch (Exception ex)
             {
@@ -2031,8 +2032,8 @@ public static class UsabilityTests
         var withIcc = new (string Tag, byte[]? Cicp, bool KeepIcc)[]
         {
             ("sRGB", new byte[] { 1, 13, 0, 1 }, false),      // sRGB 是隐含色域 ⇒ 即便给了 ICC 也不嵌
-            ("DisplayP3", new byte[] { 12, 13, 0, 1 }, true),
-            ("AdobeRGB", null, true),
+            ("DisplayP3", new byte[] { 12, 13, 0, 1 }, false), // ═══ 2026-11-12 CICP 优先：码点可声明 ⇒ ICC 丢弃
+            ("AdobeRGB", null, true),                          // H.273 无码点 ⇒ ICC 是唯一声明通道
         };
         foreach (var (tag, want, keepIcc) in withIcc)
         {
@@ -2241,12 +2242,18 @@ public static class UsabilityTests
 
     static void Pipeline_ColorSpace_WithIcc_NonSrgbTarget()
     {
-        // 非 sRGB 目标 + IccProfile 设置 → 应返回 ICC 和 CICP（PNG 3.0 推荐两者共存）
+        // ═══ 2026-11-12 CICP 优先：码点可声明的目标（DisplayP3）不再回带 ICC（cICP 独挑）；
+        //     ICC 只留码点盲空间 AdobeRGB（H.273 无其 primaries 码，ICC 是唯一诚实声明）。
         var srgbIcc = ColorProfileProvider.GetDefaultSRgbIcc();
-        var settings = new EncodingSettings { ColorSpaceTag = "DisplayP3", IccProfile = srgbIcc };
-        var (icc, cicp) = FormatHelper.GetColorMetadata(settings);
-        bool ok = icc is { Length: > 128 } && cicp is { Length: 4 } && cicp[0] == 12 && cicp[1] == 13;
-        Assert("Pipeline: DisplayP3+ICC→返回ICC和CICP", ok);
+        var p3 = new EncodingSettings { ColorSpaceTag = "DisplayP3", IccProfile = srgbIcc };
+        var (iccP3, cicpP3) = FormatHelper.GetColorMetadata(p3);
+        Assert("Pipeline: DisplayP3+ICC→ICC 丢弃、cICP==[12,13,...]（CICP 优先）",
+            iccP3 is null && cicpP3 is { Length: 4 } && cicpP3[0] == 12 && cicpP3[1] == 13,
+            $"实得 icc={(iccP3 is null ? "null" : $"{iccP3.Length}B")} cicp={CicpText(cicpP3)}");
+        var adobe = new EncodingSettings { ColorSpaceTag = "AdobeRGB", IccProfile = srgbIcc };
+        var (iccAd, cicpAd) = FormatHelper.GetColorMetadata(adobe);
+        Assert("Pipeline: AdobeRGB+ICC→ICC 原样带回（码点盲空间）、cicp=null",
+            ReferenceEquals(iccAd, srgbIcc) && cicpAd is null);
     }
 
     // ═══════════════════════════════════════════════════════════════

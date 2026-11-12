@@ -293,11 +293,19 @@ public sealed class AnimationRecorder : IDisposable
 
             // ═══ 色彩声明源（2026-11-02 D 流第 5 步）═══
             // 像素已由 PreparePixelsWithIcc 烘焙到决定的目标色域 ⇒ 声明也必须从同一次决定导出。
-            // BuildSdrCicp 对 AdobeRGB 返回 null（H.273 无该 primaries 码点）—— 码点不下发、不冒充；
-            // ICC 通道照常（IccStore 有 Adobe 的标准 profile）。
+            // BuildSdrCicp 对 AdobeRGB 返回 null（H.273 无该 primaries 码点）—— 码点不下发、不冒充。
+            // ═══ 2026-11-12 CICP 优先（用户口径），按容器能力分派 ICC：
+            // · APNG 有 cICP 通道 ⇒ 码点可声明的空间（sRGB/P3/2020）只写 cICP、不再嵌 iCCP
+            //   （旧形态两通道同义双嵌，ICC 纯增体积）；ICC 只留码点盲空间 AdobeRGB。
+            // · WebP 没有码点通道 ⇒ ICC 是唯一声明通道：非 sRGB 照旧嵌（BT2020/P3 全靠它，
+            //   砍了就静默错标成 sRGB）；sRGB 不嵌（WebP 默认即 sRGB，嵌入纯增体积——与
+            //   JPEG 家族同一条口径）。⚠ 不能拿 APNG 那把刀砍 WebP：容器能力不同。
             var targetTag = Decision().TargetTag;
             byte[]? cicp = TrueToneCap.Core.Encoding.FormatHelper.BuildSdrCicp(targetTag);
-            byte[]? icc = StandardIccFor(targetTag);
+            byte[]? icc = TrueToneCap.Core.Encoding.FormatHelper.CicpDeclarable(targetTag)
+                ? null : StandardIccFor(targetTag);
+            byte[]? webpIcc = (targetTag is "sRGB" or "System" or null)
+                ? null : StandardIccFor(targetTag);
             // AVIF 的 nclx primaries 名（2026-11-03 本机 ffmpeg git-2026-10-27 实测：avif muxer 会把
             // stream 色彩属性持久化进 colr(nclx)；但它不写 prof(ICC) box、也不搬 PNG iCCP
             // ⇒ AVIF 的声明通道只有 nclx 这一条）。
@@ -470,9 +478,9 @@ public sealed class AnimationRecorder : IDisposable
                     // APNG 走不到这里（上一臂先命中；回退时产物已带声明，TryEmbed 幂等跳过）。
                     (_, ".png") => (true, "回退单帧 PNG：16-bit 容器 + sBIT(实际 8-bit) + cICP/iCCP 声明"),
                     ("gif", _) => (true, "GIF 容器无色彩声明通道（格式限制）；像素已烘焙到目标色域"),
-                    ("webp", _) when icc is { Length: > 0 } =>
-                        TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedWebpIcc(path, icc),
-                    ("webp", _) => (true, "WebP 无可用标准 ICC，保持无声明"),
+                    ("webp", _) when webpIcc is { Length: > 0 } =>
+                        TrueToneCap.Core.Encoding.AnimatedContainerColor.TryEmbedWebpIcc(path, webpIcc),
+                    ("webp", _) => (true, "WebP：sRGB 目标不嵌 ICC（隐含色域），保持无声明"),
                     ("avif", _) => (true, cicp is null
                         ? "AVIF：目标 AdobeRGB 无 primaries 码点，nclx 不下发（与单帧 AVIF 同口径）"
                         : $"AVIF：colr(nclx) primaries={cicp[0]} transfer=13(sRGB) matrix=0 full-range（ffmpeg color flags 写入）"),

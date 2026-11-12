@@ -34,8 +34,14 @@ import zlib
 from PIL import Image, ImageCms
 
 COLOR_OUT = os.path.join(tempfile.gettempdir(), "TrueToneCap_ColorTest")
-SRGB_PNG = os.path.join(COLOR_OUT, "iccp_test.png")
-P3_PNG = os.path.join(COLOR_OUT, "provenance_p3.png")
+# ═══ 2026-11-12 CICP 优先（用户口径）后输入源换血 ═══
+# PNG 的广色域/ sRGB 声明已全走码点（cICP），PNG 里仍嵌自产 ICC 的只剩码点盲空间
+# AdobeRGB（provenance_adobe.png，由 IccProvenance 测试产出）；自产 sRGB profile
+# 仍嵌在 TIFF（无码点容器，ICC 是唯一声明通道，Tiff_EmbedsIccEvenForSrgb 产出，
+# 文件名带随机后缀 ⇒ 按稳定前缀 glob）。lcms2 读回的仍是产品真正嵌进容器的字节。
+import glob as _glob
+SRGB_TIFF_GLOB = os.path.join(COLOR_OUT, "tiff_srgb8_*.tif")
+ADOBE_PNG = os.path.join(COLOR_OUT, "provenance_adobe.png")
 
 EXPECTED_CPRT = "Copyright 2026 TrueToneCap contributors - Apache-2.0"
 TAG_SIGS = {"desc", "cprt", "wtpt", "bkpt", "rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"}
@@ -65,6 +71,26 @@ def icc_from_png(path: str) -> bytes | None:
             assert body[name_end + 1] == 0, "iCCP 压缩方法应为 0"
             return zlib.decompress(body[name_end + 2:])
         pos += 12 + ln
+    return None
+
+
+def icc_from_tiff(path: str) -> bytes | None:
+    """TIFF：InterColorProfile = Tag 34675，值可能是内联小段或偏移（公开 Tag 布局解析）。"""
+    import struct as _s
+    data = open(path, "rb").read()
+    e = "<" if data[:2] == b"II" else ">"
+    ifd = _s.unpack(e + "I", data[4:8])[0]
+    n = _s.unpack(e + "H", data[ifd:ifd + 2])[0]
+    for i in range(n):
+        ent = ifd + 2 + i * 12
+        tag, typ, cnt = _s.unpack(e + "HHI", data[ent:ent + 8])
+        if tag != 34675:
+            continue
+        size = cnt * {1: 1, 2: 1, 7: 1}.get(typ, 4)
+        if size <= 4:
+            return data[ent + 8:ent + 8 + size]
+        off = _s.unpack(e + "I", data[ent + 8:ent + 12])[0]
+        return data[off:off + size]
     return None
 
 
@@ -103,15 +129,24 @@ def max_delta(a: Image.Image, b: Image.Image) -> int:
 
 
 def main() -> int:
-    for p in (SRGB_PNG, P3_PNG):
-        if not os.path.isfile(p):
-            # 输入由 --color-tests 现场产出；缺它只说明"这轮没跑测试"，不是产品有问题 ⇒ SKIP(3)
-            print(f"[SKIP] 找不到 {p}\n"
-                  "       先跑: dotnet run --project src/TrueToneCap.Test -c Release -- --color-tests")
-            return 3
+    srgb_tiffs = sorted(_glob.glob(SRGB_TIFF_GLOB))
+    missing = []
+    if not srgb_tiffs:
+        missing.append(f"{SRGB_TIFF_GLOB}（由 Tiff_EmbedsIccEvenForSrgb 产出）")
+    if not os.path.isfile(ADOBE_PNG):
+        missing.append(f"{ADOBE_PNG}（由 IccProvenance 测试产出）")
+    for m in missing:
+        # 输入由 --color-tests 现场产出；缺它只说明"这轮没跑测试"，不是产品有问题 ⇒ SKIP(3)
+        print(f"[SKIP] 找不到 {m}\n"
+              "       先跑: dotnet run --project src/TrueToneCap.Test -c Release -- --color-tests")
+    if missing:
+        return 3
 
-    srgb, p3 = icc_from_png(SRGB_PNG), icc_from_png(P3_PNG)
-    check("取到两份 iCCP", bool(srgb) and bool(p3), f"sRGB {len(srgb or b'')}B / P3 {len(p3 or b'')}B")
+    srgb = icc_from_tiff(srgb_tiffs[0])
+    p3 = icc_from_png(ADOBE_PNG)
+    check("取到两份自产 ICC（TIFF-sRGB + PNG-AdobeRGB）", bool(srgb) and bool(p3),
+          f"sRGB {len(srgb or b'')}B（{os.path.basename(srgb_tiffs[0])}）"
+          f" / AdobeRGB {len(p3 or b'')}B（provenance_adobe.png）")
     if not (srgb and p3):
         return 1
 
@@ -125,11 +160,11 @@ def main() -> int:
     check("lcms 能打开两份自产 profile", True)
     name_s, name_p = ImageCms.getProfileName(ps).strip(), ImageCms.getProfileName(pp).strip()
     check("自产 sRGB 的 profile 描述含 sRGB", "sRGB" in name_s, name_s)
-    check("自产 P3 的 profile 描述含 Display P3", "Display P3" in name_p, name_p)
+    check("自产 AdobeRGB 的 profile 描述含 Adobe", "Adobe" in name_p, name_p)
     cprt_s = ImageCms.getProfileCopyright(ps).strip()
     cprt_p = ImageCms.getProfileCopyright(pp).strip()
     check("lcms 读到的 cprt(sRGB) 是本项目自己的 Apache 声明", cprt_s == EXPECTED_CPRT, cprt_s)
-    check("lcms 读到的 cprt(P3) 同样是自己的声明（没有残留第三方版权）", cprt_p == EXPECTED_CPRT, cprt_p)
+    check("lcms 读到的 cprt(AdobeRGB) 同样是自己的声明（没有残留第三方版权）", cprt_p == EXPECTED_CPRT, cprt_p)
     check("大端回填自洽：头部尺寸 == 实际字节数",
           struct.unpack(">I", srgb[:4])[0] == len(srgb), f"{struct.unpack('>I', srgb[:4])[0]} vs {len(srgb)}")
     sigs = {t[0] for t in tag_table(srgb)}
@@ -147,7 +182,7 @@ def main() -> int:
     d_self = max_delta(img, convert(same, same, img))
     check("裁判自检：内置 sRGB 自转恒等（否则 ② 的容差没有意义）", d_self == 0, f"偏差 {d_self}")
     d_p3 = max_delta(img, convert(p3, same, img))
-    check("反证方向：自产 P3 转成 sRGB 必须有可见差异（矩阵真的被换了，不是恒等件）", d_p3 > 4, f"偏差 {d_p3}")
+    check("反证方向：自产 AdobeRGB 转成 sRGB 必须有可见差异（矩阵真的被换了，不是恒等件；Adobe 比 P3 更宽，阈值不变）", d_p3 > 4, f"偏差 {d_p3}")
 
     print("\n── ③ 反证：把头部整数改回小端，①/② 必须失效 ──")
     bad = bytearray(srgb)

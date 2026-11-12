@@ -16,6 +16,11 @@
 ---
 
 
+## [未发布] — 色彩声明 CICP 优先（2026-11-12）
+
+- **🎨 广色域产物全面瘦身**：凡容器有码点通道（PNG cICP / AVIF colr(nclx) / JPEG XL color fields），代码点可声明的空间（Rec.709 / Rec.2020 / Display P3）一律**只写码点、不再嵌 ICC**——两条通道声明的是同一套原色，ICC 纯增体积（Rec.2020 标准件约 2.9KB，此前随每张广色域图白付一份）。ICC 收缩为两处：**码点盲空间 AdobeRGB**（H.273 无其原色码，写码点会被当成 Rec.2020 错标，ICC 是唯一诚实声明）与**没有码点通道的容器**（JPEG 家族 / WebP / TIFF，行为不变）。动图按容器能力分派：APNG 只写 cICP；WebP 无码点通道，非 sRGB 照旧嵌 ICC；AVIF 增益图底图（sRGB/Rec.2020）不再嵌 ICC。HDR 声明不变；JPEG XL 的 P3+PQ 例外保留 PQ-TRC ICC（Rec2100PQ 枚举硬编码 Rec.2020 原色，P3 是码点盲区）。色域映射卡文案同步改为如实反映单通道声明。
+- **工程侧**：单测 2070 + usability 233 全绿（反转 7 处旧"双通道并存"判据 + 3 处形态钉改口径 + 文案三处级联）；决策记录 `docs/reviews/pipeline-review/cicp-first-color-declaration-2026-11-12.md`。
+
 ## [未发布] — JPEG LI 编码改进程内库主路径（2026-11-12）
 
 - **⚡ JPEG LI 编码提速 2-3×、零临时文件、sRGB 产物瘦身**：编码从「写 11MB 临时 PPM → 启动 cjpegli.exe 子进程 → 读回」改为 **ttc_jpegli.dll 进程内直编**（P/Invoke）。2560×1440 d0.5 实测 87ms（原 exe 路径 249ms，还省掉临时文件 I/O）。**ICC 口径收口（2026-11-12 用户拍板）：只有非 sRGB 才嵌**——sRGB 是 JPEG 的隐含默认，嵌 2100B 标准 profile 纯增体积（GainMap 底图实测 2953B→835B），非 sRGB 照旧嵌（库原生按 ICC.1 规范分块写 APP2）；这把 JPEG 侧对齐到全仓既有契约（BakeIccToTarget 的 sRGB 目标不嵌、AVIF 增益图底图"sRGB 不嵌 ICC"）。产物与 cjpegli.exe **逐字节相同**——shim 走与 cjpegli.exe 完全相同的上游代码路径，且构建配方（`scripts/build-cjpegli.py`）末尾强制跑逐字节对照门禁（12 参数组合 + ICC 回读，15/15 通过），不一致即不得发布。**cjpegli.exe 保留为回退路径**（DLL 缺失/装载失败/编码异常时自动落回，子进程模式崩溃隔离语义不变）。新增许可义务：apngdis（zlib license，2026-10-07 审计漏项，随本次补记）。

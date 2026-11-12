@@ -488,12 +488,13 @@ public static class CorePipelineTests
     }
 
     /// <summary>
-    /// 两个 avifenc 入口都必须【自己】把 ICC 交给编码器 —— 不能指望中转 PNG 替我们带。
+    /// 两个 avifenc 入口都必须保留【自己】把 ICC 交给编码器的机制 —— 不能指望中转 PNG 替我们带。
     /// <para>回归背景（2026-09-20，交接 §32.10）：实测 avifenc 1.4.2 读一张带 iCCP 的 P3 PNG，
-    /// 输出容器里 <b>只有 nclx、没有 ICC</b> ⇒ 它根本不继承输入 PNG 的 profile。
-    /// 而 <c>EncodeFile</c>（≥10-bit 的 16-bit PNG 中转分支用）当时连 <c>iccProfile</c> 形参都没有，
-    /// 于是"广色域 + ≥10-bit + 软件编码"这一档的 AVIF 只剩 nclx 声明，
-    /// 硬件路同一设置写的却是 <c>prof + nclx</c> —— 两条路给同一张图两种声明。</para>
+    /// 输出容器里 <b>只有 nclx、没有 ICC</b> ⇒ 它根本不继承输入 PNG 的 profile。</para>
+    /// <para><b>2026-11-12 CICP 优先后的口径</b>：码点可声明的空间（sRGB/P3/2020）上游已不交 ICC
+    /// （nclx 单通道），这条机制的真实使用者只剩码点盲空间 AdobeRGB —— 形参、--icc 拼参与
+    /// 实参传递必须原样保留，否则 AdobeRGB 的 AVIF 会退回 BuildCicpArgs 的空串分支，
+    /// 产物【零声明】（avifenc 不会从 iCCP 继承，见上）。</para>
     /// <para>行为层面的判据在 <c>scripts/precision/icc_readback_matrix.py</c>（跨格式/跨后端比对
     /// ICC 字节，已进门禁）；这里只钉结构，防止重构时把形参或实参又默默删掉。</para>
     /// </summary>
@@ -510,10 +511,10 @@ public static class CorePipelineTests
         var fe = CodeOnly(fePath);
 
         // 两个入口：Encode（stdin）与 EncodeFile（PNG 文件）都要有 iccProfile 形参并拼 --icc
-        Assert("EncodeFile 有 iccProfile 形参（不能只靠中转 PNG 带 ICC）",
+        Assert("EncodeFile 有 iccProfile 形参（AdobeRGB 的 AVIF 全靠它，avifenc 不继承 iCCP）",
             enc.Contains("int bitDepth = 8, byte[]? iccProfile = null)")
             || enc.Contains("byte[]? iccProfile = null"),
-            "找不到形参 ⇒ avifenc 不会继承 PNG 的 iCCP，软件路广色域 AVIF 会只剩 nclx");
+            "找不到形参 ⇒ AdobeRGB 的软件路 AVIF 将零声明");
         Assert("两个 avifenc 入口都拼 --icc（≥2 处）",
             enc.Split("--icc", StringSplitOptions.None).Length - 1 >= 2,
             $"实得 {enc.Split("--icc", StringSplitOptions.None).Length - 1} 处");
@@ -522,7 +523,7 @@ public static class CorePipelineTests
         // 16-bit 中转那条 SDR 分支必须真的把 icc 传下去
         Assert("≥10-bit SDR 分支把 icc 传进 EncodeFile",
             fe.Contains("iccProfile: icc"),
-            "漏传就等于该档 AVIF 无 ICC，与硬件路不一致");
+            "漏传就等于 AdobeRGB 的该档 AVIF 零声明");
     }
 
     /// <summary>
@@ -3655,8 +3656,8 @@ public static class CorePipelineTests
             a.Contains("FileName = string.IsNullOrWhiteSpace(_config.FfmpegPath) ? \"ffmpeg\" : _config.FfmpegPath"));
         Assert("中间帧带 cICP（EncodeFast cicp: 参数真传了）",
             a.Contains("ManagedPngEncoder.EncodeFast(bakedPixels, w, h, framePath, cicp: cicp)"));
-        Assert("声明通道按格式分派（WebP ICCP / APNG cICP+iCCP / AVIF nclx flags）",
-            a.Contains("AnimatedContainerColor.TryEmbedWebpIcc(path, icc)")
+        Assert("声明通道按格式分派（WebP ICCP / APNG cICP+iCCP / AVIF nclx flags；2026-11-12 起 APNG 走 CICP 优先、WebP 非sRGB 才嵌）",
+            a.Contains("AnimatedContainerColor.TryEmbedWebpIcc(path, webpIcc)")
             && a.Contains("AnimatedContainerColor.TryEmbedPngDeclaration(path, cicp, icc)")
             && a.Contains("-color_primaries") && a.Contains("-color_trc iec61966-2-1")
             && a.Contains("GIF 容器无色彩声明通道"));
@@ -6200,16 +6201,19 @@ public static class CorePipelineTests
         // ═══ 2026-11-04 深夜审查轮：AVIF 增益图底图的声明必须跟「像素实际色域」走 ═══
         // 病灶有两种触发条件：① ExplicitWideTarget=false 但决策层给了 BT2020（跟随 HDR 屏）；
         // ② 2020 ICC 不可用 ⇒ PrepareGainMapColorSpace 静默退回 sRGB 像素。
-        // 两种都会产出"nclx 9/13/9 + sRGB ICC + sRGB 像素"的错件。唯一正确的写法是
-        // 让 wideApplied 决定 CICP/ICC/替代图原色，而不是让 tag 决定。
+        // 两种都会产出"nclx 9/13/9 + sRGB 像素"的错件。唯一正确的写法是
+        // 让 wideApplied 决定 CICP/替代图原色，而不是让 tag 决定。
+        // ═══ 2026-11-12 CICP 优先：底图 ICC 恒 null —— 底图只有 sRGB/BT.2020 两种落点，
+        // nclx 都能完整声明（旧形态 `widePixels ? baseIcc : null` 让广色域底图恒背 2.9KB 标准件，
+        // 与 2026-11-12「sRGB 不嵌 ICC」收口同源的同义重复）。
         var fe = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Encoding", "FormatEncoders.cs"));
         Assert("FormatEncoders.cs 定位到（声明一致性判据的标的）", fe is not null);
         if (fe is not null)
         {
             string feSrc = File.ReadAllText(fe);
-            Assert("AVIF 增益图：底图 ICC 跟 wideApplied（不许按 tag 硬嵌）",
-                Regex.IsMatch(feSrc, @"widePixels \? baseIcc : null"),
-                "改回形如 `s.ColorSpaceTag == \"BT2020\" ? baseIcc : null` 就会在回退路径产出错件");
+            Assert("AVIF 增益图：底图不嵌 ICC（nclx 完整声明，CICP 优先口径）",
+                Regex.IsMatch(feSrc, @"byte\[\]\? embedIcc = null;"),
+                "往回写成 `widePixels ? baseIcc : null` 就是让广色域底图背同义重复的标准件");
             Assert("AVIF 增益图：底图 CICP 跟 wideApplied（sRGB/BT2020 二选一）",
                 Regex.IsMatch(feSrc, @"BuildSdrCicp\(widePixels \? ""BT2020"" : ""sRGB""\)"));
             Assert("AVIF 增益图：替代图 primaries 跟 wideApplied（不许底图709/替代图2020 分叉）",
@@ -13746,12 +13750,14 @@ public static class CorePipelineTests
         Assert("映射表产出的每个 color_space 值都被真机判别脚本覆盖",
             unjudged.Length == 0, unjudged.Length == 0 ? "" : $"未覆盖：{string.Join(",", unjudged)}");
 
-        // ICC 优先这条不许被"两个都给"取代（libjxl 里 ICC 覆盖 color fields，两个同时给就是自相矛盾）
+        // ═══ 2026-11-12 CICP 优先：SDR 的 icc_pathname 只剩码点盲分支（AdobeRGB，libjxl 无其枚举），
+        // 两个赋值位（Encode / Encode16Bgra16）都必须保持"ICC 与 color fields 二选一"的形态
+        // （libjxl 里 ICC 覆盖 color fields，两个同时给就是自相矛盾）
         var jxlSrc = File.ReadAllText(FindRepoFile(
             Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeJxlEncoder.cs"))!);
         var code = string.Join("\n", jxlSrc.Split('\n')
             .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
-        Assert("有可嵌 ICC 时只给 icc_pathname，不再叠 color_space",
+        Assert("icc_pathname 只在码点盲分支出现，且不叠 color_space（二选一形态不许退化成双给）",
             System.Text.RegularExpressions.Regex.Matches(code, @"colorArg = \$?""-x icc_pathname").Count == 2
             && code.Contains("-x color_space={JxlColorSpaceValue(colorSpaceTag)}"));
 

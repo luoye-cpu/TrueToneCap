@@ -40,7 +40,12 @@ public enum HdrDelivery
 /// AVIF 是 YUV 码流，matrix 只能随三原色取 BT.709(1) 或 BT.2020 NCL(9)；JPEG LI 与 WebP 只有 ICC
 /// 一条通道、且 sRGB 目标<b>什么都不写</b>；TIFF 没有代码点通道，连 sRGB 也要老实嵌一份 ICC；
 /// JPEG XL 的 color fields 与 ICC 二选一；增益图靠 XMP + ISO 21496-1 段。
-/// 所以"HDR 直通吗 / 声明成什么"不能按开关回答，必须按（决定 × 格式）回答。</para>
+/// <para><b>2026-11-12 CICP 优先（用户口径）</b>：凡容器有码点通道（PNG cICP / AVIF nclx /
+/// JXL color fields），代码点可声明的空间（sRGB / DisplayP3 / BT.2020）一律只写码点、不再嵌 ICC
+/// —— 两通道同义，ICC 纯增体积；ICC 收缩为码点盲空间（AdobeRGB，见
+/// <see cref="FormatHelper.CicpDeclarable"/>）与无码点容器（JPEG 家族 / WebP / TIFF）的通道。
+/// 动图例外：WebP 虽无码点通道，但与单帧同口径（非 sRGB 照旧嵌 ICC）。</para>
+/// 所以"HDR 直通吗 / 声明成什么"不能按开关回答，必须按（决定 × 格式）回答。
 /// <para><b>2026-10-06 新增：JPEG（含增益图）与 WebP 的<b>默认</b>目标就是 Rec.709</b> ——
 /// 这两族格式的 Rec.2020 产物只有在用户<b>显式</b>把下拉拨到 Rec.2020 时才会出现；
 /// 「跟随显示器」在宽色域屏 / HDR 屏上解析出的 Rec.2020 <b>不再</b>对它们生效（会被收口回 Rec.709）。
@@ -156,28 +161,30 @@ public static class FormatColorFacts
             OutputFormat.PNG =>
                 L("PNG：cICP {0}（原色/传输/矩阵），matrix 恒 0(identity) —— PNG 存 RGB 采样，没有 YUV 往返可声明。", PngCicp())
                 + (writesPq ? L("HDR 一律不嵌 ICC。")
-                            : wide ? L("{0} 目标另嵌 iCCP，两条通道同一套原色。", TargetName())
+                            : wide ? L("{0} 目标只写 cICP，不再另嵌 iCCP（代码点已把声明说全）。", TargetName())
                                    : L("{0} 目标不嵌 ICC（cICP 已足够）。", TargetName())),
 
             OutputFormat.AVIF =>
                 L("AVIF：colr(nclx) {0}，matrix 随三原色取 {1} —— 它是 YUV 码流，", AvifCicp(), MatrixName())
                 + L("不能像 PNG 那样写 identity（写 0 时部分解码器自行套错矩阵）。")
                 // 2026-11-03：AVIF 有两档 HDR 承载，卡片必须跟着说。增益图档的底图是 SDR、
-                // 声明走 sRGB/Rec.2020 原色 + 嵌 ICC（HDR 在 tmap/ISO 21496-1 里），
+                // 声明同普通 SDR 产物（sRGB/Rec.2020 原色；2026-11-12 CICP 优先起只写 nclx），
                 // 与"PQ 容器不嵌 ICC"是两条不同的声明链 —— 写成同一句就是让界面替实现撒谎。
                 + (avifHdrMode == AvifHdrMode.GainMap
                     // ⚠ 这句曾被写成"底图是 SDR 并嵌 ICC"，被外部裁判 avifdec 当场推翻：
                     //   Rec.709 目标下底图只有 colr(nclx)、ICC Profile: Absent（只有显式 Rec.2020 才嵌）。
                     //   教训：容器文案必须由读手实读校准，不能照实现意图写。现在只说两档都成立的事实。
+                    //   2026-11-12 起显式 Rec.2020 底图也不再嵌 ICC（nclx 9/13/9 已完整声明）——
+                    //   两档终于真正同形，这句"声明同普通 SDR 产物"从近似变成精确。
                     ? L("HDR 走增益图档：底图是 SDR（声明同普通 SDR 产物），动态范围在 tmap/ISO 21496-1 增益图里（容器不写 PQ）。")
-                    : writesPq ? L("HDR 不嵌 ICC。") : wide ? L("{0} 另可嵌 ICC。", TargetName()) : L("{0} 不嵌 ICC。", TargetName())),
+                    : writesPq ? L("HDR 不嵌 ICC。") : wide ? L("{0} 只写 colr(nclx)，不再嵌 ICC（代码点已把声明说全）。", TargetName()) : L("{0} 不嵌 ICC。", TargetName())),
 
             OutputFormat.JPEG_XL =>
                 L("JPEG XL：color fields 与 ICC 二选一（同时给时 cjxl 只走 ICC、fields 被丢弃；")
                 + L("ICC 能归约成字段就只写字段，归约不了就整份内嵌）。没有 matrix 这一维，")
                 + L("且有损产物把像素量化进 XYB —— 声明写的是原图色域，不是码流里的通道值。")
                 + (writesPq ? L("HDR 走 Rec.2020 原色 + PQ（cjxl 的枚举名 Rec2100PQ，另带 intensity_target）。")
-                            : wide ? L("{0} 取到可嵌 ICC 时用 ICC，否则用 color fields。", TargetName())
+                            : wide ? L("{0} 走 color fields 枚举，不再交 ICC（可枚举 ⇒ 代码点已把声明说全）。", TargetName())
                                    : L("{0} 走 color fields，不嵌 ICC。", TargetName())),
 
             OutputFormat.JPEG_LI =>
@@ -213,12 +220,16 @@ public static class FormatColorFacts
                 + (writesPq ? L("HDR 用带 PQ TRC 的 ICC 声明。") : L("SDR 用标准色域 ICC。")),
 
             OutputFormat.JPEG_GAINMAP =>
-                L("JPEG（附带增益图）：底图【恒为 SDR】且【恒嵌】一份 ICC —— 目标是 {0} ⇒ 底图、增益比、", TargetName())
+                L("JPEG（附带增益图）：底图【恒为 SDR】—— 目标是 {0} ⇒ 底图、增益比、", TargetName())
                 // 2026-11-03：不再写死"HDR 由 XMP hdrgm + ISO 21496-1 承载"。默认档改成只写 ISO 后，
                 // 2026-11-03 二次收口：恒写 ISO 21496-1，元数据不做用户抉择（下拉已退役）。
                 // 界面直说事实，不指向已删除的设置项。
+                // 2026-11-12：旧句"恒嵌一份 ICC"已过期（sRGB 目标下底图不嵌 ICC 是 2026-11-12
+                // ICC 口径收口的结果）——广色域底图仍嵌（JPEG 无代码点通道，ICC 是唯一声明）。
                 + L("声明三件同一套原色；换目标就是换原色，不会把底图变成 HDR（HDR 由增益图段承载，")
-                + L("恒写 ISO 21496-1 最新标准；容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。"),
+                + L("恒写 ISO 21496-1 最新标准；容器不写 PQ ⇒ 与「目标不是 HDR 档」不冲突）。")
+                + L("底图 ICC 跟目标走：Rec.2020 目标嵌一份 ICC（JPEG 无代码点通道），"
+                  + "Rec.709 目标什么都不写（JFIF 隐含默认已足够）。"),
 
             _ => L("未知格式：给不出声明通道。"),
         };
