@@ -144,7 +144,7 @@ All release packages include SHA256 checksums:
 
 ```powershell
 # Verify package integrity
-Get-FileHash TrueToneCap-v0.3.12-win-x64.7z -Algorithm SHA256
+Get-FileHash TrueToneCap-v0.3.15-win-x64.7z -Algorithm SHA256
 # Compare with .sha256 file provided alongside the package
 ```
 
@@ -171,6 +171,7 @@ In case of a security incident:
 
 | Version / 版本 | Date / 日期 | Security Improvements / 安全改进 |
 |----------------|-------------|----------------------------------|
+| v0.3.15 | 2026-11-13 | No new CVE fixes this release; offline translation mode added (OCR text no longer leaves the device when selected) |
 | v0.3.12 | 2026-11-08 | 🆕 Path sanitization for all external encoders (CWE-78 mitigation) |
 | v0.3.11 | 2026-11-04 | Initial dependency update with CVE fixes (libpng → 1.6.59, cjxl → 0.12.0) |
 

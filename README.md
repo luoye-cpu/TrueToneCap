@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.12** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
+> **v0.3.15** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
 > 
 > 🔒 **Secure**: Command injection prevention | ♿ **Accessible**: WCAG 2.1 AA partial compliance
 
@@ -202,12 +202,12 @@ CI 见 `.github/workflows/ci.yml`，默认面向 self-hosted Windows 运行器
 
 ```powershell
 .\Publish.ps1                          # ② 版本号自动取自 Directory.Build.props
-.\Publish.ps1 -Version 0.3.11     # 显式指定版本
+.\Publish.ps1 -Version 0.3.15     # 显式指定版本
 .\Publish.ps1 -Tag                     #    出包同时打 v<版本> 附注标签（一条提交 = 一个版本）
 .\Publish.ps1 -NoReadyToRun            # 禁用 ReadyToRun（体积更小）
 .\PublishLogViewer.ps1                 # 单独发布日志查看器（可选工具）
 
-.\scripts\pack.ps1 -PackageDir publish\TrueToneCap-v0.3.11   # ③ 压缩 + 压缩包哈希入库
+.\scripts\pack.ps1 -PackageDir publish\TrueToneCap-v0.3.15   # ③ 压缩 + 压缩包哈希入库
 ```
 
 > ⚠ 出包两条硬规矩（都是踩出来的）：`Publish.ps1 -OutputDir` 会对目标目录
@@ -226,7 +226,7 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 冒烟也可对任意已有产物单独执行：
 
 ```powershell
-.\scripts\verify-package.ps1 -PackageDir publish\TrueToneCap-v0.3.11 -ExpectedVersion 0.3.11
+.\scripts\verify-package.ps1 -PackageDir publish\TrueToneCap-v0.3.15 -ExpectedVersion 0.3.15
 ```
 
 > ⚠️ 发布前请退出正在运行的 TrueToneCap。如确需强制终止进程请加 `-Force`
@@ -248,6 +248,17 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 - 归档原因与"能力并入主程序"的落点见 [docs/vscap-mode.md](docs/vscap-mode.md)：
   富文本文字（字体/字号/加粗/斜体 + 再编辑/拖动）、统一撤销栈、置顶贴图窗已并入主程序；
   Qt 侧车、`BuildVSCap.ps1` 与「VS-Cap 模式」开关已从产品移除（源码在 git 历史里）。
+
+### v0.3.15（2026-11-13）
+
+- **离线翻译（Argos Translate，按需下载）**：本地模型推理，文本全程不出本机；12 组语言对按需下载/删除/本地导入，缺包时就地引导，绝不静默回退在线后端。
+- **OCR 预览覆盖渲染实机闭环**：字号按原文宽度反推（覆盖字 ≥ 原字）、垫底采样局部底色并按亮度自动深浅、块尺寸改 XAML 实测 + det 词框合并成视觉行 —— 修掉「字非常小 / 重影 / 末字被截断」三类实测反馈，预览与导出同口径。
+- **色彩声明 CICP 优先**：有码点通道的容器（PNG cICP / AVIF nclx / JXL color fields）对码点可声明空间只写码点、不再嵌 ICC；ICC 收缩到 AdobeRGB 与 JPEG 家族 / WebP / TIFF。
+- **自产 ICC 瘦身**：`rTRC/gTRC/bTRC` 共享同一数据块偏移，SDR 标准件 2100 B → **1052 B**、HDR PQ 件 25.1 KB → **8696 B**，曲线字节不变（保持 A 档兼容）。
+- **JPEG LI 进程内编码**：改用 `ttc_jpegli.dll` P/Invoke 直编，2560×1440 实测 87 ms（原 exe 路径 249 ms）、零临时文件，产物与 `cjpegli.exe` 逐字节相同；新增「色彩空间」开关（XYB 默认 / 传统 YCbCr 兼容回退），sRGB 不再白嵌 ICC。
+- **四领域性能审计落地批次**：像素回读挪出 UI 线程、会话池锁临界区收缩、OCR 文字块几何缓存、修复慢格式编码期间的复用缓冲撕裂竞态、共享槽 GPU 拷贝推迟到冻结时、OCR rec 张量按批收窄（本机 A/B 1.59×）、16-bit AVIF 软件路改走 stdin 零临时文件。
+- **界面语言「跟随系统」**：中文系统出中文、其余出英文，成为新默认；显式选过的用户不受影响。
+- **工程侧**：门禁 SKIP 判据进「本轮判据未覆盖」台账；版本坐标（exe / 清单 / 徽章 / CHANGELOG / tag）统一为 0.3.15。逐条见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ### v0.3.11（2026-11-04 上架 Microsoft Store）
 
