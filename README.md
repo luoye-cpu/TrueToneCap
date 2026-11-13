@@ -251,7 +251,7 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 
 ### v0.3.16（2026-11-13）
 
-- **商店中文名独立为「真色截图」**：MSIX 清单的显示名改用 `ms-resource:AppDisplayName`，`Strings\zh-CN\Resources.resw` 为 `真色截图`、`Strings\en-US\Resources.resw` 为 `TrueToneCap`；包标识、产品 ID、代码与功能均不变。
+- **商店中文名独立为「真色截图」**：MSIX 清单的显示名改用 `ms-resource:AppDisplayName`，`Strings\zh-CN\Resources.resjson` 为 `真色截图`、`Strings\en-US\Resources.resjson` 为 `TrueToneCap`，并由 `scripts\patch-priconfig.ps1` 在 SDK 生成的 `priconfig.xml` 中插入 `Strings` 的 folder + RESJSON 索引（`.resw` 在本工具链下会触发 PRI224）；包标识、产品 ID、代码与功能均不变。
 - 本次是商店元数据/名称修正，随同一轮 submission 更新 listing 文案、功能列表与搜索关键词。
 
 ### v0.3.15（2026-11-13）

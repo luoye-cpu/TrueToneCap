@@ -18,7 +18,7 @@
 
 ## [0.3.16] — 2026-11-13：商店中文名独立为「真色截图」
 
-- **商店显示名本地化**：`Package.appxmanifest` 的 `DisplayName` 改为 `ms-resource:AppDisplayName`；新增 `Strings\zh-CN\Resources.resw`（`真色截图`）与 `Strings\en-US\Resources.resw`（`TrueToneCap`）。中文商店名不再依附在英文品牌后，英文名保持 `TrueToneCap`，包标识与产品 ID 不变。
+- **商店显示名本地化**：`Package.appxmanifest` 的 `DisplayName` 改为 `ms-resource:AppDisplayName`；新增 `Strings\zh-CN\Resources.resjson`（`真色截图`）与 `Strings\en-US\Resources.resjson`（`TrueToneCap`）。SDK 生成的 `priconfig.xml` 由 `scripts\patch-priconfig.ps1` 在 `Strings` 下插入 folder + `RESJSON` 索引；`.resw` 在本工具链的 `resources.resfiles` 索引下会触发 PRI224，故不用 `.resw`。中文商店名不再依附在英文品牌后，英文名保持 `TrueToneCap`，包标识与产品 ID 不变。
 - **无产品功能变更**：本次只改 MSIX 清单/资源与版本坐标，代码、截图、IARC、定价均不动；商店 listing 的文案与关键词更新随同一轮 submission 提交。
 - **版本坐标**：`Directory.Build.props` 三行与 `Package.appxmanifest` 的 `Identity/@Version` 一并升到 `0.3.16` / `0.3.16.0`。
 
