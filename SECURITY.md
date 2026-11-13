@@ -171,6 +171,7 @@ In case of a security incident:
 
 | Version / 版本 | Date / 日期 | Security Improvements / 安全改进 |
 |----------------|-------------|----------------------------------|
+| v0.3.16 | 2026-11-13 | No security-relevant changes; Store display-name localization only (app identity and code unchanged) |
 | v0.3.15 | 2026-11-13 | No new CVE fixes this release; offline translation mode added (OCR text no longer leaves the device when selected) |
 | v0.3.12 | 2026-11-08 | 🆕 Path sanitization for all external encoders (CWE-78 mitigation) |
 | v0.3.11 | 2026-11-04 | Initial dependency update with CVE fixes (libpng → 1.6.59, cjxl → 0.12.0) |

@@ -352,6 +352,18 @@
              Visible="false" />
   </ItemGroup>
 
+  <!-- ═══ 本地化应用显示名：给 SDK 生成的 priconfig.xml 补一条 Strings folder+RESJSON 索引 ═══
+       背景（2026-11-13）：makepri 10.0.26100.0 对 .resw 的 resheader 报 PRI224
+       （root node not found）；去掉 resheader 又不产生命名资源。实测
+       Strings\<lang>\Resources.resjson + folder index 可稳定产出 AppDisplayName
+       （zh-CN=真色截图，en-US=TrueToneCap）。AfterTargets/BeforeTargets 锁定在
+       SDK 的配置生成与 PRI 生成之间，避免改写 SDK 的 .resfiles 索引。 -->
+  <Target Name="PatchPriConfigForLocalizedDisplayName"
+          AfterTargets="_GenerateProjectPriConfigurationFiles"
+          BeforeTargets="_GenerateProjectPriFileCore">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\patch-priconfig.ps1&quot; -ConfigPath &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)priconfig.xml&quot; -StringsDir &quot;Strings&quot;" />
+  </Target>
+
   <Target Name="CopyNativeToolsToDevOutput" AfterTargets="Build">
     <ItemGroup>
       <TtcNativeTools Include="..\TrueToneCap.Core\Resources\*.exe" />

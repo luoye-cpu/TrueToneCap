@@ -29,11 +29,14 @@
   <Identity
     Name="luoye-cpu.TrueToneCap"
     Publisher="CN=301BF257-514D-402F-B9D2-1C698A29F2F9"
-    Version="0.3.15.0"
+    Version="0.3.16.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>TrueToneCap 真色截图</DisplayName>
+    <!-- 2026-11-13：中文商店名独立为「真色截图」，英文仍 TrueToneCap。
+         显示名走 Strings\<lang>\Resources.resw 的 AppDisplayName，避免一个硬编码字符串
+         同时绑死两种语言；商店 listing 的产品名会跟随各语言包的 DisplayName。 -->
+    <DisplayName>ms-resource:AppDisplayName</DisplayName>
     <!-- 2026-11-05：PublisherDisplayName 必须与 Partner Center 账号的「发布者显示名称」逐字一致，
          否则包校验直接拒收（首轮上传实测： contributors 被拒，账号显示名 = luoye-cpu）。
          换账号/改显示名时，这一行与 verify-msix.ps1 的同名判据要一起改。 -->
@@ -62,7 +65,7 @@
                  Executable="TrueToneCap.exe"
                  EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="TrueToneCap 真色截图"
+        DisplayName="ms-resource:AppDisplayName"
         Description="TrueToneCap — HDR 感知的截图与 OCR 工具"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -85,7 +88,7 @@
           <uap5:StartupTask
             TaskId="TrueToneCapStartup"
             Enabled="false"
-            DisplayName="TrueToneCap 真色截图" />
+            DisplayName="ms-resource:AppDisplayName" />
         </uap5:Extension>
       </Extensions>
     </Application>

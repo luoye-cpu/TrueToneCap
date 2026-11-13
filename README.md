@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.15** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
+> **v0.3.16** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
 > 
 > 🔒 **Secure**: Command injection prevention | ♿ **Accessible**: WCAG 2.1 AA partial compliance
 
@@ -248,6 +248,11 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 - 归档原因与"能力并入主程序"的落点见 [docs/vscap-mode.md](docs/vscap-mode.md)：
   富文本文字（字体/字号/加粗/斜体 + 再编辑/拖动）、统一撤销栈、置顶贴图窗已并入主程序；
   Qt 侧车、`BuildVSCap.ps1` 与「VS-Cap 模式」开关已从产品移除（源码在 git 历史里）。
+
+### v0.3.16（2026-11-13）
+
+- **商店中文名独立为「真色截图」**：MSIX 清单的显示名改用 `ms-resource:AppDisplayName`，`Strings\zh-CN\Resources.resw` 为 `真色截图`、`Strings\en-US\Resources.resw` 为 `TrueToneCap`；包标识、产品 ID、代码与功能均不变。
+- 本次是商店元数据/名称修正，随同一轮 submission 更新 listing 文案、功能列表与搜索关键词。
 
 ### v0.3.15（2026-11-13）
 
