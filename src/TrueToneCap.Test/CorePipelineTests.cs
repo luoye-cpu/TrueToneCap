@@ -257,6 +257,9 @@ public static class CorePipelineTests
         Test_LlmBatchParsingAndValidation();
         Test_LlmBatchAndRateLimitWiring();
         Test_LlmBatchFailureClassification();
+        Test_TranslationCombinationMatrix();
+        Test_TranslationModeOrder();
+        Test_TranslationFallbackAgainstFakeLlm();
         Test_VisionTranslationIsWired();
         Test_TranslatedImageSaveIsWired();              // 2026-10-29：译文覆盖导出 + 预览与输出同源的字号
         Test_DisplayEnumCacheIsBounded();               // 2026-10-29 A3：枚举缓存的失效接线（缺它=静默错色）
@@ -3185,6 +3188,17 @@ public static class CorePipelineTests
         Assert("LlmConfig.UseVision 由设置里的 TranslationMode 驱动",
             mwCode.Contains("UseVision =") && mwCode.Contains(Q + "Vision" + Q),
             "App 侧不再下发 UseVision ⇒ 视觉路又变回不可达");
+
+        // 视觉请求的 HttpResponseMessage 不释放会在反复重试后耗尽连接池：
+        // 它不是业务失败，界面也看不到，只会表现为“越用越慢/偶发连不上”。
+        var core = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "TranslationService.cs"));
+        if (core is not null)
+        {
+            var coreCode = CodeOnly(core);
+            Assert("视觉 HTTP 响应对象必须用 using 释放",
+                Regex.IsMatch(coreCode, @"using\s+var\s+response\s*=\s*await\s+s_visionHttp\.SendAsync"),
+                "缺 using ⇒ 每次视觉请求泄漏一个 HttpResponseMessage");
+        }
     }
 
     /// <summary>
@@ -6552,6 +6566,9 @@ public static class CorePipelineTests
         Assert("LLM 文本路使用独立客户端/独立时限",
             code.Contains("s_llmHttp") && code.Contains("LlmTextRequestTimeout"),
             "继续用 15s 共享客户端 ⇒ 模型稍慢就静默降级到免费端点");
+        Assert("有道 HTTP 响应对象必须用 using 释放",
+            Regex.IsMatch(code, @"using\s+var\s+response\s*=\s*await\s+_http\.SendAsync"),
+            "缺 using ⇒ 每次有道请求泄漏一个 HttpResponseMessage");
 
         var cfg = new LlmConfig { UseCustomLlm = true, ApiEndpoint = "https://example.invalid/v1" };
         Assert("LLM 文本批量：已配置端点且非视觉/离线时启用",
@@ -6645,6 +6662,273 @@ public static class CorePipelineTests
         Assert("HTTP 错误摘要不带响应体（响应体可能含服务商内部信息）",
             new TranslationService.LlmHttpException(401, null, "secret body").Message == "HTTP 401",
             "把响应体拼进 FirstError 会违反状态栏隐私约束");
+    }
+
+    /// <summary>
+    /// 2026-11-16：翻译后端配置的组合矩阵。六个布尔/端点维度两两组合（64 组），
+    /// 逐组核对“是否可用 / 是否走 LLM 文本批量 / 是否走视觉 / 说明文案有没有虚构后端”。
+    /// <para>这类判据的价值在于：单看每个谓词都对，组合起来才暴露“视觉与离线同时为真”、
+    /// “免费端点把空 LLM 配置掩盖成可用”这类只有实际配置残留时才会出现的状态。</para>
+    /// </summary>
+    static void Test_TranslationCombinationMatrix()
+    {
+        var failures = new List<string>();
+        int cases = 0;
+        foreach (bool useLlm in new[] { false, true })
+        foreach (string endpoint in new[] { "", "https://example.invalid/v1" })
+        foreach (bool vision in new[] { false, true })
+        foreach (bool offline in new[] { false, true })
+        foreach (bool free in new[] { false, true })
+        foreach (bool youdao in new[] { false, true })
+        {
+            cases++;
+            var c = new LlmConfig
+            {
+                UseCustomLlm = useLlm,
+                ApiEndpoint = endpoint,
+                UseVision = vision,
+                UseOfflineArgos = offline,
+                AllowUnofficialTranslateEndpoints = free,
+                YoudaoAppKey = youdao ? "k" : "",
+                YoudaoAppSecret = youdao ? "s" : "",
+            };
+
+            bool llmReady = useLlm && endpoint.Length > 0;
+            bool expectAny = llmReady || youdao || free || offline;
+            bool expectVision = vision && llmReady;
+            bool expectBatch = llmReady && !vision && !offline;
+
+            string key = $"LLM={useLlm},端点={(endpoint.Length == 0 ? "空" : "有")},视觉={vision},离线={offline},免费={free},有道={youdao}";
+            void Check(bool ok, string message)
+            {
+                if (!ok) failures.Add(key + "：" + message);
+            }
+
+            Check(TranslationService.AnyBackendAvailable(c) == expectAny, "AnyBackendAvailable 判错");
+            Check(TranslationService.VisionConfigured(c) == expectVision, "VisionConfigured 判错");
+            Check(TranslationService.LlmTextBatchConfigured(c) == expectBatch, "LlmTextBatchConfigured 判错");
+
+            string desc = TranslationService.DescribeBackends(c);
+            if (offline)
+            {
+                // 离线优先：即使免费/LLM 同时为真，也不能把它们列成“已启用”（否则隐私承诺变成谎言）。
+                Check(desc.Contains("离线翻译已启用"), "离线说明没提离线");
+                Check(!desc.Contains("免费公共端点（Edge / 必应 / MyMemory / Google）"), "离线说明虚构了免费端点");
+            }
+            else if (expectAny)
+            {
+                Check(desc.Contains("已启用的后端"), "有可用后端但说明没进入已启用分支");
+                Check(desc.Contains("自定义 LLM") == llmReady, "说明里的 LLM 与配置不一致");
+                Check(desc.Contains("有道官方 API") == youdao, "说明里的有道与配置不一致");
+                Check(desc.Contains("免费公共端点（Edge / 必应 / MyMemory / Google）") == free, "说明里的免费端点与配置不一致");
+            }
+            else
+            {
+                Check(desc.Contains("还没有任何可用"), "无后端时没有给出三条出路");
+            }
+        }
+
+        Assert($"翻译配置组合矩阵：{cases} 组配置的可用性/批量/视觉/说明判据全部一致",
+            failures.Count == 0,
+            failures.Count == 0 ? null : string.Join("；", failures.Take(8)));
+
+        // 分片边界不与配置矩阵混在一起：这里钉的是“空行不能把后面的行漏掉”和字符上限。
+        var blankMiddle = TranslationService.BuildLlmBatchChunkIndices(["a", "", "b"]);
+        var blankLabel = string.Join(" | ",
+            blankMiddle.Select(x => string.Join(",", x.Select(i => i.ToString()))));
+        Assert("分片：空行夹在中间时，后面的行仍进入同一片（下标 0,2）",
+            blankMiddle.Count == 1 && blankMiddle[0].SequenceEqual([0, 2]),
+            blankLabel);
+        var nine = TranslationService.BuildLlmBatchChunkIndices(
+            Enumerable.Range(0, 9).Select(i => "line" + i).ToArray());
+        Assert("分片：9 行按 8 行上限切成 8+1",
+            nine.Count == 2 && nine[0].Length == 8 && nine[1].Length == 1,
+            string.Join(" | ", nine.Select(x => x.Length)));
+        var tooLong = TranslationService.BuildLlmBatchChunkIndices([new string('x', 3001), "second"]);
+        Assert("分片：单行超过 3000 字符仍自成一片，下一行另起一片",
+            tooLong.Count == 2 && tooLong[0].Length == 1 && tooLong[1].Length == 1,
+            string.Join(" | ", tooLong.Select(x => x.Length)));
+    }
+
+    /// <summary>
+    /// 2026-11-16：UI 与 Core 的模式优先级必须同序：视觉 &gt; 离线 &gt; LLM 文本批量 &gt; 逐行。
+    /// <para>两处顺序不一致时，旧配置里同时残留 <c>UseVision</c>/<c>UseOfflineArgos</c> 标记的那一拍，
+    /// UI 会走视觉，而批量入口会先尝试离线；用户看到的路径和实际执行的不是同一条。</para>
+    /// </summary>
+    static void Test_TranslationModeOrder()
+    {
+        var win = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml.cs"));
+        var core = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "TranslationService.cs"));
+        if (win is null || core is null)
+        {
+            Skip("翻译模式优先级", "未找到 OcrPreviewWindow.xaml.cs / TranslationService.cs");
+            return;
+        }
+
+        var winCode = CodeOnly(win);
+        int visionAt = winCode.IndexOf("if (TranslationService.VisionConfigured", StringComparison.Ordinal);
+        int offlineAt = winCode.IndexOf("else if (_translationConfig.UseOfflineArgos)", StringComparison.Ordinal);
+        int batchAt = winCode.IndexOf("else if (TranslationService.LlmTextBatchConfigured", StringComparison.Ordinal);
+        Assert("UI 分派优先级：视觉 → 离线 → LLM 文本批量",
+            visionAt >= 0 && offlineAt >= 0 && batchAt >= 0 && visionAt < offlineAt && offlineAt < batchAt,
+            $"vision@{visionAt} offline@{offlineAt} batch@{batchAt}");
+        Assert("离线预检也必须先让视觉：否则同时残留两标记时会先弹离线引导、实际却走视觉",
+            winCode.Contains("if (_translationConfig.UseOfflineArgos && !TranslationService.VisionConfigured"));
+
+        var coreCode = CodeOnly(core);
+        int start = coreCode.IndexOf("public async Task<TranslationBatchResult> TranslateBatchAsync", StringComparison.Ordinal);
+        int end = coreCode.IndexOf("internal static List<int[]> BuildLlmBatchChunkIndices", start, StringComparison.Ordinal);
+        Assert("定位批量方法体（用于顺序判据）", start >= 0 && end > start, $"start@{start} end@{end}");
+        if (start < 0 || end <= start) return;
+        var batchCode = coreCode[start..end];
+        int coreVision = batchCode.IndexOf("if (VisionConfigured(_config))", StringComparison.Ordinal);
+        int coreOffline = batchCode.IndexOf("if (_config.UseOfflineArgos)", StringComparison.Ordinal);
+        int coreBatch = batchCode.IndexOf("bool llmBatch = LlmTextBatchConfigured(_config)", StringComparison.Ordinal);
+        Assert("批量入口与 UI 同序：视觉检查先于离线，离线先于 LLM 批量",
+            coreVision >= 0 && coreOffline >= 0 && coreBatch >= 0
+            && coreVision < coreOffline && coreOffline < coreBatch,
+            $"vision@{coreVision} offline@{coreOffline} batch@{coreBatch}");
+
+        // 行为判据：两个标记同时为真时，批量入口必须明确拒绝视觉，而不是先走离线（离线缺包时用户会看到错的错误）。
+        var both = new LlmConfig
+        {
+            UseCustomLlm = true,
+            ApiEndpoint = "https://example.invalid/v1",
+            UseVision = true,
+            UseOfflineArgos = true,
+            AllowUnofficialTranslateEndpoints = false,
+        };
+        string? outcome = null;
+        try { new TranslationService(both).TranslateBatchAsync(["Hello"], "zh-CN").GetAwaiter().GetResult(); }
+        catch (TranslationException ex) { outcome = ex.Message; }
+        catch (Exception ex) { outcome = "WRONG-TYPE:" + ex.GetType().Name; }
+        Assert("Vision+Offline 同时残留时，批量入口必须先报视觉模式错误（不偷偷走离线）",
+            outcome is not null && outcome.Contains("视觉模式"), outcome ?? "<没抛>");
+
+        // 全空白批量：没有可翻译内容，不该以“没配后端”失败；空列表也不该要求后端。
+        var noBackend = new LlmConfig { AllowUnofficialTranslateEndpoints = false };
+        var blankResult = new TranslationService(noBackend)
+            .TranslateBatchAsync(["", "   "], "zh-CN").GetAwaiter().GetResult();
+        Assert("全空白批量直接原样返回（不要求后端、不记失败）",
+            blankResult.Lines.Length == 2 && blankResult.Lines.All(string.IsNullOrWhiteSpace)
+            && blankResult.FailedCount == 0 && blankResult.Mode == "空",
+            $"lines={blankResult.Lines.Length} failed={blankResult.FailedCount} mode={blankResult.Mode}");
+        var emptyResult = new TranslationService(noBackend)
+            .TranslateBatchAsync(Array.Empty<string>(), "zh-CN").GetAwaiter().GetResult();
+        Assert("空列表批量返回空结果（不要求后端）",
+            emptyResult.Lines.Length == 0 && emptyResult.FailedCount == 0 && emptyResult.Mode == "空");
+
+        // 离线同语言：没有 en_en 语言包，语义上不用翻，必须原样返回而不是报缺包。
+        var same = OfflineArgosEngine.TranslateBatchAsync(["Hello", ""], "en", "en").GetAwaiter().GetResult();
+        Assert("离线同语言直接原样返回（不触发缺语言包）",
+            same.FailedCount == 0 && same.FirstError is null && same.Lines.SequenceEqual(["Hello", ""]));
+    }
+
+    /// <summary>
+    /// 2026-11-16：用本地伪造的 OpenAI 兼容端点把批量回退链实际跑一遍。
+    /// <para>源码判据只能证明“写了重试”，证明不了“第一次解析失败后真的会拆片、429 真的只重试一次、
+    /// 401 真的不会反复打、取消真的不发请求”。这些行为只有走真 HTTP 才能测出来。</para>
+    /// </summary>
+    static void Test_TranslationFallbackAgainstFakeLlm()
+    {
+        static LlmConfig ConfigFor(string endpoint) => new()
+        {
+            UseCustomLlm = true,
+            ApiEndpoint = endpoint,
+            AllowUnofficialTranslateEndpoints = false,
+        };
+
+        static string JsonLines(int count) => System.Text.Json.JsonSerializer.Serialize(
+            Enumerable.Range(1, Math.Max(1, count)).Select(i => "译" + i).ToArray());
+
+        // OpenAI 兼容端点要的是 chat/completions 外壳：真正的逐行 JSON 在
+        // choices[0].message.content 字符串里。直接返回裸数组会让生产代码在
+        // GetProperty("choices") 处失败，测出来的就不是批量解析，而是 HTTP 形状。
+        static string ChatResponse(int count) => System.Text.Json.JsonSerializer.Serialize(
+            new { choices = new[] { new { message = new { content = count > 0 ? JsonLines(count) : "译1" } } } });
+
+        // ① 全成功：空白行必须原样保留，且只发一次批量请求。
+        using (var server = new FakeLlmServer((_, n) => (200, ChatResponse(n), null)))
+        {
+            var result = new TranslationService(ConfigFor(server.Endpoint))
+                .TranslateBatchAsync(["Hello", "", "World"], "zh-CN").GetAwaiter().GetResult();
+            Assert("LLM 批量成功：一次请求、空白行保留、无重试/降级",
+                result.Lines.SequenceEqual(["译1", "", "译2"])
+                && result.FailedCount == 0 && result.DegradedCount == 0
+                && result.FirstError is null && result.Mode == "LLM 批量"
+                && server.RequestCount == 1,
+                $"lines={string.Join("|", result.Lines)} failed={result.FailedCount} mode={result.Mode} req={server.RequestCount}");
+        }
+
+        // ② 解析失败（行数不足）→ 同 LLM 拆小分片，4 行拆成 2+2，全部救回。
+        using (var server = new FakeLlmServer((_, n) => (200, ChatResponse(n >= 4 ? 1 : n), null)))
+        {
+            var result = new TranslationService(ConfigFor(server.Endpoint))
+                .TranslateBatchAsync(["A", "B", "C", "D"], "zh-CN").GetAwaiter().GetResult();
+            Assert("批量解析少行：拆成 2+2 同 LLM 重试并全部救回",
+                result.Lines.SequenceEqual(["译1", "译2", "译1", "译2"])
+                && result.FailedCount == 0 && result.FallbackCount == 0 && result.DegradedCount == 0
+                && result.LlmRetryCount == 4 && result.FirstError is not null
+                && result.Mode == "LLM 批量 + 同后端重试"
+                && server.RequestCount == 3,
+                $"lines={string.Join("|", result.Lines)} retry={result.LlmRetryCount} mode={result.Mode} req={server.RequestCount} err={result.FirstError}");
+        }
+
+        // ③ 401：不重试同一个 LLM（只发 1 次），显式报错，回填原文由后续跨后端/最终兜底处理。
+        using (var server = new FakeLlmServer((_, _) => (401, "{\"error\":\"bad key\"}", null)))
+        {
+            var result = new TranslationService(ConfigFor(server.Endpoint))
+                .TranslateBatchAsync(["A", "B"], "zh-CN").GetAwaiter().GetResult();
+            Assert("401/Auth：只请求一次、不拆片、不逐行重试，错误保留",
+                result.FailedCount == 2 && result.DegradedCount == 0 && result.LlmRetryCount == 0
+                && result.FirstError is not null && result.FirstError.Contains("401")
+                && server.RequestCount == 1,
+                $"failed={result.FailedCount} retry={result.LlmRetryCount} req={server.RequestCount} err={result.FirstError}");
+        }
+
+        // ④ 429 带 Retry-After → 退避后同片重试一次，第二次成功。
+        using (var server = new FakeLlmServer((idx, n) =>
+            idx == 1 ? (429, "", "Retry-After: 1\r\n") : (200, ChatResponse(n), null)))
+        {
+            var result = new TranslationService(ConfigFor(server.Endpoint))
+                .TranslateBatchAsync(["A", "B"], "zh-CN").GetAwaiter().GetResult();
+            Assert("429/RateLimited：按 Retry-After 退避一次后同片成功",
+                result.FailedCount == 0 && result.DegradedCount == 0 && result.LlmRetryCount == 2
+                && result.FirstError is not null && result.FirstError.Contains("429")
+                && server.RequestCount == 2,
+                $"failed={result.FailedCount} retry={result.LlmRetryCount} req={server.RequestCount} err={result.FirstError}");
+        }
+
+        // ⑤ 解析一直失败 → 同 LLM 逐行兜底（每行一次），全部救回、无跨后端。
+        using (var server = new FakeLlmServer((_, _) => (200, ChatResponse(1), null)))
+        {
+            var result = new TranslationService(ConfigFor(server.Endpoint))
+                .TranslateBatchAsync(["A", "B", "C", "D"], "zh-CN").GetAwaiter().GetResult();
+            Assert("批量持续失败：同 LLM 逐行 4 行全部救回，不跨后端",
+                result.FailedCount == 0 && result.FallbackCount == 4 && result.DegradedCount == 0
+                && result.LlmRetryCount == 4 && result.Mode == "LLM 批量 + 同后端逐行"
+                && server.RequestCount == 7,
+                $"failed={result.FailedCount} fallback={result.FallbackCount} retry={result.LlmRetryCount} mode={result.Mode} req={server.RequestCount}");
+        }
+
+        // ⑥ 用户取消：批量入口一个请求都不许发。
+        using (var server = new FakeLlmServer((_, _) => (200, ChatResponse(1), null)))
+        using (var cts = new CancellationTokenSource())
+        {
+            cts.Cancel();
+            string? outcome = null;
+            try
+            {
+                new TranslationService(ConfigFor(server.Endpoint))
+                    .TranslateBatchAsync(["A", "B"], "zh-CN", null, cts.Token).GetAwaiter().GetResult();
+                outcome = "NO-THROW";
+            }
+            catch (OperationCanceledException) { outcome = "CANCELLED"; }
+            catch (Exception ex) { outcome = "WRONG-TYPE:" + ex.GetType().Name; }
+            Assert("取消：抛 OperationCanceledException 且一个 LLM 请求都不发（不重试/不回退）",
+                outcome == "CANCELLED" && server.RequestCount == 0,
+                $"outcome={outcome} req={server.RequestCount}");
+        }
     }
 
     static void Test_TranslationBackendAvailabilityIsHonest()
@@ -14568,6 +14852,193 @@ public static class CorePipelineTests
         Assert("Bgra8ToBgra16BE: 与 Rgba16ToBgra16Bytes 字节一致（通道顺序同源）",
             viaHdr.AsSpan().SequenceEqual(expected),
             $"实际 {Convert.ToHexString(viaHdr)}");
+    }
+
+    /// <summary>
+    /// 本地伪造的 OpenAI 兼容 LLM 端点（原始 TcpListener，免 URLACL）。
+    /// <para>只实现 <c>POST /v1/chat/completions</c> 所需的最小 HTTP/1.1：读请求头 + Content-Length
+    /// 指定的 body，按 <c>responder(第几次请求, 批量 id 数)</c> 回状态码/JSON。单线程序列化请求，
+    /// 足以验证“第几次重试、是否拆片、是否逐行”，且不碰外网。</para>
+    /// </summary>
+    private sealed class FakeLlmServer : IDisposable
+    {
+        private readonly System.Net.Sockets.TcpListener _listener;
+        private readonly CancellationTokenSource _stop = new();
+        private readonly Func<int, int, (int Status, string Body, string? ExtraHeaders)> _responder;
+        private readonly Task _acceptLoop;
+        private int _requests;
+
+        public string Endpoint { get; }
+        public int RequestCount => System.Threading.Volatile.Read(ref _requests);
+
+        public FakeLlmServer(Func<int, int, (int Status, string Body, string? ExtraHeaders)> responder)
+        {
+            _responder = responder;
+            _listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            _listener.Start();
+            int port = ((System.Net.IPEndPoint)_listener.LocalEndpoint).Port;
+            Endpoint = $"http://127.0.0.1:{port}/v1";
+            _acceptLoop = Task.Run(AcceptLoopAsync);
+        }
+
+        private async Task AcceptLoopAsync()
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                try
+                {
+                    var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    _ = Task.Run(() => ServeAsync(client));
+                }
+                catch (OperationCanceledException) { break; }
+                catch (ObjectDisposedException) { break; }
+                catch (System.Net.Sockets.SocketException) { break; }
+            }
+        }
+
+        private async Task ServeAsync(System.Net.Sockets.TcpClient client)
+        {
+            try
+            {
+                using (client)
+                {
+                    var stream = client.GetStream();
+                    using var ms = new MemoryStream();
+                    var buf = new byte[8192];
+                    int headerEnd = -1;
+                    bool chunked = false;
+                    int contentLength = -1;
+                    while (true)
+                    {
+                        int n = await stream.ReadAsync(buf.AsMemory(), _stop.Token);
+                        if (n == 0) break;
+                        ms.Write(buf, 0, n);
+                        if (headerEnd < 0)
+                        {
+                            string text = System.Text.Encoding.ASCII.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                            int idx = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                            if (idx >= 0)
+                            {
+                                headerEnd = idx;
+                                string headers = text[..idx];
+                                contentLength = ParseContentLength(headers);
+                                chunked = headers.Contains("Transfer-Encoding: chunked", StringComparison.OrdinalIgnoreCase);
+                            }
+                        }
+                        if (headerEnd >= 0)
+                        {
+                            if (chunked)
+                            {
+                                await ReadChunkedBodyAsync(stream, ms, headerEnd + 4, _stop.Token);
+                                break;
+                            }
+                            if (contentLength >= 0 && ms.Length >= headerEnd + 4 + contentLength) break;
+                            if (contentLength < 0) break;   // 没有长度也没有 chunked：按空 body 处理
+                        }
+                    }
+
+                    if (headerEnd < 0) return;
+                    int bodyStart = headerEnd + 4;
+                    string body = System.Text.Encoding.UTF8.GetString(
+                        ms.GetBuffer(), bodyStart, (int)(ms.Length - bodyStart));
+                    // 请求体是 OpenAI JSON，批量输入被再次编码进 content 字符串；不同编码器
+                    // 会把内层引号写成 \" 或 \u0022，先统一解码再数编号，不能只看外层裸引号。
+                    string decodedForIds = Regex.Replace(body, @"\\u0022", "\"", RegexOptions.IgnoreCase)
+                        .Replace("\\\"", "\"");
+                    int batchIds = Regex.Matches(decodedForIds, @"""Id""\s*:\s*\d+", RegexOptions.IgnoreCase).Count;
+                    int requestNo = Interlocked.Increment(ref _requests);
+                    var (status, responseBody, extraHeaders) = _responder(requestNo, batchIds);
+
+                    string reason = status switch
+                    {
+                        200 => "OK",
+                        400 => "Bad Request",
+                        401 => "Unauthorized",
+                        403 => "Forbidden",
+                        408 => "Request Timeout",
+                        429 => "Too Many Requests",
+                        500 => "Internal Server Error",
+                        503 => "Service Unavailable",
+                        _ => "Status",
+                    };
+                    byte[] bodyBytes = System.Text.Encoding.UTF8.GetBytes(responseBody);
+                    string head =
+                        $"HTTP/1.1 {status} {reason}\r\n" +
+                        "Content-Type: application/json; charset=utf-8\r\n" +
+                        $"Content-Length: {bodyBytes.Length}\r\n" +
+                        "Connection: close\r\n" +
+                        (extraHeaders ?? "") + "\r\n";
+                    await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(head).AsMemory(), _stop.Token);
+                    await stream.WriteAsync(bodyBytes.AsMemory(), _stop.Token);
+                    await stream.FlushAsync(_stop.Token);
+                }
+            }
+            catch
+            {
+                // 客户端提前断开 / 测试结束取消：断言在调用侧体现，这里不掩盖真实失败。
+            }
+        }
+
+        private static async Task<bool> EnsureBytesAsync(System.Net.Sockets.NetworkStream stream,
+            MemoryStream ms, int needed, CancellationToken ct)
+        {
+            var buf = new byte[8192];
+            while (ms.Length < needed)
+            {
+                int n = await stream.ReadAsync(buf.AsMemory(), ct);
+                if (n == 0) return false;
+                ms.Write(buf, 0, n);
+            }
+            return true;
+        }
+
+        private static int IndexOfCrLf(MemoryStream ms, int start)
+        {
+            var bytes = ms.GetBuffer();
+            for (int i = start; i + 1 < ms.Length; i++)
+                if (bytes[i] == (byte)'\r' && bytes[i + 1] == (byte)'\n') return i;
+            return -1;
+        }
+
+        private static async Task<bool> ReadChunkedBodyAsync(System.Net.Sockets.NetworkStream stream,
+            MemoryStream ms, int pos, CancellationToken ct)
+        {
+            while (true)
+            {
+                int lineEnd = IndexOfCrLf(ms, pos);
+                while (lineEnd < 0)
+                {
+                    if (!await EnsureBytesAsync(stream, ms, (int)ms.Length + 1, ct)) return false;
+                    lineEnd = IndexOfCrLf(ms, pos);
+                }
+                string sizeText = System.Text.Encoding.ASCII.GetString(ms.GetBuffer(), pos, lineEnd - pos);
+                int semi = sizeText.IndexOf(';');
+                if (semi >= 0) sizeText = sizeText[..semi];
+                int size = Convert.ToInt32(sizeText.Trim(), 16);
+                pos = lineEnd + 2;
+                if (size == 0) return true;
+                if (!await EnsureBytesAsync(stream, ms, pos + size + 2, ct)) return false;
+                pos += size + 2;
+            }
+        }
+
+        private static int ParseContentLength(string headers)
+        {
+            foreach (var line in headers.Split("\r\n", StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)
+                    && int.TryParse(line["Content-Length:".Length..].Trim(), out int len))
+                    return len;
+            }
+            return -1;
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            try { _listener.Stop(); } catch { }
+            try { _acceptLoop.Wait(2000); } catch { }
+        }
     }
 
     /// <param name="detail">失败时补充的上下文（实测值 / 期望值）。

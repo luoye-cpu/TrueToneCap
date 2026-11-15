@@ -767,7 +767,9 @@ public sealed partial class OcrPreviewWindow : Window
         // 在扇出之前问"语言包/运行环境在不在"：缺了就弹引导（可就地下载语言包，
         // 或改用在线翻译），而不是让 N 行各自失败再把原因吞进"N/N 行失败"里。
         // 弹窗/下载期间的取消（关窗）会走到 ct —— 下载进程与翻译任务都会被收掉。
-        if (_translationConfig.UseOfflineArgos)
+        // ⚠ 与下方分派保持同一优先级：视觉可用时视觉优先；否则旧配置同时残留
+        //   Vision/Offline 标记时，这里会先弹离线安装引导，实际却走视觉路。
+        if (_translationConfig.UseOfflineArgos && !TranslationService.VisionConfigured(_translationConfig))
         {
             var readiness = OfflineArgosEngine.CheckReady(
                 _translationConfig.OfflineSourceLangHint, _translationConfig.TargetLanguage);

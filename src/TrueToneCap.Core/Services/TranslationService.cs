@@ -389,8 +389,19 @@ public class TranslationService
         if (lines.Count == 0)
             return new TranslationBatchResult(Array.Empty<string>(), 0, 0, null, "空");
 
+        // 全是空白行时没有任何可翻译内容：不要因为“没配后端”把它判成失败。
+        if (lines.All(l => string.IsNullOrWhiteSpace(l)))
+            return new TranslationBatchResult(lines.Select(l => l ?? "").ToArray(), 0, 0, null, "空");
+
         if (!AnyBackendAvailable(_config))
             throw new TranslationNotConfiguredException(DescribeBackends(_config));
+
+        // 与 OcrPreviewWindow 的分派顺序保持一致：视觉 > 离线 > LLM 文本批量 > 逐行。
+        // 两处顺序不一致时，“同时残留 Vision/Offline 标记”的旧配置会在这里悄悄走离线批处理，
+        // 而 UI 明明走的是视觉路 —— 用户看到的和实际执行的不是同一条链。
+        if (VisionConfigured(_config))
+            throw new TranslationException(
+                "视觉模式是整图直传路径，不能调用文本批量接口；请让 OcrPreviewWindow 走 TranslateImageWithVisionAsync。");
 
         if (_config.UseOfflineArgos)
         {
@@ -399,10 +410,6 @@ public class TranslationService
             var batch = await OfflineArgosEngine.TranslateBatchAsync(lines, from, to, ct);
             return new TranslationBatchResult(batch.Lines, batch.FailedCount, 0, batch.FirstError, "离线批量");
         }
-
-        if (VisionConfigured(_config))
-            throw new TranslationException(
-                "视觉模式是整图直传路径，不能调用文本批量接口；请让 OcrPreviewWindow 走 TranslateImageWithVisionAsync。");
 
         bool llmBatch = LlmTextBatchConfigured(_config);
         string?[] translated = new string?[lines.Count];
@@ -900,7 +907,7 @@ public class TranslationService
                 Content = new StringContent(qs, System.Text.Encoding.UTF8, "application/x-www-form-urlencoded")
             };
 
-            var response = await _http.SendAsync(request, linked.Token);
+            using var response = await _http.SendAsync(request, linked.Token);
             var json = await response.Content.ReadAsStringAsync(linked.Token);
 
             var result = ParseYoudaoResponse(json);
@@ -2126,7 +2133,7 @@ public class TranslationService
         try
         {
             await WaitIfRateLimitedAsync(linkedCts.Token);
-            var response = await s_visionHttp.SendAsync(request, linkedCts.Token);
+            using var response = await s_visionHttp.SendAsync(request, linkedCts.Token);
             response.EnsureSuccessStatusCode();
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linkedCts.Token));
             content = doc.RootElement
