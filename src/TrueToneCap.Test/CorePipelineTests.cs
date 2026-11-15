@@ -6710,7 +6710,7 @@ public static class CorePipelineTests
                 YoudaoAppSecret = youdao ? "s" : "",
             };
 
-            bool llmReady = useLlm && endpoint.Length > 0;
+            bool llmReady = useLlm && !string.IsNullOrWhiteSpace(endpoint);
             bool expectAny = llmReady || youdao || free || offline;
             bool expectVision = vision && llmReady;
             bool expectBatch = llmReady && !vision && !offline;
@@ -6726,15 +6726,29 @@ public static class CorePipelineTests
             Check(TranslationService.LlmTextBatchConfigured(c) == expectBatch, "LlmTextBatchConfigured 判错");
 
             string desc = TranslationService.DescribeBackends(c);
-            if (offline)
+            if (offline && !expectVision)
             {
-                // 离线优先：即使免费/LLM 同时为真，也不能把它们列成“已启用”（否则隐私承诺变成谎言）。
+                // 只有离线：即使免费/LLM 同时为真，也不能把它们列成“已启用”（否则隐私承诺变成谎言）。
                 Check(desc.Contains("离线翻译已启用"), "离线说明没提离线");
                 Check(!desc.Contains("免费公共端点（Edge / 必应 / MyMemory / Google）"), "离线说明虚构了免费端点");
+                Check(!desc.Contains("视觉翻译已启用"), "没有视觉配置却提了视觉");
+            }
+            else if (offline && expectVision)
+            {
+                // 视觉+离线同时残留：两条路径都要显示，不能只早退成离线说明；
+                // UI 实际走视觉，错误文案必须让用户看见“视觉优先、离线标记仍在”。
+                Check(desc.Contains("视觉翻译已启用"), "视觉+离线说明漏了视觉");
+                Check(desc.Contains("离线翻译已启用"), "视觉+离线说明漏了离线");
+                Check(desc.Contains("当前分派优先级"), "视觉+离线说明没写分派优先级");
+                Check(desc.Contains("自定义 LLM") == llmReady, "视觉+离线说明里的 LLM 与配置不一致");
+                Check(desc.Contains("有道官方 API") == youdao, "视觉+离线说明里的有道与配置不一致");
+                Check(desc.Contains("免费公共端点（Edge / 必应 / MyMemory / Google）") == free,
+                    "视觉+离线说明里的免费端点与配置不一致");
             }
             else if (expectAny)
             {
                 Check(desc.Contains("已启用的后端"), "有可用后端但说明没进入已启用分支");
+                Check(desc.Contains("视觉翻译已启用") == expectVision, "说明里的视觉与配置不一致");
                 Check(desc.Contains("自定义 LLM") == llmReady, "说明里的 LLM 与配置不一致");
                 Check(desc.Contains("有道官方 API") == youdao, "说明里的有道与配置不一致");
                 Check(desc.Contains("免费公共端点（Edge / 必应 / MyMemory / Google）") == free, "说明里的免费端点与配置不一致");
@@ -6837,6 +6851,14 @@ public static class CorePipelineTests
             Regex.IsMatch(coreCode,
                 @"allowLlm\s*&&\s*_config\.UseCustomLlm\s*&&\s*!string\.IsNullOrWhiteSpace\(_config\.ApiEndpoint\)"),
             "单行 LLM 条件退回 IsNullOrEmpty ⇒ 空白端点会被当成可用 LLM");
+
+        // 空白 LLM 端点 + 免费/有道兜底：UI 必须先落 Warn，且成功时把配置提醒写进 firstError；
+        // 没有真实错误时才写，避免配置提醒盖住真正的行级失败。
+        Assert("UI 在分派前把空白 LLM 端点警告落成 firstError，并先写 Warn 日志",
+            winCode.Contains("LlmEndpointMissingWarning(_translationConfig)")
+            && winCode.Contains("翻译配置警告：")
+            && winCode.Contains("if (firstError is null && configWarning is not null) firstError = configWarning"),
+            "空白端点自动回退到免费端点时，状态栏不能显示普通 ✅");
 
         // 全空白批量：没有可翻译内容，不该以“没配后端”失败；空列表也不该要求后端。
         var noBackend = new LlmConfig { AllowUnofficialTranslateEndpoints = false };
@@ -7124,6 +7146,45 @@ public static class CorePipelineTests
                 UseCustomLlm = true,
                 ApiEndpoint = "   ",
             }));
+        Assert("空白 LLM 端点 + 免费兜底 ⇒ 必须给出显式配置警告",
+            TranslationService.LlmEndpointMissingWarning(new LlmConfig
+            {
+                UseCustomLlm = true,
+                ApiEndpoint = "   ",
+                AllowUnofficialTranslateEndpoints = true,
+            }) is { } warning
+            && warning.Contains("端点为空") && warning.Contains("自动回退")
+            && warning.Contains("免费公共端点"), "空白端点会被免费端点兜底，但不能静默成功");
+        var ydWarning = TranslationService.LlmEndpointMissingWarning(new LlmConfig
+        {
+            UseCustomLlm = true,
+            ApiEndpoint = "   ",
+            AllowUnofficialTranslateEndpoints = false,
+            YoudaoAppKey = "k",
+            YoudaoAppSecret = "s",
+        });
+        Assert("空白 LLM 端点 + 有道兜底 ⇒ 警告也要点名有道",
+            ydWarning is not null && ydWarning.Contains("有道官方 API"), ydWarning ?? "<null>");
+        Assert("离线优先时不再发空白 LLM 端点警告（不会误导用户去改一条不执行的路径）",
+            TranslationService.LlmEndpointMissingWarning(new LlmConfig
+            {
+                UseCustomLlm = true,
+                ApiEndpoint = "   ",
+                UseOfflineArgos = true,
+                AllowUnofficialTranslateEndpoints = true,
+            }) is null);
+        Assert("端点非空/LLM 未启用时没有空白端点警告",
+            TranslationService.LlmEndpointMissingWarning(new LlmConfig
+            {
+                UseCustomLlm = true,
+                ApiEndpoint = "https://example.invalid/v1",
+                AllowUnofficialTranslateEndpoints = true,
+            }) is null
+            && TranslationService.LlmEndpointMissingWarning(new LlmConfig
+            {
+                ApiEndpoint = "   ",
+                AllowUnofficialTranslateEndpoints = true,
+            }) is null);
         Assert("LLM + 端点 ⇒ 可用",
             TranslationService.AnyBackendAvailable(new LlmConfig { UseCustomLlm = true, ApiEndpoint = "https://api.deepseek.com/v1" }));
         Assert("免费公共端点开着 ⇒ 可用（这就是 2026-10-23 之后的默认状态）",

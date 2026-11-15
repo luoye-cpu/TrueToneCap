@@ -788,6 +788,12 @@ public sealed partial class OcrPreviewWindow : Window
             var translator = new TranslationService(_translationConfig);
             var lines = _ocr.Lines;
             string? firstError = null;      // 行级容错不许吞掉原因，留一份给状态栏
+            // 2026-11-16 产品口径：LLM 已启用但端点为空、免费/有道会兜底时，必须显式警告；
+            // 自动回退可以发生，但不能让用户以为 LLM 配好了。这里先落 Warn，成功后再把它
+            // 写进 firstError；如果本次已有真实错误，保留真实错误而不是用配置提醒盖住它。
+            string? configWarning = TranslationService.LlmEndpointMissingWarning(_translationConfig);
+            if (configWarning is not null)
+                LogService.Warn("OcrPreview", "翻译配置警告：" + configWarning, LogCategory.Network);
             int? definiteFailed = null;     // 非 null = 这条路自己知道失败了几行，不必靠"译文==原文"猜
             int fallbackCount = 0;          // LLM 批量没交出、进入同 LLM 逐行的行数
             int degradedCount = 0;          // 最终由免费/有道跨后端补译的行数
@@ -886,6 +892,10 @@ public sealed partial class OcrPreviewWindow : Window
             // 窗口已关/已取消时发布快照没有意义，而且会让"关窗后仍在改状态"这件事
             // 从"浪费网络"升级成"改内存 + 入队"。真正的干净退出点在这里。
             ct.ThrowIfCancellationRequested();
+
+            // 没有真实错误时把空白 LLM 端点的配置提醒写进快照 ⇒ 即使免费/有道兜底成功，
+            // 状态栏也必须走警告分支，不能显示成普通 ✅。真实错误存在时让真实错误优先。
+            if (firstError is null && configWarning is not null) firstError = configWarning;
 
             // ═══ 一次性发布（2026-10-07 加固）═══
             // 译文、失败行数、首个错误合成一个不可变对象，赋值是单次引用写入 ⇒

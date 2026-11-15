@@ -3,7 +3,7 @@
 > 状态：**本轮审查完成；代码/测试改动随本报告一并提交**。
 > 基线：`ea61928`（上一轮组合矩阵与伪造端点回退测试）。
 > 范围：单行链路的取消/配置归一、批量结果的回退语义、离线语言码与空批量、视觉 0 行边界，以及有道/Google 响应解析和免费端点错误留痕。
-> 验证：Release 构建 **0 警告 / 0 错误**；`--unit-tests` **2173 通过 / 0 失败 / 1 跳过**；`scripts/verify.ps1 -SkipBuild -SkipPublishGates` **8 个套件全部通过，共 2833 断言**；`icc_profile_id_check.py` 因前置条件不足跳过，`--service-tests` 的在线免费端点 E2E 默认跳过。
+> 验证：Release 构建 **0 警告 / 0 错误**；`--unit-tests` **2178 通过 / 0 失败 / 1 跳过**；`scripts/verify.ps1 -SkipBuild -SkipPublishGates` **8 个套件全部通过，共 2840 断言**；`icc_profile_id_check.py` 因前置条件不足跳过，`--service-tests` 的在线免费端点 E2E 已默认执行并实测通过（Edge 返回中文译文）。
 > 关联：上一轮组合矩阵结论见 `docs/reviews/ocr/translation-combination-audit-2026-11-16.md`；回退策略背景见 `docs/reviews/ocr/translation-fallback-improvement-plan-2026-11-16.md`。
 
 ---
@@ -15,6 +15,7 @@
 3. **批量回退语义已改成“真的进入过回退阶段才计数”。** Auth 阻断且没有跨后端时，`FallbackCount=0`、`Mode=LLM 批量`；UI 文案也从“已按同 LLM 优先策略回退”改为“已进入回退阶段”，不再替程序承诺它没做的事。
 4. **单行入口与批量入口现在同一口径**：视觉模式明确拒绝、空白端点不算 LLM 可用、空白 Key 不写 `Bearer`。正常 UI 的视觉分派不受影响。
 5. **视觉 0 行、离线空列表等边界现在在发请求/查语言包之前拒绝或早退**，避免“先做一次没有意义的昂贵操作，再报一个本可以提前报的错误”。
+6. **2026-11-16 三项产品口径已落地**：空白 LLM 端点自动回退时必须显式警告；视觉+离线同时配置时文案列出两条路径并写清优先级；在线免费端点 E2E 不再需要单独开启，默认随 `--service-tests` 执行（仅不能出网的环境用 `TTC_SKIP_LIVE_TRANSLATE=1` 显式关闭）。
 
 ---
 
@@ -36,7 +37,7 @@
 
 ### 1.3 本轮不覆盖
 
-- 真实 LLM 服务商、真实有道凭据、真实免费公共端点的在线 E2E；`--service-tests` 的翻译 E2E 仍需 `TTC_LIVE_TRANSLATE=1`。
+- 真实 LLM 服务商、真实有道凭据的在线 E2E；免费公共端点的 E2E 已默认执行并通过，但真实 LLM/有道凭据仍需单独配置后才能验。
 - 完整 GUI 点击矩阵；UI 分派仍以源码判据 + 预览窗既有测试为准。
 - 发布门禁：本轮沿用 `-SkipPublishGates`，不冒充通过。
 
@@ -211,41 +212,55 @@ LlmTextBatchConfigured =
 - 非字符串、畸形 JSON、非对象根返回 `null`。
 - 每个端点失败都写 `_lastBackendNote`（超时/HTTP/解析），不再空 catch 后继续下一条。
 - 用户取消原样上抛，不继续遍历端点。
-- 免费端点开关默认开启；空白 LLM 端点不会被算作可用 LLM，但免费端点仍可作为显式兜底。这个“静默降级”问题仍留待产品口径（见 §7.1）。
+- 免费端点开关默认开启；空白 LLM 端点不会被算作可用 LLM，但免费/有道仍可作为显式兜底。这个“静默降级”现在由 `LlmEndpointMissingWarning` + UI 警告态兜住（见 §7.1）。
 
 ---
 
 ## 6. 本轮新增/更新的可执行判据
 
-**新增 28 条断言，另强化 1 条既有断言**：
+**新增 33 条断言，另强化 1 条既有断言**：
 
 | 判据 | 覆盖 |
 |---|---|
-| `Test_TranslationModeOrder` | 单行入口拒绝视觉；单行 LLM 条件使用 `IsNullOrWhiteSpace` |
+| `Test_TranslationModeOrder` | 单行入口拒绝视觉；单行 LLM 条件使用 `IsNullOrWhiteSpace`；UI 把空白 LLM 端点警告写入 `firstError` 并落 Warn |
 | `Test_TranslationFallbackAgainstFakeLlm` | 401：`FallbackCount==0`、`Mode=="LLM 批量"`（强化原有 401 断言） |
 | `Test_TranslationCancellationAndParsers` | 限流器预取消、有道路径预取消、Google 私有方法预取消、有道 8 种解析、Google 4 种解析 |
 | `Test_OfflineLanguageNormalization` | `NormalizeLang` 9 组映射、离线空列表早退 |
-| `Test_TranslationBackendAvailabilityIsHonest` | 空白端点不算可用、不启用 LLM 文本批量 |
+| `Test_TranslationBackendAvailabilityIsHonest` | 空白端点不算可用、不启用 LLM 文本批量；空白端点+免费/有道兜底的显式警告；离线优先不误报 |
 | `Test_LlmBatchAndRateLimitWiring` | 文本/视觉两处空白 API Key 不写 Bearer |
 | `Test_VisionTranslationIsWired` | `expectedLineCount=0` 在发请求前拒绝 |
+| `Test_TranslationLive_FreeEndpointsEndToEnd` | 默认执行在线免费端点 E2E，真实拿到中文译文并归因到具体后端 |
 
 ---
 
-## 7. 仍未决 / 需要产品口径
+## 7. 产品口径落地与仍未决
 
-### 7.1 LLM 端点为空 + 免费端点默认开启
+### 7.1 空白 LLM 端点 + 免费/有道兜底：显式警告（已落地）
 
-**现状**：`LlmTextBatchConfigured=false`，UI 落进逐行 `TranslateAsync`；`AnyBackendAvailable` 因免费端点默认开启而为 true；最终免费端点成功，状态栏可能普通 ✅，没有任何“LLM 配置不完整”提示。
+**原问题**：`LlmTextBatchConfigured=false`，UI 落进逐行 `TranslateAsync`；`AnyBackendAvailable` 因免费端点默认开启而为 true；最终免费端点成功，状态栏可能普通 ✅，没有任何“LLM 配置不完整”提示。
 
-**判断**：这仍是最值得下一步处理的“静默降级”。自动回退可以保留，但错误不应被隐藏；应与既定口径“显式报错 + 自动回退并行”对齐。
+**落地**：新增 `TranslationService.LlmEndpointMissingWarning(LlmConfig)`：
 
-**建议**（本轮未改，避免擅自改变用户模式选择）：UI 分派前检测 `UseCustomLlm && 端点空白 && !UseVision && !UseOfflineArgos`，把“LLM 已启用但端点为空，将使用免费公共端点/有道”写入独立警告或 `FirstError`；翻译仍自动走免费端点，但状态栏必须是警告态。
+- 仅当 `UseCustomLlm && 端点空白 && !UseOfflineArgos` 时返回警告；
+- 按实际兜底路径点名“免费公共端点（Edge / 必应 / MyMemory / Google）”和/或有道官方 API；
+- 无任何非 LLM 兜底时返回 `null`，由 `AnyBackendAvailable` 的“没有可用后端”路径处理；
+- 离线优先时不误报——用户不会看到“去改一条本次不执行的路径”。
 
-### 7.2 `DescribeBackends` 的离线早退
+UI 在分派前调用该方法并 `LogService.Warn`；翻译成功且没有真实错误时，把它写进 `firstError`，状态栏走 `⚠ 翻译完成...` 警告分支；如果本次已有真实错误，保留真实错误，不被配置提醒盖住。
 
-**现状**：`UseOfflineArgos` 为真时直接返回离线缺包/缺运行环境说明，不列 LLM/有道/免费。单独离线配置下是正确隐私口径；但 Vision+Offline 同时为真时，UI 实际走视觉，说明却仍是离线。
+**判据**：`Test_TranslationBackendAvailabilityIsHonest` 覆盖免费兜底、有道兜底、离线优先、端点非空/LLM 未启用；`Test_TranslationModeOrder` 钉住 UI 的 `configWarning → firstError` 接线。
 
-**建议**：至少让 `DescribeBackends` 在 `VisionConfigured` 时优先说明视觉路，或明确写“离线标记仍在，但视觉优先，其他在线后端被忽略”。
+### 7.2 视觉+离线：文案全部显示（已落地）
+
+**原问题**：`DescribeBackends` 在 `UseOfflineArgos` 为真时直接返回离线缺包/缺运行环境说明，不列视觉/LLM/有道/免费。单独离线配置下这是正确隐私口径；但 Vision+Offline 同时为真时，UI 实际走视觉，说明却仍是离线。
+
+**落地**：`DescribeBackends` 现在先判 `VisionConfigured`：
+
+- 只有离线、没有视觉：保留原来的离线单独说明，不虚构免费端点；
+- 视觉+离线同时配置：输出“已启用的翻译路径”，同时列出「视觉翻译已启用（整图直传）」「离线翻译已启用（本地 Argos，文字不出本机；缺语言包/运行环境时会提示补装）」以及已配置的 LLM/有道/免费端点；
+- 同一句写清分派优先级：「视觉（整图） > 离线 > LLM 文本批量 > 逐行」，并说明视觉失败不会自动改走离线、离线失败不会自动改走视觉。
+
+**判据**：`Test_TranslationCombinationMatrix` 的 64 组配置现在区分“仅离线”和“视觉+离线”两种文案：后者必须同时含视觉、离线、优先级，并按配置出现/不出现 LLM/有道/免费。
 
 ### 7.3 视觉失败是否自动回退文本路
 
@@ -257,9 +272,11 @@ LlmTextBatchConfigured =
 
 本轮补了 `NormalizeLang` 与空批量，但 `CheckReady` 的 ModelMissing/RuntimeMissing 语义、桥脚本行数不符/退出码/超时的独立行为判据仍未补；这些属于离线包的下一层回归。
 
-### 7.5 在线 E2E 未跑
+### 7.5 在线 E2E：默认执行（已落地）
 
-`--service-tests` 的免费公共端点在线翻译默认跳过；本轮没有设置 `TTC_LIVE_TRANSLATE=1`，因此“真实第三方端点今天是否仍可用”没有结论。
+`--service-tests` 的免费公共端点在线翻译不再需要 `TTC_LIVE_TRANSLATE=1`；默认随套件执行。不能出网的环境用 `TTC_SKIP_LIVE_TRANSLATE=1` 显式关闭，关闭会写进 skipped 并在门禁汇总里点名，而不是静默消失。
+
+**实测**：默认配置、未填任何凭据，发 `"Please save the file before exiting."`，1.0 s 收到 `"请在退出前保存文件。"`，归因后端 `Edge (translatetext)`；套件 `4 通过 / 0 失败 / 0 跳过`。
 
 ---
 
@@ -279,7 +296,7 @@ dotnet build TrueToneCap.slnx -c Release -v:m
 src\TrueToneCap.Test\bin\Release\net11.0-windows10.0.26100.0\TrueToneCap.Test.exe --unit-tests
 ```
 
-结果：**2173 通过 / 0 失败 / 1 跳过**（跳过项为“本机无 AV1 MFT 编码器”）。
+结果：**2178 通过 / 0 失败 / 1 跳过**（跳过项为“本机无 AV1 MFT 编码器”）。
 
 ### 8.3 全量校验
 
@@ -289,14 +306,14 @@ Set-Alias -Name python -Value $python -Scope Global
 .\scripts\verify.ps1 -SkipBuild -SkipPublishGates
 ```
 
-结果：**8 个套件全部通过，共 2833 断言**；`icc_profile_id_check.py` 因前置条件不足跳过（1 处未判，不计为通过）；发布门禁本轮跳过。
+结果：**8 个套件全部通过，共 2840 断言**；`icc_profile_id_check.py` 因前置条件不足跳过（1 处未判，不计为通过）；发布门禁本轮跳过；在线免费端点 E2E 已默认执行并通过。
 
 | 套件 | 结果 |
 |---|---|
-| `--unit-tests` | 2173 通过 / 0 失败 / 1 跳过 |
+| `--unit-tests` | 2178 通过 / 0 失败 / 1 跳过 |
 | `--color-tests` | 291 通过 / 0 失败 |
 | `--encoding-tests` | 23 通过 / 0 失败 |
-| `--service-tests` | 2 通过 / 0 失败 / 1 跳过（在线翻译 E2E 需 `TTC_LIVE_TRANSLATE=1`） |
+| `--service-tests` | 4 通过 / 0 失败（在线翻译 E2E 默认执行） |
 | `--ocr-tests` | 12 通过 / 0 失败 |
 | `--qr-tests` | 47 通过 / 0 失败 |
 | `--format-tests` | 52 通过 / 0 失败 |
@@ -304,15 +321,19 @@ Set-Alias -Name python -Value $python -Scope Global
 
 ### 8.4 构建/校验过程中的环境问题
 
-本轮校验曾因 C 盘空间不足导致构建输出被截断，出现过 `MSB3021/MSB3027 磁盘空间不足` 与 `TrueToneCap.exe`/`TrueToneCap.Test.exe` 找不到；在清出可再生成空间并重新构建后，上述 8 套件与 App 设置迁移判据全部恢复通过。这不是代码回归，但说明“磁盘剩余空间”应作为跑 `verify.ps1` 的前置条件记录。
+本轮校验曾因 C 盘空间不足导致构建输出被截断，出现过 `MSB3021/MSB3027 磁盘空间不足` 与 `TrueToneCap.exe`/`TrueToneCap.Test.exe` 找不到；在清出可再生成空间后重新构建，8 套件与 App 设置迁移判据全部恢复通过。这不是代码回归，但说明“磁盘剩余空间”应作为跑 `verify.ps1` 的前置条件记录。
+
+另一次 `-SkipBuild` 首跑出现“Tools 宿主比测试源码旧”的宿主新鲜度警告；按脚本建议做 `dotnet build ... --no-incremental` 后，2 个宿主均不早于 181 份构建输入，最终全量校验未再带该警告。
 
 ---
 
 ## 9. 结论
 
-- **默认配置（LLM + 端点，免费端点默认开启）**：文本批量走 LLM；批量失败先同 LLM 拆分/重试/逐行，跨后端只在最后；401 不再谎称逐行回退。
+- **默认配置（LLM + 端点，免费端点默认开启）**：文本批量走 LLM；批量失败先同 LLM 拆分/重试/逐行，跨后端只在最后；401 不再谎称逐行回退。LLM 已勾选但端点空白时，自动回退仍发生，但状态栏和日志必须显式警告。
 - **视觉配置**：整图直传；0 行/超限/行数不等在发请求或写盘前拒绝；不退回文本路；响应对象已释放。
+- **视觉+离线同时配置**：文案同时列出视觉与离线两条路径并写清「视觉 > 离线 > LLM 文本批量 > 逐行」；不会再只返回离线说明。
 - **离线配置**：整批一个本地进程；语言码归一与空批量已补判据；失败不回在线。
 - **免费/有道配置**：只作为逐行路径或批量最后兜底；解析器对畸形响应返回 `null` 并留原因；用户取消不被当成超时。
+- **在线 E2E**：默认执行，实测 Edge 免费端点返回中文译文；不能出网时用 `TTC_SKIP_LIVE_TRANSLATE=1` 显式关闭并计入 skipped。
 - **空行/取消/分片边界**：全空白批量不要求后端；空行不占编号、不导致漏行；取消不发请求、不重试、不回退。
-- **剩余风险**：§7.1 的“LLM 端点空 + 免费兜底静默成功”最值得下一轮修；§7.2/§7.4 属于文案与离线回归口径；§7.3 是既定设计；§7.5 需要显式开启在线 E2E。
+- **剩余风险**：§7.4 的离线 `CheckReady`/桥脚本异常仍缺独立行为判据；§7.3 视觉失败不回退文本路是既定设计；真实 LLM 服务商/真实有道凭据的在线 E2E 仍需单独配置凭据后验。

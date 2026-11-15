@@ -201,31 +201,67 @@ public class TranslationService
     /// </summary>
     public static string DescribeBackends(LlmConfig c)
     {
-        // 离线模式单独成句、且必须放在最前：TranslateAsync 里离线路在任何在线后端之前
-        // 直接返回，AllowUnofficialTranslateEndpoints 默认 true 也不改变这个事实 ——
-        // 把免费端点列成"已启用"是在撒谎，按"都没返回结果"的网络口径说话更是误导。
+        bool vision = VisionConfigured(c);
+
+        // 只有离线、没有视觉时，离线模式单独成句并放在最前：TranslateAsync 里离线路在
+        // 任何在线后端之前直接返回，AllowUnofficialTranslateEndpoints 默认 true 也不改变
+        // 这个事实 —— 把免费端点列成"已启用"是在撒谎，按"都没返回结果"的网络口径说话更是误导。
         // 它缺的不是"配置"，是语言包或 Python 运行环境。
         // 「离线翻译包」「安装运行环境」是界面上真实存在的控件文字（判据钉在 UI 源码里）。
-        if (c.UseOfflineArgos)
+        if (c.UseOfflineArgos && !vision)
             return "离线翻译已启用，但本地模型或运行环境未就绪：到 设置 → OCR/翻译 的「离线翻译包」卡片下载语言包；"
                  + "首次使用还需 Python 运行环境，可点该卡片里的「安装运行环境」。";
 
         var on = new List<string>();
+        if (vision) on.Add("视觉翻译已启用（整图直传）");
+        if (c.UseOfflineArgos)
+            on.Add("离线翻译已启用（本地 Argos，文字不出本机；缺语言包/运行环境时会提示补装）");
         if (c.UseCustomLlm && !string.IsNullOrWhiteSpace(c.ApiEndpoint)) on.Add("自定义 LLM");
         if (!string.IsNullOrWhiteSpace(c.YoudaoAppKey) && !string.IsNullOrWhiteSpace(c.YoudaoAppSecret)) on.Add("有道官方 API");
         if (c.AllowUnofficialTranslateEndpoints) on.Add("免费公共端点（Edge / 必应 / MyMemory / Google）");
 
         if (on.Count > 0)
+        {
+            // 视觉+离线同时为真时，不能再早退成"只有离线"：UI 实际走视觉，错误文案却只讲离线
+            // 会让用户以为失败发生在一条没被执行的路径上。这里把已启用的路径全部列出，并写清当前分派顺序。
+            if (vision && c.UseOfflineArgos)
+                return "已启用的翻译路径：" + string.Join("、", on)
+                     + "。当前分派优先级：视觉（整图） > 离线 > LLM 文本批量 > 逐行；"
+                     + "视觉失败不会自动改走离线，离线失败不会自动改走视觉。";
+
             // ⚠ 这里不再猜原因。原先固定缀一句"多半是网络、额度或接口变更，不是没配置"，
             // 而真实原因（401 密钥错 / 有道 errorCode / 超时）由 _lastBackendNote 附在后面 ——
             // 两句会互相矛盾，用户只会相信先看到的那句。原因统一交给 TranslateAsync 拼。
             return "已启用的后端：" + string.Join("、", on) + " —— 它们都没返回结果。";
+        }
 
         return "还没有任何可用的翻译后端，三条路任选一条：\n"
              + "① 设置 → 翻译：勾选「使用免费公共翻译端点（识别到的文字会发给第三方）」—— 不需要任何密钥，"
              + "依次走 Edge / 必应 / MyMemory / Google 这四家免费接口；\n"
              + "② 设置 → 翻译：填有道智云开放平台的 AppID 与密钥（官方 API；密钥只在本机 DPAPI 加密存储）；\n"
              + "③ 设置 → 翻译：把模式切到 LLM，填 DeepSeek / GLM / OpenAI 兼容端点与密钥。";
+    }
+
+    /// <summary>
+    /// LLM 已勾选但端点为空、同时还有免费/有道可兜底时，给 UI 的显式配置警告。
+    /// <para>这不是翻译失败，而是"自动回退已经发生"的提醒：不提示的话，用户会以为
+    /// 自己配的 LLM 成功了，实际走的是免费公共端点。离线路径优先时不产生这条提醒。</para>
+    /// </summary>
+    public static string? LlmEndpointMissingWarning(LlmConfig c)
+    {
+        if (!c.UseCustomLlm || !string.IsNullOrWhiteSpace(c.ApiEndpoint) || c.UseOfflineArgos)
+            return null;
+
+        var fallback = new List<string>();
+        if (!string.IsNullOrWhiteSpace(c.YoudaoAppKey) && !string.IsNullOrWhiteSpace(c.YoudaoAppSecret))
+            fallback.Add("有道官方 API");
+        if (c.AllowUnofficialTranslateEndpoints)
+            fallback.Add("免费公共端点（Edge / 必应 / MyMemory / Google）");
+        if (fallback.Count == 0) return null;
+
+        return "自定义 LLM 已启用，但 API 端点为空；本次已自动回退到"
+             + string.Join(" / ", fallback)
+             + "。要使用 LLM，请到 设置 → 翻译 填写端点；否则请关闭 LLM 模式。";
     }
 
     /// <summary>

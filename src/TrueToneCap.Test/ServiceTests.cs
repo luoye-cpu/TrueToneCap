@@ -33,7 +33,7 @@ public static class ServiceTests
         Test_NativeLibraryResolver_Initializes();
         Test_NativeLibraryResolver_GetExePath_ThrowsOnMissing();
 
-        // 翻译链路端到端（默认跳过，见方法注释）
+        // 翻译链路端到端（默认执行；离线环境可用 TTC_SKIP_LIVE_TRANSLATE=1 显式关闭）
         Test_TranslationLive_FreeEndpointsEndToEnd();
 
         Console.WriteLine($"\n══════════════════════════════════════");
@@ -43,7 +43,7 @@ public static class ServiceTests
     }
 
     // ═══════════════════════════════════════
-    //  翻译链路端到端（会真的外发一条请求 ⇒ 默认跳过）
+    //  翻译链路端到端（默认执行；会真的外发一条请求）
     // ═══════════════════════════════════════
 
     /// <summary>
@@ -55,16 +55,17 @@ public static class ServiceTests
     /// 上游一改版，链路上线当天不会有任何人知道。2026-10-23 就实测过一次"离线形状全绿、
     /// 而线上从没验过"：把 <c>Content-Type</c> 之外的那些浏览器头剥掉之后才确认它并不需要，
     /// 这句话只能由真发一次请求来说。</para>
-    /// <para>默认 <b>SKIP</b>：门禁不许依赖出网（与 <c>scripts/probes</c> 三条判据同一约定，
-    /// 那里也是"要网就手动跑"）。跑法：<c>TTC_LIVE_TRANSLATE=1 dotnet run … -- --service-tests</c>。
+    /// <para>默认 <b>执行</b>：这条用例是翻译链路唯一一条真出网的判据，不能靠"记得单独开"
+    /// 来保证它被跑到。确实不能出网的环境用 <c>TTC_SKIP_LIVE_TRANSLATE=1</c> 显式关闭；
+    /// 跳过会写进 skipped 并在门禁汇总里点名，而不是静默消失。
     /// 外发的是下面这一句合成文本，不含任何用户内容。</para>
     /// </summary>
     static void Test_TranslationLive_FreeEndpointsEndToEnd()
     {
-        if (Environment.GetEnvironmentVariable("TTC_LIVE_TRANSLATE") != "1")
+        if (Environment.GetEnvironmentVariable("TTC_SKIP_LIVE_TRANSLATE") == "1")
         {
             Skip("翻译链路端到端（免费公共端点）",
-                "需显式 TTC_LIVE_TRANSLATE=1（会向第三方发一条合成文本），门禁默认不跑");
+                "已由 TTC_SKIP_LIVE_TRANSLATE=1 显式关闭（仅用于不能出网的环境）");
             return;
         }
 
