@@ -260,6 +260,8 @@ public static class CorePipelineTests
         Test_TranslationCombinationMatrix();
         Test_TranslationModeOrder();
         Test_TranslationFallbackAgainstFakeLlm();
+        Test_TranslationCancellationAndParsers();
+        Test_OfflineLanguageNormalization();
         Test_VisionTranslationIsWired();
         Test_TranslatedImageSaveIsWired();              // 2026-10-29：译文覆盖导出 + 预览与输出同源的字号
         Test_DisplayEnumCacheIsBounded();               // 2026-10-29 A3：枚举缓存的失效接线（缺它=静默错色）
@@ -3156,6 +3158,18 @@ public static class CorePipelineTests
             && TranslationService.ChatCompletionsUrl("https://api.deepseek.com/v1/") == "https://api.deepseek.com/v1/chat/completions"
             && TranslationService.ChatCompletionsUrl("https://api.deepseek.com/v1/chat/completions") == "https://api.deepseek.com/v1/chat/completions",
             TranslationService.ChatCompletionsUrl("https://api.deepseek.com/v1/"));
+
+        // 0 行 OCR：先拒，别先发一次没有回填目标的整图请求
+        string zero;
+        try
+        {
+            new TranslationService(cfg).TranslateImageWithVisionAsync(new byte[] { 1, 2, 3 }, "zh-CN", 0)
+                .GetAwaiter().GetResult();
+            zero = "NO-THROW";
+        }
+        catch (TranslationException ex) { zero = ex.Message; }
+        Assert("期望 0 行时视觉翻译在发请求前拒绝",
+            zero.Contains("行数") && zero.Contains("至少为 1"), zero);
 
         // 超限必须在【发请求之前】拒，且不许偷偷缩图或退回文本路
         var tooBig = new byte[TranslationService.VisionPngMaxBytes + 1];
@@ -6566,6 +6580,9 @@ public static class CorePipelineTests
         Assert("LLM 文本路使用独立客户端/独立时限",
             code.Contains("s_llmHttp") && code.Contains("LlmTextRequestTimeout"),
             "继续用 15s 共享客户端 ⇒ 模型稍慢就静默降级到免费端点");
+        Assert("LLM 文本/视觉：空白 API Key 不写成 Bearer 头（与 IsNullOrWhiteSpace 同口径）",
+            Regex.Matches(code, @"if \(!string\.IsNullOrWhiteSpace\(_config\.ApiKey\)\)").Count >= 2,
+            "空白 Key 会发出 `Bearer    ` ⇒ 端点 401，用户却以为密钥正确");
         Assert("有道 HTTP 响应对象必须用 using 释放",
             Regex.IsMatch(code, @"using\s+var\s+response\s*=\s*await\s+_http\.SendAsync"),
             "缺 using ⇒ 每次有道请求泄漏一个 HttpResponseMessage");
@@ -6805,6 +6822,22 @@ public static class CorePipelineTests
         Assert("Vision+Offline 同时残留时，批量入口必须先报视觉模式错误（不偷偷走离线）",
             outcome is not null && outcome.Contains("视觉模式"), outcome ?? "<没抛>");
 
+        // 单行入口同样不能把整图模型当文本模型用；旧配置残留时直接调用 TranslateAsync 也要明确拒绝。
+        string? singleOutcome = null;
+        try { new TranslationService(both).TranslateAsync("Hello", "zh-CN").GetAwaiter().GetResult(); }
+        catch (TranslationException ex) { singleOutcome = ex.Message; }
+        catch (OperationCanceledException) { singleOutcome = "CANCELLED"; }
+        catch (Exception ex) { singleOutcome = "WRONG-TYPE:" + ex.GetType().Name; }
+        Assert("单行入口也必须拒绝视觉模式（与批量入口同口径）",
+            singleOutcome is not null && singleOutcome.Contains("视觉模式"), singleOutcome ?? "<没抛>");
+
+        // 空白端点在 AnyBackendAvailable 里不算可用；单行 LLM 条件也必须同口径，
+        // 否则免费端点默认开启时会把 "   " 拼成 "   /chat/completions" 再静默落到免费端点。
+        Assert("空白端点不被单行 LLM 路径视为已配置（与 AnyBackendAvailable 同口径）",
+            Regex.IsMatch(coreCode,
+                @"allowLlm\s*&&\s*_config\.UseCustomLlm\s*&&\s*!string\.IsNullOrWhiteSpace\(_config\.ApiEndpoint\)"),
+            "单行 LLM 条件退回 IsNullOrEmpty ⇒ 空白端点会被当成可用 LLM");
+
         // 全空白批量：没有可翻译内容，不该以“没配后端”失败；空列表也不该要求后端。
         var noBackend = new LlmConfig { AllowUnofficialTranslateEndpoints = false };
         var blankResult = new TranslationService(noBackend)
@@ -6879,11 +6912,12 @@ public static class CorePipelineTests
         {
             var result = new TranslationService(ConfigFor(server.Endpoint))
                 .TranslateBatchAsync(["A", "B"], "zh-CN").GetAwaiter().GetResult();
-            Assert("401/Auth：只请求一次、不拆片、不逐行重试，错误保留",
+            Assert("401/Auth：只请求一次、不拆片、不逐行重试，错误保留，不得声称已逐行回退",
                 result.FailedCount == 2 && result.DegradedCount == 0 && result.LlmRetryCount == 0
+                && result.FallbackCount == 0 && result.Mode == "LLM 批量"
                 && result.FirstError is not null && result.FirstError.Contains("401")
                 && server.RequestCount == 1,
-                $"failed={result.FailedCount} retry={result.LlmRetryCount} req={server.RequestCount} err={result.FirstError}");
+                $"failed={result.FailedCount} fallback={result.FallbackCount} retry={result.LlmRetryCount} mode={result.Mode} req={server.RequestCount} err={result.FirstError}");
         }
 
         // ④ 429 带 Retry-After → 退避后同片重试一次，第二次成功。
@@ -6931,6 +6965,137 @@ public static class CorePipelineTests
         }
     }
 
+    /// <summary>
+    /// 2026-11-16 扩展轮：取消必须沿单行链路原样上抛（不能被“超时”catch 吞掉后继续降级），
+    /// 以及有道/Google 响应解析必须扛得住形状变化（非字符串项/非对象根/畸形 JSON）。
+    /// </summary>
+    static void Test_TranslationCancellationAndParsers()
+    {
+        // ① 限流器本身：窗口未满时也不能对预取消 token 取号放行。
+        using (var cts = new CancellationTokenSource())
+        {
+            cts.Cancel();
+            string outcome;
+            try
+            {
+                TranslationService.WaitIfRateLimitedAsync(cts.Token).GetAwaiter().GetResult();
+                outcome = "NO-THROW";
+            }
+            catch (OperationCanceledException) { outcome = "CANCELLED"; }
+            catch (Exception ex) { outcome = "WRONG-TYPE:" + ex.GetType().Name; }
+            Assert("预取消 token：WaitIfRateLimitedAsync 必须抛 OperationCanceledException（不能取号放行）",
+                outcome == "CANCELLED", outcome);
+        }
+
+        // ② 有道路径：预取消不能被 catch(TaskCanceledException) 当成“请求超时”吞掉并继续免费端点。
+        var youdao = new LlmConfig
+        {
+            YoudaoAppKey = "k",
+            YoudaoAppSecret = "s",
+            AllowUnofficialTranslateEndpoints = false,
+        };
+        using (var cts = new CancellationTokenSource())
+        {
+            cts.Cancel();
+            string outcome;
+            try
+            {
+                new TranslationService(youdao)
+                    .TranslateAsync("Hello", "zh-CN", null, cts.Token).GetAwaiter().GetResult();
+                outcome = "NO-THROW";
+            }
+            catch (OperationCanceledException) { outcome = "CANCELLED"; }
+            catch (Exception ex) { outcome = "WRONG-TYPE:" + ex.GetType().Name; }
+            Assert("有道路径：用户取消必须原样上抛（不是“有道超时”后继续降级）",
+                outcome == "CANCELLED", outcome);
+        }
+
+        // ③ Google 是单行链路的最后一档：这里的 catch(Exception) 也不能吞掉用户取消。
+        var googleMethod = typeof(TranslationService).GetMethod(
+            "TryGoogleMultiEndpointAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert("找到 Google 私有端点方法（取消传播判据的标的）", googleMethod is not null);
+        if (googleMethod is not null)
+        {
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            var svc = new TranslationService(new LlmConfig { AllowUnofficialTranslateEndpoints = true });
+            string outcome;
+            try
+            {
+                var task = (Task<string?>)googleMethod.Invoke(
+                    svc, new object?[] { "Hello", "zh-CN", null, cts.Token })!;
+                task.GetAwaiter().GetResult();
+                outcome = "NO-THROW";
+            }
+            catch (OperationCanceledException) { outcome = "CANCELLED"; }
+            catch (Exception ex) { outcome = "WRONG-TYPE:" + ex.GetType().Name; }
+            Assert("Google 路径：预取消必须抛 OperationCanceledException（不能被 catch(Exception) 吞掉）",
+                outcome == "CANCELLED", outcome);
+        }
+
+        // ④ 有道响应：成功拼接、数值 errorCode、非 0、空/非字符串项、畸形 JSON、非对象根。
+        var parser = new TranslationService(new LlmConfig { YoudaoAppKey = "k", YoudaoAppSecret = "s" });
+        Assert("有道解析：errorCode=0 + 字符串数组拼接",
+            parser.ParseYoudaoResponse("{\"errorCode\":\"0\",\"translation\":[\"你好\",\"世界\"]}") == "你好世界");
+        Assert("有道解析：数值 errorCode=0 兼容",
+            parser.ParseYoudaoResponse("{\"errorCode\":0,\"translation\":[\"你好\"]}") == "你好");
+        Assert("有道解析：非 0 errorCode 返回 null（不能把错误响应当译文）",
+            parser.ParseYoudaoResponse("{\"errorCode\":\"108\",\"translation\":[\"不应出现\"]}") is null);
+        Assert("有道解析：translation 内非字符串项不抛出、无字符串项时返回 null",
+            parser.ParseYoudaoResponse("{\"errorCode\":\"0\",\"translation\":[null,123,{\"x\":1}]}") is null);
+        Assert("有道解析：translation 为空数组返回 null",
+            parser.ParseYoudaoResponse("{\"errorCode\":\"0\",\"translation\":[]}") is null);
+        Assert("有道解析：缺少 errorCode 返回 null（不能静默当成功）",
+            parser.ParseYoudaoResponse("{\"translation\":[\"你好\"]}") is null);
+        Assert("有道解析：非法 JSON 返回 null",
+            parser.ParseYoudaoResponse("{not-json") is null);
+        Assert("有道解析：非对象根返回 null（不抛 InvalidOperationException）",
+            parser.ParseYoudaoResponse("[]") is null);
+
+        // ⑤ Google 两种真实形状 + 非字符串/畸形输入。
+        Assert("Google 解析：gtx 嵌套数组形状",
+            TranslationService.ParseGoogleResponse("[[[\"你好\",\"Hello\",null,null,1]],null,\"en\"]") == "你好");
+        Assert("Google 解析：sentences 对象数组形状",
+            TranslationService.ParseGoogleResponse(
+                "{\"sentences\":[{\"trans\":\"你好\",\"orig\":\"Hello\"},{\"trans\":\"世界\",\"orig\":\"World\"}]}")
+            == "你好世界");
+        Assert("Google 解析：非字符串译文项不抛出、返回 null",
+            TranslationService.ParseGoogleResponse("[[[123,\"Hello\"]],null]") is null);
+        Assert("Google 解析：畸形 JSON 返回 null",
+            TranslationService.ParseGoogleResponse("{not-json") is null);
+    }
+
+    /// <summary>
+    /// 2026-11-16 扩展轮：离线引擎的语言码归一必须覆盖 OCR/BCP-47 常见形态；
+    /// 空批量必须在任何语言包/运行时检查之前原样返回。
+    /// </summary>
+    static void Test_OfflineLanguageNormalization()
+    {
+        Assert("离线语言：null/空白 → null",
+            OfflineArgosEngine.NormalizeLang(null) is null
+            && OfflineArgosEngine.NormalizeLang("   ") is null);
+        Assert("离线语言：en-US → en、ja-JP → ja、pt-BR → pt",
+            OfflineArgosEngine.NormalizeLang("en-US") == "en"
+            && OfflineArgosEngine.NormalizeLang("ja-JP") == "ja"
+            && OfflineArgosEngine.NormalizeLang("pt-BR") == "pt");
+        Assert("离线语言：zh-Hans-CN/zh-en 归一（简中 / 中英混合按英语）",
+            OfflineArgosEngine.NormalizeLang("zh-Hans-CN") == "zh"
+            && OfflineArgosEngine.NormalizeLang("zh-en") == "en"
+            && OfflineArgosEngine.NormalizeLang("en-zh") == "en");
+        Assert("离线语言：zh-TW/zh-Hant-HK → zt（繁体）",
+            OfflineArgosEngine.NormalizeLang("zh-TW") == "zt"
+            && OfflineArgosEngine.NormalizeLang("zh-Hant-HK") == "zt");
+        Assert("离线语言：未知码/只前缀相同但不带 '-' 的码 → null",
+            OfflineArgosEngine.NormalizeLang("xx") is null
+            && OfflineArgosEngine.NormalizeLang("enochian") is null);
+
+        var empty = OfflineArgosEngine.TranslateBatchAsync(
+            Array.Empty<string>(), "en", "zh").GetAwaiter().GetResult();
+        Assert("离线批量：空列表原样返回（不检查语言包/运行时）",
+            empty.Lines.Length == 0 && empty.FailedCount == 0 && empty.FirstError is null);
+    }
+
     static void Test_TranslationBackendAvailabilityIsHonest()
     {
         // ⚠ 2026-10-23 起"什么都没填"不再等于"没有可用后端"：免费公共端点默认开着。
@@ -6946,6 +7111,19 @@ public static class CorePipelineTests
             TranslationService.AnyBackendAvailable(new LlmConfig { YoudaoAppKey = "k", YoudaoAppSecret = "s" }));
         Assert("开了 LLM 但没填端点 ⇒ 不算可用",
             !TranslationService.AnyBackendAvailable(new LlmConfig { UseCustomLlm = true, AllowUnofficialTranslateEndpoints = false }));
+        Assert("开了 LLM 但端点只有空白 ⇒ 不算可用（与 IsNullOrWhiteSpace 同口径）",
+            !TranslationService.AnyBackendAvailable(new LlmConfig
+            {
+                UseCustomLlm = true,
+                ApiEndpoint = "   ",
+                AllowUnofficialTranslateEndpoints = false,
+            }));
+        Assert("空白端点同样不启用 LLM 文本批量",
+            !TranslationService.LlmTextBatchConfigured(new LlmConfig
+            {
+                UseCustomLlm = true,
+                ApiEndpoint = "   ",
+            }));
         Assert("LLM + 端点 ⇒ 可用",
             TranslationService.AnyBackendAvailable(new LlmConfig { UseCustomLlm = true, ApiEndpoint = "https://api.deepseek.com/v1" }));
         Assert("免费公共端点开着 ⇒ 可用（这就是 2026-10-23 之后的默认状态）",

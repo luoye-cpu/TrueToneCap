@@ -37,6 +37,9 @@ public class TranslationService
     /// <summary>请求发送前的全局限流闸门。每个请求都必须先在这里占一个槽位。</summary>
     internal static async Task WaitIfRateLimitedAsync(CancellationToken ct)
     {
+        // ⚠ 必须在取号前检查：窗口没满时下面会直接 return，原先一条都不检查，
+        //    预取消的 token 仍会真的发出请求（有道/Google 的 catch 又会把它当超时吞掉）。
+        ct.ThrowIfCancellationRequested();
         while (true)
         {
             int delayMs;
@@ -53,6 +56,8 @@ public class TranslationService
                 observed = s_requestCountInSecond;
                 if (observed < MAX_REQUESTS_PER_SECOND)
                 {
+                    // 取号窗口内再确认一次：避免“刚检查完就被取消”后仍占一个请求名额。
+                    ct.ThrowIfCancellationRequested();
                     s_requestCountInSecond = observed + 1;   // 本请求占位；下一次同窗口请求看到的已是 +1
                     return;
                 }
@@ -270,6 +275,13 @@ public class TranslationService
         if (!AnyBackendAvailable(_config))
             throw new TranslationNotConfiguredException(DescribeBackends(_config));
 
+        // 0.4 视觉模式是整图直传路径：单行文本入口也不能把整图模型当逐行文本模型用。
+        //     正常 UI 会在 VisionConfigured 时走 TranslateImageWithVisionAsync，这里兜住直接调用者；
+        //     与 TranslateBatchAsync 的拒绝保持同一口径。
+        if (VisionConfigured(_config))
+            throw new TranslationException(
+                "视觉模式是整图直传路径，不能调用文本翻译接口；请让 OcrPreviewWindow 走 TranslateImageWithVisionAsync。");
+
         // 0.5 离线路（2026-11-11 离线翻译包方案）。
         //     语义：用户选离线多半就是为了"文字不出本机"——失败时绝不静默回退到在线后端，
         //     否则隐私承诺变成谎言。原因（缺运行环境/缺语言包/翻译出错）原样抛给 UI。
@@ -285,7 +297,10 @@ public class TranslationService
         }
 
         // 1. LLM 优先（已配置端点 + Key）
-        if (allowLlm && _config.UseCustomLlm && !string.IsNullOrEmpty(_config.ApiEndpoint))
+        //    ⚠ 判空必须与 AnyBackendAvailable 一致用 IsNullOrWhiteSpace：空白端点
+        //    在免费端点开启时会被 AnyBackendAvailable 救活，但这里若用 IsNullOrEmpty
+        //    仍会去构造 "   /chat/completions"，失败后再静默落到免费端点。
+        if (allowLlm && _config.UseCustomLlm && !string.IsNullOrWhiteSpace(_config.ApiEndpoint))
         {
             try
             {
@@ -345,8 +360,9 @@ public class TranslationService
     //  批量翻译（2026-11-16：LLM 结构化批量 + 逐行回退）
     // ═══════════════════════════════════════
 
-    /// <summary>批量翻译结果。<see cref="FallbackCount"/> 是"批量没有交出、改走逐行"的行数，
-    /// 与 <see cref="FailedCount"/>（逐行也失败、回填原文的行数）分开，UI 才能如实显示"部分行降级"。</summary>
+    /// <summary>批量翻译结果。<see cref="FallbackCount"/> 是"批量没有交出、并且真的进入过逐行/跨后端
+    /// 回退阶段"的行数；Auth 阻断而一次回退都没发生时保持 0。与 <see cref="FailedCount"/>
+    /// （最终仍失败、回填原文的行数）分开，UI 才能如实显示"部分行降级"。</summary>
     public sealed record TranslationBatchResult(
         string[] Lines,
         int FailedCount,
@@ -470,10 +486,12 @@ public class TranslationService
         int failedCount = 0;
         int degradedCount = 0;
         int perLineLlmRows = 0;
+        bool perLineAttempted = false;
         var degradedBackends = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
 
         if (missing.Length > 0 && llmBatch && !llmBlocked)
         {
+            perLineAttempted = true;
             // 同 LLM 逐行：并发压到 2，每行只多给一次尝试；只调用 LLM-only 路径，
             // 严禁走 TranslateTextAsync 的完整降级链，否则 LLM 一失败又会偷偷落到免费端点。
             using var sem = new SemaphoreSlim(2);
@@ -514,8 +532,10 @@ public class TranslationService
             .Where(i => !string.IsNullOrWhiteSpace(lines[i]) && translated[i] is null)
             .ToArray();
 
+        bool crossBackendAttempted = false;
         if (stillMissing.Length > 0 && HasNonLlmBackend())
         {
+            crossBackendAttempted = true;
             using var sem = new SemaphoreSlim(4);
             var tasks = new Task[stillMissing.Length];
             for (int t = 0; t < stillMissing.Length; t++)
@@ -568,14 +588,21 @@ public class TranslationService
         string mode;
         if (!llmBatch) mode = "逐行";
         else if (degradedCount > 0) mode = "LLM 批量 + 跨后端降级";
-        else if (missing.Length > 0) mode = "LLM 批量 + 同后端逐行";
+        else if (perLineAttempted) mode = "LLM 批量 + 同后端逐行";
         else if (llmRetryCount > 0) mode = "LLM 批量 + 同后端重试";
         else mode = "LLM 批量";
+
+        // FallbackCount 的口径是"批量没交出、并且真的进入过回退阶段"的行数。
+        // Auth 阻断时 missing 仍是全部行，但同 LLM 逐行被跳过、跨后端可能也没配：
+        // 这时记 missing.Length 会让 UI 声称"已按同 LLM 优先策略回退"，实际一次都没试。
+        int fallbackCount = llmBatch
+            ? (perLineAttempted || crossBackendAttempted ? missing.Length : 0)
+            : missing.Length;
 
         return new TranslationBatchResult(
             translated.Select(s => s ?? "").ToArray(),
             failedCount,
-            missing.Length,
+            fallbackCount,
             firstError,
             mode)
         {
@@ -920,6 +947,11 @@ public class TranslationService
             //   原因已经由 ParseYoudaoResponse 归一成人话存进 _lastBackendNote（含 errorCode）。
             CoreLog.Warn("Translate", "有道返回不可用结果：" + (_lastBackendNote ?? "未给出原因"), LogCategory.Network);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 用户关窗/主动取消：不是"有道超时"，不能吞掉后继续降级到免费端点。
+            throw;
+        }
         catch (TaskCanceledException) { _lastBackendNote = "有道请求超时"; }
         catch (HttpRequestException ex) { _lastBackendNote = "有道网络失败: " + ex.GetType().Name; }
         catch (Exception ex)
@@ -988,16 +1020,24 @@ public class TranslationService
     /// 原先这里只把 errorCode 丢给 <c>Debug.WriteLine</c>（Release 下无处可去），
     /// 外层于是静默降到 Google：用户填错 AppID 和"有道正常工作"在界面上长得一模一样。
     /// </remarks>
-    private string? ParseYoudaoResponse(string json)
+    internal string? ParseYoudaoResponse(string json)
     {
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                _lastBackendNote = "有道响应不是 JSON 对象（响应形态与文档不符）";
+                return null;
+            }
 
             // errorCode 在开放平台返回的是字符串（如 "0"），兼容数值形态
             if (!root.TryGetProperty("errorCode", out var ec))
+            {
+                _lastBackendNote = "有道响应缺少 errorCode（响应形态与文档不符）";
                 return null;
+            }
             var code = ec.ValueKind == JsonValueKind.String ? ec.GetString() : ec.ToString();
             if (code != "0")
             {
@@ -1012,7 +1052,12 @@ public class TranslationService
             {
                 var sb = new StringBuilder();
                 foreach (var item in results.EnumerateArray())
+                {
+                    // 只接受字符串项：文档形状是 string[]；null/数字/对象混进来时
+                    // GetString() 会抛 InvalidOperationException，不能让它变成“有道异常”。
+                    if (item.ValueKind != JsonValueKind.String) continue;
                     sb.Append(item.GetString());
+                }
                 var result = sb.ToString();
                 if (!string.IsNullOrWhiteSpace(result)) return result;
             }
@@ -1020,9 +1065,9 @@ public class TranslationService
             // errorCode 是 0 却没有可用译文 —— 形态与文档不符，也要给出原因而不是静默降级
             _lastBackendNote = "有道 errorCode 0 但响应里没有非空 translation 数组（响应形态与文档不符）";
         }
-        catch (JsonException ex)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
-            _lastBackendNote = "有道响应不是合法 JSON（" + ex.GetType().Name + "）";
+            _lastBackendNote = "有道响应不是合法 JSON 对象（" + ex.GetType().Name + "）";
         }
         return null;
     }
@@ -1095,15 +1140,32 @@ public class TranslationService
                     return result;
                 }
             }
-            catch (TaskCanceledException) { }
-            catch (HttpRequestException) { }
-            catch (Exception) { }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // 用户取消必须原样上抛；否则调用方会把"关窗"当成"Google 超时"再继续兜底。
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _lastBackendNote = $"{label} 请求超时（>5 秒）";
+                CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+            }
+            catch (HttpRequestException ex)
+            {
+                _lastBackendNote = $"{label} 请求失败（{ex.GetType().Name}）";
+                CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+            }
+            catch (Exception ex)
+            {
+                _lastBackendNote = $"{label} 解析或请求异常（{ex.GetType().Name}）";
+                CoreLog.Debug("Translate", _lastBackendNote, LogCategory.Network);
+            }
         }
 
         return null;
     }
 
-    private static string? ParseGoogleResponse(string json)
+    internal static string? ParseGoogleResponse(string json)
     {
         try
         {
@@ -1118,7 +1180,8 @@ public class TranslationService
                     var sb = new StringBuilder();
                     foreach (var s in sentences.EnumerateArray())
                     {
-                        if (s.ValueKind == JsonValueKind.Array && s.GetArrayLength() > 0)
+                        if (s.ValueKind == JsonValueKind.Array && s.GetArrayLength() > 0
+                            && s[0].ValueKind == JsonValueKind.String)
                         {
                             var t = s[0].GetString();
                             if (!string.IsNullOrWhiteSpace(t)) sb.Append(t);
@@ -1129,12 +1192,16 @@ public class TranslationService
                 }
             }
 
-            if (root.TryGetProperty("sentences", out var s2))
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("sentences", out var s2)
+                && s2.ValueKind == JsonValueKind.Array)
             {
                 var sb = new StringBuilder();
                 foreach (var s in s2.EnumerateArray())
                 {
-                    if (s.TryGetProperty("trans", out var t))
+                    if (s.ValueKind == JsonValueKind.Object
+                        && s.TryGetProperty("trans", out var t)
+                        && t.ValueKind == JsonValueKind.String)
                         sb.Append(t.GetString());
                 }
                 var r = sb.ToString();
@@ -1730,7 +1797,7 @@ public class TranslationService
         {
             Content = JsonContent.Create(requestBody, LlmJsonContext.Default.LlmChatRequest)
         };
-        if (!string.IsNullOrEmpty(_config.ApiKey))
+        if (!string.IsNullOrWhiteSpace(_config.ApiKey))
             request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -2087,6 +2154,11 @@ public class TranslationService
         if (!VisionConfigured(_config))
             throw new TranslationNotConfiguredException(DescribeBackends(_config));
 
+        // OCR 一行都没有时，视觉模型再准也没有可回填的目标；提前拒绝，别先发一次整图请求。
+        if (expectedLineCount <= 0)
+            throw new TranslationException(
+                $"视觉翻译要求 OCR 行数至少为 1（当前 {expectedLineCount}）—— 没有可回填的目标行。");
+
         if (png.Length > VisionPngMaxBytes)
             throw new TranslationException(
                 $"截图 PNG 为 {png.Length / 1024.0 / 1024.0:F1} MB，超过视觉端点单次上限 " +
@@ -2124,7 +2196,7 @@ public class TranslationService
         {
             Content = JsonContent.Create(requestBody, LlmJsonContext.Default.LlmVisionRequest)
         };
-        if (!string.IsNullOrEmpty(_config.ApiKey))
+        if (!string.IsNullOrWhiteSpace(_config.ApiKey))
             request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");
 
         string content;

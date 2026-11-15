@@ -7,7 +7,8 @@
 > 基线：`00cb126`（`fix(translate): LLM 文本路改结构化批量并修正限流/超时`）。
 > 关联：本轮对话的 LLM 批量回退分析；当前实现入口为
 > `src/TrueToneCap.Core/Services/TranslationService.cs` 的 `TranslateBatchAsync`。
-> 扩展审查与组合测试结论见 `docs/reviews/ocr/translation-combination-audit-2026-11-16.md`。
+> 扩展审查与组合测试结论见 `docs/reviews/ocr/translation-combination-audit-2026-11-16.md`；
+> 第二轮扩展审查见 `docs/reviews/ocr/translation-expanded-audit-2026-11-16.md`。
 > 行号只作当前工作树定位，代码一动即漂；实施时以方法名/锚点为准。
 
 ---

@@ -915,7 +915,7 @@ DispatcherQueue.TryEnqueue(() =>
                 int failed = snap.DefiniteFailed ??
                     snap.Lines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
                 string fallbackNote = snap.FallbackCount > 0
-                    ? $"；批量未交出 {snap.FallbackCount} 行，已按同 LLM 优先策略回退"
+                    ? $"；批量未交出 {snap.FallbackCount} 行，已进入回退阶段"
                     : "";
                 string retryNote = snap.LlmRetryCount > 0
                     ? $"；{snap.LlmRetryCount} 行经同 LLM 重试成功"

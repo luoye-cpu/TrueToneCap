@@ -5,6 +5,7 @@
 > 验证：Release 构建 **0 警告 / 0 错误**；`--unit-tests` **2145 通过 / 0 失败 / 1 跳过**；
 > `scripts/verify.ps1 -SkipPublishGates` **8 个套件全部通过，共 2805 断言**；1 处 ICC 探针因前置条件不足未判，`--service-tests` 的在线免费端点 E2E 默认跳过。
 > 关联：`docs/reviews/ocr/translation-fallback-improvement-plan-2026-11-16.md`（回退策略改进，已提交）；本轮不重复该计划的全部背景，只审当前实现的组合行为。
+> 后续扩展审查：`docs/reviews/ocr/translation-expanded-audit-2026-11-16.md`（2026-11-16 第二轮，取消传播/配置归一/批量结果语义/解析器判据）。
 
 ---
 
