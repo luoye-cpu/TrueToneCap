@@ -255,6 +255,8 @@ public sealed partial class MainWindow : Window
         SetComboItemText(LlmProviderCbo, "GLM", LocaleManager.Tr("智谱 GLM"));
         SetComboItemText(LlmProviderCbo, "SiliconFlow", LocaleManager.Tr("硅基流动"));
         SetComboItemText(LlmProviderCbo, "Aliyun", LocaleManager.Tr("阿里云百炼"));
+        SetComboItemText(LlmProviderCbo, "OpenRouter", LocaleManager.Tr("OpenRouter 聚合"));
+        SetComboItemText(LlmProviderCbo, "OpenCode", LocaleManager.Tr("OpenCode Zen 聚合"));
         SetComboItemText(LlmProviderCbo, "Custom", LocaleManager.Tr("自定义"));
 
         // TranslationModeCbo：项文字是 XAML 字面量，收起时不在可视树里 ⇒ 只能按 Tag 逐个点名。

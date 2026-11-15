@@ -561,7 +561,8 @@ StopAndEncodeAsync()
 ### 9.2 翻译
 
 - LLM 翻译（各平台 OpenAI 兼容 `chat/completions` 入口；Claude / Gemini 走各自兼容层，本项目不实现 Anthropic / Google 原生协议）
-  - 2026-11 预设覆盖 DeepSeek、智谱 GLM、阿里云百炼、硅基流动、Moonshot Kimi、火山方舟、MiniMax、OpenAI、Anthropic Claude、Google Gemini、xAI Grok、Mistral。
+  - 2026-11 预设覆盖 DeepSeek、智谱 GLM、阿里云百炼、硅基流动、Moonshot Kimi、火山方舟、MiniMax、OpenAI、Anthropic Claude、Google Gemini、xAI Grok、Mistral，以及 OpenRouter、OpenCode Zen 两个聚合入口。
+  - 聚合平台只收录少量主流/免费模型：OpenRouter 保留其 `provider/model` 前缀，OpenCode Zen 只收录官方明确走 `chat/completions` 的条目；不走 `responses`/`messages` 的模型不进入下拉。
   - Anthropic 兼容层要求 Claude 4.7+ 省略 `temperature`；GPT-5/GPT-6 推理模型同样不保证接受该字段，由 `LlmModelPolicy` 统一处理。
 - 独立预览窗口 `OcrPreviewWindow`，文字点对点覆盖
 

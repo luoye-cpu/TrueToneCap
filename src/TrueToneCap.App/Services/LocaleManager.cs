@@ -555,6 +555,8 @@ public static class LocaleManager
             ["白色半透明"] = "Translucent White",
             ["纯黑半透明"] = "Translucent Black",
             ["阿里云百炼"] = "Alibaba Cloud Bailian",
+            ["OpenRouter 聚合"] = "OpenRouter (aggregator)",
+            ["OpenCode Zen 聚合"] = "OpenCode Zen (aggregator)",
             ["🖥️ 界面"] = "🖥️ Interface",
             ["免费翻译"] = "Free Translation",
             ["硅基流动"] = "SiliconFlow",

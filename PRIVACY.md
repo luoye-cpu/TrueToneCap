@@ -74,7 +74,7 @@ TrueToneCap 是一款**本地优先**的 Windows 截图与文字识别（OCR）�
 
 **"免费公共接口"**由对应服务提供方运营，发送的文字按**其**隐私政策处理，我们无法控制其留存与使用规则。
 **"你自己配置的端点"**指：你在设置中填写的 API 地址与密钥，数据最终由**该服务提供方**处理。
-常见提供方包括 OpenAI、Anthropic、Google、DeepSeek、Moonshot、智谱、阿里云百炼、硅基流动、火山方舟、MiniMax、xAI、Mistral 等 —— 以你实际填写者为准。
+常见提供方包括 OpenAI、Anthropic、Google、DeepSeek、Moonshot、智谱、阿里云百炼、硅基流动、火山方舟、MiniMax、xAI、Mistral、OpenRouter、OpenCode Zen 等 —— 以你实际填写者为准。
 本应用**不内置任何 API 密钥**，不会替你选择 LLM 服务商。
 
 ### 四、本机存储的数据
@@ -171,7 +171,7 @@ The other modes require you to configure them yourself.
 under **their** privacy policies, which we do not control. **"The endpoint you configure"** means
 the API URL and key you enter in Settings; your data is ultimately processed by **that provider**.
 Typical providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot, Zhipu, Alibaba Cloud (Bailian),
-SiliconFlow, Volcengine Ark, MiniMax, xAI, and Mistral — whichever you enter. This app **ships with no API keys** and does not choose an
+SiliconFlow, Volcengine Ark, MiniMax, xAI, Mistral, OpenRouter, and OpenCode Zen — whichever you enter. This app **ships with no API keys** and does not choose an
 LLM provider for you.
 
 ### 4. Data stored on your device

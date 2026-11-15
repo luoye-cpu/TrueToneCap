@@ -119,6 +119,9 @@ public sealed partial class MainWindow : Window
             "Gemini" => ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
             "xAI" => ("https://api.x.ai/v1", "grok-4.7"),
             "Mistral" => ("https://api.mistral.ai/v1", "mistral-large-latest"),
+            // 聚合平台：OpenRouter 模型 ID 带 provider 前缀；OpenCode Zen 只选 chat/completions 的模型。
+            "OpenRouter" => ("https://openrouter.ai/api/v1", "google/gemini-3.8-flash"),
+            "OpenCode" => ("https://opencode.ai/zen/v1", "deepseek-v4.1-flash"),
             _ => ("", "")
         };
         if (tag != "Custom" && !string.IsNullOrEmpty(endpoint))

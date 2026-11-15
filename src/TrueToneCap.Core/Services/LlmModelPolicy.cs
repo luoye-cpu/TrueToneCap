@@ -64,16 +64,23 @@ public static class LlmModelPolicy
     /// <summary>
     /// 返回请求应携带的 temperature；<c>null</c> 表示 JSON 中省略该字段。
     /// <para>Anthropic 的 OpenAI 兼容层明确要求 Claude 4.7+ 省略 temperature（小于 1 会 400）；
-    /// OpenAI 的 GPT-5/GPT-6 推理模型也不保证接受该字段。当前只对这两类省略，
-    /// 其余 OpenAI 兼容平台继续保留 0.1 的翻译温度。</para>
+    /// OpenAI 的 GPT-5/GPT-6 推理模型也不保证接受该字段。聚合平台会把模型 ID 写成
+    /// <c>anthropic/claude-sonnet-5</c> 或 <c>openai/gpt-5.6-terra</c>，因此按最后一段
+    /// 模型名判断，不能只看整串前缀。OpenRouter 的两个路由模型不保证下游接受 temperature，
+    /// 也一并省略。</para>
     /// </summary>
     public static double? TemperatureFor(string? model)
     {
         if (string.IsNullOrWhiteSpace(model)) return TranslationTemperature;
         var trimmed = model.Trim();
-        if (trimmed.StartsWith("claude-", StringComparison.OrdinalIgnoreCase)) return null;
-        if (trimmed.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase)
-            || trimmed.StartsWith("gpt-6", StringComparison.OrdinalIgnoreCase)) return null;
+        if (trimmed.Equals("openrouter/auto", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Equals("openrouter/free", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var slash = trimmed.LastIndexOf('/');
+        var leaf = slash >= 0 ? trimmed[(slash + 1)..] : trimmed;
+        if (leaf.StartsWith("claude-", StringComparison.OrdinalIgnoreCase)) return null;
+        if (leaf.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase)
+            || leaf.StartsWith("gpt-6", StringComparison.OrdinalIgnoreCase)) return null;
         return TranslationTemperature;
     }
 }

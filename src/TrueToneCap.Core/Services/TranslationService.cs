@@ -2403,9 +2403,9 @@ public sealed class TranslationNotConfiguredException : TranslationException
 //
 // 这里曾经有一个 public static class LlmProviders（11 个提供方 / 27 个模型），2026-09-21 删除。
 // 删除的理由不是"没人用"这一条，而是它是**第二份事实源**：
-//   · 提供方清单真正生效的地方是 MainWindow.xaml 的 LlmProviderCbo（2026-11-16 起 12 项 + 自定义）
+//   · 提供方清单真正生效的地方是 MainWindow.xaml 的 LlmProviderCbo（2026-11-16 起 14 项 + 自定义）
 //     与 MainWindow.OcrSettings.cs 的 OnLlmProviderChanged（tag → endpoint/默认模型）；
-//   · 模型清单真正生效的地方是 LlmModelCbo 的 ComboBoxItem.Tag（2026-11-16 起 35 个平台模型 + 自定义）；
+//   · 模型清单真正生效的地方是 LlmModelCbo 的 ComboBoxItem.Tag（2026-11-16 起 50 个平台模型 + 自定义）；
 //   · LlmProviders 全仓唯一的消费者是 OcrServiceTests 的三条断言 ⇒ 门禁绿灯覆盖的是一个
 //     用户永远碰不到的表，而三处真表之间的漂移（如 Gemini 在 XAML 是 gemini-2.0-flash、
 //     在 LlmProviders 是 gemini-3.5-flash）没有任何判据在看。

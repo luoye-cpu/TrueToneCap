@@ -625,6 +625,8 @@
                                         <ComboBoxItem Tag="Gemini">Google Gemini</ComboBoxItem>
                                         <ComboBoxItem Tag="xAI">xAI Grok</ComboBoxItem>
                                         <ComboBoxItem Tag="Mistral">Mistral</ComboBoxItem>
+                                        <ComboBoxItem Tag="OpenRouter">OpenRouter 聚合</ComboBoxItem>
+                                        <ComboBoxItem Tag="OpenCode">OpenCode Zen 聚合</ComboBoxItem>
                                         <ComboBoxItem Tag="Custom" IsSelected="True">自定义</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
@@ -669,6 +671,24 @@
                                         <ComboBoxItem Tag="grok-4.7">Grok 4.7 (xAI)</ComboBoxItem>
                                         <ComboBoxItem Tag="mistral-large-latest">Mistral Large 4</ComboBoxItem>
                                         <ComboBoxItem Tag="mistral-small-latest">Mistral Small 4</ComboBoxItem>
+                                        <!-- 聚合平台：只放已确认走 chat/completions 的少量主流与免费模型。
+                                             OpenRouter 的模型 ID 自带 provider 前缀；OpenCode Zen 的 GPT/Gemini/Claude
+                                             原生条目分别走 responses/messages，不在本下拉里，避免请求协议错配。 -->
+                                        <ComboBoxItem Tag="openrouter/auto">OpenRouter Auto（自动路由）</ComboBoxItem>
+                                        <ComboBoxItem Tag="openrouter/free">OpenRouter Free（免费路由）</ComboBoxItem>
+                                        <ComboBoxItem Tag="anthropic/claude-sonnet-5">Claude Sonnet 5 (OpenRouter)</ComboBoxItem>
+                                        <ComboBoxItem Tag="openai/gpt-5.6-terra">GPT-5.6 Terra (OpenRouter)</ComboBoxItem>
+                                        <ComboBoxItem Tag="google/gemini-3.8-flash">Gemini 3.8 Flash (OpenRouter)</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek/deepseek-v4.1-flash">DeepSeek V4.1 Flash (OpenRouter)</ComboBoxItem>
+                                        <ComboBoxItem Tag="x-ai/grok-4.7">Grok 4.7 (OpenRouter)</ComboBoxItem>
+                                        <ComboBoxItem Tag="moonshotai/kimi-k3.1-pro">Kimi K3.1 Pro (OpenRouter)</ComboBoxItem>
+                                        <ComboBoxItem Tag="nvidia/nemotron-3.5-super-vl:free">Nemotron 3.5 Super VL（免费）</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek-v4.1-flash">DeepSeek V4.1 Flash (OpenCode)</ComboBoxItem>
+                                        <ComboBoxItem Tag="mistral-large-4">Mistral Large 4 (OpenCode)</ComboBoxItem>
+                                        <ComboBoxItem Tag="qwen3.8-max">Qwen3.8 Max (OpenCode)</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek-v4.1-flash-free">DeepSeek V4.1 Flash（免费）</ComboBoxItem>
+                                        <ComboBoxItem Tag="glm-5.3-flash-free">GLM-5.3-Flash（免费）</ComboBoxItem>
+                                        <ComboBoxItem Tag="nemotron-3.5-lightning-free">Nemotron 3.5 Lightning（免费）</ComboBoxItem>
                                         <ComboBoxItem Tag="custom">自定义模型</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>

@@ -7015,6 +7015,14 @@ public static class CorePipelineTests
             LlmModelPolicy.TemperatureFor("gpt-5.4-mini") is null);
         Assert("DeepSeek V4.1 Flash 保留 0.1 翻译温度",
             LlmModelPolicy.TemperatureFor("deepseek-flash") == LlmModelPolicy.TranslationTemperature);
+        Assert("OpenRouter 的 Claude 模型按最后一段识别并省略 temperature",
+            LlmModelPolicy.TemperatureFor("anthropic/claude-sonnet-5") is null);
+        Assert("OpenRouter 的 GPT-5 模型按最后一段识别并省略 temperature",
+            LlmModelPolicy.TemperatureFor("openai/gpt-5.6-terra") is null);
+        Assert("OpenRouter 路由模型省略 temperature（下游不保证接受）",
+            LlmModelPolicy.TemperatureFor("openrouter/free") is null);
+        Assert("OpenCode 的 DeepSeek 模型保留 0.1 翻译温度",
+            LlmModelPolicy.TemperatureFor("deepseek-v4.1-flash") == LlmModelPolicy.TranslationTemperature);
 
         var noTemp = System.Text.Json.JsonSerializer.Serialize(
             new LlmChatRequest("claude-sonnet-5",
