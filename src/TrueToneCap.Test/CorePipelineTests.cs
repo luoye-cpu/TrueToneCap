@@ -254,6 +254,8 @@ public static class CorePipelineTests
         Test_FreeEndpointHintNamesARealControl();      // 提示里引号内的控件名必须在界面上逐字存在
         Test_FreeEndpointsDefaultMigrationIsWired();
         Test_LlmFailureReasonIsClassified();
+        Test_LlmBatchParsingAndValidation();
+        Test_LlmBatchAndRateLimitWiring();
         Test_VisionTranslationIsWired();
         Test_TranslatedImageSaveIsWired();              // 2026-10-29：译文覆盖导出 + 预览与输出同源的字号
         Test_DisplayEnumCacheIsBounded();               // 2026-10-29 A3：枚举缓存的失效接线（缺它=静默错色）
@@ -6461,6 +6463,122 @@ public static class CorePipelineTests
             configured.Contains("没返回结果") && !configured.Contains("多半是网络"), configured);
     }
 
+    /// <summary>
+    /// 2026-11-16：LLM 文本批量/单行校验的行为判据。
+    /// 这里不联网，只钉“服务端返回什么形状才会被接受”——真正危险的错是
+    /// “HTTP 200 + 多行解释/漏行”被当成译文逐行覆盖。
+    /// </summary>
+    static void Test_LlmBatchParsingAndValidation()
+    {
+        static void Ok(string label, string raw, int expected, params string[] want)
+        {
+            var r = TranslationService.ParseLlmBatchContent(raw, expected);
+            Assert($"LLM 批量解析：{label}", r.Lines is not null && r.Lines.Length == expected,
+                r.Error ?? "Lines=null");
+            if (r.Lines is not null)
+                Assert($"LLM 批量解析：{label} 内容正确",
+                    want.All(w => r.Lines.Contains(w)), string.Join(" | ", r.Lines));
+        }
+
+        static void Bad(string label, string raw, int expected)
+        {
+            var r = TranslationService.ParseLlmBatchContent(raw, expected);
+            Assert($"LLM 批量解析：{label} 必须拒收", r.Lines is null && !string.IsNullOrWhiteSpace(r.Error),
+                r.Error ?? "错误地接受了");
+        }
+
+        Ok("字符串数组", "[\"你好\",\"世界\"]", 2, "你好", "世界");
+        Ok("代码块包裹", "```json\n[\"你好\",\"世界\"]\n```", 2, "你好", "世界");
+        Ok("translations 字符串数组", "{\"translations\":[\"你好\",\"世界\"]}", 2, "你好", "世界");
+        Ok("带 id 的对象数组按 id 回填（不信任顺序）",
+            "{\"translations\":[{\"id\":2,\"text\":\"世界\"},{\"id\":1,\"text\":\"你好\"}]}", 2, "你好", "世界");
+        Ok("编号对象映射", "{\"1\":\"你好\",\"2\":\"世界\"}", 2, "你好", "世界");
+        Ok("编号纯文本兜底", "1. 你好\n2. 世界", 2, "你好", "世界");
+
+        Bad("行数少", "[\"你好\"]", 2);
+        Bad("行数多", "[\"你好\",\"世界\",\"多余\"]", 2);
+        Bad("空译文", "[\"你好\",\"\"]", 2);
+        Bad("译文含换行/解释", "[\"你好\\n世界\",\"世界\"]", 2);
+        Bad("重复 id", "{\"translations\":[{\"id\":1,\"text\":\"你好\"},{\"id\":1,\"text\":\"世界\"}]}", 2);
+        Bad("缺 id", "{\"translations\":[{\"id\":1,\"text\":\"你好\"}]}", 2);
+        Bad("非法 JSON", "not json at all", 2);
+
+        // 单行输出：允许编号/引号/代码块前缀，拒绝多行与解释性文字
+        Assert("单行清理：去代码块", TranslationService.SanitizeSingleLine("```\nhello\n```") == "hello");
+        Assert("单行清理：去 Translation 前缀", TranslationService.SanitizeSingleLine("Translation: 你好") == "你好");
+        Assert("单行清理：去引号", TranslationService.SanitizeSingleLine("\"你好\"") == "你好");
+        Assert("单行清理：多行必须拒收", TranslationService.SanitizeSingleLine("你好\n世界") is null);
+        Assert("单行清理：解释性文字必须拒收",
+            TranslationService.SanitizeSingleLine("Note: the original tone was changed") is null);
+
+        // 分片边界：空行夹在中间时不能用“区间 + 非空计数”，否则后面的行会被漏掉
+        var groups = TranslationService.BuildLlmBatchChunkIndices(new[] { "a", "", "b", "c" });
+        Assert("批量分片：空行夹在中间不漏行",
+            groups.Count == 1 && groups[0].SequenceEqual(new[] { 0, 2, 3 }),
+            string.Join(" | ", groups.Select(g => string.Join(",", g))));
+        var groups9 = TranslationService.BuildLlmBatchChunkIndices(Enumerable.Range(0, 9).Select(i => $"l{i}").ToArray());
+        Assert("批量分片：9 行按 8+1 切",
+            groups9.Count == 2 && groups9[0].Length == 8 && groups9[1].Length == 1,
+            string.Join(" | ", groups9.Select(g => string.Join(",", g))));
+    }
+
+    /// <summary>
+    /// 2026-11-16：限流必须真的在“发送前”执行，且 LLM 不能再用 15s 共享客户端。
+    /// 这些是接线判据：行为层面的计时会受 CI 负载影响，而“顺序写反/漏调用”是确定性的。
+    /// </summary>
+    static void Test_LlmBatchAndRateLimitWiring()
+    {
+        var tsPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "TranslationService.cs"));
+        Assert("找到 TranslationService.cs（限流/批量接线判据的标的）", tsPath is not null);
+        if (tsPath is null) return;
+        string code = StripLineComments(File.ReadAllText(tsPath));
+
+        Assert("限流器：正常请求也要自增计数（不再只在超阈值分支里自增）",
+            Regex.IsMatch(code, @"s_requestCountInSecond\s*=\s*observed\s*\+\s*1"),
+            "计数器不自增 ⇒ WaitIfRateLimitedAsync 是死代码");
+        Assert("限流器：窗口满后真的等待下一拍",
+            Regex.IsMatch(code, @"Task\.Delay\(delayMs,\s*ct\)"),
+            "只自增不等待 ⇒ 退避无效");
+
+        Assert("Edge/Bing：发送前必须过限流",
+            Regex.IsMatch(code,
+                @"WaitIfRateLimitedAsync\(linked\.Token\);\s*using var resp = await s_http\.SendAsync"),
+            "漏掉限流 ⇒ 4 路并发直接撞免费端点风控");
+        Assert("LLM：发送前必须过限流（不能先发再等）",
+            Regex.IsMatch(code,
+                @"WaitIfRateLimitedAsync\(linkedCts\.Token\);\s*using var response = await s_llmHttp\.SendAsync"),
+            "先 SendAsync 再 WaitIfRateLimitedAsync ⇒ 429 已经发生，退避只发生在失败之后");
+        Assert("LLM 文本路使用独立客户端/独立时限",
+            code.Contains("s_llmHttp") && code.Contains("LlmTextRequestTimeout"),
+            "继续用 15s 共享客户端 ⇒ 模型稍慢就静默降级到免费端点");
+
+        var cfg = new LlmConfig { UseCustomLlm = true, ApiEndpoint = "https://example.invalid/v1" };
+        Assert("LLM 文本批量：已配置端点且非视觉/离线时启用",
+            TranslationService.LlmTextBatchConfigured(cfg));
+        Assert("LLM 文本批量：视觉模式不误入文本批量",
+            !TranslationService.LlmTextBatchConfigured(new LlmConfig
+            {
+                UseCustomLlm = true,
+                ApiEndpoint = "https://example.invalid/v1",
+                UseVision = true,
+            }));
+
+        var win = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml.cs"));
+        Assert("找到 OcrPreviewWindow.xaml.cs（批量接线判据的标的）", win is not null);
+        if (win is null) return;
+        string app = StripLineComments(File.ReadAllText(win));
+        Assert("预览窗：LLM 文本路优先走 TranslateBatchAsync",
+            app.Contains("LlmTextBatchConfigured") && app.Contains("TranslateBatchAsync("),
+            "仍逐行扇出 ⇒ 单行缺上下文、N 行 N 请求");
+        Assert("预览窗：批量失败行数必须进 definiteFailed",
+            app.Contains("definiteFailed = batch.FailedCount"),
+            "否则批量失败会被 UI 当成全部成功");
+        Assert("预览窗：逐行回退行数必须进快照/状态栏",
+            app.Contains("fallbackCount = batch.FallbackCount")
+            && Regex.IsMatch(app, @"new TranslationSnapshot\([^)]*fallbackCount"),
+            "回退不可见 ⇒ 用户不知道哪些行走过免费端点");
+    }
+
     static void Test_TranslationBackendAvailabilityIsHonest()
     {
         // ⚠ 2026-10-23 起"什么都没填"不再等于"没有可用后端"：免费公共端点默认开着。
@@ -7750,11 +7868,11 @@ public static class CorePipelineTests
 
         // ⚠ 上面两条臂只证明 helper 本身正确 —— 变异实测 M2 抓到：把调用点退回
         //    `content?.Trim() ?? text` 时它们【照样全绿】。缺陷长在调用点上，所以必须再钉调用点。
-        //    切片只取到本方法结束（`\n    }`），并先剥掉整行注释 —— helper 的 XML 文档里就写着
-        //    旧写法当反例，不剥注释这条锁会永久假红。
+        //    切片取 singled-line LLM 方法本体（RequireTranslatedContent 的调用已从 HTTP 解析
+        //    拆到 TranslateWithLlmAsync，不能再从 .GetProperty("content") 锚点切）。
         var tsPath = FindRepoFile(Path.Combine("src", "TrueToneCap.Core", "Services", "TranslationService.cs"));
         string tsRaw = tsPath is null ? "" : File.ReadAllText(tsPath);
-        int la = tsRaw.IndexOf(".GetProperty(\"content\")", System.StringComparison.Ordinal);
+        int la = tsRaw.IndexOf("private async Task<string> TranslateWithLlmAsync", System.StringComparison.Ordinal);
         int lb = la < 0 ? -1 : tsRaw.IndexOf("\n    }", la, System.StringComparison.Ordinal);
         var llmWin = (la >= 0 && lb > la) ? StripLineComments(tsRaw.Substring(la, lb - la)) : "";
         Assert("LLM 解析的调用点必须真的走那道守卫（helper 正确 ≠ 有人调它）",

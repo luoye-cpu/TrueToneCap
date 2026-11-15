@@ -43,6 +43,7 @@ public sealed partial class OcrPreviewWindow : Window
     private sealed record TranslationSnapshot(
         IReadOnlyList<string> Lines,
         int? DefiniteFailed,
+        int FallbackCount,
         string? FirstError);
 
     private TranslationSnapshot? _translation;
@@ -783,6 +784,7 @@ public sealed partial class OcrPreviewWindow : Window
             var lines = _ocr.Lines;
             string? firstError = null;      // 行级容错不许吞掉原因，留一份给状态栏
             int? definiteFailed = null;     // 非 null = 这条路自己知道失败了几行，不必靠"译文==原文"猜
+            int fallbackCount = 0;          // LLM 批量没交出、改走逐行的行数（只作可见性说明）
             List<string> translated;
 
             if (TranslationService.VisionConfigured(_translationConfig))
@@ -819,6 +821,19 @@ public sealed partial class OcrPreviewWindow : Window
                     lines.Select(l => l.Text).ToArray(), from, to, ct);
                 translated = batch.Lines.ToList();
                 definiteFailed = batch.FailedCount;
+                if (batch.FirstError is not null) firstError = batch.FirstError;
+            }
+            else if (TranslationService.LlmTextBatchConfigured(_translationConfig))
+            {
+                // ═══ LLM 文本路：整批带编号 JSON 发送，按行回填 ═══
+                // 2026-11-16：旧实现把 N 行分别发给 LLM，单行缺上下文 + 无行数约束，
+                // 模型容易漏词/扩写/带解释；批量接口在 Core 内做等行数校验，失败分片才逐行回退。
+                var batch = await translator.TranslateBatchAsync(
+                    lines.Select(l => l.Text).ToArray(),
+                    _translationConfig.TargetLanguage, null, ct);
+                translated = batch.Lines.ToList();
+                definiteFailed = batch.FailedCount;
+                fallbackCount = batch.FallbackCount;
                 if (batch.FirstError is not null) firstError = batch.FirstError;
             }
             else
@@ -864,7 +879,7 @@ public sealed partial class OcrPreviewWindow : Window
             // ═══ 一次性发布（2026-10-07 加固）═══
             // 译文、失败行数、首个错误合成一个不可变对象，赋值是单次引用写入 ⇒
             // 渲染端读到的永远是"完整的一份"，不会再出现半成品。
-            _translation = new TranslationSnapshot(translated, definiteFailed, firstError);
+            _translation = new TranslationSnapshot(translated, definiteFailed, fallbackCount, firstError);
 
 DispatcherQueue.TryEnqueue(() =>
             {
@@ -886,13 +901,16 @@ DispatcherQueue.TryEnqueue(() =>
                 // 视觉路自己知道结果（整批成功或整批抛异常），走 definiteFailed。
                 int failed = snap.DefiniteFailed ??
                     snap.Lines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
+                string fallbackNote = snap.FallbackCount > 0
+                    ? $"；其中 {snap.FallbackCount} 行走逐行回退"
+                    : "";
                 string why = snap.FirstError is null ? "" : $"（原因示例：{snap.FirstError}）";
                 InfoTxt.Text = failed switch
                 {
-                    0 => $"✅ 翻译完成（{total} 行），点击文字块可复制译文",
+                    0 => $"✅ 翻译完成（{total} 行）{fallbackNote}，点击文字块可复制译文",
                     // 全行皆败不叫"完成"——原先这里仍打 ✅ 语气的"翻译完成"，是把故障说成成功
-                    _ when failed == total => $"❌ 翻译失败：{total}/{total} 行都没出译文 {why}",
-                    _ => $"⚠ 翻译完成（{failed}/{total} 行失败，已保留原文）{why}，点击文字块可复制",
+                    _ when failed == total => $"❌ 翻译失败：{total}/{total} 行都没出译文 {fallbackNote}{why}",
+                    _ => $"⚠ 翻译完成（{failed}/{total} 行失败，已保留原文）{fallbackNote}{why}，点击文字块可复制",
                 };
             });
         }

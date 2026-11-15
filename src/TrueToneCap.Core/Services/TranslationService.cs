@@ -21,43 +21,51 @@ public class TranslationService
     // ⚠️ 关键问题：大量 OCR 行同时翻译时，虽然并发限制为 4，但如果 20 行都走 Edge/Bing，
     //    仍然可能在短时间内触发"每秒多次请求"的风控。
     //    解决方案：增加全局限流计数器，检测短时间内的请求频率，自动退避。
+    //
+    // 2026-11-16 修复：旧实现的计数器只在"已经超阈值"的分支里自增，正常请求永远不计数，
+    // 于是限流器事实上是死代码；并且 LLM 把限流放在 SendAsync 之后，Edge/Bing 干脆没调用。
+    // 现在每个请求在【发送前】先占一个窗口槽位；窗口满了就等下一拍再重试。
     private static int s_requestCountInSecond = 0;
     private static DateTime s_lastSecondReset = DateTime.UtcNow;
     private static readonly object s_rateLimitLock = new();
-    
-    // 最大每秒请求数（针对同一后端，多个后端合计不能超过此值）
+
+    // 最大每秒请求数（全后端共享；4 路并发 + 重试都在这一条闸门下）
     private const int MAX_REQUESTS_PER_SECOND = 6;
-    
-    /// <summary>智能限流：检测是否超过阈值，如需退避则延时。</summary>
-    private static async Task WaitIfRateLimitedAsync(CancellationToken ct)
+
+    /// <summary>请求发送前的全局限流闸门。每个请求都必须先在这里占一个槽位。</summary>
+    internal static async Task WaitIfRateLimitedAsync(CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
-        
-        // ⚠ 不能直接在 lock 内 await！先检查是否需要延迟，然后离开 lock 后延时
-        int needDelay = 0;
-        
-        lock (s_rateLimitLock)
+        while (true)
         {
-            // 重置每秒计数
-            if ((now - s_lastSecondReset).TotalSeconds >= 1.0)
+            int delayMs;
+            int observed;
+            lock (s_rateLimitLock)
             {
-                s_requestCountInSecond = 0;
-                s_lastSecondReset = now;
+                var now = DateTime.UtcNow;
+                if ((now - s_lastSecondReset).TotalSeconds >= 1.0)
+                {
+                    s_requestCountInSecond = 0;
+                    s_lastSecondReset = now;
+                }
+
+                observed = s_requestCountInSecond;
+                if (observed < MAX_REQUESTS_PER_SECOND)
+                {
+                    s_requestCountInSecond = observed + 1;   // 本请求占位；下一次同窗口请求看到的已是 +1
+                    return;
+                }
+
+                // 窗口已满：等到当前窗口结束，再加一点抖动避免同一刻一起醒来。
+                double elapsedMs = (now - s_lastSecondReset).TotalMilliseconds;
+                delayMs = (int)Math.Clamp(1000 - elapsedMs, 1, 1000)
+                        + Random.Shared.Next(0, 120);
             }
-            
-            // 如果已达到阈值，记录需要延迟的时间
-            if (s_requestCountInSecond >= MAX_REQUESTS_PER_SECOND)
-            {
-                needDelay = Random.Shared.Next(100, 500);
-                Interlocked.Increment(ref s_requestCountInSecond);
-            }
-        }
-        
-        // 离开 lock 后再延时（避免 deadlock）
-        if (needDelay > 0)
-        {
-            CoreLog.Debug("Translate", $"请求频率过高 ({s_requestCountInSecond}/{MAX_REQUESTS_PER_SECOND})，退避{needDelay}ms");
-            await Task.Delay(needDelay, ct);
+
+            // ⚠ 不能直接在 lock 内 await（会串行化所有翻译请求）；离开 lock 后再等。
+            CoreLog.Debug("Translate",
+                $"请求频率过高 ({observed}/{MAX_REQUESTS_PER_SECOND})，退避{delayMs}ms",
+                LogCategory.Network);
+            await Task.Delay(delayMs, ct);
         }
     }
     
@@ -88,6 +96,22 @@ public class TranslationService
         ConnectTimeout = TimeSpan.FromSeconds(10),
     })
     { Timeout = Timeout.InfiniteTimeSpan };
+
+    // ═══ 2026-11-16：LLM 文本路单独一个客户端 ═══
+    // 15s 的共享客户端是给免费端点的短请求定的；LLM 在本地网关/长上下文下实测常超过 15s，
+    // 旧实现于是把"模型还在算"误判成失败并逐行降级到免费端点，同一屏出现两种译文风格。
+    // 这里只放宽时限，连接复用策略与文本路一致；真正的时限由每次请求的链接 CTS 控制。
+    private static readonly HttpClient s_llmHttp = new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        MaxConnectionsPerServer = 8,
+        AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+        ConnectTimeout = TimeSpan.FromSeconds(10),
+    })
+    { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>LLM 文本/批量请求的时限。视觉路另有 120s，不能把两件事混成一个常数。</summary>
+    internal static readonly TimeSpan LlmTextRequestTimeout = TimeSpan.FromSeconds(60);
 
     /// <summary>视觉请求的时限。用链接 CTS 实现（共享 HttpClient 的 Timeout=∞），
     /// 这样"用户关窗"与"端点太慢"能分开：前者重抛取消，后者给出可读原因。</summary>
@@ -215,7 +239,7 @@ public class TranslationService
         HttpRequestException h =>
             $"自定义 LLM 连不上：{h.Message}",
         TaskCanceledException =>
-            "自定义 LLM 超时（连接 10 秒 / 整次请求 15 秒）",
+            $"自定义 LLM 超时（连接 10 秒 / 整次请求 {LlmTextRequestTimeout.TotalSeconds:F0} 秒）",
         _ => $"自定义 LLM 失败: {ex.GetType().Name}: {ex.Message}"
     };
 
@@ -223,6 +247,12 @@ public class TranslationService
     /// （Edge / 必应 / MyMemory / Google，默认启用，可在设置关闭）。</summary>
     public async Task<string> TranslateAsync(string text, string targetLang, string? sourceLang = null,
         CancellationToken ct = default)
+        => await TranslateTextAsync(text, targetLang, sourceLang, ct, allowLlm: true).ConfigureAwait(false);
+
+    /// <summary>单行翻译的共用实现。<paramref name="allowLlm"/> 为 false 时跳过 LLM，
+    /// 供批量失败后的逐行回退使用，避免同一屏对同一个 LLM 再打 N 次。</summary>
+    private async Task<string> TranslateTextAsync(string text, string targetLang,
+        string? sourceLang, CancellationToken ct, bool allowLlm)
     {
         if (string.IsNullOrWhiteSpace(text)) return text;
 
@@ -246,11 +276,16 @@ public class TranslationService
         }
 
         // 1. LLM 优先（已配置端点 + Key）
-        if (_config.UseCustomLlm && !string.IsNullOrEmpty(_config.ApiEndpoint))
+        if (allowLlm && _config.UseCustomLlm && !string.IsNullOrEmpty(_config.ApiEndpoint))
         {
             try
             {
                 return await TranslateWithLlmAsync(text, targetLang, sourceLang, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // 用户关窗/主动取消：这不是 LLM 失败，不能当成"降级到免费后端"继续跑
+                throw;
             }
             catch (Exception ex)
             {
@@ -296,6 +331,230 @@ public class TranslationService
         throw new TranslationException(DescribeBackends(_config)
             + (_lastBackendNote is null ? "" : $"\n最后一次尝试的原因：{_lastBackendNote}"));
     }
+
+    // ═══════════════════════════════════════
+    //  批量翻译（2026-11-16：LLM 结构化批量 + 逐行回退）
+    // ═══════════════════════════════════════
+
+    /// <summary>批量翻译结果。<see cref="FallbackCount"/> 是"批量没有交出、改走逐行"的行数，
+    /// 与 <see cref="FailedCount"/>（逐行也失败、回填原文的行数）分开，UI 才能如实显示"部分行降级"。</summary>
+    public sealed record TranslationBatchResult(
+        string[] Lines,
+        int FailedCount,
+        int FallbackCount,
+        string? FirstError,
+        string Mode);
+
+    /// <summary>当前配置是否适合走 LLM 文本批量。视觉路与离线路有自己的整批实现，不能混用。</summary>
+    public static bool LlmTextBatchConfigured(LlmConfig c) =>
+        c.UseCustomLlm && !string.IsNullOrWhiteSpace(c.ApiEndpoint)
+        && !c.UseOfflineArgos && !c.UseVision;
+
+    private const int LlmBatchMaxLines = 8;
+    private const int LlmBatchMaxChars = 3000;
+
+    private sealed record LlmBatchChunk(IReadOnlyList<int> Indices);
+
+    /// <summary>
+    /// 批量翻译一组 OCR 行：LLM 按编号/JSON 结构化整批发送；任何缺行、格式坏、超时或 HTTP 失败
+    /// 都只让【那一批】回退到逐行，而不是把整屏静默换成免费端点。
+    /// <para>⚠ 不把多行拼成一段长文：OCR 行是布局单元，拼文会让模型合并/漏行/改顺序；
+    /// 这里用带 <c>id</c> 的 JSON 数组并强制返回等数量数组，逐行校验后回填。</para>
+    /// <para>离线/视觉模式不调用本方法（它们已有自己的整批路径）；若误调用则明确报错，
+    /// 不偷偷按在线文本处理。</para>
+    /// </summary>
+    public async Task<TranslationBatchResult> TranslateBatchAsync(
+        IReadOnlyList<string> lines, string targetLang, string? sourceLang = null,
+        CancellationToken ct = default)
+    {
+        if (lines.Count == 0)
+            return new TranslationBatchResult(Array.Empty<string>(), 0, 0, null, "空");
+
+        if (!AnyBackendAvailable(_config))
+            throw new TranslationNotConfiguredException(DescribeBackends(_config));
+
+        if (_config.UseOfflineArgos)
+        {
+            var from = OfflineArgosEngine.NormalizeLang(_config.OfflineSourceLangHint) ?? "en";
+            var to = OfflineArgosEngine.NormalizeLang(targetLang) ?? "en";
+            var batch = await OfflineArgosEngine.TranslateBatchAsync(lines, from, to, ct);
+            return new TranslationBatchResult(batch.Lines, batch.FailedCount, 0, batch.FirstError, "离线批量");
+        }
+
+        if (VisionConfigured(_config))
+            throw new TranslationException(
+                "视觉模式是整图直传路径，不能调用文本批量接口；请让 OcrPreviewWindow 走 TranslateImageWithVisionAsync。");
+
+        string?[] translated = new string?[lines.Count];
+        string? firstError = null;
+
+        if (LlmTextBatchConfigured(_config))
+        {
+            foreach (var chunk in BuildLlmBatchChunks(lines))
+            {
+                ct.ThrowIfCancellationRequested();
+                var chunkTexts = new string[chunk.Indices.Count];
+                for (int i = 0; i < chunk.Indices.Count; i++) chunkTexts[i] = lines[chunk.Indices[i]];
+
+                try
+                {
+                    var got = await TranslateLlmBatchChunkAsync(chunkTexts, targetLang, sourceLang, ct);
+                    for (int i = 0; i < chunk.Indices.Count; i++) translated[chunk.Indices[i]] = got[i];
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    firstError ??= ExplainLlmBatchFailure(ex);
+                    CoreLog.Warn("Translate",
+                        $"LLM 批量分片失败（行 {chunk.Indices[0] + 1}–{chunk.Indices[chunk.Indices.Count - 1] + 1}）：{firstError}",
+                        ex, LogCategory.Network);
+                }
+            }
+        }
+
+        // 批量没交出的行（含未配置 LLM 的逐行模式）逐行回退。若配了免费/有道后端，
+        // 回退不再重打 LLM —— 批量刚失败/超时，逐行再打只会把 429 与超时放大。
+        var missing = Enumerable.Range(0, lines.Count)
+            .Where(i => !string.IsNullOrWhiteSpace(lines[i]) && translated[i] is null)
+            .ToArray();
+
+        int failedCount = 0;
+        if (missing.Length > 0)
+        {
+            bool allowLlmFallback = !HasNonLlmBackend();
+            using var sem = new SemaphoreSlim(4);
+            var tasks = new Task[missing.Length];
+            for (int t = 0; t < missing.Length; t++)
+            {
+                int i = missing[t];
+                tasks[t] = Task.Run(async () =>
+                {
+                    await sem.WaitAsync(ct);
+                    try
+                    {
+                        translated[i] = await TranslateTextAsync(
+                            lines[i], targetLang, sourceLang, ct, allowLlm: allowLlmFallback);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        translated[i] = lines[i];
+                        Interlocked.Increment(ref failedCount);
+                        Interlocked.CompareExchange(ref firstError, ex.Message, null);
+                    }
+                    finally
+                    {
+                        sem.Release();
+                    }
+                });
+            }
+            await Task.WhenAll(tasks);
+        }
+
+        for (int i = 0; i < translated.Length; i++)
+            translated[i] ??= lines[i];   // 空白行与极端兜底：保留原文，不制造空译文
+
+        string mode = LlmTextBatchConfigured(_config)
+            ? (missing.Length == 0 ? "LLM 批量" : "LLM 批量 + 逐行回退")
+            : "逐行";
+
+        return new TranslationBatchResult(
+            translated.Select(s => s ?? "").ToArray(),
+            failedCount,
+            missing.Length,
+            firstError,
+            mode);
+    }
+
+    /// <summary>批量的分片规则：最多 8 行或 3000 字符，避免一次请求过大/模型漏行。
+    /// <para>只收非空白行的<b>原始下标</para>，不按“连续区间 + 非空计数”切 —— 中间夹一个空行时
+    /// 区间会跨过它，把后面的行漏出这一片（2026-11-16 自审发现的边界）。</para></summary>
+    private static List<LlmBatchChunk> BuildLlmBatchChunks(IReadOnlyList<string> lines) =>
+        BuildLlmBatchChunkIndices(lines).Select(g => new LlmBatchChunk(g)).ToList();
+
+    /// <summary>分片下标（internal 供测试钉边界：空行夹在中间时不许把后面的行漏掉）。</summary>
+    internal static List<int[]> BuildLlmBatchChunkIndices(IReadOnlyList<string> lines)
+    {
+        var chunks = new List<int[]>();
+        List<int> current = new();
+        int chars = 0;
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[i])) continue;
+            int len = lines[i].Length;
+            if (current.Count >= LlmBatchMaxLines || (current.Count > 0 && chars + len > LlmBatchMaxChars))
+            {
+                chunks.Add(current.ToArray());
+                current = new List<int>();
+                chars = 0;
+            }
+            current.Add(i);
+            chars += len;
+        }
+        if (current.Count > 0) chunks.Add(current.ToArray());
+        return chunks;
+    }
+
+    /// <summary>发一个 LLM 批量分片，返回与输入等数量的译文；行数/格式不符时抛异常。</summary>
+    private async Task<string[]> TranslateLlmBatchChunkAsync(
+        IReadOnlyList<string> texts, string targetLang, string? sourceLang, CancellationToken ct)
+    {
+        string sl = sourceLang ?? "auto-detect";
+        string basePrompt = !string.IsNullOrWhiteSpace(_config.SystemPrompt)
+            ? _config.SystemPrompt
+            : $"You are a professional translator. Translate the following text to {targetLang}.";
+        string systemPrompt = basePrompt
+            + "\n\nYou are translating a batch of numbered OCR lines. "
+            + "Return ONLY a valid JSON array of exactly " + texts.Count + " strings, in input order. "
+            + "Each string must be the translation of the corresponding input line. "
+            + "Do not merge, split, reorder, omit, or add lines. Do not return explanations, notes, "
+            + "quotes, numbering, markdown fences, or the source text. "
+            + "Preserve numbers, URLs, code identifiers, and proper nouns.";
+
+        var input = new LlmBatchLine[texts.Count];
+        for (int i = 0; i < texts.Count; i++) input[i] = new LlmBatchLine(i + 1, texts[i]);
+        string inputJson = JsonSerializer.Serialize(input, LlmJsonContext.Default.LlmBatchLineArray);
+
+        string userPrompt =
+            $"Translate from {sl} to {targetLang}. Return exactly {texts.Count} translated strings "
+            + "as a JSON array, in the same order as the input. Input:\n" + inputJson;
+
+        var requestBody = new LlmChatRequest(
+            Model: !string.IsNullOrWhiteSpace(_config.ModelName) ? _config.ModelName : "deepseek-chat",
+            Messages: [
+                new LlmChatMessage("system", systemPrompt),
+                new LlmChatMessage("user", userPrompt)
+            ],
+            Temperature: 0.1,
+            MaxTokens: 4096
+        );
+
+        string content = await SendLlmChatAsync(requestBody, ct);
+        var parsed = ParseLlmBatchContent(content, texts.Count);
+        if (parsed.Lines is null)
+            throw new TranslationException(parsed.Error ?? "LLM 批量响应不可用");
+        return parsed.Lines;
+    }
+
+    private static string ExplainLlmBatchFailure(Exception ex) => ex switch
+    {
+        HttpRequestException => ClassifyLlmFailure(ex),
+        TranslationException => ex.Message,
+        TaskCanceledException =>
+            $"自定义 LLM 批量超时（> {LlmTextRequestTimeout.TotalSeconds:F0} 秒）",
+        _ => $"自定义 LLM 批量失败: {ex.GetType().Name}: {ex.Message}"
+    };
+
+    private bool HasNonLlmBackend() =>
+        (!string.IsNullOrWhiteSpace(_config.YoudaoAppKey)
+         && !string.IsNullOrWhiteSpace(_config.YoudaoAppSecret))
+        || _config.AllowUnofficialTranslateEndpoints;
 
     // ═══════════════════════════════════════
     //  有道翻译（有道智云开放平台官方 API）
@@ -737,6 +996,7 @@ public class TranslationService
             using var req = new HttpRequestMessage(HttpMethod.Get, BingCredsPageUrl);
             req.Headers.TryAddWithoutValidation("User-Agent", BingBrowserUa);
             req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,*/*");
+            await WaitIfRateLimitedAsync(ct);
             using var resp = await s_http.SendAsync(req, ct);
             string html = await resp.Content.ReadAsStringAsync(ct);
 
@@ -828,6 +1088,7 @@ public class TranslationService
                 req.Headers.TryAddWithoutValidation("Origin", $"https://{creds.Host}");
                 req.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
 
+                await WaitIfRateLimitedAsync(linked.Token);
                 using var resp = await s_http.SendAsync(req, linked.Token);
                 string body = await resp.Content.ReadAsStringAsync(linked.Token);
                 var (translation, note) = ParseBingResponse(body);
@@ -982,6 +1243,7 @@ public class TranslationService
             //    （.NET 的 HttpClient 默认连 UA 都不发，而 urllib 会替自己加一个 —— 这就是
             //    第一轮"离线形状全绿、真发请求时第一档静默失效"的根因，见 EdgeClientUa 的说明）
             req.Headers.TryAddWithoutValidation("User-Agent", built.Value.ua);
+            await WaitIfRateLimitedAsync(linked.Token);
             using var resp = await s_http.SendAsync(req, linked.Token);
             string body = await resp.Content.ReadAsStringAsync(linked.Token);
             var (translation, note) = ParseEdgeResponse((int)resp.StatusCode, body);
@@ -1157,16 +1419,17 @@ public class TranslationService
         string? sourceLang, CancellationToken ct)
     {
         string sl = sourceLang ?? "auto-detect";
-        string systemPrompt = !string.IsNullOrWhiteSpace(_config.SystemPrompt)
+        string basePrompt = !string.IsNullOrWhiteSpace(_config.SystemPrompt)
             ? _config.SystemPrompt
-            : $"You are a professional translator. Translate the following text to {targetLang}. Only output the translation, no explanations.";
+            : $"You are a professional translator. Translate the following text to {targetLang}.";
+        string systemPrompt = basePrompt
+            + "\n\nTranslate exactly one OCR line. Return exactly one line of translated text. "
+            + "Do not return explanations, notes, quotes, code fences, numbering, or the source text. "
+            + "Do not merge or split lines.";
 
         string model = !string.IsNullOrWhiteSpace(_config.ModelName)
             ? _config.ModelName
             : "deepseek-chat";
-
-        // 构建端点 URL（确保以 /chat/completions 结尾）
-        string endpoint = ChatCompletionsUrl(_config.ApiEndpoint);
 
         // 使用源生成器构建请求体（AOT 兼容，替代匿名类型 + JsonContent.Create）
         var requestBody = new LlmChatRequest(
@@ -1175,35 +1438,57 @@ public class TranslationService
                 new LlmChatMessage("system", systemPrompt),
                 new LlmChatMessage("user", $"Translate from {sl} to {targetLang}:\n\n{text}")
             ],
-            Temperature: 0.3,
+            Temperature: 0.1,
             MaxTokens: 4096
         );
 
-        var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        string content = await SendLlmChatAsync(requestBody, ct);
+
+        // 先验内容再记归因：RequireTranslatedContent 对空/多行/解释性译文要抛，归因不能抢在它前面写"成功"
+        var llmDone = RequireTranslatedContent(content);
+        NoteSuccess("自定义 LLM");
+        return llmDone;
+    }
+
+    /// <summary>
+    /// 发一次 OpenAI 兼容的 chat/completions 并取出 content。
+    /// <para>P0（2026-11-16）：限流必须在<b>发送前</b>执行，LLM 不再和免费短文本共用 15s 客户端；
+    /// 用户关窗导致的取消要原样上抛，不能被当成"LLM 超时后降级"。</para>
+    /// </summary>
+    private async Task<string> SendLlmChatAsync(LlmChatRequest requestBody, CancellationToken ct)
+    {
+        string endpoint = ChatCompletionsUrl(_config.ApiEndpoint);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
             Content = JsonContent.Create(requestBody, LlmJsonContext.Default.LlmChatRequest)
         };
         if (!string.IsNullOrEmpty(_config.ApiKey))
             request.Headers.Add("Authorization", $"Bearer {_config.ApiKey}");
 
-        var response = await _http.SendAsync(request, ct);
-        
-        // 智能限流：防止短时间内大量请求触发风控
-        await WaitIfRateLimitedAsync(ct);
-        
-        response.EnsureSuccessStatusCode();
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        linkedCts.CancelAfter(LlmTextRequestTimeout);
+        try
+        {
+            await WaitIfRateLimitedAsync(linkedCts.Token);
+            using var response = await s_llmHttp.SendAsync(request, linkedCts.Token);
+            response.EnsureSuccessStatusCode();
 
-        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-        var content = doc.RootElement
-            .GetProperty("choices")[0]
-            .GetProperty("message")
-            .GetProperty("content")
-            .GetString();
-
-        // 先验内容再记归因：RequireTranslatedContent 对空译文要抛，归因不能抢在它前面写"成功"
-        var llmDone = RequireTranslatedContent(content);
-        NoteSuccess("自定义 LLM");
-        return llmDone;
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linkedCts.Token));
+            return doc.RootElement
+                .GetProperty("choices")[0]
+                .GetProperty("message")
+                .GetProperty("content")
+                .GetString() ?? "";
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;   // 用户关窗/取消：不是 LLM 失败，交给 UI 静默收尾
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TaskCanceledException(
+                $"自定义 LLM 请求超过 {LlmTextRequestTimeout.TotalSeconds:F0} 秒没有返回");
+        }
     }
 
     /// <summary>
@@ -1213,6 +1498,8 @@ public class TranslationService
     /// 返回空串也只是换一种静默，所以这里抛异常交给 <see cref="TranslateAsync"/> 既有的
     /// <c>catch (Exception)</c>：换下一个后端，并由 <see cref="ClassifyLlmFailure"/> 把这条事实
     /// 写进 _lastBackendNote 与 Warn 日志（该 catch 无类型过滤，任何异常都不会冒到界面变成原始异常文本）。</para>
+    /// <para>2026-11-16 起不只判空：自动剥掉代码块/引号/编号/“Translation:”前缀，
+    /// 并把多行、解释性文字、拒答语判成失败，避免 HTTP 200 的坏译文被当成成功回填。</para>
     /// </summary>
     internal static string RequireTranslatedContent(string? content)
     {
@@ -1220,7 +1507,263 @@ public class TranslationService
             throw new InvalidOperationException(
                 "端点回了 HTTP 200，但 choices[0].message.content 是空的（JSON null 或空白）⇒ 这次没有返回译文");
 
-        return content.Trim();
+        var sanitized = SanitizeSingleLine(content);
+        if (sanitized is null)
+            throw new InvalidOperationException(
+                "端点回了 HTTP 200，但 content 不是单行译文（含多行、解释性文字或拒答语）⇒ 这次不算翻译成功");
+        return sanitized;
+    }
+
+    /// <summary>LLM 批量响应的解析结果；<c>Lines</c> 为 null 时 <c>Error</c> 必须给出人话原因。</summary>
+    internal sealed record LlmBatchParseResult(string[]? Lines, string? Error);
+
+    /// <summary>
+    /// 解析 LLM 批量响应。接受四种常见形状：等长字符串数组、<c>{"translations":[...]}</c>、
+    /// 带 <c>id</c> 的对象数组、按编号分行的纯文本。**任何形状都必须等数量且逐行可校验**，
+    /// 否则整批退回逐行 —— 不允许“按顺序硬套”造成错位覆盖。
+    /// </summary>
+    internal static LlmBatchParseResult ParseLlmBatchContent(string? raw, int expectedCount)
+    {
+        if (expectedCount <= 0)
+            return new LlmBatchParseResult(null, "批量输入行数为 0，不能解析");
+        if (string.IsNullOrWhiteSpace(raw))
+            return new LlmBatchParseResult(null, "LLM 批量响应为空");
+
+        string text = StripCodeFence(raw.Trim());
+        string? jsonText = ExtractJsonPayload(text);
+        if (jsonText is not null)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(jsonText);
+                var parsed = ParseJsonBatchRoot(doc.RootElement, expectedCount);
+                if (parsed.Lines is not null) return parsed;
+                // JSON 形状不对时继续尝试“编号行”纯文本；若也不成立，报 JSON 那条更具体的原因
+                var byLines = ParseNumberedBatchLines(text, expectedCount);
+                return byLines.Lines is not null ? byLines : parsed;
+            }
+            catch (JsonException ex)
+            {
+                var byLines = ParseNumberedBatchLines(text, expectedCount);
+                if (byLines.Lines is not null) return byLines;
+                return new LlmBatchParseResult(null,
+                    "LLM 批量响应不是合法 JSON（" + ex.GetType().Name + "），也不是等数量的编号行");
+            }
+        }
+
+        return ParseNumberedBatchLines(text, expectedCount);
+    }
+
+    private static LlmBatchParseResult ParseJsonBatchRoot(JsonElement root, int expectedCount)
+    {
+        if (root.ValueKind == JsonValueKind.Array)
+            return ParseJsonBatchArray(root, expectedCount);
+
+        if (root.ValueKind == JsonValueKind.Object)
+        {
+            if (root.TryGetProperty("translations", out var tr) && tr.ValueKind == JsonValueKind.Array)
+                return ParseJsonBatchArray(tr, expectedCount);
+            if (root.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Array)
+                return ParseJsonBatchArray(result, expectedCount);
+            if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+                return ParseJsonBatchArray(data, expectedCount);
+            return ParseJsonIdMap(root, expectedCount);
+        }
+
+        return new LlmBatchParseResult(null, "LLM 批量响应根节点既不是数组也不是对象");
+    }
+
+    private static LlmBatchParseResult ParseJsonBatchArray(JsonElement arr, int expectedCount)
+    {
+        int got = arr.GetArrayLength();
+        if (got != expectedCount)
+            return new LlmBatchParseResult(null,
+                $"LLM 批量响应行数 {got} ≠ 输入 {expectedCount}（可能合并或漏行）");
+
+        // 对象数组且每项都有 id：按 id 回填，不信任数组顺序。
+        bool allObjects = true, allHaveId = true;
+        foreach (var el in arr.EnumerateArray())
+        {
+            if (el.ValueKind != JsonValueKind.Object) { allObjects = false; break; }
+            if (!el.TryGetProperty("id", out _)) { allHaveId = false; break; }
+        }
+
+        if (allObjects && allHaveId)
+        {
+            var map = new Dictionary<int, string>();
+            int itemIndex = 0;
+            foreach (var el in arr.EnumerateArray())
+            {
+                int? id = TryReadInt(el.TryGetProperty("id", out var idEl) ? idEl : default);
+                if (id is null || id.Value < 1 || id.Value > expectedCount)
+                    return new LlmBatchParseResult(null, $"LLM 批量响应第 {itemIndex + 1} 项的 id 非法");
+                if (map.ContainsKey(id.Value))
+                    return new LlmBatchParseResult(null, $"LLM 批量响应存在重复 id={id}");
+                string? value = ReadJsonTranslationText(el);
+                var line = SanitizeSingleLine(value);
+                if (line is null)
+                    return new LlmBatchParseResult(null, $"LLM 批量响应 id={id} 的译文为空/多行/解释性文字");
+                map[id.Value] = line;
+                itemIndex++;
+            }
+            if (map.Count != expectedCount)
+                return new LlmBatchParseResult(null,
+                    $"LLM 批量响应有效 id 数 {map.Count} ≠ 输入 {expectedCount}");
+            for (int i = 1; i <= expectedCount; i++)
+                if (!map.ContainsKey(i))
+                    return new LlmBatchParseResult(null, $"LLM 批量响应缺少 id={i}");
+            return new LlmBatchParseResult(
+                Enumerable.Range(1, expectedCount).Select(i => map[i]).ToArray(), null);
+        }
+
+        // 字符串数组（或没有 id 的对象数组）：只能按顺序，前提仍是等数量。
+        var lines = new string[expectedCount];
+        int index = 0;
+        foreach (var el in arr.EnumerateArray())
+        {
+            string? value = el.ValueKind == JsonValueKind.String
+                ? el.GetString()
+                : el.ValueKind == JsonValueKind.Object ? ReadJsonTranslationText(el) : null;
+            var line = SanitizeSingleLine(value);
+            if (line is null)
+                return new LlmBatchParseResult(null,
+                    $"LLM 批量响应第 {index + 1} 行不是可用的单行译文");
+            lines[index++] = line;
+        }
+        return new LlmBatchParseResult(lines, null);
+    }
+
+    private static LlmBatchParseResult ParseJsonIdMap(JsonElement obj, int expectedCount)
+    {
+        var map = new Dictionary<int, string>();
+        foreach (var prop in obj.EnumerateObject())
+        {
+            int? id = int.TryParse(prop.Name, out var n) ? n : null;
+            if (id is null || id.Value < 1 || id.Value > expectedCount) continue;   // 非编号字段（如 note）不参与回填
+            if (map.ContainsKey(id.Value))
+                return new LlmBatchParseResult(null, $"LLM 批量响应存在重复 id={id}");
+            string? value = prop.Value.ValueKind == JsonValueKind.String
+                ? prop.Value.GetString()
+                : prop.Value.ValueKind == JsonValueKind.Object ? ReadJsonTranslationText(prop.Value) : null;
+            var line = SanitizeSingleLine(value);
+            if (line is null)
+                return new LlmBatchParseResult(null, $"LLM 批量响应 id={id} 的译文为空/多行/解释性文字");
+            map[id.Value] = line;
+        }
+
+        if (map.Count != expectedCount)
+            return new LlmBatchParseResult(null,
+                $"LLM 批量响应有效 id 数 {map.Count} ≠ 输入 {expectedCount}");
+        for (int i = 1; i <= expectedCount; i++)
+            if (!map.ContainsKey(i))
+                return new LlmBatchParseResult(null, $"LLM 批量响应缺少 id={i}");
+        return new LlmBatchParseResult(
+            Enumerable.Range(1, expectedCount).Select(i => map[i]).ToArray(), null);
+    }
+
+    private static string? ReadJsonTranslationText(JsonElement obj)
+    {
+        foreach (var key in new[] { "text", "translation", "value" })
+        {
+            if (obj.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String)
+                return value.GetString();
+        }
+        return null;
+    }
+
+    private static int? TryReadInt(JsonElement el)
+    {
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var n)) return n;
+        if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), out var s)) return s;
+        return null;
+    }
+
+    private static LlmBatchParseResult ParseNumberedBatchLines(string text, int expectedCount)
+    {
+        var rawLines = text.Replace("\r\n", "\n").Replace('\r', '\n')
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (rawLines.Length != expectedCount)
+            return new LlmBatchParseResult(null,
+                $"LLM 批量响应行数 {rawLines.Length} ≠ 输入 {expectedCount}（可能合并或漏行）");
+
+        var lines = new string[expectedCount];
+        for (int i = 0; i < expectedCount; i++)
+        {
+            string withoutNumber = Regex.Replace(rawLines[i], @"^\s*\d+\s*[.、)：:]\s*", "");
+            var line = SanitizeSingleLine(withoutNumber);
+            if (line is null)
+                return new LlmBatchParseResult(null,
+                    $"LLM 批量响应第 {i + 1} 行不是可用的单行译文");
+            lines[i] = line;
+        }
+        return new LlmBatchParseResult(lines, null);
+    }
+
+    private static string? ExtractJsonPayload(string text)
+    {
+        int firstArray = text.IndexOf('[');
+        int firstObject = text.IndexOf('{');
+        if (firstArray >= 0 && (firstObject < 0 || firstArray <= firstObject))
+        {
+            int last = text.LastIndexOf(']');
+            if (last > firstArray) return text[firstArray..(last + 1)];
+        }
+        if (firstObject >= 0)
+        {
+            int last = text.LastIndexOf('}');
+            if (last > firstObject) return text[firstObject..(last + 1)];
+        }
+        return null;
+    }
+
+    private static string StripCodeFence(string s)
+    {
+        if (!s.StartsWith("```", StringComparison.Ordinal)) return s;
+        int firstNewline = s.IndexOf('\n');
+        if (firstNewline < 0) return s.Trim('`').Trim();
+        string body = s[(firstNewline + 1)..].Trim();
+        if (body.EndsWith("```", StringComparison.Ordinal)) body = body[..^3].Trim();
+        return body;
+    }
+
+    /// <summary>
+    /// 把模型输出收敛成"一条可覆盖 OCR 行的译文"：去代码块、引号、编号、Translation: 前缀；
+    /// 多行/解释性文字/拒答语返回 null（由调用方判失败并换后端）。
+    /// </summary>
+    internal static string? SanitizeSingleLine(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return null;
+        string s = StripCodeFence(content.Trim());
+
+        s = Regex.Replace(s,
+            @"^(?:here\s+is\s+the\s+translation|here's\s+the\s+translation|translation|译文|翻译|output)\s*[：:]\s*",
+            "", RegexOptions.IgnoreCase);
+        s = Regex.Replace(s, @"^\s*\d+\s*[.、)：:]\s*", "");
+        s = s.Trim();
+
+        if ((s.StartsWith("\"", StringComparison.Ordinal) && s.EndsWith("\"", StringComparison.Ordinal)
+             || s.StartsWith("“", StringComparison.Ordinal) && s.EndsWith("”", StringComparison.Ordinal)
+             || s.StartsWith("'", StringComparison.Ordinal) && s.EndsWith("'", StringComparison.Ordinal))
+            && s.Length >= 2)
+            s = s[1..^1].Trim();
+
+        if (s.Length == 0) return null;
+        if (s.Contains('\n') || s.Contains('\r')) return null;
+
+        string lower = s.ToLowerInvariant();
+        if (lower.Contains("as an ai")
+            || lower.Contains("i cannot")
+            || lower.Contains("i'm sorry")
+            || lower.Contains("here is the translation")
+            || lower.Contains("here's the translation")
+            || lower.StartsWith("note:")
+            || lower.StartsWith("explanation:")
+            || s.Contains("以下是翻译")
+            || s.Contains("译文如下")
+            || s.Contains("翻译如下"))
+            return null;
+
+        return s;
     }
 
     // ═══════════════════════════════════════
@@ -1295,6 +1838,7 @@ public class TranslationService
         linkedCts.CancelAfter(VisionRequestTimeout);
         try
         {
+            await WaitIfRateLimitedAsync(linkedCts.Token);
             var response = await s_visionHttp.SendAsync(request, linkedCts.Token);
             response.EnsureSuccessStatusCode();
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linkedCts.Token));
@@ -1358,12 +1902,13 @@ public class TranslationService
     internal static string[]? MapVisionLines(string? raw, int expectedLineCount)
     {
         if (string.IsNullOrWhiteSpace(raw) || expectedLineCount <= 0) return null;
-        var lines = raw.Replace("\r\n", "\n").Replace('\r', '\n')
+        var mapped = raw.Replace("\r\n", "\n").Replace('\r', '\n')
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(l => System.Text.RegularExpressions.Regex.Replace(l, @"^\s*\d+\s*[.、)：:]\s*", ""))
-            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .Select(SanitizeSingleLine)
             .ToArray();
-        return lines.Length == expectedLineCount ? lines : null;
+        return mapped.Length == expectedLineCount && mapped.All(l => l is not null)
+            ? mapped.Select(l => l!).ToArray()
+            : null;
     }
 }
 

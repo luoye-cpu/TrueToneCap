@@ -18,6 +18,9 @@ internal sealed record LlmChatRequest(
 /// <summary>LLM API 聊天消息。</summary>
 internal sealed record LlmChatMessage(string Role, string Content);
 
+/// <summary>LLM 文本批量输入的一行：<c>id</c> 从 1 开始，模型必须按这个编号返回。</summary>
+internal sealed record LlmBatchLine(int Id, string Text);
+
 /// <summary>
 /// 多模态消息的内容片段（OpenAI 兼容形态）：一条 user 消息 = 一段文字 + 一张图，
 /// 图以 <c>image_url.url</c> 的 <c>data:image/png;base64,...</c> 内联。
@@ -58,6 +61,7 @@ internal sealed record LlmVisionRequest(
 [JsonSerializable(typeof(LlmChatRequest))]
 [JsonSerializable(typeof(LlmVisionRequest))]
 [JsonSerializable(typeof(string[]))]
+[JsonSerializable(typeof(LlmBatchLine[]))]
 internal partial class LlmJsonContext : JsonSerializerContext
 {
 }
