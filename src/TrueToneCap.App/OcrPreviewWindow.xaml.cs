@@ -44,6 +44,9 @@ public sealed partial class OcrPreviewWindow : Window
         IReadOnlyList<string> Lines,
         int? DefiniteFailed,
         int FallbackCount,
+        int DegradedCount,
+        string? DegradedBackend,
+        int LlmRetryCount,
         string? FirstError);
 
     private TranslationSnapshot? _translation;
@@ -784,7 +787,10 @@ public sealed partial class OcrPreviewWindow : Window
             var lines = _ocr.Lines;
             string? firstError = null;      // 行级容错不许吞掉原因，留一份给状态栏
             int? definiteFailed = null;     // 非 null = 这条路自己知道失败了几行，不必靠"译文==原文"猜
-            int fallbackCount = 0;          // LLM 批量没交出、改走逐行的行数（只作可见性说明）
+            int fallbackCount = 0;          // LLM 批量没交出、进入同 LLM 逐行的行数
+            int degradedCount = 0;          // 最终由免费/有道跨后端补译的行数
+            string? degradedBackend = null; // 跨后端最后兜底实际使用的后端名
+            int llmRetryCount = 0;          // 同 LLM 分片/逐行重试救回的行数
             List<string> translated;
 
             if (TranslationService.VisionConfigured(_translationConfig))
@@ -834,6 +840,9 @@ public sealed partial class OcrPreviewWindow : Window
                 translated = batch.Lines.ToList();
                 definiteFailed = batch.FailedCount;
                 fallbackCount = batch.FallbackCount;
+                degradedCount = batch.DegradedCount;
+                degradedBackend = batch.DegradedBackend;
+                llmRetryCount = batch.LlmRetryCount;
                 if (batch.FirstError is not null) firstError = batch.FirstError;
             }
             else
@@ -879,7 +888,9 @@ public sealed partial class OcrPreviewWindow : Window
             // ═══ 一次性发布（2026-10-07 加固）═══
             // 译文、失败行数、首个错误合成一个不可变对象，赋值是单次引用写入 ⇒
             // 渲染端读到的永远是"完整的一份"，不会再出现半成品。
-            _translation = new TranslationSnapshot(translated, definiteFailed, fallbackCount, firstError);
+            _translation = new TranslationSnapshot(
+                translated, definiteFailed, fallbackCount,
+                degradedCount, degradedBackend, llmRetryCount, firstError);
 
 DispatcherQueue.TryEnqueue(() =>
             {
@@ -902,15 +913,29 @@ DispatcherQueue.TryEnqueue(() =>
                 int failed = snap.DefiniteFailed ??
                     snap.Lines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
                 string fallbackNote = snap.FallbackCount > 0
-                    ? $"；其中 {snap.FallbackCount} 行走逐行回退"
+                    ? $"；批量未交出 {snap.FallbackCount} 行，已按同 LLM 优先策略回退"
+                    : "";
+                string retryNote = snap.LlmRetryCount > 0
+                    ? $"；{snap.LlmRetryCount} 行经同 LLM 重试成功"
+                    : "";
+                string degradedNote = snap.DegradedCount > 0
+                    ? $"；其中 {snap.DegradedCount} 行由 {snap.DegradedBackend ?? "备用翻译引擎"} 跨后端补译" +
+                      "（风格可能与其余行不一致）"
                     : "";
                 string why = snap.FirstError is null ? "" : $"（原因示例：{snap.FirstError}）";
+                bool hadExplicitError = snap.FirstError is not null;
                 InfoTxt.Text = failed switch
                 {
-                    0 => $"✅ 翻译完成（{total} 行）{fallbackNote}，点击文字块可复制译文",
+                    0 when !hadExplicitError && snap.DegradedCount == 0 =>
+                        $"✅ 翻译完成（{total} 行）{fallbackNote}{retryNote}，点击文字块可复制译文",
+                    // 回退成功 ≠ 没有错误：批量失败/跨后端降级必须留下警告，不能只显示普通成功。
+                    0 => $"⚠ 翻译完成（{total} 行），但曾发生错误或降级" +
+                         $"{fallbackNote}{retryNote}{degradedNote}{why}，点击文字块可复制译文",
                     // 全行皆败不叫"完成"——原先这里仍打 ✅ 语气的"翻译完成"，是把故障说成成功
-                    _ when failed == total => $"❌ 翻译失败：{total}/{total} 行都没出译文 {fallbackNote}{why}",
-                    _ => $"⚠ 翻译完成（{failed}/{total} 行失败，已保留原文）{fallbackNote}{why}，点击文字块可复制",
+                    _ when failed == total => $"❌ 翻译失败：{total}/{total} 行都没出译文 " +
+                        $"{fallbackNote}{retryNote}{degradedNote}{why}",
+                    _ => $"⚠ 翻译完成（{failed}/{total} 行失败，已保留原文）" +
+                        $"{fallbackNote}{retryNote}{degradedNote}{why}，点击文字块可复制",
                 };
             });
         }

@@ -256,6 +256,7 @@ public static class CorePipelineTests
         Test_LlmFailureReasonIsClassified();
         Test_LlmBatchParsingAndValidation();
         Test_LlmBatchAndRateLimitWiring();
+        Test_LlmBatchFailureClassification();
         Test_VisionTranslationIsWired();
         Test_TranslatedImageSaveIsWired();              // 2026-10-29：译文覆盖导出 + 预览与输出同源的字号
         Test_DisplayEnumCacheIsBounded();               // 2026-10-29 A3：枚举缓存的失效接线（缺它=静默错色）
@@ -6563,6 +6564,37 @@ public static class CorePipelineTests
                 UseVision = true,
             }));
 
+        Assert("批量失败：先拆分/同分片重试同一 LLM，再逐行同 LLM",
+            code.Contains("RecoverLlmBatchChunkAsync")
+            && code.Contains("RetrySplitLlmBatchChunkAsync")
+            && code.Contains("TranslateSingleLineWithLlmOnlyAsync"),
+            "批量一失败就直接 allowLlmFallback=!HasNonLlmBackend ⇒ 默认配置下整片落到免费端点");
+        Assert("批量失败：跨后端只能作为最后兜底（不再用 allowLlmFallback 提前选后端）",
+            !Regex.IsMatch(code, @"allowLlmFallback\s*=\s*!HasNonLlmBackend\(\)")
+            && code.Contains("stillMissing.Length > 0 && HasNonLlmBackend()"),
+            "旧逻辑仍在 ⇒ 解析/超时会立刻换后端，重新制造同屏混后端");
+        Assert("批量结果：降级字段与同 LLM 重试行数真正回传",
+            code.Contains("DegradedCount = degradedCount")
+            && code.Contains("DegradedBackend = degradedBackend")
+            && code.Contains("LlmRetryCount = llmRetryCount"),
+            "结果契约缺字段 ⇒ UI 无法区分“同 LLM 重试成功”和“跨后端补译”");
+        Assert("批量错误：回退成功也不清空 FirstError",
+            Regex.IsMatch(code, @"Interlocked\.CompareExchange\(ref firstError")
+            && Regex.IsMatch(code, @"if \(firstError is null\) firstError = reason"),
+            "回退成功就丢错误 ⇒ 用户永远看不到批量为什么失败");
+        Assert("取消不触发回退：批量/逐行/跨后端都先过滤用户取消",
+            Regex.Matches(code, @"OperationCanceledException\) when \(ct\.IsCancellationRequested\)").Count >= 3,
+            "少一个过滤 ⇒ 关窗会把取消误判成超时，继续重试/跨后端");
+        var onlyLlm = new LlmConfig
+        {
+            UseCustomLlm = true,
+            ApiEndpoint = "https://example.invalid/v1",
+            AllowUnofficialTranslateEndpoints = false,
+        };
+        Assert("只配 LLM（关免费端点、无有道）仍是可用后端，失败时只能显式报错",
+            TranslationService.AnyBackendAvailable(onlyLlm),
+            "若这里为 false，只配 LLM 的合法配置会在发请求前就被拒绝");
+
         var win = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "OcrPreviewWindow.xaml.cs"));
         Assert("找到 OcrPreviewWindow.xaml.cs（批量接线判据的标的）", win is not null);
         if (win is null) return;
@@ -6573,10 +6605,43 @@ public static class CorePipelineTests
         Assert("预览窗：批量失败行数必须进 definiteFailed",
             app.Contains("definiteFailed = batch.FailedCount"),
             "否则批量失败会被 UI 当成全部成功");
-        Assert("预览窗：逐行回退行数必须进快照/状态栏",
+        Assert("预览窗：回退/降级行数必须进快照",
             app.Contains("fallbackCount = batch.FallbackCount")
-            && Regex.IsMatch(app, @"new TranslationSnapshot\([^)]*fallbackCount"),
+            && app.Contains("degradedCount = batch.DegradedCount")
+            && app.Contains("degradedBackend = batch.DegradedBackend")
+            && app.Contains("llmRetryCount = batch.LlmRetryCount")
+            && Regex.IsMatch(app, @"new TranslationSnapshot\([^;]*fallbackCount[\s\S]*?degradedCount"),
             "回退不可见 ⇒ 用户不知道哪些行走过免费端点");
+        Assert("预览窗：回退成功但存在错误时必须显示警告，而不是普通 ✅",
+            app.Contains("hadExplicitError")
+            && Regex.IsMatch(app, @"0 when !hadExplicitError && snap\.DegradedCount == 0")
+            && app.Contains("但曾发生错误或降级"),
+            "FirstError 非空却仍打 ✅ ⇒ 自动回退把错误吞掉了");
+    }
+
+    /// <summary>
+    /// 2026-11-16：批量回退的第一步由失败类型决定。这里钉住分类本身，
+    /// 防止 401/403 被当成普通网络失败反复重试，或 429 被当成解析失败去拆小分片。
+    /// </summary>
+    static void Test_LlmBatchFailureClassification()
+    {
+        static string Kind(Exception ex) => TranslationService.ClassifyLlmBatchFailure(ex).ToString();
+
+        Assert("401 必须归为 Auth（不重试，但显式报错后自动回退）",
+            Kind(new TranslationService.LlmHttpException(401, null, "bad key")) == "Auth");
+        Assert("403 必须归为 Auth", Kind(new TranslationService.LlmHttpException(403, null, "forbidden")) == "Auth");
+        Assert("429 必须归为 RateLimited（退避一次后再跨后端）",
+            Kind(new TranslationService.LlmHttpException(429, 2, "slow down")) == "RateLimited");
+        Assert("超时必须归为 Timeout", Kind(new TaskCanceledException("timeout")) == "Timeout");
+        Assert("缺行/多行等解析拒绝必须归为 Parse",
+            Kind(new TranslationException("批量返回行数少于输入")) == "Parse");
+        Assert("非法 JSON 必须归为 Protocol", Kind(new System.Text.Json.JsonException("bad json")) == "Protocol");
+        Assert("5xx 必须归为 Transient",
+            Kind(new TranslationService.LlmHttpException(503, null, "busy")) == "Transient");
+        Assert("400 必须归为 Protocol（多半是请求/模型名问题，不是网络抖动）",
+            Kind(new TranslationService.LlmHttpException(400, null, "bad request")) == "Protocol");
+        Assert("无状态码的网络异常必须归为 Transient",
+            Kind(new HttpRequestException("connection reset")) == "Transient");
     }
 
     static void Test_TranslationBackendAvailabilityIsHonest()

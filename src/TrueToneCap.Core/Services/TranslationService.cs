@@ -4,6 +4,8 @@
 // 多后端翻译服务：LLM (OpenAI 兼容) → 有道官方开放平台 → 免费公共端点（Edge / 必应 / MyMemory / Google，默认启用）
 // 支持: DeepSeek V4 Flash / GLM-4.7-Flash / GPT-4o-mini / GPT-4.1-mini / 任意 OpenAI 兼容端点
 
+using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -228,6 +230,13 @@ public class TranslationService
     /// </summary>
     internal static string ClassifyLlmFailure(Exception ex) => ex switch
     {
+        LlmHttpException h => h.StatusCode switch
+        {
+            401 => $"自定义 LLM 返回 401（{h.Message}）—— 是 API 密钥不对或该模型未开通，不是网络问题",
+            403 => $"自定义 LLM 返回 403（{h.Message}）—— 密钥没有访问该模型的权限，不是网络问题",
+            429 => $"自定义 LLM 返回 429（{h.Message}）—— 额度或频率到顶了",
+            var code => $"自定义 LLM 返回 HTTP {code}（{h.Message}）",
+        },
         HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized } h =>
             $"自定义 LLM 返回 401（{h.Message}）—— 是 API 密钥不对或该模型未开通，不是网络问题",
         HttpRequestException { StatusCode: System.Net.HttpStatusCode.Forbidden } h =>
@@ -343,7 +352,17 @@ public class TranslationService
         int FailedCount,
         int FallbackCount,
         string? FirstError,
-        string Mode);
+        string Mode)
+    {
+        /// <summary>最终由不同后端（免费/有道）补译的行数；0 = 全部同 LLM 或全成功。</summary>
+        public int DegradedCount { get; init; }
+
+        /// <summary>降级后端的人话名，例如“免费公共端点”“有道官方 API”。</summary>
+        public string? DegradedBackend { get; init; }
+
+        /// <summary>批量分片/逐行同 LLM 重试过、且最终成功的行数（不包含跨后端回退）。</summary>
+        public int LlmRetryCount { get; init; }
+    }
 
     /// <summary>当前配置是否适合走 LLM 文本批量。视觉路与离线路有自己的整批实现，不能混用。</summary>
     public static bool LlmTextBatchConfigured(LlmConfig c) =>
@@ -357,7 +376,7 @@ public class TranslationService
 
     /// <summary>
     /// 批量翻译一组 OCR 行：LLM 按编号/JSON 结构化整批发送；任何缺行、格式坏、超时或 HTTP 失败
-    /// 都只让【那一批】回退到逐行，而不是把整屏静默换成免费端点。
+    /// 都先尝试同一 LLM（拆小分片/同片重试/逐行），跨后端只作最后兜底，不会把整屏静默换成免费端点。
     /// <para>⚠ 不把多行拼成一段长文：OCR 行是布局单元，拼文会让模型合并/漏行/改顺序；
     /// 这里用带 <c>id</c> 的 JSON 数组并强制返回等数量数组，逐行校验后回填。</para>
     /// <para>离线/视觉模式不调用本方法（它们已有自己的整批路径）；若误调用则明确报错，
@@ -385,14 +404,25 @@ public class TranslationService
             throw new TranslationException(
                 "视觉模式是整图直传路径，不能调用文本批量接口；请让 OcrPreviewWindow 走 TranslateImageWithVisionAsync。");
 
+        bool llmBatch = LlmTextBatchConfigured(_config);
         string?[] translated = new string?[lines.Count];
         string? firstError = null;
+        int llmRetryCount = 0;
 
-        if (LlmTextBatchConfigured(_config))
+        void NoteFailure(string reason)
+        {
+            if (firstError is null) firstError = reason;
+            CoreLog.Warn("Translate", "LLM 批量失败: " + reason, LogCategory.Network);
+        }
+
+        bool llmBlocked = false;
+        if (llmBatch)
         {
             foreach (var chunk in BuildLlmBatchChunks(lines))
             {
                 ct.ThrowIfCancellationRequested();
+                if (llmBlocked) continue;   // Auth/429 已判定 LLM 不可用，剩余分片不再打
+
                 var chunkTexts = new string[chunk.Indices.Count];
                 for (int i = 0; i < chunk.Indices.Count; i++) chunkTexts[i] = lines[chunk.Indices[i]];
 
@@ -407,25 +437,39 @@ public class TranslationService
                 }
                 catch (Exception ex)
                 {
-                    firstError ??= ExplainLlmBatchFailure(ex);
+                    var kind = ClassifyLlmBatchFailure(ex);
+                    NoteFailure(ExplainLlmBatchFailure(ex));
                     CoreLog.Warn("Translate",
-                        $"LLM 批量分片失败（行 {chunk.Indices[0] + 1}–{chunk.Indices[chunk.Indices.Count - 1] + 1}）：{firstError}",
+                        $"LLM 批量分片失败 kind={kind}（行 {chunk.Indices[0] + 1}–" +
+                        $"{chunk.Indices[chunk.Indices.Count - 1] + 1}）：{firstError}",
                         ex, LogCategory.Network);
+
+                    var outcome = await RecoverLlmBatchChunkAsync(
+                        chunkTexts, targetLang, sourceLang, ex, kind, NoteFailure, ct);
+                    for (int i = 0; i < chunk.Indices.Count; i++)
+                        if (outcome.Lines[i] is not null) translated[chunk.Indices[i]] = outcome.Lines[i];
+                    llmRetryCount += outcome.RecoveredRows;
+                    if (outcome.Fatal) llmBlocked = true;
                 }
             }
         }
 
-        // 批量没交出的行（含未配置 LLM 的逐行模式）逐行回退。若配了免费/有道后端，
-        // 回退不再重打 LLM —— 批量刚失败/超时，逐行再打只会把 429 与超时放大。
+        // 批量没交出的行（含未配置 LLM 的逐行模式）先记下来；
+        // 后面先尝试同 LLM 逐行，跨后端只作为最后兜底。
         var missing = Enumerable.Range(0, lines.Count)
             .Where(i => !string.IsNullOrWhiteSpace(lines[i]) && translated[i] is null)
             .ToArray();
 
         int failedCount = 0;
-        if (missing.Length > 0)
+        int degradedCount = 0;
+        int perLineLlmRows = 0;
+        var degradedBackends = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+
+        if (missing.Length > 0 && llmBatch && !llmBlocked)
         {
-            bool allowLlmFallback = !HasNonLlmBackend();
-            using var sem = new SemaphoreSlim(4);
+            // 同 LLM 逐行：并发压到 2，每行只多给一次尝试；只调用 LLM-only 路径，
+            // 严禁走 TranslateTextAsync 的完整降级链，否则 LLM 一失败又会偷偷落到免费端点。
+            using var sem = new SemaphoreSlim(2);
             var tasks = new Task[missing.Length];
             for (int t = 0; t < missing.Length; t++)
             {
@@ -435,8 +479,9 @@ public class TranslationService
                     await sem.WaitAsync(ct);
                     try
                     {
-                        translated[i] = await TranslateTextAsync(
-                            lines[i], targetLang, sourceLang, ct, allowLlm: allowLlmFallback);
+                        translated[i] = await TranslateSingleLineWithLlmOnlyAsync(
+                            lines[i], targetLang, sourceLang, ct);
+                        Interlocked.Increment(ref perLineLlmRows);
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
                     {
@@ -444,9 +489,51 @@ public class TranslationService
                     }
                     catch (Exception ex)
                     {
-                        translated[i] = lines[i];
-                        Interlocked.Increment(ref failedCount);
+                        Interlocked.CompareExchange(ref firstError, ClassifyLlmFailure(ex), null);
+                        CoreLog.Warn("Translate", "LLM 逐行重试失败: " + ex.Message, ex, LogCategory.Network);
+                    }
+                    finally
+                    {
+                        sem.Release();
+                    }
+                });
+            }
+            await Task.WhenAll(tasks);
+            llmRetryCount += perLineLlmRows;
+        }
+
+        // 跨后端兜底：只有同 LLM 批量/逐行都失败、且配置了免费或有道时才走。
+        var stillMissing = Enumerable.Range(0, lines.Count)
+            .Where(i => !string.IsNullOrWhiteSpace(lines[i]) && translated[i] is null)
+            .ToArray();
+
+        if (stillMissing.Length > 0 && HasNonLlmBackend())
+        {
+            using var sem = new SemaphoreSlim(4);
+            var tasks = new Task[stillMissing.Length];
+            for (int t = 0; t < stillMissing.Length; t++)
+            {
+                int i = stillMissing[t];
+                tasks[t] = Task.Run(async () =>
+                {
+                    await sem.WaitAsync(ct);
+                    try
+                    {
+                        // 每行独立实例，成功后可读到 LastBackendServed；避免并发下"最后谁成功"串台。
+                        var fallback = new TranslationService(_config);
+                        translated[i] = await fallback.TranslateTextAsync(
+                            lines[i], targetLang, sourceLang, ct, allowLlm: false);
+                        if (llmBatch) Interlocked.Increment(ref degradedCount);
+                        degradedBackends.TryAdd(fallback.LastBackendServed ?? "备用翻译引擎", 0);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
                         Interlocked.CompareExchange(ref firstError, ex.Message, null);
+                        CoreLog.Warn("Translate", "跨后端兜底失败: " + ex.Message, ex, LogCategory.Network);
                     }
                     finally
                     {
@@ -457,19 +544,38 @@ public class TranslationService
             await Task.WhenAll(tasks);
         }
 
+        // 最终兜底：仍为空的行保留原文；空白行不算失败。
         for (int i = 0; i < translated.Length; i++)
-            translated[i] ??= lines[i];   // 空白行与极端兜底：保留原文，不制造空译文
+        {
+            if (translated[i] is null)
+            {
+                translated[i] = lines[i];
+                if (!string.IsNullOrWhiteSpace(lines[i])) failedCount++;
+            }
+        }
 
-        string mode = LlmTextBatchConfigured(_config)
-            ? (missing.Length == 0 ? "LLM 批量" : "LLM 批量 + 逐行回退")
-            : "逐行";
+        string? degradedBackend = degradedCount > 0 && !degradedBackends.IsEmpty
+            ? string.Join(" / ", degradedBackends.Keys.OrderBy(k => k, StringComparer.Ordinal))
+            : null;
+
+        string mode;
+        if (!llmBatch) mode = "逐行";
+        else if (degradedCount > 0) mode = "LLM 批量 + 跨后端降级";
+        else if (missing.Length > 0) mode = "LLM 批量 + 同后端逐行";
+        else if (llmRetryCount > 0) mode = "LLM 批量 + 同后端重试";
+        else mode = "LLM 批量";
 
         return new TranslationBatchResult(
             translated.Select(s => s ?? "").ToArray(),
             failedCount,
             missing.Length,
             firstError,
-            mode);
+            mode)
+        {
+            DegradedCount = degradedCount,
+            DegradedBackend = degradedBackend,
+            LlmRetryCount = llmRetryCount,
+        };
     }
 
     /// <summary>批量的分片规则：最多 8 行或 3000 字符，避免一次请求过大/模型漏行。
@@ -500,6 +606,160 @@ public class TranslationService
         if (current.Count > 0) chunks.Add(current.ToArray());
         return chunks;
     }
+
+    /// <summary>批量失败的恢复类型；分类决定重试/拆分/跨后端。</summary>
+    internal enum LlmBatchFailureKind
+    {
+        Parse,
+        Protocol,
+        Timeout,
+        RateLimited,
+        Auth,
+        Transient,
+        Unknown,
+    }
+
+    /// <summary>一个分片恢复后的结果：成功回填的行 + 被同 LLM 重试救回的行数 + 是否必须停止 LLM。</summary>
+    private sealed record LlmBatchChunkOutcome(
+        string?[] Lines,
+        int RecoveredRows,
+        bool Fatal);
+
+    /// <summary>把异常归一成回退策略可用的类别。用户取消必须先被 catch 过滤，不能走到这里。</summary>
+    internal static LlmBatchFailureKind ClassifyLlmBatchFailure(Exception ex) => ex switch
+    {
+        LlmHttpException { StatusCode: 429 } => LlmBatchFailureKind.RateLimited,
+        LlmHttpException { StatusCode: 401 or 403 } => LlmBatchFailureKind.Auth,
+        LlmHttpException { StatusCode: 408 } => LlmBatchFailureKind.Timeout,
+        LlmHttpException { StatusCode: >= 500 } => LlmBatchFailureKind.Transient,
+        LlmHttpException { StatusCode: 400 or 422 } => LlmBatchFailureKind.Protocol,
+        LlmHttpException => LlmBatchFailureKind.Transient,
+        TaskCanceledException => LlmBatchFailureKind.Timeout,
+        TranslationException => LlmBatchFailureKind.Parse,
+        JsonException or KeyNotFoundException => LlmBatchFailureKind.Protocol,
+        HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden }
+            => LlmBatchFailureKind.Auth,
+        HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests }
+            => LlmBatchFailureKind.RateLimited,
+        HttpRequestException { StatusCode: HttpStatusCode.RequestTimeout }
+            => LlmBatchFailureKind.Timeout,
+        HttpRequestException { StatusCode: var code }
+            when code is not null && (int)code >= 500 => LlmBatchFailureKind.Transient,
+        HttpRequestException { StatusCode: var code }
+            when code is not null && (code == HttpStatusCode.BadRequest
+                || code == HttpStatusCode.UnprocessableEntity) => LlmBatchFailureKind.Protocol,
+        HttpRequestException => LlmBatchFailureKind.Transient,
+        _ => LlmBatchFailureKind.Unknown,
+    };
+
+    /// <summary>429 有 Retry-After 就尊重；其余用一个短固定退避，避免重试风暴。</summary>
+    private static TimeSpan LlmBatchRetryDelay(Exception ex, TimeSpan fallback)
+        => ex is LlmHttpException h && h.RetryAfterSeconds is int seconds
+            ? TimeSpan.FromSeconds(Math.Clamp(seconds, 1, 60))
+            : fallback;
+
+    /// <summary>
+    /// 对失败分片做一次恢复：
+    /// Parse/Protocol/Timeout → 拆小一次；RateLimited → 退避后同片重试一次；
+    /// Transient/Unknown → 短退避后同片重试一次；Auth/429 最终失败 → Fatal，调用方停止后续 LLM。
+    /// </summary>
+    private async Task<LlmBatchChunkOutcome> RecoverLlmBatchChunkAsync(
+        IReadOnlyList<string> texts, string targetLang, string? sourceLang,
+        Exception initial, LlmBatchFailureKind kind, Action<string> noteFailure,
+        CancellationToken ct)
+    {
+        switch (kind)
+        {
+            case LlmBatchFailureKind.Auth:
+                return new LlmBatchChunkOutcome(new string?[texts.Count], 0, true);
+
+            case LlmBatchFailureKind.RateLimited:
+                await Task.Delay(LlmBatchRetryDelay(initial, TimeSpan.FromSeconds(2)), ct);
+                return await RetrySameLlmBatchChunkAsync(
+                    texts, targetLang, sourceLang, noteFailure, ct);
+
+            case LlmBatchFailureKind.Parse:
+            case LlmBatchFailureKind.Protocol:
+            case LlmBatchFailureKind.Timeout:
+                if (texts.Count <= 1)
+                    return new LlmBatchChunkOutcome(new string?[texts.Count], 0, false);
+                return await RetrySplitLlmBatchChunkAsync(
+                    texts, targetLang, sourceLang, noteFailure, ct);
+
+            case LlmBatchFailureKind.Transient:
+            case LlmBatchFailureKind.Unknown:
+            default:
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                return await RetrySameLlmBatchChunkAsync(
+                    texts, targetLang, sourceLang, noteFailure, ct);
+        }
+    }
+
+    private async Task<LlmBatchChunkOutcome> RetrySameLlmBatchChunkAsync(
+        IReadOnlyList<string> texts, string targetLang, string? sourceLang,
+        Action<string> noteFailure, CancellationToken ct)
+    {
+        try
+        {
+            var got = await TranslateLlmBatchChunkAsync(texts, targetLang, sourceLang, ct);
+            return new LlmBatchChunkOutcome(got, texts.Count, false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            noteFailure(ExplainLlmBatchFailure(ex));
+            var kind = ClassifyLlmBatchFailure(ex);
+            return new LlmBatchChunkOutcome(new string?[texts.Count], 0,
+                kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.RateLimited);
+        }
+    }
+
+    private async Task<LlmBatchChunkOutcome> RetrySplitLlmBatchChunkAsync(
+        IReadOnlyList<string> texts, string targetLang, string? sourceLang,
+        Action<string> noteFailure, CancellationToken ct)
+    {
+        var result = new string?[texts.Count];
+        int recovered = 0;
+        bool fatal = false;
+        int half = texts.Count / 2;
+        var parts = new[]
+        {
+            (Offset: 0, Texts: texts.Take(half).ToArray()),
+            (Offset: half, Texts: texts.Skip(half).ToArray()),
+        };
+
+        foreach (var part in parts)
+        {
+            if (fatal) break;
+            try
+            {
+                var got = await TranslateLlmBatchChunkAsync(part.Texts, targetLang, sourceLang, ct);
+                for (int i = 0; i < part.Texts.Length; i++)
+                    result[part.Offset + i] = got[i];
+                recovered += part.Texts.Length;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                noteFailure(ExplainLlmBatchFailure(ex));
+                var kind = ClassifyLlmBatchFailure(ex);
+                if (kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.RateLimited)
+                    fatal = true;
+            }
+        }
+        return new LlmBatchChunkOutcome(result, recovered, fatal);
+    }
+
+    /// <summary>只走同一个 LLM 的单行翻译；不进入免费/有道降级链。</summary>
+    private Task<string> TranslateSingleLineWithLlmOnlyAsync(
+        string text, string targetLang, string? sourceLang, CancellationToken ct)
+        => TranslateWithLlmAsync(text, targetLang, sourceLang, ct);
 
     /// <summary>发一个 LLM 批量分片，返回与输入等数量的译文；行数/格式不符时抛异常。</summary>
     private async Task<string[]> TranslateLlmBatchChunkAsync(
@@ -544,6 +804,7 @@ public class TranslationService
 
     private static string ExplainLlmBatchFailure(Exception ex) => ex switch
     {
+        LlmHttpException => ClassifyLlmFailure(ex),
         HttpRequestException => ClassifyLlmFailure(ex),
         TranslationException => ex.Message,
         TaskCanceledException =>
@@ -1471,7 +1732,18 @@ public class TranslationService
         {
             await WaitIfRateLimitedAsync(linkedCts.Token);
             using var response = await s_llmHttp.SendAsync(request, linkedCts.Token);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                int? retryAfter = null;
+                var retryHeader = response.Headers.RetryAfter;
+                if (retryHeader?.Delta is { } delta)
+                    retryAfter = (int)Math.Clamp(delta.TotalSeconds, 1, 60);
+                else if (retryHeader?.Date is { } date)
+                    retryAfter = (int)Math.Clamp((date - DateTimeOffset.UtcNow).TotalSeconds, 1, 60);
+
+                string errBody = await response.Content.ReadAsStringAsync(linkedCts.Token);
+                throw new LlmHttpException((int)response.StatusCode, retryAfter, errBody);
+            }
 
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linkedCts.Token));
             return doc.RootElement
@@ -1488,6 +1760,27 @@ public class TranslationService
         {
             throw new TaskCanceledException(
                 $"自定义 LLM 请求超过 {LlmTextRequestTimeout.TotalSeconds:F0} 秒没有返回");
+        }
+    }
+
+    /// <summary>LLM 返回非 2xx 时保留状态码与 Retry-After，供批量回退分类使用。</summary>
+    internal sealed class LlmHttpException : Exception
+    {
+        public int StatusCode { get; }
+        public int? RetryAfterSeconds { get; }
+
+        public LlmHttpException(int statusCode, int? retryAfterSeconds, string body)
+            : base(FormatMessage(statusCode, body))
+        {
+            StatusCode = statusCode;
+            RetryAfterSeconds = retryAfterSeconds;
+        }
+
+        private static string FormatMessage(int statusCode, string body)
+        {
+            string s = (body ?? "").Replace('\r', ' ').Replace('\n', ' ').Trim();
+            if (s.Length == 0) return $"HTTP {statusCode}";
+            return $"HTTP {statusCode}: {(s.Length > 160 ? s[..160] : s)}";
         }
     }
 
