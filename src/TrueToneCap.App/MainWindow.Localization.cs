@@ -194,9 +194,7 @@ public sealed partial class MainWindow : Window
         SetComboItemText(OcrEngineCbo, "OnnxCpu", LocaleManager.OcrCpu);
         SetComboItemText(OcrEngineCbo, "WindowsOcr", LocaleManager.OcrWindows);
 
-        SetComboItemText(LlmModelCbo, "gpt-4o-mini", LocaleManager.LlmGpt4oMini);
-        SetComboItemText(LlmModelCbo, "deepseek-chat", LocaleManager.LlmDeepSeek);
-        SetComboItemText(LlmModelCbo, "gpt-4.1-mini", LocaleManager.LlmGpt41Mini);
+        // 2026-11-16 模型展示名以 XAML 中的平台/模型标识为准（专有名词不翻译）；只保留“自定义”一项。
         SetComboItemText(LlmModelCbo, "custom", LocaleManager.LlmCustom);
 
         SetComboItemText(TargetLangCbo, "zh-CN", LocaleManager.TlChinese);

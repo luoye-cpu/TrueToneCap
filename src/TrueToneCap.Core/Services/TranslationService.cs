@@ -2,7 +2,7 @@
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.Core/Services/TranslationService.cs
 // 多后端翻译服务：LLM (OpenAI 兼容) → 有道官方开放平台 → 免费公共端点（Edge / 必应 / MyMemory / Google，默认启用）
-// 支持: DeepSeek V4 Flash / GLM-4.7-Flash / GPT-4o-mini / GPT-4.1-mini / 任意 OpenAI 兼容端点
+// 支持: DeepSeek V4.1 Flash / GLM-5.3-Flash / Qwen3.8-Flash / Kimi K3.1 Pro / GPT-5.4 mini / Claude Sonnet 5 / Gemini 3.8 Flash / Grok 4.7 / Mistral Large 4 / 任意 OpenAI 兼容端点
 
 using System.Collections.Concurrent;
 using System.Net;
@@ -855,13 +855,17 @@ public class TranslationService
             $"Translate from {sl} to {targetLang}. Return exactly {texts.Count} translated strings "
             + "as a JSON array, in the same order as the input. Input:\n" + inputJson;
 
+        string model = !string.IsNullOrWhiteSpace(_config.ModelName)
+            ? _config.ModelName
+            : LlmModelPolicy.DefaultModel;
+
         var requestBody = new LlmChatRequest(
-            Model: !string.IsNullOrWhiteSpace(_config.ModelName) ? _config.ModelName : "deepseek-chat",
+            Model: model,
             Messages: [
                 new LlmChatMessage("system", systemPrompt),
                 new LlmChatMessage("user", userPrompt)
             ],
-            Temperature: 0.1,
+            Temperature: LlmModelPolicy.TemperatureFor(model),
             MaxTokens: 4096
         );
 
@@ -1800,7 +1804,7 @@ public class TranslationService
 
         string model = !string.IsNullOrWhiteSpace(_config.ModelName)
             ? _config.ModelName
-            : "deepseek-chat";
+            : LlmModelPolicy.DefaultModel;
 
         // 使用源生成器构建请求体（AOT 兼容，替代匿名类型 + JsonContent.Create）
         var requestBody = new LlmChatRequest(
@@ -1809,7 +1813,7 @@ public class TranslationService
                 new LlmChatMessage("system", systemPrompt),
                 new LlmChatMessage("user", $"Translate from {sl} to {targetLang}:\n\n{text}")
             ],
-            Temperature: 0.1,
+            Temperature: LlmModelPolicy.TemperatureFor(model),
             MaxTokens: 4096
         );
 
@@ -2202,7 +2206,7 @@ public class TranslationService
 
         string endpoint = ChatCompletionsUrl(_config.ApiEndpoint);
 
-        string model = !string.IsNullOrWhiteSpace(_config.ModelName) ? _config.ModelName : "gpt-4o-mini";
+        string model = !string.IsNullOrWhiteSpace(_config.ModelName) ? _config.ModelName : LlmModelPolicy.DefaultModel;
 
         // 提示词只要"逐行、按顺序、不带编号"这三件事；OCR 的文字内容刻意【不】进 prompt，
         // 否则模型会照着文本翻而不是读图，那这条链路就退化成文本路了。
@@ -2225,7 +2229,7 @@ public class TranslationService
                         new LlmImageUrl("data:image/png;base64," + Convert.ToBase64String(png)))
                 ])
             ],
-            Temperature: 0.1,
+            Temperature: LlmModelPolicy.TemperatureFor(model),
             MaxTokens: 4096);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
@@ -2359,7 +2363,7 @@ public sealed class TranslationNotConfiguredException : TranslationException
     public bool UseVision { get; set; }
     public string ApiEndpoint { get; set; } = "";
     public string ApiKey { get; set; } = "";
-    public string ModelName { get; set; } = "deepseek-chat";
+    public string ModelName { get; set; } = LlmModelPolicy.DefaultModel;
     public string SystemPrompt { get; set; } = "";
     public string TargetLanguage { get; set; } = "zh-CN";
     // 源语言字段已删除（2026-09-21）：全仓零赋值零读取，源语言实际由各家后端 auto 检测
@@ -2399,9 +2403,9 @@ public sealed class TranslationNotConfiguredException : TranslationException
 //
 // 这里曾经有一个 public static class LlmProviders（11 个提供方 / 27 个模型），2026-09-21 删除。
 // 删除的理由不是"没人用"这一条，而是它是**第二份事实源**：
-//   · 提供方清单真正生效的地方是 MainWindow.xaml 的 LlmProviderCbo（9 项）
+//   · 提供方清单真正生效的地方是 MainWindow.xaml 的 LlmProviderCbo（2026-11-16 起 12 项 + 自定义）
 //     与 MainWindow.OcrSettings.cs 的 OnLlmProviderChanged（tag → endpoint/默认模型）；
-//   · 模型清单真正生效的地方是 LlmModelCbo 的 ComboBoxItem.Tag；
+//   · 模型清单真正生效的地方是 LlmModelCbo 的 ComboBoxItem.Tag（2026-11-16 起 35 个平台模型 + 自定义）；
 //   · LlmProviders 全仓唯一的消费者是 OcrServiceTests 的三条断言 ⇒ 门禁绿灯覆盖的是一个
 //     用户永远碰不到的表，而三处真表之间的漂移（如 Gemini 在 XAML 是 gemini-2.0-flash、
 //     在 LlmProviders 是 gemini-3.5-flash）没有任何判据在看。

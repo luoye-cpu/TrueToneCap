@@ -516,6 +516,9 @@ public sealed class SettingsService
         // 且下一次保存被 `?? "Gray"` 兜底把用户的 RGB 增益静默翻成灰度。现在按 Tag 拼法放行，
         // 大小写变体（"rgb"/"RGB"）由 FitTag 改写成 "Rgb" 而不是回落默认 —— 意图保住，拼法对齐。
         FitTag(s.GainMapMode, v => s.GainMapMode = v, dft.GainMapMode, "Gray", "Rgb");
+        // 2026-11-16 LLM 模型预设换代：把旧设置里的 deepseek-chat / gpt-4o-mini / glm-4.7-flash
+        // 等已下线或过时的模型名迁移到新预设；未知模型名保持原样（可能来自用户自定义端点）。
+        s.LlmModel = TrueToneCap.Core.Services.LlmModelPolicy.Normalize(s.LlmModel);
         // ═══ 2026-11-03：JPEG 增益图元数据承载方式的白名单 ═══
         // 元数据承载的 FitTag 已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，
         // 不做用户抉择；settings.json 里的遗留键被静默忽略）

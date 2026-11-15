@@ -11,7 +11,7 @@ namespace TrueToneCap.Core.Services;
 internal sealed record LlmChatRequest(
     string Model,
     LlmChatMessage[] Messages,
-    double Temperature,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Temperature,
     [property: JsonPropertyName("max_tokens")] int MaxTokens
 );
 
@@ -44,7 +44,7 @@ internal sealed record LlmVisionMessage(string Role, LlmContentPart[] Content);
 internal sealed record LlmVisionRequest(
     string Model,
     LlmVisionMessage[] Messages,
-    double Temperature,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Temperature,
     [property: JsonPropertyName("max_tokens")] int MaxTokens
 );
 

@@ -105,14 +105,20 @@ public sealed partial class MainWindow : Window
         var tag = (LlmProviderCbo.SelectedItem as ComboBoxItem)?.Tag as string;
         var (endpoint, model) = tag switch
         {
-            "DeepSeek" => ("https://api.deepseek.com/v1", "deepseek-chat"),
-            "DeepSeek-Flash" => ("https://api.deepseek.com/v1", "deepseek-v4-flash"),
-            "GLM" => ("https://open.bigmodel.cn/api/paas/v4", "glm-4.7-flash"),
-            "Gemini" => ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash"),
-            "SiliconFlow" => ("https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-72B-Instruct"),
-            "OpenAI" => ("https://api.openai.com/v1", "gpt-4o-mini"),
-            "Aliyun" => ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-turbo"),
-            "Moonshot" => ("https://api.moonshot.cn/v1", "moonshot-v1-8k"),
+            // 2026-11-16 供应商预设：只列 OpenAI 兼容 chat/completions 入口。
+            // 改这里必须同步 MainWindow.xaml 的 LlmProviderCbo/LlmModelCbo 与 OcrServiceTests.LlmProviderTables_AreClosed。
+            "DeepSeek" => ("https://api.deepseek.com", "deepseek-flash"),
+            "GLM" => ("https://open.bigmodel.cn/api/paas/v4", "glm-5.3-flash"),
+            "Aliyun" => ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.8-flash"),
+            "SiliconFlow" => ("https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V4.1-Flash"),
+            "Moonshot" => ("https://api.moonshot.cn/v1", "kimi-k3.1-pro"),
+            "Volcengine" => ("https://ark.cn-beijing.volces.com/api/v3", "doubao-seed-2-1-pro-260915"),
+            "MiniMax" => ("https://api.minimax.cn/v1", "MiniMax-M3"),
+            "OpenAI" => ("https://api.openai.com/v1", "gpt-5.4-mini"),
+            "Anthropic" => ("https://api.anthropic.com/v1/", "claude-sonnet-5"),
+            "Gemini" => ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
+            "xAI" => ("https://api.x.ai/v1", "grok-4.7"),
+            "Mistral" => ("https://api.mistral.ai/v1", "mistral-large-latest"),
             _ => ("", "")
         };
         if (tag != "Custom" && !string.IsNullOrEmpty(endpoint))

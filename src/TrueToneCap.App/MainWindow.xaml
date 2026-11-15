@@ -611,41 +611,68 @@
                                            Text="OCR 识别文字后，通过 LLM API 翻译为高质量译文" TextWrapping="Wrap"/>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="提供商" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="LlmProviderCbo" Grid.Column="1" SelectionChanged="OnLlmProviderChanged">
+                                        <!-- 2026-11-16 供应商表：仅收录有公开 OpenAI 兼容 chat/completions 入口的平台。
+                                             改这里必须同步 OnLlmProviderChanged 与 LlmModelCbo，判据是 OcrServiceTests.LlmProviderTables_AreClosed。 -->
                                         <ComboBoxItem Tag="DeepSeek">DeepSeek</ComboBoxItem>
-                                        <ComboBoxItem Tag="DeepSeek-Flash">DeepSeek (V4 Flash)</ComboBoxItem>
                                         <ComboBoxItem Tag="GLM">智谱 GLM</ComboBoxItem>
-                                        <ComboBoxItem Tag="Gemini">Google Gemini</ComboBoxItem>
+                                        <ComboBoxItem Tag="Aliyun">阿里云百炼 Qwen</ComboBoxItem>
                                         <ComboBoxItem Tag="SiliconFlow">硅基流动</ComboBoxItem>
+                                        <ComboBoxItem Tag="Moonshot">Moonshot Kimi</ComboBoxItem>
+                                        <ComboBoxItem Tag="Volcengine">火山方舟 Doubao</ComboBoxItem>
+                                        <ComboBoxItem Tag="MiniMax">MiniMax</ComboBoxItem>
                                         <ComboBoxItem Tag="OpenAI">OpenAI</ComboBoxItem>
-                                        <ComboBoxItem Tag="Aliyun">阿里云百炼</ComboBoxItem>
-                                        <ComboBoxItem Tag="Moonshot">Moonshot</ComboBoxItem>
+                                        <ComboBoxItem Tag="Anthropic">Anthropic Claude</ComboBoxItem>
+                                        <ComboBoxItem Tag="Gemini">Google Gemini</ComboBoxItem>
+                                        <ComboBoxItem Tag="xAI">xAI Grok</ComboBoxItem>
+                                        <ComboBoxItem Tag="Mistral">Mistral</ComboBoxItem>
                                         <ComboBoxItem Tag="Custom" IsSelected="True">自定义</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <Grid ColumnDefinitions="100,*"><TextBlock Text="API 端点" VerticalAlignment="Center"/><TextBox x:Name="LlmEndpointTxt" Grid.Column="1" PlaceholderText="https://api.deepseek.com/v1"/></Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="API 端点" VerticalAlignment="Center"/><TextBox x:Name="LlmEndpointTxt" Grid.Column="1" PlaceholderText="https://api.deepseek.com"/></Grid>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="API 密钥" VerticalAlignment="Center"/><TextBox x:Name="LlmApiKeyTxt" Grid.Column="1" PlaceholderText="sk-..."/></Grid>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="模型" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="LlmModelCbo" Grid.Column="1" SelectionChanged="OnLlmModelChanged">
-                                        <ComboBoxItem Tag="deepseek-chat">DeepSeek V3</ComboBoxItem>
-                                        <ComboBoxItem Tag="deepseek-v4-flash">DeepSeek V4 Flash</ComboBoxItem>
-                                        <ComboBoxItem Tag="glm-4.7-flash">GLM-4.7 Flash (智谱)</ComboBoxItem>
-                                        <ComboBoxItem Tag="glm-4-flash">GLM-4 Flash (智谱)</ComboBoxItem>
-                                        <ComboBoxItem Tag="gemini-2.0-flash">Gemini 2.0 Flash (Google)</ComboBoxItem>
-                                        <ComboBoxItem Tag="gemini-2.5-flash">Gemini 2.5 Flash (Google)</ComboBoxItem>
-                                        <ComboBoxItem Tag="gemini-2.5-pro">Gemini 2.5 Pro (Google)</ComboBoxItem>
-                                        <ComboBoxItem Tag="Qwen/Qwen2.5-72B-Instruct">Qwen2.5-72B (硅基流动)</ComboBoxItem>
-                                        <ComboBoxItem Tag="deepseek-ai/DeepSeek-V3">DeepSeek V3 (硅基流动)</ComboBoxItem>
-                                        <ComboBoxItem Tag="deepseek-ai/DeepSeek-R1">DeepSeek R1 (硅基流动)</ComboBoxItem>
-                                        <ComboBoxItem Tag="gpt-4o-mini">GPT-4o mini</ComboBoxItem>
-                                        <ComboBoxItem Tag="gpt-4.1-mini">GPT-4.1 mini</ComboBoxItem>
-                                        <ComboBoxItem Tag="gpt-4.1-nano">GPT-4.1 nano</ComboBoxItem>
-                                        <ComboBoxItem Tag="qwen-turbo">Qwen Turbo (阿里)</ComboBoxItem>
-                                        <ComboBoxItem Tag="qwen-plus">Qwen Plus (阿里)</ComboBoxItem>
-                                        <ComboBoxItem Tag="moonshot-v1-8k">Moonshot V1 8K</ComboBoxItem>
+                                        <!-- 2026-11-16 模型表：按平台当前公开模型整理；模型 ID 是请求里的 model 字段，
+                                            不是展示文案。旧模型名由 Core 的 LlmModelPolicy 在设置加载时迁移。 -->
+                                        <ComboBoxItem Tag="deepseek-flash">DeepSeek V4.1 Flash</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek-v4-pro">DeepSeek V4 Pro</ComboBoxItem>
+                                        <ComboBoxItem Tag="glm-5.3-flash">GLM-5.3 Flash (智谱)</ComboBoxItem>
+                                        <ComboBoxItem Tag="glm-5.3">GLM-5.3 (智谱)</ComboBoxItem>
+                                        <ComboBoxItem Tag="glm-5.3-flashx">GLM-5.3 FlashX (智谱)</ComboBoxItem>
+                                        <ComboBoxItem Tag="qwen3.8-flash">Qwen3.8 Flash (阿里)</ComboBoxItem>
+                                        <ComboBoxItem Tag="qwen3.7-plus">Qwen3.7 Plus (阿里)</ComboBoxItem>
+                                        <ComboBoxItem Tag="qwen4-max-preview">Qwen4 Max Preview (阿里)</ComboBoxItem>
+                                        <ComboBoxItem Tag="qwen3-vl-plus">Qwen3 VL Plus (阿里)</ComboBoxItem>
+                                        <ComboBoxItem Tag="deepseek-ai/DeepSeek-V4.1-Flash">DeepSeek V4.1 Flash (硅基流动)</ComboBoxItem>
+                                        <ComboBoxItem Tag="Qwen/Qwen3.8-27B">Qwen3.8 27B (硅基流动)</ComboBoxItem>
+                                        <ComboBoxItem Tag="moonshotai/Kimi-K3">Kimi K3 (硅基流动)</ComboBoxItem>
+                                        <ComboBoxItem Tag="kimi-k3.1-pro">Kimi K3.1 Pro</ComboBoxItem>
+                                        <ComboBoxItem Tag="kimi-k3.1-pro-highspeed">Kimi K3.1 Pro 高速版</ComboBoxItem>
+                                        <ComboBoxItem Tag="kimi-k3">Kimi K3</ComboBoxItem>
+                                        <ComboBoxItem Tag="doubao-seed-2-1-pro-260915">Doubao Seed 2.1 Pro</ComboBoxItem>
+                                        <ComboBoxItem Tag="doubao-seed-2-1-lite-260915">Doubao Seed 2.1 Lite</ComboBoxItem>
+                                        <ComboBoxItem Tag="doubao-seed-2-1-turbo-260628">Doubao Seed 2.1 Turbo</ComboBoxItem>
+                                        <ComboBoxItem Tag="MiniMax-M3">MiniMax M3</ComboBoxItem>
+                                        <ComboBoxItem Tag="MiniMax-M2.7">MiniMax M2.7</ComboBoxItem>
+                                        <ComboBoxItem Tag="MiniMax-M2.7-highspeed">MiniMax M2.7 高速版</ComboBoxItem>
+                                        <ComboBoxItem Tag="gpt-6.1-terra">GPT-6.1 Terra</ComboBoxItem>
+                                        <ComboBoxItem Tag="gpt-5.5">GPT-5.5</ComboBoxItem>
+                                        <ComboBoxItem Tag="gpt-5.4-mini">GPT-5.4 mini</ComboBoxItem>
+                                        <ComboBoxItem Tag="gpt-5.4-nano">GPT-5.4 nano</ComboBoxItem>
+                                        <ComboBoxItem Tag="claude-fable-5">Claude Fable 5</ComboBoxItem>
+                                        <ComboBoxItem Tag="claude-opus-5">Claude Opus 5</ComboBoxItem>
+                                        <ComboBoxItem Tag="claude-sonnet-5">Claude Sonnet 5</ComboBoxItem>
+                                        <ComboBoxItem Tag="claude-haiku-4-5">Claude Haiku 4.5</ComboBoxItem>
+                                        <ComboBoxItem Tag="gemini-3.8-flash">Gemini 3.8 Flash (Google)</ComboBoxItem>
+                                        <ComboBoxItem Tag="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite (Google)</ComboBoxItem>
+                                        <ComboBoxItem Tag="gemini-4-argon">Gemini 4 Argon (Google)</ComboBoxItem>
+                                        <ComboBoxItem Tag="grok-4.7">Grok 4.7 (xAI)</ComboBoxItem>
+                                        <ComboBoxItem Tag="mistral-large-latest">Mistral Large 4</ComboBoxItem>
+                                        <ComboBoxItem Tag="mistral-small-latest">Mistral Small 4</ComboBoxItem>
                                         <ComboBoxItem Tag="custom">自定义模型</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
-                                <Grid ColumnDefinitions="100,*"><TextBlock Text="自定义模型" VerticalAlignment="Center"/><TextBox x:Name="LlmModelTxt" Grid.Column="1" PlaceholderText="deepseek-chat"/></Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="自定义模型" VerticalAlignment="Center"/><TextBox x:Name="LlmModelTxt" Grid.Column="1" PlaceholderText="deepseek-flash"/></Grid>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="提示词" VerticalAlignment="Top" Margin="0,6,0,0"/><TextBox x:Name="LlmPromptTxt" Grid.Column="1" PlaceholderText="留空使用默认翻译提示词..." AcceptsReturn="True" Height="52" TextWrapping="Wrap"/></Grid>
                             </StackPanel>
                         </Border>

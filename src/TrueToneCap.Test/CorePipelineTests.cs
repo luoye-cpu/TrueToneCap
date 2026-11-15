@@ -257,6 +257,7 @@ public static class CorePipelineTests
         Test_LlmBatchParsingAndValidation();
         Test_LlmBatchAndRateLimitWiring();
         Test_LlmBatchFailureClassification();
+        Test_LlmModelPolicyFor2026Presets();   // 2026-11-16：旧模型名迁移 + Claude/GPT 新模型的 temperature 兼容
         Test_TranslationCombinationMatrix();
         Test_TranslationModeOrder();
         Test_TranslationFallbackAgainstFakeLlm();
@@ -6985,6 +6986,49 @@ public static class CorePipelineTests
                 outcome == "CANCELLED" && server.RequestCount == 0,
                 $"outcome={outcome} req={server.RequestCount}");
         }
+    }
+
+    /// <summary>
+    /// 2026-11-16 供应商预设换代：旧设置里的模型名不能把用户带到已下线模型；
+    /// 同时 Claude 4.7+ / GPT-5/GPT-6 推理模型不接受 temperature，请求体必须能省略该字段。
+    /// </summary>
+    static void Test_LlmModelPolicyFor2026Presets()
+    {
+        Assert("旧 DeepSeek 模型名迁移到 deepseek-flash",
+            LlmModelPolicy.Normalize("deepseek-chat") == "deepseek-flash");
+        Assert("旧 GPT-4o mini 迁移到 GPT-5.4 mini",
+            LlmModelPolicy.Normalize("gpt-4o-mini") == "gpt-5.4-mini");
+        Assert("旧 GLM-4.7 Flash 迁移到 GLM-5.3 Flash",
+            LlmModelPolicy.Normalize("glm-4.7-flash") == "glm-5.3-flash");
+        Assert("旧 Qwen2.5 72B 迁移到 Qwen3.8 27B",
+            LlmModelPolicy.Normalize("Qwen/Qwen2.5-72B-Instruct") == "Qwen/Qwen3.8-27B");
+        Assert("空模型名回落到当前默认模型",
+            LlmModelPolicy.Normalize("") == LlmModelPolicy.DefaultModel);
+        Assert("未知模型名原样保留（自定义端点不被改写）",
+            LlmModelPolicy.Normalize("my-custom-model") == "my-custom-model");
+
+        Assert("Claude 5 省略 temperature（Anthropic 兼容层要求）",
+            LlmModelPolicy.TemperatureFor("claude-sonnet-5") is null);
+        Assert("GPT-6.1 Terra 省略 temperature",
+            LlmModelPolicy.TemperatureFor("gpt-6.1-terra") is null);
+        Assert("GPT-5.4 mini 省略 temperature",
+            LlmModelPolicy.TemperatureFor("gpt-5.4-mini") is null);
+        Assert("DeepSeek V4.1 Flash 保留 0.1 翻译温度",
+            LlmModelPolicy.TemperatureFor("deepseek-flash") == LlmModelPolicy.TranslationTemperature);
+
+        var noTemp = System.Text.Json.JsonSerializer.Serialize(
+            new LlmChatRequest("claude-sonnet-5",
+                [new LlmChatMessage("user", "hi")], Temperature: null, MaxTokens: 128),
+            LlmJsonContext.Default.LlmChatRequest);
+        Assert("temperature 为 null 时 JSON 不写出该字段",
+            !noTemp.Contains("\"temperature\"", StringComparison.Ordinal), noTemp);
+
+        var withTemp = System.Text.Json.JsonSerializer.Serialize(
+            new LlmChatRequest("deepseek-flash",
+                [new LlmChatMessage("user", "hi")], Temperature: 0.1, MaxTokens: 128),
+            LlmJsonContext.Default.LlmChatRequest);
+        Assert("需要温度时仍写出 temperature",
+            withTemp.Contains("\"temperature\":0.1", StringComparison.Ordinal), withTemp);
     }
 
     /// <summary>

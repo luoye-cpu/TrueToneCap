@@ -406,7 +406,7 @@ public sealed class AppSettingsData
     /// ⚠ 明文不进 settings.json —— 由 SettingsService 转存至 SecretStore（DPAPI 加密）。</summary>
     [JsonIgnore]
     public string LlmApiKey { get; set; } = "";
-    public string LlmModel { get; set; } = "deepseek-chat";
+    public string LlmModel { get; set; } = "deepseek-flash";
     public string LlmSystemPrompt { get; set; } = "";
     public string TargetLanguage { get; set; } = "zh-CN";
     public string OcrLanguage { get; set; } = "";
