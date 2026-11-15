@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TrueToneCap contributors
+#
 # 为本地化应用显示名补一条 Strings 文件夹索引。
 #
 # 背景（2026-11-13，TrueToneCap 0.3.16）：
