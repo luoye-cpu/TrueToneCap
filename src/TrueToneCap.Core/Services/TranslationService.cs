@@ -1770,17 +1770,11 @@ public class TranslationService
         public int? RetryAfterSeconds { get; }
 
         public LlmHttpException(int statusCode, int? retryAfterSeconds, string body)
-            : base(FormatMessage(statusCode, body))
+            : base($"HTTP {statusCode}")
         {
             StatusCode = statusCode;
             RetryAfterSeconds = retryAfterSeconds;
-        }
-
-        private static string FormatMessage(int statusCode, string body)
-        {
-            string s = (body ?? "").Replace('\r', ' ').Replace('\n', ' ').Trim();
-            if (s.Length == 0) return $"HTTP {statusCode}";
-            return $"HTTP {statusCode}: {(s.Length > 160 ? s[..160] : s)}";
+            _ = body;   // 响应体可能含服务商内部信息，不进异常文本；只保留状态码供分类/UI
         }
     }
 

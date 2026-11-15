@@ -6642,6 +6642,9 @@ public static class CorePipelineTests
             Kind(new TranslationService.LlmHttpException(400, null, "bad request")) == "Protocol");
         Assert("无状态码的网络异常必须归为 Transient",
             Kind(new HttpRequestException("connection reset")) == "Transient");
+        Assert("HTTP 错误摘要不带响应体（响应体可能含服务商内部信息）",
+            new TranslationService.LlmHttpException(401, null, "secret body").Message == "HTTP 401",
+            "把响应体拼进 FirstError 会违反状态栏隐私约束");
     }
 
     static void Test_TranslationBackendAvailabilityIsHonest()
