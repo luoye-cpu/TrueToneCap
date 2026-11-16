@@ -366,17 +366,21 @@ public partial class App : Application
         return mode;
     }
 
-    /// <summary>切换应用主题（运行时）。设置 Application.RequestedTheme 全局生效。</summary>
+    /// <summary>
+    /// 切换应用主题（运行时）。
+    /// </summary>
+    /// <remarks>
+    /// WinUI 3 的 <see cref="Application.RequestedTheme"/> 只能在应用启动、
+    /// 首个窗口创建之前设置；运行时再赋值会抛异常（本机实测 0x80131515），
+    /// 且异常会让调用方后面的窗口同步/设置保存全部跳过。主题切换必须落到
+    /// 每个窗口根元素的 <c>FrameworkElement.RequestedTheme</c> 上，见
+    /// <c>MainWindow.SyncWindowTheme</c> / <c>MarkdownDocumentWindow</c>。
+    /// </remarks>
     public static void ApplyTheme(AppThemeMode mode)
     {
         _currentTheme = mode;
         var effective = ResolveEffectiveTheme(mode);
-        if (Current is App app)
-        {
-            app.RequestedTheme = effective == AppThemeMode.Light
-                ? ApplicationTheme.Light
-                : ApplicationTheme.Dark;
-        }
+        LogService.Info("App", $"主题切换: {mode} → {effective}（运行时走窗口 ElementTheme）");
     }
 
     /// <summary>从 settings.json 加载主题设置（用于构造函数，在 InitializeComponent 前调用）。</summary>

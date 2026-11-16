@@ -59,18 +59,35 @@ Write-Host "`n  Checking App.xaml resource references..." -ForegroundColor Yello
 $appXamlContent = Get-Content "src/TrueToneCap.App/App.xaml" -Raw
 
 $resourceFiles = @(
-    "HighContrastTheme.xaml",
     "FocusVisualStyles.xaml",
     "AccessibilityEnhancements.xaml",
     "NavigationViewAccessibilityEnhancements.xaml"
 )
+
+$referenceErrors = $false
 
 foreach ($ref in $resourceFiles) {
     if ($appXamlContent -like "*$ref*") {
         Write-Host "  ✓ $ref referenced in App.xaml" -ForegroundColor Green
     } else {
         Write-Host "  ✗ $ref NOT referenced in App.xaml" -ForegroundColor Red
+        $referenceErrors = $true
     }
+}
+
+# HighContrastTheme.xaml 只允许作为本地/按需资源，禁止再全局合并。
+# 2026-11-11 事故：全局合并把背景改成白色、边框改成黑色，却没有同步前景色，
+# 深色/OLED/Windows 高对比度下会形成白底白字。
+if ($appXamlContent -like "*HighContrastTheme.xaml*") {
+    Write-Host "  ✗ HighContrastTheme.xaml 被全局合并进 App.xaml（禁止）" -ForegroundColor Red
+    $referenceErrors = $true
+} else {
+    Write-Host "  ✓ HighContrastTheme.xaml 未全局合并（按需/本地资源）" -ForegroundColor Green
+}
+
+if ($referenceErrors) {
+    Write-Host "`n ✗ App.xaml resource reference check failed!" -ForegroundColor Red
+    exit 1
 }
 
 # Summary
