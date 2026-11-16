@@ -270,8 +270,16 @@ public sealed partial class MainWindow : Window
         // ⇒ 与上面几个下拉同理：必须按 Tag 逐个点名，不能指望扫描器。
         // ⚠ 这些下拉共用同一组 Tag/文案，所以循环里是一次写六遍 —— 有意为之：
         //   一旦将来某个格式的档位含义分化（例如 WebP 只给两档），各自的文字就能独立改。
-        // 两档格式（PNG/TIFF/WebP/JPEG LI）：均衡（默认，= 参数拉满）+ 快速
-        foreach (var effortCbo in new[] { EffortPngCbo, EffortTiffCbo, EffortWebpCbo })
+        // 三档 PNG（2026-11-16 用户口径新增「优」）：优 / 均衡 / 快速
+        foreach (var effortCbo in new[] { EffortPngCbo })
+        {
+            if (effortCbo is null) continue;
+            SetComboItemText(effortCbo, "Optimal", LocaleManager.Tr("优"));
+            SetComboItemText(effortCbo, "Smallest", LocaleManager.Tr("均衡"));
+            SetComboItemText(effortCbo, "Quick", LocaleManager.Tr("快速"));
+        }
+        // 两档格式（TIFF/WebP）：均衡（默认，= 参数拉满）+ 快速
+        foreach (var effortCbo in new[] { EffortTiffCbo, EffortWebpCbo })
         {
             if (effortCbo is null) continue;
             SetComboItemText(effortCbo, "Smallest", LocaleManager.Tr("均衡"));

@@ -234,21 +234,23 @@
                                      像素、滤波后码流结构与解码结果完全相同，任何一档的产物都同样合法。
                                      它也是 PNG 唯一的旋钮：质量滑块对本格式恒锁在 100。
                                      显示名 ↔ Tag（只改名，Tag 与枚举不动 ⇒ 已存的设置不需迁移）：
-                                     「均衡」= Tag Smallest = level 9（默认，= 拉满），「快速」= Tag Quick = level 8。
+                                     「优」= Tag Optimal = level 9 + 固定 Sub/Paeth 候选各压一次取最小（2026-11-16 新增，最慢）；
+                                     「均衡」= Tag Smallest = level 9（默认，= 原拉满），「快速」= Tag Quick = level 8。
                                      实测（2026-10-29 复测，artifacts/tier_bench_2026-10-29.log）：
                                      三张真截图（735x840 / 893x491 / 1000x700）切「快速」快 1.2~2.4 倍、
                                      体积 +0.3%~+1.4%；4K HDR 合成噪声帧快 8.1 倍、体积【反而小 1.1%】。
-                                     ⚠ 这里的「均衡」按"默认档"命名，它其实就是拉满档，且不保证严格最小
+                                     ⚠ 这里的「均衡」按"默认档"命名，它其实就是单次拉满档，且不保证严格最小
                                         （那张 4K 上「快速」反而更小）⇒ 别把名字读成"参数在中点"。
                                      ⚠ 真截图样本只有 100 万像素级，4K 那一档用的是合成内容，别当成同一把尺。 -->
                                 <Grid ColumnDefinitions="120,*"><TextBlock Text="压缩强度" VerticalAlignment="Center"/>
                                     <ComboBox x:Name="EffortPngCbo" Grid.Column="1" SelectionChanged="OnPerFormatSelectionChanged">
+                                        <ComboBoxItem Tag="Optimal">优</ComboBoxItem>
                                         <ComboBoxItem Tag="Smallest" IsSelected="True">均衡</ComboBoxItem>
                                         <ComboBoxItem Tag="Quick">快速</ComboBoxItem>
                                     </ComboBox>
                                 </Grid>
                                 <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="120,0,0,0" TextWrapping="Wrap"
-                                    Text="无损：只影响压缩耗时与文件体积，像素不变。均衡=压缩最强，快速=更快。"/>
+                                    Text="无损：只影响压缩耗时与文件体积，像素不变。优=多滤波候选、体积最小但最慢；均衡=单次最强；快速=更快。"/>
                                 <!-- PNG 色度采样：PNG 是 RGB 无损格式，不支持色度子采样 -->
                             </StackPanel>
                         </Border>

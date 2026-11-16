@@ -29,6 +29,20 @@ public static class ManagedPngEncoder
     /// </summary>
     private const int IdatPayloadBytes = 64 * 1024;
 
+    /// <summary>
+    /// 「优」档额外的固定滤波候选（PNG filter type）：1=Sub、4=Paeth。
+    /// <para>除这两条固定候选外，<c>Optimal</c> 还会试一条 Entropy 打分扫描线和一条
+    /// 8 行分带、带内实际 level-1 压缩比大小的 brute 候选；三条都是整帧候选，最终统一压
+    /// level 9 取最小。候选里本来还包含当前自适应结果，因此本档不会比 Smallest 更大。</para>
+    /// <para>不吸收 oxipng 的整帧多策略 + 行/块 brute 全量搜索：那会把 4K 从数秒推到十几秒；
+    /// 这里的 brute 只做 8 行带、带内 5 种 PNG 滤波，成本约为一次额外 level-1 压缩。</para>
+    /// </summary>
+    private static readonly byte[] OptimalExtraFilters = [1, 4];
+
+    /// <summary>逐行滤波打分策略。SumAbs 是历史默认；Entropy 是「优」档额外候选，
+    /// 按该行字节分布的集中度估计 deflate 的编码成本（越集中越好）。</summary>
+    private enum FilterScoreMode { SumAbs, Entropy }
+
     /// <summary>编码 BGRA 像素为 PNG 文件。</summary>
     /// <param name="bgra">BGRA 像素数据。</param>
     /// <param name="w">宽度。</param>
@@ -149,7 +163,13 @@ public static class ManagedPngEncoder
         // IDAT
         // 2026-10-31：分块流式写出（见 WriteIdat）—— 整帧压缩字节不再落成一份 byte[]。
         var rawData = BuildRawScanlines(bgra, w, h, outDepth);
-        WriteIdat(output, rawData, effort);
+        if (effort == CompressionEffort.Optimal)
+            WriteIdatOptimal(output, rawData, effort,
+                filter => BuildRawScanlines(bgra, w, h, outDepth, filter),
+                mode => BuildRawScanlines(bgra, w, h, outDepth, null, mode),
+                () => BuildRawScanlinesBrute(bgra, w, h, outDepth));
+        else
+            WriteIdat(output, rawData, effort);
 
         WriteChunk(output, "IEND"u8, []);
     }
@@ -226,6 +246,11 @@ public static class ManagedPngEncoder
         // 实测这正是 4K HDR AVIF 前处理的主要耗时。故提供 fastest 开关。
         var rawData = BuildRawScanlines16(bgra16, w, h, bitDepth, omitAlpha);
         if (fastest) WriteIdatFastest(output, rawData);
+        else if (effort == CompressionEffort.Optimal)
+            WriteIdatOptimal(output, rawData, effort,
+                filter => BuildRawScanlines16(bgra16, w, h, bitDepth, omitAlpha, filter),
+                mode => BuildRawScanlines16(bgra16, w, h, bitDepth, omitAlpha, null, mode),
+                () => BuildRawScanlines16Brute(bgra16, w, h, bitDepth, omitAlpha));
         else WriteIdat(output, rawData, effort);
 
         // IEND
@@ -246,6 +271,54 @@ public static class ManagedPngEncoder
         bool useNative = DeflateZlib.SelectNativeBackend(rawData, level);
         var sink = new IdatChunkSink(output);
         DeflateZlib.CompressTo(sink, rawData, level, useNative);
+        sink.FinishIdat();
+    }
+
+    /// <summary>PNG「优」档：在当前自适应扫描线之外，再试 Entropy 打分、8 行分带 brute 和少量固定滤波，
+    /// 每条候选都实际压一次，取压缩字节最短者。
+    /// <para>候选生成仍是【先把 BGRA 转成扫描线、再按固定 filter 压】，不经过 PNG 解码/反滤波；
+    /// 每个候选压完只保留压缩字节（几百 KB 量级），候选 raw 用完即弃。分带 brute 需要一份
+    /// filter=0 的 base 和一份目标 raw，因此峰值会比默认路径多约 2 份 33/66 MB 扫描线 ——
+    /// 这是「优」档用内存换体积的明确代价，不会把五份候选 raw 同时留在内存里。</para>
+    /// <para>压缩级别与 <see cref="CompressionEffort.Smallest"/> 相同（level 9）；本档的体积收益来自
+    /// 滤波候选，不靠把 deflate 从 9 拉到 12。</para></summary>
+    private static void WriteIdatOptimal(Stream output, byte[] adaptiveRaw, CompressionEffort effort,
+        Func<byte, byte[]> buildFixed, Func<FilterScoreMode, byte[]> buildScored, Func<byte[]> buildBrute)
+    {
+        int level = CompressionEffortMap.PngTiffDeflateLevel(effort);
+        byte[] best = CompressToBytes(adaptiveRaw, level);
+
+        var entropy = CompressToBytes(buildScored(FilterScoreMode.Entropy), level);
+        if (entropy.Length < best.Length) best = entropy;
+
+        var brute = CompressToBytes(buildBrute(), level);
+        if (brute.Length < best.Length) best = brute;
+
+        foreach (byte filter in OptimalExtraFilters)
+        {
+            var candidateRaw = buildFixed(filter);
+            var candidate = CompressToBytes(candidateRaw, level);
+            if (candidate.Length < best.Length) best = candidate;
+        }
+        WriteIdatBytes(output, best);
+    }
+
+    /// <summary>把一整条 zlib 码流物化成 byte[]，只给「优」档的候选比较使用。
+    /// 默认路径仍是 <see cref="WriteIdat"/> 的流式写出，不因本档多一次整帧物化。</summary>
+    private static byte[] CompressToBytes(byte[] rawData, int level)
+    {
+        bool useNative = DeflateZlib.SelectNativeBackend(rawData, level);
+        using var ms = new MemoryStream();
+        DeflateZlib.CompressTo(ms, rawData, level, useNative);
+        return ms.ToArray();
+    }
+
+    /// <summary>把已压好的 zlib 码流按 64 KiB 切成 IDAT；与流式路径共用同一个
+    /// <see cref="IdatChunkSink"/>，因此 chunk 边界/CRC 口径不变。</summary>
+    private static void WriteIdatBytes(Stream output, byte[] compressed)
+    {
+        var sink = new IdatChunkSink(output);
+        sink.Write(compressed);
         sink.FinishIdat();
     }
 
@@ -360,7 +433,7 @@ public static class ManagedPngEncoder
     /// 使用自适应滤波选择（同 SDR 路径），5 种滤波器中选绝对值最小和。</summary>
     /// <param name="actualBitDepth">实际位深 (10/12/16)，用于缩放和 IHDR。</param>
     private static byte[] BuildRawScanlines16(byte[] bgra16, int w, int h, int actualBitDepth = 16,
-        bool omitAlpha = false)
+        bool omitAlpha = false, byte? fixedFilter = null, FilterScoreMode scoreMode = FilterScoreMode.SumAbs)
     {
         const int bytesPerChannel = 2;
         // omitAlpha ⇒ PNG color type 2（RGB）：每像素 6 字节，滤波的 bpp 也跟着变成 6。
@@ -445,30 +518,41 @@ public static class ManagedPngEncoder
                 int rawOff = y * (1 + rowBytes);
                 Buffer.BlockCopy(raw, rawOff + 1, curRow, 0, rowBytes);
 
-                // 自适应滤波选择：尝试 5 种滤波器，选最小绝对值和（压缩率启发式）
-                byte bestFilter = 0;
-                long bestScore = long.MaxValue;
-
-                for (byte f = 0; f <= 4; f++)
+                if (fixedFilter is byte ff)
                 {
-                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
-                    long score = 0;
-                    for (int i = 0; i < rowBytes; i++)
-                    {
-                        int v = filtered[i];
-                        score += v < 128 ? v : 256 - v;
-                    }
-                    if (score < bestScore)
-                    {
-                        bestScore = score;
-                        bestFilter = f;
-                    }
+                    // 「优」档候选：整帧固定一种滤波，跳过逐行打分。
+                    raw[rawOff] = ff;
+                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, ff);
+                    Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
                 }
+                else
+                {
+                    // 自适应滤波选择：尝试 5 种滤波器。
+                    // SumAbs 是历史默认；Entropy 是「优」档的额外候选策略。
+                    // 两者都只是“选一条整帧扫描线”，最终由 WriteIdatOptimal 实际压缩后比大小。
+                    byte bestFilter = 0;
+                    bool maximize = scoreMode == FilterScoreMode.Entropy;
+                    double bestScore = maximize ? double.MinValue : double.MaxValue;
 
-                // 写入最佳滤波结果
-                raw[rawOff] = bestFilter;
-                ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
-                Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
+                    for (byte f = 0; f <= 4; f++)
+                    {
+                        ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
+                        double score = scoreMode == FilterScoreMode.Entropy
+                            ? EntropyScore(filtered)
+                            : SumAbsScore(filtered);
+                        bool win = maximize ? score > bestScore : score < bestScore;
+                        if (win)
+                        {
+                            bestScore = score;
+                            bestFilter = f;
+                        }
+                    }
+
+                    // 写入最佳滤波结果
+                    raw[rawOff] = bestFilter;
+                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
+                    Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
+                }
 
                 // 当前行变为上一行
                 (curRow, prevRow) = (prevRow, curRow);
@@ -479,7 +563,7 @@ public static class ManagedPngEncoder
 
     /// <summary>构建原始扫描线数据（含 filter byte）— 自适应滤波优化压缩率。
     /// SDR 路径固定 8-bit。</summary>
-    private static byte[] BuildRawScanlines(byte[] bgra, int w, int h, int outDepth)
+    private static byte[] BuildRawScanlines(byte[] bgra, int w, int h, int outDepth, byte? fixedFilter = null, FilterScoreMode scoreMode = FilterScoreMode.SumAbs)
     {
         int channels = 4;
         int bytesPerChannel = outDepth <= 8 ? 1 : 2; // 8-bit → 1B, 10/12/16-bit → 2B
@@ -555,36 +639,145 @@ public static class ManagedPngEncoder
                 int rawOff = y * (1 + rowBytes);
                 Buffer.BlockCopy(raw, rawOff + 1, curRow, 0, rowBytes);
 
-                // 自适应滤波选择: 尝试 4 种滤波器 (跳过 None, 平坦区域压缩会处理)
-                byte bestFilter = 1; // Sub 默认
-                long bestScore = long.MaxValue;
-
-                for (byte f = 1; f <= 4; f++)
+                if (fixedFilter is byte ff)
                 {
-                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
-                    long score = 0;
-                    for (int i = 0; i < rowBytes; i++)
-                    {
-                        int v = filtered[i];
-                        score += v < 128 ? v : 256 - v;
-                    }
-                    if (score < bestScore)
-                    {
-                        bestScore = score;
-                        bestFilter = f;
-                    }
+                    // 「优」档候选：整帧固定一种滤波，跳过逐行打分。
+                    raw[rawOff] = ff;
+                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, ff);
+                    Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
                 }
+                else
+                {
+                    // 自适应滤波选择：SumAbs 默认跳过 None（平坦区域交给 deflate 处理）；
+                    // Entropy 候选则把 None 也纳入。
+                    byte bestFilter = 1; // Sub 默认
+                    bool maximize = scoreMode == FilterScoreMode.Entropy;
+                    double bestScore = maximize ? double.MinValue : double.MaxValue;
+                    int firstFilter = scoreMode == FilterScoreMode.SumAbs ? 1 : 0;
 
-                // 写入最佳滤波结果
-                raw[rawOff] = bestFilter;
-                ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
-                Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
+                    for (byte f = (byte)firstFilter; f <= 4; f++)
+                    {
+                        ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, f);
+                        double score = scoreMode == FilterScoreMode.Entropy
+                            ? EntropyScore(filtered)
+                            : SumAbsScore(filtered);
+                        bool win = maximize ? score > bestScore : score < bestScore;
+                        if (win)
+                        {
+                            bestScore = score;
+                            bestFilter = f;
+                        }
+                    }
+
+                    // 写入最佳滤波结果
+                    raw[rawOff] = bestFilter;
+                    ApplyFilter(curRow, prevRow, filtered, rowBytes, bpp, bestFilter);
+                    Array.Copy(filtered, 0, raw, rawOff + 1, rowBytes);
+                }
 
                 // 当前行变为上一行（交换缓冲，避免每行分配）
                 (curRow, prevRow) = (prevRow, curRow);
             }
         });
         return raw;
+    }
+
+    /// <summary>逐行滤波得分：绝对值和（历史默认）。</summary>
+    private static double SumAbsScore(ReadOnlySpan<byte> row)
+    {
+        double score = 0;
+        foreach (byte b in row) score += b < 128 ? b : 256 - b;
+        return score;
+    }
+
+    /// <summary>逐行滤波得分：字节分布集中度（熵的反向近似）。
+    /// <para>对每个过滤后的行做 256 桶直方图，返回 Σ c·log2(c)；分布越集中该值越大。
+    /// 这不是 deflate 的真实码长，只是“更容易被 LZ/Huffman 压”的廉价代理；最终仍由
+    /// <see cref="WriteIdatOptimal"/> 实际压一遍再决定是否采纳。</para></summary>
+    private static double EntropyScore(ReadOnlySpan<byte> row)
+    {
+        Span<int> hist = stackalloc int[256];
+        foreach (byte b in row) hist[b]++;
+        double score = 0;
+        for (int i = 0; i < 256; i++)
+        {
+            int c = hist[i];
+            if (c > 1) score += c * Math.Log2(c);
+        }
+        return score;
+    }
+
+    /// <summary>「优」档的 8-bit 分带滤波候选：先得到一份 filter=0 的原始扫描线，
+    /// 再按 8 行一带、对每条带实际压 5 种固定滤波，选该带压缩字节最短者。
+    /// <para>这是 oxipng `brute-lines` 的极小化版本：只在一帧内部做“带内选滤波”，
+    /// 不改变像素、不做整帧多份候选；带间独立，所以可以并行。</para></summary>
+    private static byte[] BuildRawScanlinesBrute(byte[] bgra, int w, int h, int outDepth)
+    {
+        var baseRaw = BuildRawScanlines(bgra, w, h, outDepth, fixedFilter: 0);
+        int bpp = outDepth <= 8 ? 4 : 8;
+        return BuildBandedRaw(baseRaw, w, h, bpp, 8);
+    }
+
+    /// <summary>「优」档的 16-bit 分带滤波候选，语义同 8-bit 版本。</summary>
+    private static byte[] BuildRawScanlines16Brute(byte[] bgra16, int w, int h, int bitDepth, bool omitAlpha)
+    {
+        var baseRaw = BuildRawScanlines16(bgra16, w, h, bitDepth, omitAlpha, fixedFilter: 0);
+        int bpp = omitAlpha ? 6 : 8;   // color type 2 = RGB16 (6B/px)，color type 6 = RGBA16 (8B/px)
+        return BuildBandedRaw(baseRaw, w, h, bpp, 8);
+    }
+
+    /// <summary>把一份 filter=0 的原始扫描线按带重滤波；每条带用 level 1 实际压缩比大小。</summary>
+    private static byte[] BuildBandedRaw(byte[] baseRaw, int w, int h, int bpp, int bandRows)
+    {
+        int rowBytes = w * bpp;
+        int stride = 1 + rowBytes;
+        var result = (byte[])baseRaw.Clone();
+        int bandCount = (h + bandRows - 1) / bandRows;
+
+        System.Threading.Tasks.Parallel.For(0, bandCount, b =>
+        {
+            int y0 = b * bandRows;
+            int y1 = Math.Min(h, y0 + bandRows);
+            if (y0 >= y1) return;
+
+            var prev = new byte[rowBytes];
+            if (y0 > 0)
+                Array.Copy(baseRaw, (y0 - 1) * stride + 1, prev, 0, rowBytes);
+
+            var cur = new byte[rowBytes];
+            var filtered = new byte[rowBytes];
+            byte[]? best = null;
+            int bestPacked = int.MaxValue;
+
+            for (byte f = 0; f <= 4; f++)
+            {
+                var candidate = new byte[(y1 - y0) * stride];
+                if (y0 == 0) Array.Clear(prev);
+                else Array.Copy(baseRaw, (y0 - 1) * stride + 1, prev, 0, rowBytes);
+
+                for (int y = y0; y < y1; y++)
+                {
+                    int off = (y - y0) * stride;
+                    Array.Copy(baseRaw, y * stride + 1, cur, 0, rowBytes);
+                    candidate[off] = f;
+                    ApplyFilter(cur, prev, filtered, rowBytes, bpp, f);
+                    Array.Copy(filtered, 0, candidate, off + 1, rowBytes);
+                    Array.Copy(cur, 0, prev, 0, rowBytes);   // 下一行的“上一行”仍是原始字节
+                }
+
+                // 用最小 deflate 档估“这一带哪种滤波更省”；最终整帧还会再压一次 level 9。
+                var packed = DeflateZlib.Compress(candidate, 1);
+                if (packed.Length < bestPacked)
+                {
+                    bestPacked = packed.Length;
+                    best = candidate;
+                }
+            }
+
+            if (best is not null)
+                Array.Copy(best, 0, result, y0 * stride, best.Length);
+        });
+        return result;
     }
 
     /// <summary>应用 PNG 行滤波器。</summary>

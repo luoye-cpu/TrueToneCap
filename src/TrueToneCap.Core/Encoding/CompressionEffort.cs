@@ -40,10 +40,11 @@ namespace TrueToneCap.Core.Encoding;
 /// <para>档位名按<b>用户视角的结果</b>命名，而不是按底层参数名 ——
 /// 底层各家的参数名、方向、量纲都不同（avifenc 越小越慢、cjxl 越大越慢、cwebp 越大越慢、
 /// NVENC P 越大越快、cjpegli 是布尔开关），照参数名命名必然误导。
-/// 界面显示名（2026-10-29 用户定名）：两档格式（PNG/TIFF/WebP/JPEG LI）用「均衡 / 快速」，
-/// 三档格式（AVIF/JPEG XL）用「极高 / 均衡 / 快速」⇒ <see cref="Smallest"/> 在两档菜单里
-/// 显示「均衡」（且是默认）、三档菜单里显示「极高」—— 两个菜单里的「均衡」<b>不是</b>
-/// 同一成员，三档菜单的「均衡」是 <see cref="Balanced"/>。</para>
+/// 界面显示名（2026-10-29 用户定名；2026-11-16 起 PNG 为三档，TIFF/WebP/JPEG LI 仍两档）：
+/// 两档格式用「均衡 / 快速」，PNG 三档用「优 / 均衡 / 快速」，AVIF/JPEG XL 用「极高 / 均衡 / 快速」
+/// ⇒ <see cref="Smallest"/> 在两档菜单里显示「均衡」（且是默认）、在 PNG 三档菜单里显示「均衡」且仍是默认、
+/// 在 AVIF/JPEG XL 三档菜单里显示「极高」—— 不同菜单里的「均衡」<b>不是</b>同一成员，三档菜单的「均衡」是
+/// <see cref="Balanced"/>；PNG 的「优」是 <see cref="Optimal"/>。</para>
 /// <para>⚠ <b>JPEG LI 曾在档位体系里（2026-10-07~2026-11-12），现已退出</b>：
 /// 当年它在这张映射上的唯一落点是 <c>--xyb</c>（用户据实测纳入，"均衡"=开、"快速"=关）。
 /// 2026-11-12 用户拍板：xyb 换的是色彩空间、不是压缩强度，不该藏在档位里 ——
@@ -60,9 +61,10 @@ public enum CompressionEffort
     /// avifenc/cwebp 的 <c>-q</c>、cjxl/cjpegli 的 <c>-d</c> 质量距离、NVENC 的 RC 全部不变；
     /// PNG/TIFF 走无损 deflate，解压逐字节相同。把本档误解成"最低质量"并据此调低编码器
     /// 质量参数，是本文件明令禁止的错误。</para>
-    /// <para>⚠ <b>它同时是两档格式的「均衡」默认档</b>：PNG / TIFF / WebP 的菜单只有两格，
+    /// <para>⚠ <b>它是 PNG / TIFF / WebP 菜单里的「均衡」默认档</b>：PNG 三档、TIFF / WebP 两档，
     /// 显示名「均衡」的就是本成员（也是 <c>AppSettingsData</c> 的 EffortWebp /
     /// EffortPng / EffortTiff 默认值）——"均衡"指"菜单里的默认那一格"，<b>不</b>指参数取中点；
+    /// PNG 自 2026-11-16 起多一格「优」（<see cref="Optimal"/>），但默认仍是本档，老用户产物不变；
     /// 在 AVIF / JPEG XL 的三档菜单里它显示「极高」，那边默认档是 <see cref="Balanced"/>。</para>
     /// <para>本档的逐编码器落点（均不改质量旋钮；映射唯一出处 <see cref="CompressionEffortMap"/>）：
     /// AVIF = <c>-s 0</c> + <c>-a tune=ssim</c>、JPEG XL = <c>-e 7</c>、WebP = <c>-m 6</c>、
@@ -96,6 +98,18 @@ public enum CompressionEffort
     /// <para>⚠ 枚举数值只追加不重排：持久化写的是字符串，但任何把枚举当整数落盘/传参的地方
     /// 都经不起静默改序。</para></summary>
     Quick = 3,
+
+    /// <summary>Tag <c>Optimal</c>，PNG 界面显示「优」（2026-11-16 用户口径新增）。
+    /// <para><b>只给 PNG，不给 TIFF / WebP</b>：它不改 deflate level（仍与 <see cref="Smallest"/> 同为
+    /// level 9），而是在当前自适应滤波之外再生成 Entropy 打分、8 行分带 brute 和固定 Sub / Paeth
+    /// 候选，逐候选实际压缩后取最小。这正是 oxipng 体积收益的来源（多候选实际压缩），但候选数
+    /// 远少于 oxipng `-o 4` 的整帧多策略 + 行/块 brute 搜索，所以耗时是当前最大压缩的数倍，
+    /// 而不是 oxipng `-o 4` 的十几倍。</para>
+    /// <para>TIFF / WebP / AVIF / JPEG XL 界面上不可达；<see cref="CompressionEffortMap.PngTiffDeflateLevel"/>
+    /// 仍为它保留 level 9（若被旧配置误选，TIFF 会与 <see cref="Smallest"/> 同档，不产生未定义行为）。</para>
+    /// <para>⚠ 新档不承诺"每张图都一定更小"：候选集合里包含当前自适应结果，因此不会比
+    /// <see cref="Smallest"/> 更大；只有额外候选真的赢过自适应时才会变小。</para></summary>
+    Optimal = 4,
 }
 
 /// <summary>档位 → 各编码器参数的<b>唯一</b>映射处。
@@ -115,6 +129,7 @@ public static class CompressionEffortMap
         "Quick" => CompressionEffort.Quick,
         "Fastest" => CompressionEffort.Fastest,
         "Balanced" => CompressionEffort.Balanced,
+        "Optimal" => CompressionEffort.Optimal,
         _ => CompressionEffort.Balanced,
     };
 
@@ -129,6 +144,7 @@ public static class CompressionEffortMap
         CompressionEffort.Quick => "Quick",
         CompressionEffort.Fastest => "Fastest",
         CompressionEffort.Balanced => "Balanced",
+        CompressionEffort.Optimal => "Optimal",
         _ => throw new System.ArgumentOutOfRangeException(nameof(e), e, "未知档位 —— 新增枚举成员必须在这里补一格"),
     };
 
@@ -232,9 +248,10 @@ public static class CompressionEffortMap
     /// 见 <c>CorePipelineTests.Test_PerfWiring_DeflateOptionsEqualsEnum</c>。</para>
     /// <para><b>档位只改 deflate 的搜索强度</b>（<c>max_chain</c> 128→4096、<c>max_lazy</c> 16→258 等），
     /// 码流格式不变 ⇒ 解压器看不出区别，任何一档的产物都同样合法、同样无损；
-    /// 判据把"四个档位解出的扫描线逐字节相同"钉住了这一点。</para>
-    /// <para><b>界面按用户口径只给两格</b>：显示「均衡」= Tag <c>Smallest</c>（level 9，默认，其实就是拉满）
-    /// 与显示「快速」= Tag <c>Quick</c>（level 8）。
+    /// 判据把"所有档位解出的像素逐字节相同"钉住了这一点（「优」档会换滤波候选，因此判据比的是反滤波后像素，而不是滤波后的扫描线）。</para>
+    /// <para><b>界面按用户口径：PNG 三格、TIFF 两格</b>：PNG 显示「优」= Tag <c>Optimal</c>
+    /// （level 9 + Entropy / 分带 brute / 固定 Sub、Paeth 候选，默认仍是下一格）、显示「均衡」= Tag <c>Smallest</c>（level 9，默认）、
+    /// 显示「快速」= Tag <c>Quick</c>（level 8）；TIFF 仍只有「均衡 / 快速」两格。
     /// ⚠ 两格的显示名不描述参数深度（本格式的"均衡"就是最慢那一档），界面文案因此一律不写实测数字——
     ///   快慢与体积代价随机器变，数字只留在源码与本注释里。</para>
     /// Smallest == 这两个格式纳入档位之前的硬编码 level 9 ⇒ 没动过设置的人**解压后**逐字节不变。
@@ -249,6 +266,7 @@ public static class CompressionEffortMap
         CompressionEffort.Quick => 8,     // 用户要的"稍微放宽"：快 2~10 倍，体积 −1.9% ~ +0.3%
         CompressionEffort.Balanced => 6,  // 不可达（PNG/TIFF 界面两格），保留定义
         CompressionEffort.Fastest => 1,   // 不可达，保留定义：+36.5% 体积（平直内容能翻倍）
+        CompressionEffort.Optimal => 9,   // PNG「优」只多滤波/分带候选；deflate level 与 Smallest 相同
         _ => throw new System.ArgumentOutOfRangeException(nameof(e), e, "未知档位 —— 新增枚举成员必须在这里补一格"),
     };
 }

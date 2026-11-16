@@ -354,6 +354,7 @@ public static class LocaleManager
             // 档位显示名（2026-10-29 用户定名）：两档格式用「均衡 / 快速」，三档格式用「极高 / 均衡 / 快速」。
             // ⚠ 名字里不含参数深度：两档格式的「均衡」其实就是拉满那一档（见下面各条说明）。
             ["极高"] = "Maximum",
+            ["优"] = "Optimal",
             ["均衡"] = "Balanced",
             ["快速"] = "Fast",
             ["只影响编码耗时与文件体积，不影响质量。软件路改 avifenc 的 speed，硬件路改 NVENC 的 preset。"] = "Only encoding time and file size change; quality is untouched. The software path changes avifenc's speed, the hardware path NVENC's preset.",
@@ -364,6 +365,7 @@ public static class LocaleManager
             ["传统"] = "Traditional",
             ["色彩空间"] = "Color Space",
             ["传统（YCbCr）兼容性最好；XYB 体积通常更小，但少数软件可能无法正确解码。"] = "Traditional (YCbCr) has the best compatibility; XYB is usually smaller but some software may fail to decode it.",
+            ["无损：只影响压缩耗时与文件体积，像素不变。优=多滤波候选、体积最小但最慢；均衡=单次最强；快速=更快。"] = "Lossless: only compression time and file size change, pixels stay identical. Optimal = multi-filter candidates, smallest but slowest; Balanced = single-pass maximum; Fast = quicker.",
             ["无损：只影响压缩耗时与文件体积，像素不变。均衡=压缩最强，快速=更快。"] = "Lossless: only compression time and file size change, pixels stay identical. Balanced = strongest compression, Fast = quicker.",
             ["额外添加 .png 后缀来提高兼容性"] = "Add .png suffix for compatibility",
             ["附带增益图（输出 Ultra HDR 照片）"] = "Attach gain map (Ultra HDR output)",

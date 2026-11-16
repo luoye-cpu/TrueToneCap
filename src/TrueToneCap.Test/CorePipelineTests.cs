@@ -3365,7 +3365,7 @@ public static class CorePipelineTests
         // 窗口法一旦有人往方法体里加几十行就静默失效（找不着 = 判据瞎）。
         // 切片身份用体内独有的 `outDepth == 8` 分支来验 —— 16-bit 那个方法没有这条分支。
         var m8 = Regex.Match(p,
-            @"private static byte\[\] BuildRawScanlines\(byte\[\] bgra, int w, int h, int outDepth\)([\s\S]*?)\n    \}\n");
+            @"private static byte\[\] BuildRawScanlines\(byte\[\] bgra, int w, int h, int outDepth(?:, byte\? fixedFilter = null)?(?:, FilterScoreMode scoreMode = FilterScoreMode.SumAbs)?\)([\s\S]*?)\n    \}\n");
         Assert("切得出 8-bit BuildRawScanlines 方法体（切不出=判据自己瞎了，不许当通过）",
             m8.Success, "8-bit 方法签名或缩进被改动，本判据无法定位方法体");
         var b8 = m8.Success ? m8.Groups[1].Value : "";
@@ -4035,7 +4035,7 @@ public static class CorePipelineTests
         var xm = File.ReadAllText(FindRepoFile(Path.Combine("src", "TrueToneCap.App", "MainWindow.xaml"))!);
         var wantDefault = new (string Cbo, string Field, string Tier, int NTiers)[]
         {
-            ("EffortPngCbo",     "EffortPng",     "Smallest", 2),
+            ("EffortPngCbo",     "EffortPng",     "Smallest", 3),
             ("EffortTiffCbo",    "EffortTiff",    "Smallest", 2),
             ("EffortWebpCbo",    "EffortWebp",    "Smallest", 2),
             ("EffortAvifCbo",    "EffortAvif",    "Balanced", 3),
@@ -4079,9 +4079,9 @@ public static class CorePipelineTests
         // 直接对撞，两组都不许有差集。
         var lcc = CodeOf(loc);
         var locLoops = Regex.Matches(lcc, @"foreach \(var effortCbo in new\[\] \{([^}]*)\}\)\s*\{([\s\S]*?)\n        \}");
-        Assert($"压缩强度下拉的逐 Tag 点名循环解析到 2 组（实得 {locLoops.Count}：两档组 + 三档组）",
-            locLoops.Count == 2,
-            "组数变了说明本轮的两档/三档拆分没落地 ⇒ 下面的对撞会退化成什么都查不到，必须让它红");
+        Assert($"压缩强度下拉的逐 Tag 点名循环解析到 3 组（实得 {locLoops.Count}：PNG 三档组 + 两档组 + 三档组）",
+            locLoops.Count == 3,
+            "组数变了说明本轮 PNG 三档拆分没落地 ⇒ 下面的对撞会退化成什么都查不到，必须让它红");
         var localizedByCbo = new Dictionary<string, HashSet<string>>();
         foreach (Match lp in locLoops)
         {
@@ -4127,12 +4127,11 @@ public static class CorePipelineTests
             stc.Contains("SetComboByTag(EffortPngCbo, _settings.EffortPng)")
             && stc.Contains("SetComboByTag(EffortTiffCbo, _settings.EffortTiff)"));
 
-        // ── ⑤ 行为级：四个档位解出来的扫描线必须逐字节相同 ──
-        // 上面四条钉的是"接线在不在"，这条钉的是承诺本身：档位只改 deflate 的搜索强度，
-        // 不改像素、不改行滤波的选择 ⇒ 滤波后的 raw（解压 IDAT 得到）在各档之间必须一模一样。
-        // 若哪天有人把档位与滤波器选择绑在一起（"最快档就只试 Sub"），这条会立刻红。
-        // ⚠ 走【全枚举】而不是写死三个名字：Quick 是 2026-10-29 加的，写死的清单会漏掉它，
-        //   而"界面有那一格、判据从没编码过那一格"正是这类判据最安静的一种坏法。
+        // ── ⑤ 行为级：所有档位解出来的【像素】必须逐字节相同 ──
+        // 旧判据比的是“滤波后的扫描线”，那是 2026-10-29 只有 deflate level 变化时的口径；
+        // 2026-11-16 的 PNG「优」档会在自适应之外再试固定 Sub/Paeth 候选 ⇒ 滤波字节本来就会不同。
+        // 因此这里改为反滤波后比像素：档位可以改滤波选择，但不许改任何一个像素。
+        // ⚠ 走【全枚举】而不是写死名字：以后新增档位自动进表。
         var dir = Path.Combine(Path.GetTempPath(), "ttc_png_tier_judge");
         Directory.CreateDirectory(dir);
         int tw = 256, th = 257;                     // 不整除的行列 + ~263KB raw：小到毫秒级，
@@ -4162,6 +4161,44 @@ public static class CorePipelineTests
             zin.CopyTo(raw);
             return raw.ToArray();
         }
+        int Paeth(int a, int b, int c)
+        {
+            int p = a + b - c;
+            int pa = Math.Abs(p - a), pb = Math.Abs(p - b), pc = Math.Abs(p - c);
+            return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+        }
+        // 仅用于本判据的 RGBA8 反滤波（测试夹具固定 4 BPP）。
+        byte[] Unfilter(byte[] filtered)
+        {
+            int rowBytes = tw * 4;
+            var pixels = new byte[th * rowBytes];
+            var prev = new byte[rowBytes];
+            for (int y = 0; y < th; y++)
+            {
+                int ro = y * (1 + rowBytes);
+                int oo = y * rowBytes;
+                byte ft = filtered[ro];
+                for (int i = 0; i < rowBytes; i++)
+                {
+                    int a = i >= 4 ? pixels[oo + i - 4] : 0;
+                    int b = prev[i];
+                    int c = i >= 4 ? prev[i - 4] : 0;
+                    int x = filtered[ro + 1 + i];
+                    int v = ft switch
+                    {
+                        0 => x,
+                        1 => x + a,
+                        2 => x + b,
+                        3 => x + ((a + b) >> 1),
+                        4 => x + Paeth(a, b, c),
+                        _ => throw new InvalidOperationException($"未知 PNG filter {ft}"),
+                    };
+                    pixels[oo + i] = (byte)v;
+                }
+                Array.Copy(pixels, oo, prev, 0, rowBytes);
+            }
+            return pixels;
+        }
         var eff = System.Enum.GetValues<CompressionEffort>();
         var raws = eff.Select(tier =>
         {
@@ -4169,22 +4206,27 @@ public static class CorePipelineTests
             ManagedPngEncoder.Encode(src, tw, th, f, 8, null, null, tier);
             return new { File = f, Tier = tier, Len = new FileInfo(f).Length, Raw = RawOf(f) };
         }).ToList();
-        Assert($"PNG 的四档（{string.Join("/", eff)}）都能被读回并解出 IDAT（解不出 = 产物坏，不是判据宽松）",
-            raws.Count == 4 && raws.All(r => r.Raw!.Length == th * (1 + tw * 4) && r.Len > 100),
+        Assert($"PNG 的 {eff.Length} 档（{string.Join("/", eff)}）都能被读回并解出 IDAT（解不出 = 产物坏，不是判据宽松）",
+            raws.Count == eff.Length && raws.All(r => r.Raw!.Length == th * (1 + tw * 4) && r.Len > 100),
             string.Join(" | ", raws.Select(r => $"{r.Tier}:{r.Raw?.Length}B")));
-        Assert("四档解出的扫描线逐字节相同（档位只改压缩，不改像素与行滤波选择）",
-            raws.All(r => r.Raw!.SequenceEqual(raws[0].Raw!)));
-        // 上一条的活体证明：各档产物【体积】必须真的分得开 —— 否则"逐字节相同"可能只是因为
+        var pixelsOf = raws.ToDictionary(r => r.Tier, r => Unfilter(r.Raw!));
+        Assert("所有档位反滤波后的像素逐字节相同（档位只改压缩/滤波选择，不改像素）",
+            raws.All(r => pixelsOf[r.Tier].SequenceEqual(pixelsOf[CompressionEffort.Smallest])),
+            "有档位改动了像素 —— 这不是压缩档位能做的事");
+        // 上一条的活体证明：各档产物【体积】必须真的分得开 —— 否则"像素相同"可能只是因为
         // 档位根本没落地、几个文件一模一样。把 effort 摘掉再跑，这条会红。
-        // 分两组说，因为它们的分量不同：
-        //   · Smallest vs Quick 是 PNG/TIFF 下拉里【仅有的两格】，它们相等 = 这个格式的档位整条是装饰；
-        //   · 四档全互不相同是更强的版本，防的是"某一格塌进另一格"（Quick 与 Balanced 撞车之类）。
         var lenOf = raws.ToDictionary(r => r.Tier, r => r.Len);
-        Assert("Smallest 与 Quick 的产物体积不同（这两格就是 PNG/TIFF 界面的全部菜单；相同=档位整条无效）",
+        Assert("Smallest 与 Quick 的产物体积不同（老两档仍各自有效；相同=这两格塌成一格）",
             lenOf[CompressionEffort.Smallest] != lenOf[CompressionEffort.Quick],
             $"两档同为 {lenOf[CompressionEffort.Quick]}B");
-        Assert("四档产物体积互不相同（档位确实逐格落到 deflate 上了）",
-            lenOf.Values.Distinct().Count() == 4,
+        Assert("PNG「优」档不大于 Smallest（候选含当前自适应结果，理论下界）",
+            lenOf[CompressionEffort.Optimal] <= lenOf[CompressionEffort.Smallest],
+            $"Optimal={lenOf[CompressionEffort.Optimal]}B / Smallest={lenOf[CompressionEffort.Smallest]}B");
+        Assert("PNG「优」档在判据夹具上确实比 Smallest 小（否则新档没有可观测行为）",
+            lenOf[CompressionEffort.Optimal] < lenOf[CompressionEffort.Smallest],
+            $"Optimal={lenOf[CompressionEffort.Optimal]}B / Smallest={lenOf[CompressionEffort.Smallest]}B");
+        Assert($"{eff.Length} 档产物体积互不相同（档位确实逐格落到压缩/滤波路径上了）",
+            lenOf.Values.Distinct().Count() == eff.Length,
             string.Join(" / ", raws.Select(r => $"{r.Tier}:{r.Len}B")));
         foreach (var r in raws) try { File.Delete(r.File); } catch { }
         try { Directory.Delete(dir); } catch { }
@@ -5825,17 +5867,17 @@ public static class CorePipelineTests
         Assert("① 路径覆盖开关 TTC_DEFLATE_DLL 只读一次",
             CountOf(dz, "Environment.GetEnvironmentVariable(\"TTC_DEFLATE_DLL\")") == 1);
 
-        // 2026-10-31 流式化：PNG 不再"压完整一帧再写一条 IDAT"，改成把压缩字节增量推给分块 sink。
-        // 判据跟着换成"PNG 的压缩腿 = SelectNativeBackend 判一次 + CompressTo 写出去"，
-        // 而"不各写一份 ZLibStream"这半句仍然要查（中转件那条 Fastest 是刻意的例外，见下）。
-        Assert("② PNG 与 TIFF 都只经 DeflateZlib 这一条压缩腿，不再各写一份 ZLibStream",
-            CountOf(png, "DeflateZlib.SelectNativeBackend(rawData, level)") == 1
+        // 2026-11-16：PNG「优」档新增一条“候选压进 MemoryStream 比较大小”的腿
+        // （CompressToBytes），默认路径仍是流式 sink；两条腿都必须经 DeflateZlib，不许自己写 ZLibStream。
+        Assert("② PNG 与 TIFF 都只经 DeflateZlib 这一条压缩实现，不再各写一份 ZLibStream",
+            CountOf(png, "DeflateZlib.SelectNativeBackend(rawData, level)") == 2
             && CountOf(png, "DeflateZlib.CompressTo(sink, rawData, level, useNative)") == 1
+            && CountOf(png, "DeflateZlib.CompressTo(ms, rawData, level, useNative)") == 1
             && CountOf(tif, "DeflateZlib.Compress(raw, CompressionEffortMap.PngTiffDeflateLevel(effort))") == 1
             && CountOf(png, "new ZLibStream(") == 2
             && CountOf(png, "new ZLibStream(sink, CompressionLevel.Fastest") == 1
             && CountOf(png, "new ZLibStream(ms, CompressionLevel.Fastest") == 1,
-            "PNG 的压缩腿必须只有流式入口那一处；两处 ZLibStream 都必须是写死 Fastest 的旁路"
+            "PNG 的压缩腿必须只有 DeflateZlib 那两处（默认流式 + 优档候选）；两处 ZLibStream 都必须是写死 Fastest 的旁路"
             + $"（IDAT 中转件 + iCCP 各一处，实得 {CountOf(png, "new ZLibStream(")} 处）—— "
             + "任何一处改用档位 level，就等于给无损产物开了第二条口径不同的压缩路");
 
@@ -7969,7 +8011,7 @@ public static class CorePipelineTests
         // 且 cjpegli 没有别的 effort 旋钮 ⇒ 那一栏从来只是 xyb 开关的两半）。独立开关如下一条。
         CheckWhitelistEqualsTags(xaml, srv, "JpegLiColorModelCbo", "s.JpegLiColorModel", expectTags: 2);
         // PNG / TIFF 于 2026-10-29 纳入（用户点名"编码速度相对过慢的几个要给档位"）。
-        CheckWhitelistEqualsTags(xaml, srv, "EffortPngCbo", "s.EffortPng", expectTags: 2);
+        CheckWhitelistEqualsTags(xaml, srv, "EffortPngCbo", "s.EffortPng", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "EffortTiffCbo", "s.EffortTiff", expectTags: 2);
         Test_SettingsEffort_TwoTierMenuAndMigration(srv);
 
@@ -8000,24 +8042,27 @@ public static class CorePipelineTests
             && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Quick) == 5
             && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Balanced) == 4
             && CompressionEffortMap.NvencPresetNumber(CompressionEffort.Fastest) == 1);
-        // 每一张表都必须"档位不同 ⇒ 参数不同"：塌成同一个值就是界面还能选、实际毫无效果。
-        foreach (var (mapName, fn) in new (string, System.Func<CompressionEffort, int>)[]
+        // 每一张表都必须"可达档位不同 ⇒ 参数不同"：塌成同一个值就是界面还能选、实际毫无效果。
+        // Optimal 是 PNG 专属的“同 level + 滤波候选”档：它故意与 Smallest 同为 level 9，
+        // 因此不放进 level 表的互异集合，而由下面的 PNG 行为判据证明它确实改变了产物。
+        foreach (var (mapName, fn, tiers) in new (string, System.Func<CompressionEffort, int>, CompressionEffort[])[]
         {
-            ("JXL", CompressionEffortMap.JxlEffort),
-            ("AVIF", CompressionEffortMap.AvifencSpeed),
-            ("WebP", CompressionEffortMap.WebPMethod),
-            ("NVENC", CompressionEffortMap.NvencPresetNumber),
-            ("PNG-TIFF", CompressionEffortMap.PngTiffDeflateLevel),
+            ("JXL", CompressionEffortMap.JxlEffort,
+             [CompressionEffort.Smallest, CompressionEffort.Balanced, CompressionEffort.Fastest]),
+            ("AVIF", CompressionEffortMap.AvifencSpeed,
+             [CompressionEffort.Smallest, CompressionEffort.Balanced, CompressionEffort.Fastest]),
+            ("WebP", CompressionEffortMap.WebPMethod,
+             [CompressionEffort.Smallest, CompressionEffort.Quick]),
+            ("NVENC", CompressionEffortMap.NvencPresetNumber,
+             [CompressionEffort.Smallest, CompressionEffort.Balanced, CompressionEffort.Fastest]),
+            ("PNG-TIFF", CompressionEffortMap.PngTiffDeflateLevel,
+             [CompressionEffort.Smallest, CompressionEffort.Quick]),
         })
         {
-            var all = System.Enum.GetValues<CompressionEffort>();
-            var vals = all.Select(fn).ToList();
-            // 打印 name=value 成对，不打印"档位名列表 + 值列表"两串：后者要求读者自己对齐顺序，
-            // 而 Enum.GetValues 的顺序是 0,1,2,3 = Smallest/Balanced/Fastest/Quick —— 与本功能的
-            // 阅读顺序（慢→快）不同，写死标签就会让"7/5/3/6"被读成"Smallest/Quick/Balanced/Fastest"。
-            var shown = string.Join(" ", all.Zip(vals, (t, v) => $"{t}={v}"));
-            Assert($"压缩强度/{mapName}：四个档位的参数值互不相同（{shown}）",
-                vals.Distinct().Count() == all.Length,
+            var vals = tiers.Select(fn).ToList();
+            var shown = string.Join(" ", tiers.Zip(vals, (t, v) => $"{t}={v}"));
+            Assert($"压缩强度/{mapName}：可达档位的参数值互不相同（{shown}）",
+                vals.Distinct().Count() == tiers.Length,
                 "有档位塌成同一个值 ⇒ 那一格选了等于没选；"
                 + "若某个格式确实没有对应的旋钮，正确做法是【不给它那一格】，而不是两格填同一个值");
         }
@@ -8114,14 +8159,14 @@ public static class CorePipelineTests
         var badRoundTrip = System.Enum.GetValues<CompressionEffort>()
             .Where(t => CompressionEffortMap.Parse(CompressionEffortMap.ToTag(t)) != t)
             .ToList();
-        Assert("压缩强度/Tag 往返对每个档位都一致（含 Quick）",
-            badRoundTrip.Count == 0 && System.Enum.GetValues<CompressionEffort>().Length == 4,
+        Assert("压缩强度/Tag 往返对每个档位都一致（含 Quick / Optimal）",
+            badRoundTrip.Count == 0 && System.Enum.GetValues<CompressionEffort>().Length == 5,
             "没对上：" + string.Join(",", badRoundTrip)
             + $"（枚举现值数 {System.Enum.GetValues<CompressionEffort>().Length}；"
             + "若新增档位后忘了补 ToTag 一格，这里会点名到具体是哪个）");
-        // 四个档位的 Tag 字面量互不相同 —— 相同 = 两格并存成同一个词，持久化直接改义。
+        // 五个档位的 Tag 字面量互不相同 —— 相同 = 两格并存成同一个词，持久化直接改义。
         var tagWords = System.Enum.GetValues<CompressionEffort>().Select(CompressionEffortMap.ToTag).ToList();
-        Assert($"压缩强度/四个 Tag 字面量互不相同（{string.Join("/", tagWords)}）",
+        Assert($"压缩强度/五个 Tag 字面量互不相同（{string.Join("/", tagWords)}）",
             tagWords.Distinct().Count() == tagWords.Count);
 
         // ═══ 色域那一轴不比对白名单字符串，它存的是【裸索引】⇒ 要钉的是两张表的长度等式 ═══
@@ -8218,10 +8263,11 @@ public static class CorePipelineTests
     /// </summary>
     static void Test_SettingsEffort_TwoTierMenuAndMigration(string srv)
     {
-        var two = new[] { "EffortWebp", "EffortPng", "EffortTiff" };
+        var two = new[] { "EffortWebp", "EffortTiff" };
         var three = new[] { "EffortAvif", "EffortJpegXl" };
+        var pngThree = new[] { "EffortPng" };
 
-        // ── ① 三个两档调用点确实走 FitTwoTierEffort（缺席证明的正向活体：数得到 3 处）──
+        // ── ① 三个调用点确实走 FitTwoTierEffort（PNG 自 2026-11-16 起借同一通道收三格）──
         // （EffortJpegLi 曾是第四个，2026-11-12 退出档位体系后收口通道不再有它。）
         int twoTierCalls = Regex.Matches(srv, @"\bFitTwoTierEffort\(s\.").Count;
         Assert($"两档收口通道被 3 个字段调用（实得 {twoTierCalls}）", twoTierCalls == 3,
@@ -8237,6 +8283,19 @@ public static class CorePipelineTests
                 listed.Count == 2 && listed[0] == "Smallest" && listed[1] == "Quick",
                 $"实得 [{string.Join(",", listed)}]");
             Assert($"{f}: 默认取该字段的 dft.{f}（不是写死的字面量，否则两处默认会分家）",
+                call.Value.Contains($"dft.{f}"), call.Value);
+        }
+
+        foreach (var f in pngThree)
+        {
+            var call = Regex.Match(srv, @"FitTwoTierEffort\(s\." + f + @"[^)]*\)");
+            Assert($"{f}: 找到三格收口调用", call.Success, $"解析不到 FitTwoTierEffort(s.{f}…)");
+            if (!call.Success) continue;
+            var listed = ExtractQuotedValues(call.Value, "\"");
+            Assert($"{f}: 菜单按【慢 → 快】写成 Optimal, Smallest, Quick（旧词仍折向 tags[^1]）",
+                listed.Count == 3 && listed[0] == "Optimal" && listed[1] == "Smallest" && listed[2] == "Quick",
+                $"实得 [{string.Join(",", listed)}]");
+            Assert($"{f}: 默认取该字段的 dft.{f}（三格菜单的默认仍是 Smallest）",
                 call.Value.Contains($"dft.{f}"), call.Value);
         }
 

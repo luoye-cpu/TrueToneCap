@@ -576,7 +576,9 @@ public sealed class SettingsService
         FitTag(s.EffortAvif, v => s.EffortAvif = v, dft.EffortAvif, "Smallest", "Balanced", "Fastest");
         FitTag(s.EffortJpegXl, v => s.EffortJpegXl = v, dft.EffortJpegXl, "Smallest", "Balanced", "Fastest");
         FitTwoTierEffort(s.EffortWebp, v => s.EffortWebp = v, dft.EffortWebp, "Smallest", "Quick");
-        FitTwoTierEffort(s.EffortPng, v => s.EffortPng = v, dft.EffortPng, "Smallest", "Quick");
+        // PNG 自 2026-11-16 起三档：优（Optimal）/ 均衡（Smallest）/ 快速（Quick）。
+        // 旧三档时代写盘的 Balanced/Fastest 仍折向 tags[^1] = Quick（与两档格式同一迁移口径）。
+        FitTwoTierEffort(s.EffortPng, v => s.EffortPng = v, dft.EffortPng, "Optimal", "Smallest", "Quick");
         FitTwoTierEffort(s.EffortTiff, v => s.EffortTiff = v, dft.EffortTiff, "Smallest", "Quick");
         // JPEG LI 色彩空间（2026-11-12 用户拍板新增）：xyb 不属于压缩强度档位（cjpegli 也无别的
         // effort 旋钮），独立二态开关；默认 Xyb（体积优先，与改栏前的默认输出一致），
