@@ -16,6 +16,13 @@
 ---
 
 
+## [0.3.18] — 2026-11-17：运行时主题改走窗口 ElementTheme、收口全局硬编码高对比度调色板
+
+- **运行时主题改为通过窗口 `ElementTheme` 生效**：此前运行时切深浅色不随窗口正确重算画刷；改为在窗口层级设置 `ElementTheme`，让 WinUI 按当前窗口主题重算资源字典，系统级与应用内主题切换即时生效，不再依赖全局硬编码路径。
+- **移除全局合并的硬编码高对比度调色板**：`HighContrastTheme.xaml` 不再被全局 `MergedDictionaries` 合并。硬编码调色板会覆盖系统高对比度与应用主题，导致高对比度模式下颜色被强行改写；现改由系统/窗口主题驱动，高对比度与正常主题都能正确呈现。
+- **发布流程锁文件规范化**：`dotnet publish -r win-x64` 会把 `win-x64` RID 段追加进 Core 的 `packages.lock.json`，与无 RID 还原冲突（NU1004）；发布后补一次无 RID `dotnet restore` 逐字节归一化并提交，保证 CI `--locked-mode` 可复现。
+- **版本坐标**：`Directory.Build.props` 三行、`Package.appxmanifest` 的 `Identity/@Version`、README 徽章统一为 `0.3.18` / `0.3.18.0`；GitHub 绿色包与微软商店提交包同版本。
+
 ## [0.3.17] — 2026-11-16：LLM 批量翻译加固与 PNG「优」档
 
 - **LLM 文本翻译改为结构化批量**：一次请求返回带 `id` 的 JSON 对象数组，按 `id` 对齐而不是按位置拼接；缺 `id`、对象/字符串混合、重复或缺失行一律整批拒收，避免静默错行。单行清洗不再用 `Contains("i cannot")`、`StartsWith("note:")` 这类宽匹配——`I cannot open the file`、`Note: takes effect after saving`、`I'm sorry, something went wrong` 等合法 UI 文案不再被误拒，真正的拒答句仍拒收。
