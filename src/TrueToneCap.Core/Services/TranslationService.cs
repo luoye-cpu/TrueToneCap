@@ -835,25 +835,14 @@ public class TranslationService
     private async Task<string[]> TranslateLlmBatchChunkAsync(
         IReadOnlyList<string> texts, string targetLang, string? sourceLang, CancellationToken ct)
     {
-        string sl = sourceLang ?? "auto-detect";
-        string basePrompt = !string.IsNullOrWhiteSpace(_config.SystemPrompt)
-            ? _config.SystemPrompt
-            : $"You are a professional translator. Translate the following text to {targetLang}.";
-        string systemPrompt = basePrompt
-            + "\n\nYou are translating a batch of numbered OCR lines. "
-            + "Return ONLY a valid JSON array of exactly " + texts.Count + " strings, in input order. "
-            + "Each string must be the translation of the corresponding input line. "
-            + "Do not merge, split, reorder, omit, or add lines. Do not return explanations, notes, "
-            + "quotes, numbering, markdown fences, or the source text. "
-            + "Preserve numbers, URLs, code identifiers, and proper nouns.";
+        string systemPrompt = LlmPromptPolicy.BuildBatchSystemPrompt(
+            _config.SystemPrompt, targetLang, texts.Count);
 
         var input = new LlmBatchLine[texts.Count];
         for (int i = 0; i < texts.Count; i++) input[i] = new LlmBatchLine(i + 1, texts[i]);
         string inputJson = JsonSerializer.Serialize(input, LlmJsonContext.Default.LlmBatchLineArray);
 
-        string userPrompt =
-            $"Translate from {sl} to {targetLang}. Return exactly {texts.Count} translated strings "
-            + "as a JSON array, in the same order as the input. Input:\n" + inputJson;
+        string userPrompt = LlmPromptPolicy.BuildBatchUserPrompt(targetLang, sourceLang, inputJson);
 
         string model = !string.IsNullOrWhiteSpace(_config.ModelName)
             ? _config.ModelName
@@ -1793,14 +1782,8 @@ public class TranslationService
     private async Task<string> TranslateWithLlmAsync(string text, string targetLang,
         string? sourceLang, CancellationToken ct)
     {
-        string sl = sourceLang ?? "auto-detect";
-        string basePrompt = !string.IsNullOrWhiteSpace(_config.SystemPrompt)
-            ? _config.SystemPrompt
-            : $"You are a professional translator. Translate the following text to {targetLang}.";
-        string systemPrompt = basePrompt
-            + "\n\nTranslate exactly one OCR line. Return exactly one line of translated text. "
-            + "Do not return explanations, notes, quotes, code fences, numbering, or the source text. "
-            + "Do not merge or split lines.";
+        string systemPrompt = LlmPromptPolicy.BuildSingleSystemPrompt(_config.SystemPrompt, targetLang);
+        string userPrompt = LlmPromptPolicy.BuildSingleUserPrompt(targetLang, sourceLang, text);
 
         string model = !string.IsNullOrWhiteSpace(_config.ModelName)
             ? _config.ModelName
@@ -1811,7 +1794,7 @@ public class TranslationService
             Model: model,
             Messages: [
                 new LlmChatMessage("system", systemPrompt),
-                new LlmChatMessage("user", $"Translate from {sl} to {targetLang}:\n\n{text}")
+                new LlmChatMessage("user", userPrompt)
             ],
             Temperature: LlmModelPolicy.TemperatureFor(model),
             MaxTokens: 4096
@@ -2064,7 +2047,9 @@ public class TranslationService
 
     private static string? ReadJsonTranslationText(JsonElement obj)
     {
-        foreach (var key in new[] { "text", "translation", "value" })
+        // 先读 translation：若模型把输入对象原样带回来，里面同时有 text（源文）和 translation，
+        // 旧顺序会把源文当成译文。value 是部分网关的别名；text 只作为最后兜底。
+        foreach (var key in new[] { "translation", "value", "text" })
         {
             if (obj.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String)
                 return value.GetString();
@@ -2208,15 +2193,11 @@ public class TranslationService
 
         string model = !string.IsNullOrWhiteSpace(_config.ModelName) ? _config.ModelName : LlmModelPolicy.DefaultModel;
 
-        // 提示词只要"逐行、按顺序、不带编号"这三件事；OCR 的文字内容刻意【不】进 prompt，
-        // 否则模型会照着文本翻而不是读图，那这条链路就退化成文本路了。
-        string instruction =
-            (string.IsNullOrWhiteSpace(_config.SystemPrompt)
-                ? "你是截图翻译引擎。读出图片里的文字并翻译成目标语言。"
-                : _config.SystemPrompt + "\n") +
-            $"目标语言：{targetLang}。" +
-            $"图中约 {expectedLineCount} 行文字：请按图中从上到下、从左到右的顺序输出等数量的行，" +
-            "每行一条译文；不要编号、不要解释、不要合并或拆分行、不要输出原文。";
+        // 输出契约交给 LlmPromptPolicy（精确行数/逐行/注入防护/保留规则）。
+        // OCR 的文字内容仍刻意【不】进 prompt，否则模型会照着文本翻而不是读图，
+        // 这条链路就退化成文本路了；只用 OCR 行数作为对齐锚点。
+        string instruction = LlmPromptPolicy.BuildVisionInstruction(
+            _config.SystemPrompt, targetLang, expectedLineCount);
 
         var requestBody = new LlmVisionRequest(
             Model: model,

@@ -289,7 +289,7 @@ public static class LocaleManager
                 "After OCR, translate the text through an LLM API for higher-quality output",
             ["提供商"] = "Provider",
             ["提示词"] = "Prompt",
-            ["留空使用默认翻译提示词..."] = "Leave empty for the default translation prompt…",
+            ["留空使用默认提示词；自定义只影响风格和术语"] = "Leave empty for the default prompt; custom text only affects style and terminology",
             ["字体名称"] = "Font name",
             ["前四项是应用内浮层，始终可见；「Windows 自带通知」不可用时自动回退为浮层。"] =
                 "The first four are in-app overlays and always visible; Windows notifications fall back to an overlay when unavailable.",

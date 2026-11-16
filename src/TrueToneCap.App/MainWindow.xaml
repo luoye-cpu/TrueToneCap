@@ -693,7 +693,7 @@
                                     </ComboBox>
                                 </Grid>
                                 <Grid ColumnDefinitions="100,*"><TextBlock Text="自定义模型" VerticalAlignment="Center"/><TextBox x:Name="LlmModelTxt" Grid.Column="1" PlaceholderText="deepseek-flash"/></Grid>
-                                <Grid ColumnDefinitions="100,*"><TextBlock Text="提示词" VerticalAlignment="Top" Margin="0,6,0,0"/><TextBox x:Name="LlmPromptTxt" Grid.Column="1" PlaceholderText="留空使用默认翻译提示词..." AcceptsReturn="True" Height="52" TextWrapping="Wrap"/></Grid>
+                                <Grid ColumnDefinitions="100,*"><TextBlock Text="提示词" VerticalAlignment="Top" Margin="0,6,0,0"/><TextBox x:Name="LlmPromptTxt" Grid.Column="1" PlaceholderText="留空使用默认提示词；自定义只影响风格和术语" AcceptsReturn="True" Height="52" TextWrapping="Wrap"/></Grid>
                             </StackPanel>
                         </Border>
 
