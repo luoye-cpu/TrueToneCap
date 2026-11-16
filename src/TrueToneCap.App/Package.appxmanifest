@@ -29,7 +29,7 @@
   <Identity
     Name="luoye-cpu.TrueToneCap"
     Publisher="CN=301BF257-514D-402F-B9D2-1C698A29F2F9"
-    Version="0.3.16.0"
+    Version="0.3.17.0"
     ProcessorArchitecture="x64" />
 
   <Properties>

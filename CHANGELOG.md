@@ -16,6 +16,16 @@
 ---
 
 
+## [0.3.17] — 2026-11-16：LLM 批量翻译加固与 PNG「优」档
+
+- **LLM 文本翻译改为结构化批量**：一次请求返回带 `id` 的 JSON 对象数组，按 `id` 对齐而不是按位置拼接；缺 `id`、对象/字符串混合、重复或缺失行一律整批拒收，避免静默错行。单行清洗不再用 `Contains("i cannot")`、`StartsWith("note:")` 这类宽匹配——`I cannot open the file`、`Note: takes effect after saving`、`I'm sorry, something went wrong` 等合法 UI 文案不再被误拒，真正的拒答句仍拒收。
+- **失败分类与回退语义**：404/405/410 直接判为不可恢复配置错误，不再拆片、不再逐行放大；400/422 保留一次拆片，若两半都失败且零救回则停止逐行重试。同一 LLM 优先重试，仍失败才显式回退到下一后端并保留错误原因；回退错误不再携带 LLM 响应体。同时修正取消传播，取消后不再继续回退链。
+- **提示词与界面口径**：收紧「只返回 JSON」、批量 `id`、视觉行数、拒答判据；空端点给出警告；视觉+离线模式文案全部显示，E2E 默认执行。
+- **2026-11 LLM 预设**：更新国内外主流供应商与模型，新增 OpenRouter、OpenCode Zen 聚合平台预设；旧模型名迁移只在空端点或已知预设端点上生效，自定义网关的 `deepseek-chat`、`gpt-4o-mini` 等原样保留。
+- **PNG 新增「优」档**：PNG 从两档扩为三档，默认仍是「均衡」`Smallest`；新增「优」`Optimal` = level 9 + 固定 Sub/Paeth 候选各压一次取最小，最慢但可能更小。TIFF/WebP 档位与默认值不变。
+- **验证**：Release 构建 0 警告 / 0 错误；8 个测试套件共 2905 条断言通过（unit 2238、color 291、encoding 23、service 4、OCR 12、QR 47、format 52、usability 238）。新增判据覆盖 404/400 行为、缺 `id` 拒收、合法英文文案反例、自定义端点保留、16-bit「优」档回环。外部 precision 判据因本机缺 Pillow/PIL 使用 `-SkipPrecision` 跳过，发布门禁使用 `-SkipPublishGates` 跳过；这两项没有计为通过。
+- **版本坐标**：`Directory.Build.props` 三行、`Package.appxmanifest` 的 `Identity/@Version`、README 徽章统一为 `0.3.17` / `0.3.17.0`；微软商店提交包与 GitHub 绿色包同版本。
+
 ## [0.3.16] — 2026-11-13：商店中文名独立为「真色截图」
 
 - **商店显示名本地化**：`Package.appxmanifest` 的 `DisplayName` 改为 `ms-resource:AppDisplayName`；新增 `Strings\zh-CN\Resources.resjson`（`真色截图`）与 `Strings\en-US\Resources.resjson`（`TrueToneCap`）。SDK 生成的 `priconfig.xml` 由 `scripts\patch-priconfig.ps1` 在 `Strings` 下插入 folder + `RESJSON` 索引；`.resw` 在本工具链的 `resources.resfiles` 索引下会触发 PRI224，故不用 `.resw`。中文商店名不再依附在英文品牌后，英文名保持 `TrueToneCap`，包标识与产品 ID 不变。

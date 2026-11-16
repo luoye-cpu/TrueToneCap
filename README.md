@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.16** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
+> **v0.3.17** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
 > 
 > 🔒 **Secure**: Command injection prevention | ♿ **Accessible**: WCAG 2.1 AA partial compliance
 
@@ -248,6 +248,14 @@ native 工具清单与可启动性，外加"二进制内嵌 commit 是否等于�
 - 归档原因与"能力并入主程序"的落点见 [docs/vscap-mode.md](docs/vscap-mode.md)：
   富文本文字（字体/字号/加粗/斜体 + 再编辑/拖动）、统一撤销栈、置顶贴图窗已并入主程序；
   Qt 侧车、`BuildVSCap.ps1` 与「VS-Cap 模式」开关已从产品移除（源码在 git 历史里）。
+
+### v0.3.17（2026-11-16）
+
+- **LLM 翻译批量链路加固**：文本翻译改为带 `id` 的结构化 JSON 批量，按 `id` 对齐而不是按位置；缺 `id`、对象/字符串混合、重复/缺失行整批拒收，避免静默错行。单行清洗不再宽匹配 `i cannot` / `note:`，合法英文 UI 文案不再被误拒。
+- **失败分类与回退**：404/405/410 直接判配置错误，不拆片、不逐行放大；400/422 最多拆一次，两半都零救回则停止逐行重试。同 LLM 先重试，仍失败才显式回退并保留错误原因；回退错误不再携带 LLM 响应体。
+- **2026-11 LLM 预设**：更新国内外主流模型，新增 OpenRouter、OpenCode Zen 聚合平台；旧模型名迁移仅对空端点或已知预设端点生效，自定义网关模型名原样保留。
+- **PNG「优」档**：PNG 扩为三档，默认仍是「均衡」`Smallest`；新增「优」`Optimal`（level 9 + 固定 Sub/Paeth 候选取最小），TIFF/WebP 默认不变。
+- **验证**：Release 构建 0 警告/0 错误；8 套件 2905 条断言通过。外部 precision 与发布门禁在本轮开发验证中分别以 `-SkipPrecision` / `-SkipPublishGates` 跳过，未计为通过；发版前由 `Publish.ps1` 重新跑发布门禁。逐条见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ### v0.3.16（2026-11-13）
 
