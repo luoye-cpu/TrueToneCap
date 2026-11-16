@@ -4,6 +4,14 @@
 
     <!-- ═══ High Contrast Mode Theme Overrides ═══ -->
     <!-- 2026-11-08: WCAG 2.1 AA compliance - Add high contrast theme for accessibility mode -->
+    <!--
+        ⚠ 2026-11-16（商店用户白底白字事故）：
+        本文件曾被 App.xaml 无条件全局合并。这里硬编码的白色 surface / 黑色边框在
+        深色或系统高对比度主题下会和 WinUI 的白色前景冲突 ⇒ 白底白字、控件不可读。
+        现已从 App.xaml 的 MergedDictionaries 移除。高对比度请使用 WinUI 自带主题；
+        若将来要恢复本文件，必须改为 SystemColor* 画笔，并且只在 HighContrast
+        主题字典内生效，禁止全局合并。
+    -->
     
     <!-- Core system colors for high contrast -->
     <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#FF000000"/>

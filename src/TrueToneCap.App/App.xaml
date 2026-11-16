@@ -28,8 +28,15 @@
 
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
-                <!-- WCAG 2.1 AA: High contrast theme (2026-11-08) -->
-                <ResourceDictionary Source="ms-appx:///Resources/HighContrastTheme.xaml"/>
+                <!--
+                    ═══ 2026-11-16 修复：HighContrastTheme.xaml 不再全局合并 ═══
+                    它把 SolidBackgroundFillColorBase / CardBackgroundFillColorDefault 硬编码成白色，
+                    又把 CardStrokeColorDefaultBrush 硬编码成黑色；在深色或系统高对比度主题下，
+                    默认 TextBlock/ComboBox 前景仍是白色 ⇒ 白底白字（商店用户实测截图）。
+                    高对比度模式交给 WinUI 自带的 HighContrast 主题资源；本字典只保留文件作审计参考，
+                    禁止再放回 MergedDictionaries。需要自定义高对比样式时必须使用 SystemColor* 画笔，
+                    不得硬编码浅色 surface。
+                -->
                 <!-- WCAG 2.1 AA: Focus visual enhancement styles (2026-11-08) -->
                 <ResourceDictionary Source="ms-appx:///Resources/FocusVisualStyles.xaml"/>
                 <!-- WCAG 2.1 AA: General accessibility enhancements (2026-11-08) -->
