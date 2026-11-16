@@ -518,7 +518,7 @@ public sealed class SettingsService
         FitTag(s.GainMapMode, v => s.GainMapMode = v, dft.GainMapMode, "Gray", "Rgb");
         // 2026-11-16 LLM 模型预设换代：把旧设置里的 deepseek-chat / gpt-4o-mini / glm-4.7-flash
         // 等已下线或过时的模型名迁移到新预设；未知模型名保持原样（可能来自用户自定义端点）。
-        s.LlmModel = TrueToneCap.Core.Services.LlmModelPolicy.Normalize(s.LlmModel);
+        s.LlmModel = TrueToneCap.Core.Services.LlmModelPolicy.Normalize(s.LlmModel, s.LlmEndpoint);
         // ═══ 2026-11-03：JPEG 增益图元数据承载方式的白名单 ═══
         // 元数据承载的 FitTag 已删（2026-11-03 二次收口：JPEG 恒写 ISO 21496-1，
         // 不做用户抉择；settings.json 里的遗留键被静默忽略）
@@ -563,11 +563,12 @@ public sealed class SettingsService
         // ── 位深：按格式钳制（各格式实际支持的集合不同，详见 NormalizeBitDepth）──
         NormalizeBitDepth(s);
 
-        // ── 压缩强度档位（2026-10-07 用户口径；2026-10-29 扩到 PNG / TIFF 并分成两组）──
+        // ── 压缩强度档位（2026-10-07 用户口径；2026-10-29 扩到 PNG / TIFF；2026-11-16 PNG 增「优」）──
         // 逐格式各一栏：AVIF / JPEG XL / WebP / JPEG LI 的 effort/speed 旋钮 + PNG / TIFF 的无损 deflate 档。
-        // ⚠ 2026-10-29 用户把菜单分成两组：<b>AVIF / JPEG XL 三档</b>（默认均衡），
-        //   <b>PNG / TIFF / WebP / JPEG LI 两档</b>（显示名「均衡」= Tag Smallest = 拉满，默认；「快速」= Quick）。
-        //   两组的合法值集合不同，所以走两条不同的收口通道 —— 见 FitTwoTierEffort 的备注，
+        // ⚠ 当前菜单分三组：<b>AVIF / JPEG XL 三档</b>（默认均衡）；
+        //   <b>PNG 三档</b>（优 Optimal / 均衡 Smallest / 快速 Quick，默认 Smallest）；
+        //   <b>TIFF / WebP 两档</b>（默认 Smallest）。JPEG LI 已退出压缩强度体系，改用独立的色彩空间开关。
+        //   各组合法值集合不同，所以走不同收口通道 —— 见 FitEffortMenu 的备注，
         //   那里写的为什么两档格式【不能】继续用 FitTag。
         // 用 FitTag 而不是自己写 if：它是本文件既有的"合法值收口"通道，同时负责
         // 「大小写不符时改写成 Tag 拼法」—— 自己写比较会漏掉那一半（见 FitTag 的备注）。
@@ -575,11 +576,11 @@ public sealed class SettingsService
         //   口径一致（设置被绕过时仍安全），是有意的双保险而非重复。
         FitTag(s.EffortAvif, v => s.EffortAvif = v, dft.EffortAvif, "Smallest", "Balanced", "Fastest");
         FitTag(s.EffortJpegXl, v => s.EffortJpegXl = v, dft.EffortJpegXl, "Smallest", "Balanced", "Fastest");
-        FitTwoTierEffort(s.EffortWebp, v => s.EffortWebp = v, dft.EffortWebp, "Smallest", "Quick");
+        FitEffortMenu(s.EffortWebp, v => s.EffortWebp = v, dft.EffortWebp, "Smallest", "Quick");
         // PNG 自 2026-11-16 起三档：优（Optimal）/ 均衡（Smallest）/ 快速（Quick）。
         // 旧三档时代写盘的 Balanced/Fastest 仍折向 tags[^1] = Quick（与两档格式同一迁移口径）。
-        FitTwoTierEffort(s.EffortPng, v => s.EffortPng = v, dft.EffortPng, "Optimal", "Smallest", "Quick");
-        FitTwoTierEffort(s.EffortTiff, v => s.EffortTiff = v, dft.EffortTiff, "Smallest", "Quick");
+        FitEffortMenu(s.EffortPng, v => s.EffortPng = v, dft.EffortPng, "Optimal", "Smallest", "Quick");
+        FitEffortMenu(s.EffortTiff, v => s.EffortTiff = v, dft.EffortTiff, "Smallest", "Quick");
         // JPEG LI 色彩空间（2026-11-12 用户拍板新增）：xyb 不属于压缩强度档位（cjpegli 也无别的
         // effort 旋钮），独立二态开关；默认 Xyb（体积优先，与改栏前的默认输出一致），
         // Traditional 是兼容回退档。旧 EffortJpegLi 键（Smallest/Quick）自本版起不被读取，
@@ -737,8 +738,8 @@ public sealed class SettingsService
         set(def);
     }
 
-    /// <summary>两档格式（PNG / TIFF / WebP / JPEG LI）的档位收口（2026-10-29 用户口径）。
-    /// <para>与 <see cref="FitTag"/> 只差一件事，而那件事是<b>迁移</b>不是回落：这四个格式
+    /// <summary>压缩强度菜单收口（PNG 三档；TIFF / WebP 两档；JPEG LI 已退出本通道）。
+    /// <para>与 <see cref="FitTag"/> 只差一件事，而那件事是<b>迁移</b>不是回落：这些格式
     /// 在两档化之前是三档（Smallest / Balanced / Fastest），老用户盘上写的正是后两个词。
     /// 用 FitTag 的话 <c>"Balanced"</c> 会作为"合法值"原样留下 ⇒ 界面侧
     /// <c>SetComboByTag</c> 在只有两格的下拉里找不到它，下拉显示空白并留一条 Warn，
@@ -758,8 +759,8 @@ public sealed class SettingsService
     /// 的纪律一致 —— 迁移只认旧词，不给未知值猜意图。空值不改写，交由下游按默认处理。</para>
     /// <para><c>tags</c> 必须按<b>慢 → 快</b>写：旧词折向的是 <c>tags[^1]</c>（最快的那一格），
     /// 顺序写反就等于把"我不要最慢"迁成了"我要最慢"。判据
-    /// <c>CorePipelineTests.Test_SettingsEffort_TwoTierMenuAndMigration</c> 逐字段钉这个顺序。</para></summary>
-    private static void FitTwoTierEffort(string current, Action<string> set, string def, params string[] tags)
+    /// <c>CorePipelineTests.Test_SettingsEffort_MenuAndMigration</c> 逐字段钉这个顺序。</para></summary>
+    private static void FitEffortMenu(string current, Action<string> set, string def, params string[] tags)
     {
         if (string.IsNullOrEmpty(current)) return;
         foreach (var t in tags)

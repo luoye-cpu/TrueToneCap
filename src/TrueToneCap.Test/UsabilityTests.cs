@@ -156,6 +156,7 @@ public static class UsabilityTests
         Console.WriteLine("\n── 10. PNG 编码器专项 ──");
         Png_AllBitDepths();
         Png_16bit_Roundtrip();
+        Png_Optimal16_Roundtrip();
         // 2026-09-19：Png_IccAndCicp_MutualExclusion → Png_IccAndCicp_Coexist（源码从不互斥，见该方法注释）
         Png_IccAndCicp_Coexist();
         Png_StreamOutput();
@@ -1665,6 +1666,64 @@ public static class UsabilityTests
             if (p10.Samples[i] != 65472) { alphaClamped = false; break; }
         Assert("PNG 10-bit: 65535 钳到容器内最高台阶 65472（不回绕成 0）", alphaClamped,
             $"实际 {p10.Samples[3]}");
+    }
+
+    /// <summary>
+    /// 2026-11-16：PNG「优」档的 16-bit + omitAlpha 路径必须仍能往返。
+    /// <para>这条专门咬 16-bit RGB 的 bpp：Encode16 的 omitAlpha 输出 color type 2（每像素 6 字节），
+    /// 分带 brute / Entropy / Sub/Paeth 候选只要把 bpp 当成 8，反向滤波后的像素就会整体错位。
+    /// 同时核对 cICP 原样保留、16-bit 容器不写 sBIT。</para>
+    /// </summary>
+    static void Png_Optimal16_Roundtrip()
+    {
+        const int w = 7, h = 5;
+        var rgba16 = new ushort[w * h * 4];
+        for (int i = 0; i < w * h; i++)
+        {
+            rgba16[i * 4 + 0] = (ushort)((i * 2731 + 17) & 0xFFFF);
+            rgba16[i * 4 + 1] = (ushort)((65535 - i * 3571) & 0xFFFF);
+            rgba16[i * 4 + 2] = (ushort)((i * 7919 + 101) & 0xFFFF);
+            rgba16[i * 4 + 3] = (ushort)(i % 3 == 0 ? 65535 : 0);
+        }
+
+        string path = Path.Combine(OutDir, "png_optimal16_omit_alpha.png");
+        if (File.Exists(path)) File.Delete(path);
+        ManagedPngEncoder.Encode16(
+            FormatHelper.Rgba16ToBgra16Bytes(rgba16, w, h), w, h, path,
+            cicp: [9, 16, 0, 1], iccProfile: null, bitDepth: 16, fastest: false,
+            effort: CompressionEffort.Optimal, omitAlpha: true);
+
+        var png = TryReadPng(path, "PNG Optimal 16-bit omitAlpha");
+        if (png is null) return;
+
+        Assert("PNG Optimal 16-bit: IHDR 仍为 16-bit / colorType 2（omitAlpha 生效）",
+            png.Width == w && png.Height == h && png.BitDepth == 16 && png.ColorType == 2,
+            $"实际 {png.Width}x{png.Height} / {png.BitDepth} / ct{png.ColorType}");
+        Assert("PNG Optimal 16-bit: 16-bit 容器不写 sBIT",
+            png.Find("sBIT") is null, string.Join(",", png.Chunks.Select(c => c.Type)));
+        var cicp = png.Find("cICP");
+        Assert("PNG Optimal 16-bit: cICP 原样保留",
+            cicp is { Length: 4 } && cicp.SequenceEqual(new byte[] { 9, 16, 0, 1 }),
+            cicp is null ? "缺 cICP" : string.Join(",", cicp));
+        Assert("PNG Optimal 16-bit: IDAT/IEND 结构完整",
+            png.Count("IDAT") >= 1 && png.Has("IEND") && png.Chunks[^1].Type == "IEND",
+            string.Join(",", png.Chunks.Select(c => c.Type)));
+
+        int expected = w * h * 3;
+        bool same = png.Samples.Length == expected;
+        int firstBad = -1;
+        for (int i = 0; same && i < w * h; i++)
+            for (int c = 0; c < 3; c++)
+                if (png.Samples[i * 3 + c] != rgba16[i * 4 + c])
+                {
+                    same = false;
+                    firstBad = i * 3 + c;
+                    break;
+                }
+        Assert("PNG Optimal 16-bit: 去掉 alpha 后 RGB 每采样逐值相等（bpp=6 滤波还原正确）",
+            same,
+            same ? $"{expected} 个 RGB 采样全等"
+                 : $"首个不符 #{firstBad}（期望 {rgba16[(firstBad / 3) * 4 + firstBad % 3]}，实际 {(firstBad >= 0 && firstBad < png.Samples.Length ? png.Samples[firstBad] : 0)}）");
     }
 
     static void Png_IccAndCicp_Coexist()

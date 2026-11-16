@@ -3940,7 +3940,7 @@ public static class CorePipelineTests
 
     /// <summary>
     /// PNG / TIFF 纳入「压缩强度」档位的接线判据（2026-10-29，用户点名"编码速度相对过慢的几个给档位"，
-    /// 同日把菜单定成两组：PNG / TIFF / WebP / JPEG LI 两档，AVIF / JPEG XL 三档）。
+    /// 同日把菜单定成两组：TIFF / WebP 两档，AVIF / JPEG XL 三档；2026-11-16 PNG 增「优」成三档）。
     /// <para>这一批改动的产物副作用面很大（默认档一改，所有没动过设置的人的 PNG/TIFF 字节都变），
     /// 所以判据重点在**接线形态**：档位必须真的走到 deflate，而"不该受档位影响"的那些出口
     /// （中转文件、保底 PNG、诊断件、测试夹具）必须一个都没被牵连。</para>
@@ -4024,7 +4024,7 @@ public static class CorePipelineTests
             "仍残留硬编码档位，或映射函数没被调用");
 
         // ── ④ 设置侧：字段默认、下拉格数、管线按格式读、界面接线，以及"两处默认值事实源必须同源" ──
-        // 默认档与格数的分布是 2026-10-29 用户逐条点定的（PNG/TIFF/WebP = 两档、默认那格显示
+        // 默认档与格数的分布是 2026-10-29 用户逐条点定的（TIFF/WebP = 两档、PNG = 三档、默认那格显示
         // 「均衡」但 Tag 仍是 Smallest=拉满；
         // AVIF/JXL = 三档、默认均衡；JPEG LI 已于 2026-11-12 退出档位体系，见下方 ④c）。
         // 差集序列化不会把"等于默认"的键写进文件 ⇒ 这里的默认值对老用户真的生效，
@@ -6577,6 +6577,10 @@ public static class CorePipelineTests
         Bad("译文含换行/解释", "[\"你好\\n世界\",\"世界\"]", 2);
         Bad("重复 id", "{\"translations\":[{\"id\":1,\"text\":\"你好\"},{\"id\":1,\"text\":\"世界\"}]}", 2);
         Bad("缺 id", "{\"translations\":[{\"id\":1,\"text\":\"你好\"}]}", 2);
+        Bad("对象数组漏 id 不得按位置回填",
+            "{\"translations\":[{\"text\":\"世界\"},{\"text\":\"你好\"}]}", 2);
+        Bad("对象/字符串混合数组不得静默回填",
+            "{\"translations\":[{\"id\":1,\"text\":\"你好\"},\"世界\"]}", 2);
         Bad("非法 JSON", "not json at all", 2);
 
         // 单行输出：允许编号/引号/代码块前缀，拒绝多行与解释性文字
@@ -6586,6 +6590,20 @@ public static class CorePipelineTests
         Assert("单行清理：多行必须拒收", TranslationService.SanitizeSingleLine("你好\n世界") is null);
         Assert("单行清理：解释性文字必须拒收",
             TranslationService.SanitizeSingleLine("Note: the original tone was changed") is null);
+
+        // 反例同样重要：合法英文 UI 文案不能被“i cannot / note: / i'm sorry”宽匹配误杀。
+        Assert("单行清理：合法英文能力提示不误拒",
+            TranslationService.SanitizeSingleLine("I cannot open the file") == "I cannot open the file");
+        Assert("单行清理：合法 Note 标签不误拒",
+            TranslationService.SanitizeSingleLine("Note: takes effect after saving") == "Note: takes effect after saving");
+        Assert("单行清理：含 source 的合法警告不误拒",
+            TranslationService.SanitizeSingleLine("Note: source file will be overwritten") == "Note: source file will be overwritten");
+        Assert("单行清理：合法英文错误文案不误拒",
+            TranslationService.SanitizeSingleLine("I'm sorry, something went wrong") == "I'm sorry, something went wrong");
+        Assert("单行清理：真正的拒答仍拒收",
+            TranslationService.SanitizeSingleLine("I'm sorry, but I cannot assist with that.") is null);
+        Assert("单行清理：纯道歉式拒答仍拒收",
+            TranslationService.SanitizeSingleLine("I'm sorry.") is null);
 
         // 分片边界：空行夹在中间时不能用“区间 + 非空计数”，否则后面的行会被漏掉
         var groups = TranslationService.BuildLlmBatchChunkIndices(new[] { "a", "", "b", "c" });
@@ -6789,6 +6807,12 @@ public static class CorePipelineTests
             Kind(new TranslationService.LlmHttpException(503, null, "busy")) == "Transient");
         Assert("400 必须归为 Protocol（多半是请求/模型名问题，不是网络抖动）",
             Kind(new TranslationService.LlmHttpException(400, null, "bad request")) == "Protocol");
+        Assert("404 必须归为 Configuration（端点路径/模型名错误，拆片与逐行都不会成功）",
+            Kind(new TranslationService.LlmHttpException(404, null, "model not found")) == "Configuration");
+        Assert("405 必须归为 Configuration（端点不接受该路径/方法）",
+            Kind(new TranslationService.LlmHttpException(405, null, "method not allowed")) == "Configuration");
+        Assert("410 必须归为 Configuration（端点已下线/迁移）",
+            Kind(new TranslationService.LlmHttpException(410, null, "gone")) == "Configuration");
         Assert("无状态码的网络异常必须归为 Transient",
             Kind(new HttpRequestException("connection reset")) == "Transient");
         Assert("HTTP 错误摘要不带响应体（响应体可能含服务商内部信息）",
@@ -7070,6 +7094,32 @@ public static class CorePipelineTests
                 $"failed={result.FailedCount} retry={result.LlmRetryCount} req={server.RequestCount} err={result.FirstError}");
         }
 
+        // ④b 404：端点路径/模型名不存在，拆片和逐行都不会成功 ⇒ 只发一次请求，不能放大成 N 次。
+        using (var server = new FakeLlmServer((_, _) => (404, "{\"error\":\"model not found\"}", null)))
+        {
+            var result = new TranslationService(ConfigFor(server.Endpoint))
+                .TranslateBatchAsync(["A", "B"], "zh-CN").GetAwaiter().GetResult();
+            Assert("404/Configuration：只请求一次、不拆片、不逐行，显式保留 404 错误",
+                result.FailedCount == 2 && result.DegradedCount == 0 && result.LlmRetryCount == 0
+                && result.FallbackCount == 0 && result.Mode == "LLM 批量"
+                && result.FirstError is not null && result.FirstError.Contains("404")
+                && server.RequestCount == 1,
+                $"failed={result.FailedCount} fallback={result.FallbackCount} retry={result.LlmRetryCount} mode={result.Mode} req={server.RequestCount} err={result.FirstError}");
+        }
+
+        // ④c 400：允许拆小一次；但两半都失败且一行没救回时，不再逐行放大成 N 次必败请求。
+        using (var server = new FakeLlmServer((_, _) => (400, "{\"error\":\"bad request\"}", null)))
+        {
+            var result = new TranslationService(ConfigFor(server.Endpoint))
+                .TranslateBatchAsync(["A", "B", "C", "D"], "zh-CN").GetAwaiter().GetResult();
+            Assert("400/Protocol：批量 + 一次拆片后停止，不逐行放大必败请求",
+                result.FailedCount == 4 && result.DegradedCount == 0 && result.LlmRetryCount == 0
+                && result.FallbackCount == 0 && result.Mode == "LLM 批量"
+                && result.FirstError is not null && result.FirstError.Contains("400")
+                && server.RequestCount == 3,
+                $"failed={result.FailedCount} fallback={result.FallbackCount} retry={result.LlmRetryCount} mode={result.Mode} req={server.RequestCount} err={result.FirstError}");
+        }
+
         // ⑤ 解析一直失败 → 同 LLM 逐行兜底（每行一次），全部救回、无跨后端。
         using (var server = new FakeLlmServer((_, _) => (200, ChatResponse(1), null)))
         {
@@ -7120,6 +7170,17 @@ public static class CorePipelineTests
             LlmModelPolicy.Normalize("") == LlmModelPolicy.DefaultModel);
         Assert("未知模型名原样保留（自定义端点不被改写）",
             LlmModelPolicy.Normalize("my-custom-model") == "my-custom-model");
+        Assert("旧模型名在自定义网关上原样保留（不能被预设迁移静默改写）",
+            LlmModelPolicy.Normalize("deepseek-chat", "https://my-gateway.example/v1") == "deepseek-chat");
+        Assert("旧模型名在已知预设端点上仍迁移（老设置继续可用）",
+            LlmModelPolicy.Normalize("deepseek-chat", "https://api.deepseek.com/v1") == "deepseek-flash");
+        Assert("空端点沿用旧迁移行为（没有端点信息时按预设处理）",
+            LlmModelPolicy.Normalize("gpt-4o-mini", null) == "gpt-5.4-mini");
+        var settingsPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SettingsService.cs"));
+        Assert("设置加载把端点传给模型迁移（否则自定义端点仍会被改写）",
+            settingsPath is not null
+            && File.ReadAllText(settingsPath).Contains("LlmModelPolicy.Normalize(s.LlmModel, s.LlmEndpoint)"),
+            "SettingsService 仍在只传模型名");
 
         Assert("Claude 5 省略 temperature（Anthropic 兼容层要求）",
             LlmModelPolicy.TemperatureFor("claude-sonnet-5") is null);
@@ -8013,7 +8074,7 @@ public static class CorePipelineTests
         // PNG / TIFF 于 2026-10-29 纳入（用户点名"编码速度相对过慢的几个要给档位"）。
         CheckWhitelistEqualsTags(xaml, srv, "EffortPngCbo", "s.EffortPng", expectTags: 3);
         CheckWhitelistEqualsTags(xaml, srv, "EffortTiffCbo", "s.EffortTiff", expectTags: 2);
-        Test_SettingsEffort_TwoTierMenuAndMigration(srv);
+        Test_SettingsEffort_MenuAndMigration(srv);
 
         // ── 档位 → 底层参数的映射（2026-10-07 起；每个数字背后都有一次实测）──
         // 值本身见 docs/reviews/compression/encoder-params-and-smallest-tier-2026-10-07.md。
@@ -8243,11 +8304,11 @@ public static class CorePipelineTests
     }
 
     /// <summary>
-    /// 两档格式（WebP / JPEG LI / PNG / TIFF）的菜单顺序 + 三档旧词迁移。
+    /// 压缩强度菜单（TIFF / WebP 两档、PNG 三档）的菜单顺序 + 旧词迁移。
     /// <para>补的是 <see cref="CheckWhitelistEqualsTags"/> 看不见的两件事，因为它比的是<b>集合</b>
     /// 相等（Except 双向），顺序与迁移分支对它都是盲区：</para>
     /// <list type="number">
-    /// <item><b>顺序</b>。<c>FitTwoTierEffort</c> 把旧词折向 <c>tags[^1]</c> —— 末位必须是"更快"那一格。
+    /// <item><b>顺序</b>。<c>FitEffortMenu</c> 把旧词折向 <c>tags[^1]</c> —— 末位必须是"更快"那一格。
     /// 调用点把两个 Tag 写反（<c>"Quick", "Smallest"</c>）时白名单集合不变、判据不红，
     /// 但一次升级会把"我不要最慢"迁成"我要最慢"（PNG 上每张多等约 20 秒）。
     /// 这不是假想：本仓 2026-09-15 的 <c>FormatIndex</c> 缺陷就是"表序与代码序不一致"，
@@ -8261,22 +8322,22 @@ public static class CorePipelineTests
     /// 撤掉 CopyCompiledShadersForTests 的记录），App 侧没有可加载的入口 ⇒ 沿用本仓对
     /// XAML↔SettingsService 的既有做法（文本交叉核对），并把"解析不到"一律判红而不是跳过。</para>
     /// </summary>
-    static void Test_SettingsEffort_TwoTierMenuAndMigration(string srv)
+    static void Test_SettingsEffort_MenuAndMigration(string srv)
     {
         var two = new[] { "EffortWebp", "EffortTiff" };
         var three = new[] { "EffortAvif", "EffortJpegXl" };
         var pngThree = new[] { "EffortPng" };
 
-        // ── ① 三个调用点确实走 FitTwoTierEffort（PNG 自 2026-11-16 起借同一通道收三格）──
+        // ── ① 三个调用点确实走 FitEffortMenu（PNG 自 2026-11-16 起借同一通道收三格）──
         // （EffortJpegLi 曾是第四个，2026-11-12 退出档位体系后收口通道不再有它。）
-        int twoTierCalls = Regex.Matches(srv, @"\bFitTwoTierEffort\(s\.").Count;
-        Assert($"两档收口通道被 3 个字段调用（实得 {twoTierCalls}）", twoTierCalls == 3,
+        int effortMenuCalls = Regex.Matches(srv, @"\bFitEffortMenu\(s\.").Count;
+        Assert($"压缩强度收口通道被 3 个字段调用（实得 {effortMenuCalls}）", effortMenuCalls == 3,
             "少一处 = 那个格式还在用三档白名单 FitTag，盘上能留着一个界面上没有的档");
 
         foreach (var f in two)
         {
-            var call = Regex.Match(srv, @"FitTwoTierEffort\(s\." + f + @"[^)]*\)");
-            Assert($"{f}: 找到两档收口调用", call.Success, $"解析不到 FitTwoTierEffort(s.{f}…)");
+            var call = Regex.Match(srv, @"FitEffortMenu\(s\." + f + @"[^)]*\)");
+            Assert($"{f}: 找到压缩强度收口调用", call.Success, $"解析不到 FitEffortMenu(s.{f}…)");
             if (!call.Success) continue;
             var listed = ExtractQuotedValues(call.Value, "\"");
             Assert($"{f}: 菜单按【慢 → 快】写成 Smallest, Quick（旧词折向 tags[^1]，末位必须是更快那格）",
@@ -8288,8 +8349,8 @@ public static class CorePipelineTests
 
         foreach (var f in pngThree)
         {
-            var call = Regex.Match(srv, @"FitTwoTierEffort\(s\." + f + @"[^)]*\)");
-            Assert($"{f}: 找到三格收口调用", call.Success, $"解析不到 FitTwoTierEffort(s.{f}…)");
+            var call = Regex.Match(srv, @"FitEffortMenu\(s\." + f + @"[^)]*\)");
+            Assert($"{f}: 找到三格收口调用", call.Success, $"解析不到 FitEffortMenu(s.{f}…)");
             if (!call.Success) continue;
             var listed = ExtractQuotedValues(call.Value, "\"");
             Assert($"{f}: 菜单按【慢 → 快】写成 Optimal, Smallest, Quick（旧词仍折向 tags[^1]）",
@@ -8313,8 +8374,8 @@ public static class CorePipelineTests
         }
 
         // ── ③ 迁移表必须同时认下三档时代的两个旧词，且折向 tags[^1] 而不是写死 "Quick" ──
-        var helper = Regex.Match(srv, @"private static void FitTwoTierEffort\([\s\S]*?\r?\n    \}");
-        Assert("FitTwoTierEffort 方法体解析到", helper.Success,
+        var helper = Regex.Match(srv, @"private static void FitEffortMenu\([\s\S]*?\r?\n    \}");
+        Assert("FitEffortMenu 方法体解析到", helper.Success,
             "签名或收尾变了 ⇒ 本判据看不见那条迁移分支了，必须让它红而不是静默跳过");
         if (helper.Success)
         {
@@ -9070,12 +9131,12 @@ public static class CorePipelineTests
     /// </summary>
     static List<string> ExtractIsOneOfArgs(string cs, string propertyRef)
     {
-        // 两条收口通道都要认（2026-10-29 压缩强度分成三档/两档两组，新增 FitTwoTierEffort）：
+        // 两条收口通道都要认（2026-10-29 压缩强度分成三档/两档两组，新增 FitEffortMenu）：
         // 只认 FitTag 的话，四个两档格式的白名单会被解析成"没找到"⇒ 下面那条
         // "白名单: 解析到 X 的合法值"直接红，而红会被读成"白名单没写"。
-        // 两个前缀互不为子串（"FitTwoTierEffort(" 里不含 "FitTag("），所以不存在串台。
+        // 两个前缀互不为子串（"FitEffortMenu(" 里不含 "FitTag("），所以不存在串台。
         int idx = cs.IndexOf("FitTag(" + propertyRef, StringComparison.Ordinal);
-        if (idx < 0) idx = cs.IndexOf("FitTwoTierEffort(" + propertyRef, StringComparison.Ordinal);
+        if (idx < 0) idx = cs.IndexOf("FitEffortMenu(" + propertyRef, StringComparison.Ordinal);
         if (idx < 0) return new List<string>();
         int close = cs.IndexOf(')', idx);
         var seg = close > idx ? cs[idx..close] : cs[idx..];

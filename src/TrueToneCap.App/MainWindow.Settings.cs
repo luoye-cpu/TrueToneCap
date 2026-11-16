@@ -250,10 +250,10 @@ public sealed partial class MainWindow : Window
         if (GainMapModeCbo is not null) SetComboByTag(GainMapModeCbo, _settings.GainMapMode);
         // 元数据承载方式回显已删（2026-11-03 二次收口：恒写 ISO 21496-1，不做用户抉择）
 
-        // ═══ 压缩强度档位（2026-10-07；2026-10-29 扩到 PNG / TIFF 并分成两组）═══
+        // ═══ 压缩强度档位（2026-10-07；2026-10-29 扩到 PNG / TIFF；2026-11-16 PNG 增「优」）═══
         // 逐格式恢复各自的档位。SetComboByTag 已处理"未实化容器上写 IsSelected 是空操作"
         // 与"大小写不敏感"两件事，这里直接用即可。
-        // ⚠ 两组下拉格数不同（AVIF / JPEG XL 三格，PNG / TIFF / WebP / JPEG LI 两格），
+        // ⚠ 下拉格数不同（AVIF / JPEG XL 三格、PNG 三格、TIFF / WebP 两格；JPEG LI 是独立色彩空间开关），
         //   所以这里的六行是"逐格式点名"而不是扫一遍可视树：卡片默认 Collapsed，
         //   项不在可视树里时扫不到 ⇒ 只能显式写全六个（漏一个 = 重启后那一格落回 XAML 的默认档）。
         if (EffortAvifCbo is not null) SetComboByTag(EffortAvifCbo, _settings.EffortAvif);

@@ -275,6 +275,8 @@ public class TranslationService
         {
             401 => $"自定义 LLM 返回 401（{h.Message}）—— 是 API 密钥不对或该模型未开通，不是网络问题",
             403 => $"自定义 LLM 返回 403（{h.Message}）—— 密钥没有访问该模型的权限，不是网络问题",
+            404 or 410 => $"自定义 LLM 返回 {h.StatusCode}（{h.Message}）—— API 路径或模型名不存在，请检查端点和模型名，不是网络问题",
+            405 => $"自定义 LLM 返回 405（{h.Message}）—— 该端点不接受这个路径/方法，请检查 API 地址",
             429 => $"自定义 LLM 返回 429（{h.Message}）—— 额度或频率到顶了",
             var code => $"自定义 LLM 返回 HTTP {code}（{h.Message}）",
         },
@@ -685,6 +687,8 @@ public class TranslationService
         Timeout,
         RateLimited,
         Auth,
+        /// <summary>端点路径/模型不存在等配置错误：拆片和逐行都不会成功，必须立即停止同一 LLM。</summary>
+        Configuration,
         Transient,
         Unknown,
     }
@@ -700,6 +704,7 @@ public class TranslationService
     {
         LlmHttpException { StatusCode: 429 } => LlmBatchFailureKind.RateLimited,
         LlmHttpException { StatusCode: 401 or 403 } => LlmBatchFailureKind.Auth,
+        LlmHttpException { StatusCode: 404 or 405 or 410 } => LlmBatchFailureKind.Configuration,
         LlmHttpException { StatusCode: 408 } => LlmBatchFailureKind.Timeout,
         LlmHttpException { StatusCode: >= 500 } => LlmBatchFailureKind.Transient,
         LlmHttpException { StatusCode: 400 or 422 } => LlmBatchFailureKind.Protocol,
@@ -709,6 +714,8 @@ public class TranslationService
         JsonException or KeyNotFoundException => LlmBatchFailureKind.Protocol,
         HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden }
             => LlmBatchFailureKind.Auth,
+        HttpRequestException { StatusCode: HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed or HttpStatusCode.Gone }
+            => LlmBatchFailureKind.Configuration,
         HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests }
             => LlmBatchFailureKind.RateLimited,
         HttpRequestException { StatusCode: HttpStatusCode.RequestTimeout }
@@ -731,7 +738,7 @@ public class TranslationService
     /// <summary>
     /// 对失败分片做一次恢复：
     /// Parse/Protocol/Timeout → 拆小一次；RateLimited → 退避后同片重试一次；
-    /// Transient/Unknown → 短退避后同片重试一次；Auth/429 最终失败 → Fatal，调用方停止后续 LLM。
+    /// Transient/Unknown → 短退避后同片重试一次；Auth/404/405/410 等配置错误 → Fatal，调用方停止后续 LLM。
     /// </summary>
     private async Task<LlmBatchChunkOutcome> RecoverLlmBatchChunkAsync(
         IReadOnlyList<string> texts, string targetLang, string? sourceLang,
@@ -741,6 +748,7 @@ public class TranslationService
         switch (kind)
         {
             case LlmBatchFailureKind.Auth:
+            case LlmBatchFailureKind.Configuration:
                 return new LlmBatchChunkOutcome(new string?[texts.Count], 0, true);
 
             case LlmBatchFailureKind.RateLimited:
@@ -783,7 +791,8 @@ public class TranslationService
             noteFailure(ExplainLlmBatchFailure(ex));
             var kind = ClassifyLlmBatchFailure(ex);
             return new LlmBatchChunkOutcome(new string?[texts.Count], 0,
-                kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.RateLimited);
+                kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.RateLimited
+                    or LlmBatchFailureKind.Configuration);
         }
     }
 
@@ -794,6 +803,7 @@ public class TranslationService
         var result = new string?[texts.Count];
         int recovered = 0;
         bool fatal = false;
+        int failedParts = 0, protocolFailedParts = 0;
         int half = texts.Count / 2;
         var parts = new[]
         {
@@ -817,12 +827,23 @@ public class TranslationService
             }
             catch (Exception ex)
             {
+                failedParts++;
                 noteFailure(ExplainLlmBatchFailure(ex));
                 var kind = ClassifyLlmBatchFailure(ex);
-                if (kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.RateLimited)
+                if (kind == LlmBatchFailureKind.Protocol) protocolFailedParts++;
+                if (kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.RateLimited
+                    or LlmBatchFailureKind.Configuration)
                     fatal = true;
             }
         }
+
+        // 两半都因 400/422 失败且一行都没救回：这不像“某一段太长”，更像模型名/协议/
+        // 端点整体不接受请求。继续逐行只会把 8 行放大成十几次必败请求，直接停止同一 LLM。
+        // 若只有一半失败，仍保留逐行兜底，避免丢掉另一半可翻译的行。
+        if (!fatal && recovered == 0 && failedParts == parts.Length
+            && protocolFailedParts == parts.Length)
+            fatal = true;
+
         return new LlmBatchChunkOutcome(result, recovered, fatal);
     }
 
@@ -1964,7 +1985,8 @@ public class TranslationService
             return new LlmBatchParseResult(null,
                 $"LLM 批量响应行数 {got} ≠ 输入 {expectedCount}（可能合并或漏行）");
 
-        // 对象数组且每项都有 id：按 id 回填，不信任数组顺序。
+        // 对象数组：必须每项带 id。模型若返回对象数组却漏掉 id，按位置映射会在顺序变化时静默错行；
+        // 这类响应直接拒收，让上层走拆片/逐行，而不是把错误译文贴到别的 UI 行上。
         bool allObjects = true, allHaveId = true;
         foreach (var el in arr.EnumerateArray())
         {
@@ -1972,8 +1994,11 @@ public class TranslationService
             if (!el.TryGetProperty("id", out _)) { allHaveId = false; break; }
         }
 
-        if (allObjects && allHaveId)
+        if (allObjects)
         {
+            if (!allHaveId)
+                return new LlmBatchParseResult(null,
+                    "LLM 批量响应的对象数组缺少 id；不能按位置回填（可能静默错行）");
             var map = new Dictionary<int, string>();
             int itemIndex = 0;
             foreach (var el in arr.EnumerateArray())
@@ -2000,14 +2025,15 @@ public class TranslationService
                 Enumerable.Range(1, expectedCount).Select(i => map[i]).ToArray(), null);
         }
 
-        // 字符串数组（或没有 id 的对象数组）：只能按顺序，前提仍是等数量。
+        // 字符串数组：只能按顺序，前提仍是等数量。混合类型或对象数组一律不走位置回填。
         var lines = new string[expectedCount];
         int index = 0;
         foreach (var el in arr.EnumerateArray())
         {
-            string? value = el.ValueKind == JsonValueKind.String
-                ? el.GetString()
-                : el.ValueKind == JsonValueKind.Object ? ReadJsonTranslationText(el) : null;
+            if (el.ValueKind != JsonValueKind.String)
+                return new LlmBatchParseResult(null,
+                    $"LLM 批量响应第 {index + 1} 行不是字符串（对象数组必须带 id 才能回填）");
+            string? value = el.GetString();
             var line = SanitizeSingleLine(value);
             if (line is null)
                 return new LlmBatchParseResult(null,
@@ -2137,13 +2163,22 @@ public class TranslationService
         if (s.Contains('\n') || s.Contains('\r')) return null;
 
         string lower = s.ToLowerInvariant();
-        if (lower.Contains("as an ai")
-            || lower.Contains("i cannot")
-            || lower.Contains("i'm sorry")
-            || lower.Contains("here is the translation")
-            || lower.Contains("here's the translation")
-            || lower.StartsWith("note:")
-            || lower.StartsWith("explanation:")
+
+        // 拒答/解释性输出要拒收，但不能用“包含 i cannot / note:”这种宽匹配：
+        // 目标语言是英文时，“I cannot open the file”“Note: takes effect after saving”
+        // 都是合法 UI 文案，宽匹配会把它们误判成拒答，再触发拆片/逐行/跨后端。
+        // 这里只认完整的拒答句或明确的元话术；宁可放过一句真正的拒答，也不误伤普通译文。
+        if (Regex.IsMatch(lower, @"^as an ai(?: language model| assistant)?[.!]?$")
+            || Regex.IsMatch(lower, @"^i(?:'m| am) sorry[.!]?$")
+            || Regex.IsMatch(lower, @"^i cannot[.!]?$")
+            || Regex.IsMatch(lower,
+                @"\b(?:i cannot|i can't|i am unable to|i'm unable to)\s+(?:assist|help|translate|comply|continue|provide|do that|fulfill)\b")
+            || lower.StartsWith("here is the translation", StringComparison.Ordinal)
+            || lower.StartsWith("here's the translation", StringComparison.Ordinal)
+            || (lower.StartsWith("note:", StringComparison.Ordinal)
+                && Regex.IsMatch(lower, @"(?:the original|source text|the translation|translated text|tone|wording|phrasing|literal meaning)"))
+            || (lower.StartsWith("explanation:", StringComparison.Ordinal)
+                && Regex.IsMatch(lower, @"(?:the original|source text|the translation|translated text|tone|wording|phrasing|literal meaning)"))
             || s.Contains("以下是翻译")
             || s.Contains("译文如下")
             || s.Contains("翻译如下"))

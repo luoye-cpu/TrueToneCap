@@ -159,13 +159,13 @@ public sealed class AppSettingsData
     //     CompressionEffortMap.Parse 回落到均衡档，不会变成"最慢档"。
     //   · ⚠ 差集序列化不会把"等于默认"的键写进文件 ⇒ **改这里的默认值对老用户真的生效**
     //     （见 SettingsService 的默认表版本记录）；用户手动选过的档存在文件里，不会被覆盖，
-    //     但会经 SettingsService.FitTwoTierEffort 把三档时代的旧词折成新菜单里对应的那格。
+    //     但会经 SettingsService.FitEffortMenu 把三档时代的旧词折成新菜单里对应的那格。
     //
-    // ⚠ 两组格式的下拉【格数不同】（2026-10-29 用户口径原话："这4个格式是2档位，默认是最高参数
-    //   拉满，有一个相对快速参数；其他的几个是3个档位，默认是个均衡，然后一个最大质量一个快速"）：
-    //   · 两档：PNG / TIFF / WebP → 合法值 {Smallest, Quick}，默认 Smallest。
+    // ⚠ 各格式的下拉【格数不同】（2026-10-29 用户口径；2026-11-16 PNG 增「优」）：
+    //   · 两档：TIFF / WebP → 合法值 {Smallest, Quick}，默认 Smallest。
     //   · 三档：AVIF / JPEG XL → 合法值 {Smallest, Balanced, Fastest}，默认 Balanced。
-    //   白名单因此分两条通道下发，逐格式写死在 SettingsService.Normalize 里。
+    //   · PNG 三档：合法值 {Optimal, Smallest, Quick}，默认 Smallest（「优」是可选更高压缩率档）。
+    //   白名单因此分通道下发，逐格式写死在 SettingsService.Normalize 里。
     //
     // 默认档的分布是 2026-10-29 用户逐条点的（"TIFF 默认回到最小体积，JPEG 和 PNG 等默认都是最小体积"，
     // 并确认 AVIF / JPEG XL 不动）：

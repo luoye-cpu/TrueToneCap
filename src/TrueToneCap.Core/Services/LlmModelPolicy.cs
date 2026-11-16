@@ -51,14 +51,57 @@ public static class LlmModelPolicy
     };
 
     /// <summary>
-    /// 设置加载时的模型名归一。空值回落到当前默认模型；旧名按 <see cref="LegacyModels"/>
-    /// 迁移；未知模型名保持原样，留给用户配置的自定义端点。
+    /// 已知预设端点的主机名。旧模型名迁移只应作用于这些平台；用户自建网关
+    /// （例如仍在提供 deepseek-chat 或 gpt-4o-mini 的兼容层）必须原样保留，
+    /// 否则设置加载会把本来可用的自定义配置静默改成预设模型。
     /// </summary>
-    public static string Normalize(string? model)
+    private static readonly HashSet<string> KnownPresetHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "api.deepseek.com",
+        "open.bigmodel.cn",
+        "dashscope.aliyuncs.com",
+        "api.siliconflow.cn",
+        "api.siliconflow.com",
+        "api.moonshot.cn",
+        "api.moonshot.ai",
+        "ark.cn-beijing.volces.com",
+        "api.minimax.cn",
+        "api.minimax.io",
+        "api.openai.com",
+        "api.anthropic.com",
+        "generativelanguage.googleapis.com",
+        "api.x.ai",
+        "api.mistral.ai",
+        "openrouter.ai",
+        "opencode.ai",
+        "api.opencode.ai",
+    };
+
+    /// <summary>
+    /// 设置加载时的模型名归一。空值回落到当前默认模型；旧名仅在空端点或已知预设端点上
+    /// 按 <see cref="LegacyModels"/> 迁移；自定义端点上的同名模型必须原样保留。
+    /// </summary>
+    public static string Normalize(string? model, string? apiEndpoint = null)
     {
         var trimmed = model?.Trim() ?? "";
         if (trimmed.Length == 0) return DefaultModel;
-        return LegacyModels.TryGetValue(trimmed, out var migrated) ? migrated : trimmed;
+        if (!LegacyModels.TryGetValue(trimmed, out var migrated)) return trimmed;
+        return IsPresetEndpoint(apiEndpoint) ? migrated : trimmed;
+    }
+
+    /// <summary>空端点沿用旧行为；只有已知预设主机才参与迁移，未知/自建端点一律保留。</summary>
+    private static bool IsPresetEndpoint(string? apiEndpoint)
+    {
+        if (string.IsNullOrWhiteSpace(apiEndpoint)) return true;
+        Uri? uri;
+        try { uri = new Uri(apiEndpoint.Trim()); }
+        catch (UriFormatException) { return false; }
+        var host = uri.Host;
+        foreach (var preset in KnownPresetHosts)
+            if (host.Equals(preset, StringComparison.OrdinalIgnoreCase)
+                || host.EndsWith("." + preset, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     /// <summary>
