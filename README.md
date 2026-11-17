@@ -1,8 +1,11 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.18** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/) · GitHub Release
-> 
+> **v0.3.18** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/detail/9N42LP5NVFWR) · GitHub Release
+>
 > 🔒 **Secure**: Command injection prevention | ♿ **Accessible**: WCAG 2.1 AA partial compliance
+
+[![Get TrueToneCap from Microsoft Store](docs/assets/microsoft-store-badge-dark.svg#gh-light-mode-only)](https://apps.microsoft.com/detail/9N42LP5NVFWR)
+[![Get TrueToneCap from Microsoft Store](docs/assets/microsoft-store-badge-light.svg#gh-dark-mode-only)](https://apps.microsoft.com/detail/9N42LP5NVFWR)
 
 **TrueToneCap** is a scalpel built for pixels. / **TrueToneCap** 是一把为像素而生的手术刀。
 
@@ -30,7 +33,7 @@ Selection, annotation, OCR, translation — everything happens in real-time on a
 
 | Step / 步骤 | English | 中文 |
 |-------------|---------|------|
-| 1 | Install from [Microsoft Store](https://apps.microsoft.com/) (search "TrueToneCap"), or download a GitHub Release archive | 从 [Microsoft Store](https://apps.microsoft.com/) 安装（搜 "TrueToneCap 真色截图"），或从 GitHub Release 下载压缩包 |
+| 1 | Install from [Microsoft Store](https://apps.microsoft.com/detail/9N42LP5NVFWR), or download a GitHub Release archive | 从 [Microsoft Store](https://apps.microsoft.com/detail/9N42LP5NVFWR) 安装，或从 GitHub Release 下载压缩包 |
 | 2 | Extract the archive (portable edition only) | 解压压缩包（仅便携版需要） |
 | 3 | Run `TrueToneCap.exe` | 双击运行 `TrueToneCap.exe` |
 | 4 | Press `Ctrl+Shift+S` to capture, `Ctrl+Shift+G` to record | 按 `Ctrl+Shift+S` 截图、`Ctrl+Shift+G` 录制动图 |
