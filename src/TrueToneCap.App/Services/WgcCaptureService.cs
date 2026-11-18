@@ -88,6 +88,57 @@ public sealed partial class WgcCaptureService : IDisposable
     private static void Log(string msg) => LogService.Debug("WgcCapture", msg, LogCategory.Capture);
     private static void LogInfo(string msg) => LogService.Info("WgcCapture", msg, LogCategory.Capture); // 关键事件落盘
 
+    // ═══ WGC 无边框捕获许可 ═══
+    // MSIX 包必须先在清单声明 graphicsCaptureWithoutBorder，再调用
+    // GraphicsCaptureAccess.RequestAccessAsync(Borderless)；否则 IsBorderRequired=false
+    // 会“设置成功但被系统忽略”。绿色包没有包身份，保持旧行为（直接按 false 设置）。
+    // 每次用户截图前刷新一次：状态是 Prompt 时系统会弹一次；Allow/Deny 后系统直接返回，
+    // 不会无限弹窗；用户后来在系统设置里改了权限，下一次截图也能生效。
+    private static volatile bool s_borderlessAllowed = !TrueToneCap.Core.Settings.PackageRuntime.IsPackaged;
+
+    private static readonly object s_borderlessPolicyLock = new();
+
+    /// <summary>刷新 Borderless 许可并同步到已有会话。必须在 UI 线程调用（系统同意提示需要 UI）。</summary>
+    public async Task RefreshBorderlessAccessAsync()
+    {
+        if (!TrueToneCap.Core.Settings.PackageRuntime.IsPackaged)
+        {
+            // 未打包形态没有包清单能力，沿用原来的“直接设置 false”路径。
+            s_borderlessAllowed = true;
+            return;
+        }
+
+        try
+        {
+            var status = await GraphicsCaptureAccess.RequestAccessAsync(GraphicsCaptureAccessKind.Borderless);
+            bool allowed = status == Windows.Security.Authorization.AppCapabilityAccess.AppCapabilityAccessStatus.Allowed;
+            bool changed;
+            lock (s_borderlessPolicyLock)
+            {
+                changed = s_borderlessAllowed != allowed;
+                s_borderlessAllowed = allowed;
+            }
+            if (changed) ApplyBorderlessPolicyToSessions();
+            LogInfo($"[WGC] Borderless 许可: {status}");
+        }
+        catch (Exception ex)
+        {
+            lock (s_borderlessPolicyLock) s_borderlessAllowed = false;
+            LogInfo($"[WGC] Borderless 许可请求失败: {ex.Message}");
+            ApplyBorderlessPolicyToSessions();
+        }
+    }
+
+    /// <summary>把当前许可状态同步到池内已有会话；没有许可时恢复系统边框。</summary>
+    private void ApplyBorderlessPolicyToSessions()
+    {
+        lock (_poolLock)
+        {
+            foreach (var session in _sessionPool.Values)
+                session.SetBorderRequired(!s_borderlessAllowed);
+        }
+    }
+
     private ID3D11Device? _d3dDevice;
     private nint _deviceMonitor;
     private bool _disposed;
@@ -129,14 +180,13 @@ public sealed partial class WgcCaptureService : IDisposable
     private readonly long[] _mPoolLockUs = new long[PoolLockSites];
     private readonly long[] _mPoolLockMaxUs = new long[PoolLockSites];
     private CancellationTokenSource? _idleStopCts;
-    // ═══ 2026-11-11 性能审计 #9：15000 → 120000 ═══
-    // 15s 的原始依据是"保活窗口内逐帧整屏 CPU 回读占 43.4% 单核"（见 :275 注释）——
-    // P0-5 把逐帧回读收敛到消费者窗口、#7 又把逐帧 GPU 拷贝推迟到冻结时之后，
-    // 无消费者时保活的持续成本只剩 ~1.2fps 的显存内 CopyResource（静态桌面），已降两个数量级。
-    // 而把会话收掉的代价没变：首拍付会话启动（p50 51ms）+ SDR 等首帧（83ms）+ Float16 等帧（160ms）。
-    // 提到 2 分钟：超过 2 分钟间隔的截图才重付冷启动；SharedHeld 顺延保护不变（选区窗开着不收）。
-    // 显存代价（每会话 staging+latest+shared ≈ 40-140MB）由 #7 的削减对冲。
-    private const int IdleStopDelayMs = 120000; // 2 分钟无截图则自动停止会话
+    // ═══ 2026-11-19 性能回收：120000 → 20000 ═══
+    // 2 分钟的保活窗口对真实截图间隔来说太长：一次截图后会话仍持续收帧/占着
+    // staging+latest+shared ≈ 40-140MB/会话，HDR 屏还有 SDR+HDR 两套。
+    // 20s 足够覆盖连续截图；超过 20s 重新建会话只多付首帧冷启动（p50 51ms +
+    // SDR 首帧 83ms + Float16 等帧 160ms），比长时间占 GPU/显存更划算。
+    // SharedHeld 顺延保护不变（选区窗开着不收）。
+    private const int IdleStopDelayMs = 20000; // 20 秒无截图则自动停止会话
 
     /// <summary>结算一次 _poolLock 持有（在锁**外面**调用：先出锁再记账，绝不让仪表把临界区延长）。</summary>
     private void RecordPoolLock(int site, long t0)
@@ -402,8 +452,12 @@ public sealed partial class WgcCaptureService : IDisposable
                 // 会话
                 _session = _framePool.CreateCaptureSession(_item);
                 _session.IsCursorCaptureEnabled = false;
-                // 消除 WGC 默认黄色录制边框
-                try { _session.IsBorderRequired = false; } catch { }
+                // 只有拿到 Borderless 许可才关闭系统黄框；没有许可时保持默认 true，
+                // 避免“设置为 false 但被系统忽略”的静默假成功。
+                if (s_borderlessAllowed)
+                {
+                    try { _session.IsBorderRequired = false; } catch { }
+                }
                 _session.StartCapture();
 
                 sw.Stop();
@@ -417,6 +471,14 @@ public sealed partial class WgcCaptureService : IDisposable
                 LogInfo($"会话启动失败: 0x{_hmonitor:X} {ex.Message}");
                 return false;
             }
+        }
+
+        /// <summary>把当前 Borderless 许可应用到这条会话；没有许可时恢复系统边框。</summary>
+        internal void SetBorderRequired(bool required)
+        {
+            var session = _session;
+            if (session is null) return;
+            try { session.IsBorderRequired = required; } catch { }
         }
 
         private void OnFrameArrived(Direct3D11CaptureFramePool sender, object? args)
@@ -2753,7 +2815,7 @@ public sealed partial class WgcCaptureService : IDisposable
         // GPU 纹理缓存与 float 写入缓冲会一直常驻（双 4K 约 132MB×2 起步），截完图也永远不释放。
         //
         // 时序约定与单屏【完全一致】，且这里比单屏更安全，不存在"把下游正在读的缓冲提前释放"：
-        //   ① ScheduleIdleStop 只是挂一个 15 秒的后台计时器，下一次截图会把它取消重挂；
+        //   ① ScheduleIdleStop 只是挂一个 20 秒的后台计时器，下一次截图会把它取消重挂；
         //   ② 本次返回的像素全是独立副本 —— fullPixels/fullHdr 是这里新建的拼接画布，
         //      各屏像素经 GetLatestSdr()/GetLatestHdr()（内部 Buffer.BlockCopy 复制）再拷进画布，
         //      会话里的 _latestSdr/_writeBufferHdr/_stagingTex/_latestTexture 没有一张被交给下游；

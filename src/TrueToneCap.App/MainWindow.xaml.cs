@@ -1756,6 +1756,10 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
+            // 每次用户截图前刷新一次 Borderless 许可：状态为 Prompt 时系统弹一次，
+            // 已允许/拒绝后系统直接返回；不改变下面 WGC 捕获路径。
+            await _wgcService.RefreshBorderlessAccessAsync();
+
             // ⚠ 无感截图由 UI 线程启动：在此采集 UI 状态快照，供后台编码线程使用。
             // 后台线程访问 WinUI 控件会抛异常并被静默吞掉（详见 EncodingUiState 注释）。
             var ui = CaptureEncodingUiState();
@@ -2633,6 +2637,10 @@ public sealed partial class MainWindow : Window
             // 判空已经做过；下面这些调用跨 await、还有两处进闭包（预览窗的交还/兜底回调），
             // 属性每读一次都会丢流分析状态 ⇒ 收成一个本地非空别名，闭包里也照用。
             var wgc = _wgcService;
+
+            // 每次用户截图前刷新一次 Borderless 许可：状态为 Prompt 时系统弹一次，
+            // 已允许/拒绝后系统直接返回；不改变下面 WGC 捕获路径。
+            await wgc.RefreshBorderlessAccessAsync();
 
             // 获取虚拟桌面坐标
             var displays = DisplayEnumerator.EnumerateDisplays();

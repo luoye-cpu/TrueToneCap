@@ -22,14 +22,15 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:uap11="http://schemas.microsoft.com/appx/manifest/uap/windows10/11"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap5 desktop rescap">
+  IgnorableNamespaces="uap uap5 uap11 desktop rescap">
 
   <Identity
     Name="luoye-cpu.TrueToneCap"
     Publisher="CN=301BF257-514D-402F-B9D2-1C698A29F2F9"
-    Version="0.3.18.0"
+    Version="0.3.19.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
@@ -98,5 +99,8 @@
     <!-- 桌面应用（Win32/WinUI）必需：允许以完全信任方式运行，
          以进行 D3D11/WGC 屏幕捕获、调用随包分发的原生编码器子进程等。 -->
     <rescap:Capability Name="runFullTrust" />
+    <!-- WGC 无边框捕获：IsBorderRequired=false 的前置能力。
+         没有此项时设置会被系统静默忽略，捕获提示边框仍然显示。 -->
+    <uap11:Capability Name="graphicsCaptureWithoutBorder" />
   </Capabilities>
 </Package>

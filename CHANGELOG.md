@@ -16,6 +16,12 @@
 ---
 
 
+## [0.3.19] — 2026-11-19：WGC 黄色捕获边框修复与 20 秒会话回收
+
+- **WGC 黄色捕获边框修复**：MSIX 清单新增 `graphicsCaptureWithoutBorder` 能力；无感截图与选区截图每次进入捕获前刷新一次 `GraphicsCaptureAccess.RequestAccessAsync(Borderless)`。系统状态为 `Prompt` 时提示一次，用户允许/拒绝后不再无限弹窗；只有允许时才关闭每个捕获会话的 `IsBorderRequired`，拒绝或撤销许可则恢复系统边框。绿色/未打包包保持原有路径。
+- **空闲 WGC 会话回收 2 分钟 → 20 秒**：一次截图后不再长期占着 SDR/HDR 会话、staging/共享槽（每会话约 40–140MB）；20 秒足够覆盖连续截图，超过后重建只多付一次首帧冷启动。选区窗持有冻结槽时仍按原逻辑顺延回收。
+- **版本坐标**：`Directory.Build.props` 三行、`Package.appxmanifest` 的 `Identity/@Version`、README 徽章统一为 `0.3.19` / `0.3.19.0`；GitHub 绿色包与微软商店提交包同版本。
+
 ## [0.3.18] — 2026-11-17：运行时主题改走窗口 ElementTheme、收口全局硬编码高对比度调色板
 
 - **运行时主题改为通过窗口 `ElementTheme` 生效**：此前运行时切深浅色不随窗口正确重算画刷；改为在窗口层级设置 `ElementTheme`，让 WinUI 按当前窗口主题重算资源字典，系统级与应用内主题切换即时生效，不再依赖全局硬编码路径。
