@@ -175,6 +175,10 @@ public static class LogService
     /// <summary>初始化日志服务。</summary>
     public static void InitializeFileLog(string? logDir = null)
     {
+        // 先停掉上一次的后台清理循环，避免重复初始化泄漏任务；
+        // ⚠ 必须放在打开新 writer 之前，且只停清理循环（原先在末尾调用 Shutdown() 会把刚打开的 writer 立刻关掉）。
+        StopCleanupTimer();
+
         // ═══ 2026-10-07：按运行形态选日志目录 ═══
         // MSIX 包的安装目录是【只读】的（官方："Write inside the package — Not allowed.
         // The package is read-only."）。未打包时日志写在 <程序目录>\log 属于"便携"语义，
@@ -182,15 +186,21 @@ public static class LogService
         // 不至于丢日志，但位置反直觉（用户在程序目录找不到 log/，也不知道去了哪儿）。
         // ⇒ 打包形态直接写 %LOCALAPPDATA%\TrueToneCap\log，与设置/密钥同一处，用户找得到。
         // ⚠️ 刻意不动未打包形态：绿色包用户仍在程序目录看到 log/。
-        s_logDir = logDir ?? (TrueToneCap.Core.Settings.PackageRuntime.IsPackaged
+        var targetDir = logDir ?? (TrueToneCap.Core.Settings.PackageRuntime.IsPackaged
             ? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "TrueToneCap", "log")
             : Path.Combine(AppContext.BaseDirectory, "log"));
         try
         {
-            Directory.CreateDirectory(s_logDir);
-            RotateLogFile();
+            lock (s_lock)
+            {
+                if (!string.Equals(s_logDir, targetDir, StringComparison.OrdinalIgnoreCase))
+                    CloseWriter();
+                s_logDir = targetDir;
+                Directory.CreateDirectory(s_logDir);
+                RotateLogFile();
+            }
             CleanupOldLogs();
             AttachCoreSink();          // 必须在 RotateLogFile 之后：早期缓冲要有地方落
             Info("LogService", $"日志系统初始化，目录: {s_logDir}");
@@ -198,21 +208,15 @@ public static class LogService
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[LogService] 初始化失败: {ex.Message}");
-            s_logDir = Path.Combine(Path.GetTempPath(), "TrueToneCap_logs");
-            Directory.CreateDirectory(s_logDir);
-            RotateLogFile();
+            lock (s_lock)
+            {
+                CloseWriter();
+                s_logDir = Path.Combine(Path.GetTempPath(), "TrueToneCap_logs");
+                Directory.CreateDirectory(s_logDir);
+                RotateLogFile();
+            }
             AttachCoreSink();
         }
-
-        // 启动后台定时清理任务（旧实现无取消机制，进程退出时任务仍在等待）
-        //
-        // ═══ 2026-09-15 修复：重复初始化会泄漏后台清理循环 ═══
-        // 本方法在 App.xaml.cs:66 与 AppServices.cs:45 各被调用一次。
-        // 原实现直接 `s_cleanupCts = new CancellationTokenSource()` 覆盖：
-        // 既未 Cancel 也未 Dispose 旧的 ⇒ 第一个后台循环永远挂在 1 小时的 Task.Delay 上
-        // （进程退出前不会醒来，也不会被取消），且此后每小时会有两个循环重复清理。
-        // 这里先停掉上一次的，保证任意时刻最多一个清理循环。
-        Shutdown();
 
         var cts = new CancellationTokenSource();
         s_cleanupCts = cts;
@@ -239,12 +243,17 @@ public static class LogService
         });
     }
 
-    /// <summary>停止后台清理任务并关闭日志 writer。应用退出时调用，避免进程无法干净退出。</summary>
-    public static void Shutdown()
+    private static void StopCleanupTimer()
     {
         s_cleanupCts?.Cancel();
         s_cleanupCts?.Dispose();
         s_cleanupCts = null;
+    }
+
+    /// <summary>停止后台清理任务并关闭日志 writer。应用退出时调用，避免进程无法干净退出。</summary>
+    public static void Shutdown()
+    {
+        StopCleanupTimer();
         lock (s_lock) CloseWriter();
     }
 
@@ -264,19 +273,25 @@ public static class LogService
             ? NextSlicePath(today)
             : Path.Combine(s_logDir!, $"app_{today}.log");
 
+        FileStream? fs = null;
+        StreamWriter? writer = null;
         try
         {
-            var fs = new FileStream(s_currentLogPath, FileMode.Append, FileAccess.Write,
+            fs = new FileStream(s_currentLogPath, FileMode.Append, FileAccess.Write,
                 FileShare.ReadWrite, 64 * 1024);
-            var writer = new StreamWriter(fs) { AutoFlush = true };
+            writer = new StreamWriter(fs) { AutoFlush = true };
             writer.WriteLine(slice
                 ? $"=== TrueToneCap 日志分片 [{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ==="
                 : $"=== TrueToneCap 日志 [{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ===");
             s_writerBytes = fs.Position;
             s_writer = writer;
+            writer = null;
+            fs = null;
         }
         catch
         {
+            try { writer?.Dispose(); } catch { }
+            try { fs?.Dispose(); } catch { }
             // 打开失败（目录被删/磁盘满）→ 保持 null，下次写入再试；不抛给调用方
             s_writer = null;
             s_currentLogPath = null;
@@ -431,7 +446,13 @@ public static class LogService
     {
         try
         {
-            System.Diagnostics.Process.Start("explorer.exe", LogDirectory);
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                UseShellExecute = false
+            };
+            psi.ArgumentList.Add(LogDirectory);
+            System.Diagnostics.Process.Start(psi);
         }
         catch { }
     }

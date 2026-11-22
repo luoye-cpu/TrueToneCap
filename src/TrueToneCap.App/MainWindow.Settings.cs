@@ -533,16 +533,7 @@ public sealed partial class MainWindow : Window
     /// 失败必须显式告知用户：否则设置界面显示"已保存"而系统侧实际未生效。</summary>
     private void SyncStartupAndHotkey()
     {
-        try
-        {
-            StartupManager.IsEnabled = _settings.AutoStart;
-            LogService.Info("MainWindow", $"开机自启已{(StartupManager.IsEnabled ? "启用" : "禁用")}");
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("MainWindow", "开机自启设置失败（界面状态可能与实际不符）", ex);
-            SetStatus("⚠ 开机自启设置失败");
-        }
+        _ = SyncStartupAsync();
 
         try
         {
@@ -553,6 +544,21 @@ public sealed partial class MainWindow : Window
         {
             LogService.Error("MainWindow", "热键注册失败（可能被其他程序占用）", ex);
             SetStatus($"⚠ 热键注册失败: {_settings.Hotkey}");
+        }
+    }
+
+    /// <summary>异步同步开机自启（避免 MSIX 下 StartupTask 在 WinUI STA 线程同步阻塞）。</summary>
+    private async Task SyncStartupAsync()
+    {
+        try
+        {
+            bool effective = await StartupManager.SetEnabledAsync(_settings.AutoStart);
+            LogService.Info("MainWindow", $"开机自启已{(effective ? "启用" : "禁用")}");
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("MainWindow", "开机自启设置失败（界面状态可能与实际不符）", ex);
+            SetStatus("⚠ 开机自启设置失败");
         }
     }
 

@@ -45,7 +45,7 @@ public static partial class SecretStore
     /// <summary>读取凭据；不存在或解密失败返回 null。</summary>
     public static string? Get(string key)
     {
-        lock (s_lock) return Load().GetValueOrDefault(key);
+        lock (s_lock) return LoadForRead().GetValueOrDefault(key);
     }
 
     /// <summary>写入（或覆盖）凭据。</summary>
@@ -53,7 +53,7 @@ public static partial class SecretStore
     {
         lock (s_lock)
         {
-            var dict = Load();
+            var dict = LoadForWrite();
             // 值没变就不重写（与 Delete 的 dict.Remove 短路同一条纪律）：
             // 每次 Save 设置都会无条件调进来两次（LLM Key / 有道 Secret），
             // 原先等于每次存设置都白做两次 DPAPI 加密 + 两次整文件写。
@@ -68,7 +68,7 @@ public static partial class SecretStore
     {
         lock (s_lock)
         {
-            var dict = Load();
+            var dict = LoadForWrite();
             if (dict.Remove(key)) Save(dict);
         }
     }
@@ -78,38 +78,109 @@ public static partial class SecretStore
     //  明文格式: 逐行 "key\tbase64(value)\n"，整体经 DPAPI 加密
     // ═══════════════════════════════════════
 
-    private static Dictionary<string, string> Load()
+    /// <summary>
+    /// 只读路径：读取失败或解密失败时<b>不写入 s_cache</b>，避免瞬时文件锁把空字典固化进缓存
+    /// 并在后续 Set 时抹掉其它凭据。
+    /// </summary>
+    private static Dictionary<string, string> LoadForRead()
     {
         if (s_cache is not null) return s_cache;
 
-        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!File.Exists(SecretsPath))
+        {
+            var empty = new Dictionary<string, string>(StringComparer.Ordinal);
+            s_cache = empty;
+            return empty;
+        }
+
         try
         {
-            if (File.Exists(SecretsPath))
+            var plain = Unprotect(File.ReadAllBytes(SecretsPath));
+            if (plain is null)
+                return new Dictionary<string, string>(StringComparer.Ordinal);
+
+            try
             {
-                var plain = Unprotect(File.ReadAllBytes(SecretsPath));
-                if (plain is not null)
-                {
-                    foreach (var line in Encoding.UTF8.GetString(plain)
-                                 .Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var tab = line.IndexOf('\t');
-                        if (tab <= 0) continue;
-                        var k = line[..tab];
-                        var v = line[(tab + 1)..].TrimEnd('\r');
-                        try { dict[k] = Encoding.UTF8.GetString(Convert.FromBase64String(v)); }
-                        catch (FormatException) { LogService.Warn("SecretStore", $"凭据条目损坏，已跳过: {k}"); }
-                    }
-                }
+                var dict = ParseEntries(plain);
+                s_cache = dict;
+                return dict;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(plain);
             }
         }
         catch (Exception ex)
         {
-            LogService.Warn("SecretStore", $"凭据读取失败: {ex.Message}");
+            LogService.Warn("SecretStore", $"凭据读取失败（未覆盖缓存）: {ex.Message}");
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// 写入路径：返回可安全修改的副本（Save 成功后才更新 s_cache，避免写失败污染内存态）。
+    /// 若磁盘文件存在但发生瞬时 I/O 失败，直接上抛拒绝覆写，防止静默清空其它凭据；
+    /// 若文件可读但 DPAPI 无法解密（跨机/损坏），先尽力备份原文件再允许重建。
+    /// </summary>
+    private static Dictionary<string, string> LoadForWrite()
+    {
+        if (s_cache is not null)
+            return new Dictionary<string, string>(s_cache, StringComparer.Ordinal);
+
+        if (!File.Exists(SecretsPath))
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+
+        // 瞬时 I/O / 权限异常直接抛出，绝不拿空字典覆盖已有 secrets.bin
+        var cipher = File.ReadAllBytes(SecretsPath);
+        var plain = Unprotect(cipher);
+        if (plain is null)
+        {
+            TryBackupUndecryptableFile();
+            return new Dictionary<string, string>(StringComparer.Ordinal);
         }
 
-        s_cache = dict;
+        try
+        {
+            var dict = ParseEntries(plain);
+            s_cache = dict;
+            return new Dictionary<string, string>(dict, StringComparer.Ordinal);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plain);
+        }
+    }
+
+    private static Dictionary<string, string> ParseEntries(byte[] plain)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var line in Encoding.UTF8.GetString(plain)
+                     .Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var tab = line.IndexOf('\t');
+            if (tab <= 0) continue;
+            var k = line[..tab];
+            var v = line[(tab + 1)..].TrimEnd('\r');
+            try { dict[k] = Encoding.UTF8.GetString(Convert.FromBase64String(v)); }
+            catch (FormatException) { LogService.Warn("SecretStore", $"凭据条目损坏，已跳过: {k}"); }
+        }
         return dict;
+    }
+
+    private static void TryBackupUndecryptableFile()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(SecretsPath);
+            if (string.IsNullOrEmpty(dir)) return;
+            var backup = Path.Combine(dir, $"secrets.undecryptable.{DateTime.UtcNow:yyyyMMddHHmmss}.bak");
+            File.Copy(SecretsPath, backup, overwrite: false);
+            LogService.Warn("SecretStore", $"旧凭据库无法解密，已备份至 {Path.GetFileName(backup)} 后重建");
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("SecretStore", $"无法解密的旧凭据库备份失败: {ex.Message}");
+        }
     }
 
     private static void Save(Dictionary<string, string> dict)
@@ -122,7 +193,16 @@ public static partial class SecretStore
         foreach (var (k, v) in dict)
             sb.Append(k).Append('\t').Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(v))).Append('\n');
 
-        var cipher = Protect(Encoding.UTF8.GetBytes(sb.ToString()));
+        var plainBytes = Encoding.UTF8.GetBytes(sb.ToString());
+        byte[] cipher;
+        try
+        {
+            cipher = Protect(plainBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plainBytes);
+        }
 
         // 原子写入：先写临时文件再 Move 覆盖。
         // File.WriteAllBytes 在写入过程中若进程崩溃/断电，会留下一个截断的 secrets.bin，
@@ -142,7 +222,7 @@ public static partial class SecretStore
             throw; // 让调用方（SettingsService.SaveQuiet）决定如何处理
         }
 
-        s_cache = dict;
+        s_cache = new Dictionary<string, string>(dict, StringComparer.Ordinal);
     }
 
     // ═══════════════════════════════════════
@@ -173,23 +253,32 @@ public static partial class SecretStore
 
     private static byte[] Protect(byte[] data)
     {
-        nint inPtr = Marshal.AllocHGlobal(data.Length);
+        nint inPtr = data.Length > 0 ? Marshal.AllocHGlobal(data.Length) : 0;
         var inBlob = new DATA_BLOB { cbData = data.Length, pbData = inPtr };
         var outBlob = default(DATA_BLOB);
         try
         {
-            Marshal.Copy(data, 0, inPtr, data.Length);
+            if (data.Length > 0)
+                Marshal.Copy(data, 0, inPtr, data.Length);
             if (!CryptProtectData(ref inBlob, 0, 0, 0, 0, CRYPTPROTECT_UI_FORBIDDEN, ref outBlob))
                 throw new CryptographicException(
                     $"CryptProtectData 失败 (Win32={Marshal.GetLastWin32Error()})");
             return CopyAndFreeBlob(outBlob);
         }
-        finally { Marshal.FreeHGlobal(inPtr); }
+        finally
+        {
+            if (inPtr != 0)
+            {
+                Marshal.Copy(new byte[data.Length], 0, inPtr, data.Length);
+                Marshal.FreeHGlobal(inPtr);
+            }
+        }
     }
 
     /// <summary>解密；失败（非本机/非本用户/数据被篡改）返回 null 而非抛出。</summary>
     private static byte[]? Unprotect(byte[] cipher)
     {
+        if (cipher.Length == 0) return null;
         nint inPtr = Marshal.AllocHGlobal(cipher.Length);
         var inBlob = new DATA_BLOB { cbData = cipher.Length, pbData = inPtr };
         var outBlob = default(DATA_BLOB);

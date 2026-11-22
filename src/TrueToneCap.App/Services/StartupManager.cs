@@ -48,21 +48,22 @@ public static class StartupManager
     private static bool Packaged => TrueToneCap.Core.Settings.PackageRuntime.IsPackaged;
 
     /// <summary>
-    /// 是否已启用开机自启。
-    /// <para>打包形态读 <c>StartupTask.State</c>；未打包形态读注册表 Run 项。</para>
+    /// 异步读取开机自启状态（不在 WinUI STA 线程上做同步阻塞等待）。
+    /// <para>打包形态异步读取 <c>StartupTask.State</c>；未打包形态直接读注册表 Run 项。</para>
     /// </summary>
-    public static bool IsEnabled
+    public static Task<bool> GetEnabledAsync() =>
+        Packaged ? IsEnabledPackagedAsync() : Task.FromResult(IsEnabledRegistry());
+
+    /// <summary>
+    /// 异步设置开机自启状态并返回设置后的实际生效状态。
+    /// <para>打包形态异步调用 <c>StartupTask.GetAsync</c> / <c>RequestEnableAsync</c> / <c>Disable</c>，
+    /// 避免在 WinUI STA UI 线程同步 <c>.GetAwaiter().GetResult()</c> 导致卡顿或死锁。</para>
+    /// </summary>
+    public static Task<bool> SetEnabledAsync(bool value)
     {
-        get
-        {
-            if (Packaged) return IsEnabledPackaged();
-            return IsEnabledRegistry();
-        }
-        set
-        {
-            if (Packaged) SetEnabledPackaged(value);
-            else SetEnabledRegistry(value);
-        }
+        if (Packaged) return SetEnabledPackagedAsync(value);
+        SetEnabledRegistry(value);
+        return Task.FromResult(IsEnabledRegistry());
     }
 
     // ═══════════════════════════════════════
@@ -131,14 +132,14 @@ public static class StartupManager
     // 全部用强类型 API —— 见文件头"为什么用直接调用而不是反射"。
 
     /// <summary>
-    /// 读取打包形态的自启状态。
+    /// 异步读取打包形态的自启状态。
     /// <para>StartupTaskState: Disabled=0, DisabledByUser=1, Enabled=2, DisabledByPolicy=3。</para>
     /// </summary>
-    private static bool IsEnabledPackaged()
+    private static async Task<bool> IsEnabledPackagedAsync()
     {
         try
         {
-            var startupTask = StartupTask.GetAsync(StartupTaskId).AsTask().GetAwaiter().GetResult();
+            var startupTask = await StartupTask.GetAsync(StartupTaskId).AsTask().ConfigureAwait(false);
             if (startupTask is null) return false;
 
             int s = (int)startupTask.State;
@@ -153,15 +154,15 @@ public static class StartupManager
         }
     }
 
-    private static void SetEnabledPackaged(bool value)
+    private static async Task<bool> SetEnabledPackagedAsync(bool value)
     {
         try
         {
-            var startupTask = StartupTask.GetAsync(StartupTaskId).AsTask().GetAwaiter().GetResult();
+            var startupTask = await StartupTask.GetAsync(StartupTaskId).AsTask().ConfigureAwait(false);
             if (startupTask is null)
             {
                 LogService.Warn("StartupManager", "StartupTask 实例为空 ⇒ 开机自启不可用");
-                return;
+                return false;
             }
 
             if (value)
@@ -170,29 +171,28 @@ public static class StartupManager
                 //    用户若在「设置 → 应用 → 启动」里关掉过，会返回 DisabledByUser，
                 //    且 API 不会替你改回来（系统有意的保护）—— 必须把结果如实报出来，
                 //    否则界面显示"已启用"而实际没启用，正是本文件最该避免的那种谎报。
-                var finalState = startupTask.RequestEnableAsync().AsTask().GetAwaiter().GetResult();
+                var finalState = await startupTask.RequestEnableAsync().AsTask().ConfigureAwait(false);
                 int s = (int)finalState;
                 if (s == 2)
                 {
                     LogService.Info("StartupManager", "开机自启已启用（StartupTask）");
+                    return true;
                 }
-                else
-                {
-                    LogService.Warn("StartupManager",
-                        $"开机自启未能启用（StartupTaskState={s}）；"
-                        + "若为 1(DisabledByUser) 需用户到「设置 → 应用 → 启动」手动打开");
-                    // 如实告知界面：IsEnabled 下一次读取会返回 false，不谎报成功
-                }
+
+                LogService.Warn("StartupManager",
+                    $"开机自启未能启用（StartupTaskState={s}）；"
+                    + "若为 1(DisabledByUser) 需用户到「设置 → 应用 → 启动」手动打开");
+                return false;
             }
-            else
-            {
-                startupTask.Disable();
-                LogService.Info("StartupManager", "开机自启已禁用（StartupTask）");
-            }
+
+            startupTask.Disable();
+            LogService.Info("StartupManager", "开机自启已禁用（StartupTask）");
+            return false;
         }
         catch (Exception ex)
         {
             LogService.Warn("StartupManager", $"设置 StartupTask 失败: {ex.Message}");
+            return false;
         }
     }
 }

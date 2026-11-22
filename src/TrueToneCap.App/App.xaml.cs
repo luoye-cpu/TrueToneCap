@@ -128,10 +128,10 @@ public partial class App : Application
         SetProcessDpiAwarenessContext(DPI_CONTEXT_PER_MONITOR_AWARE_V2);
         LogService.Debug("App", "DPI 感知设置完成");
 
-        // ── 单实例检测 ──
+        // ── 单实例检测（按当前登录会话隔离：使用 Local\ 避免多用户/RDP 跨会话互踩锁）──
         // 注册激活消息需在可能广播之前完成
         ActivateMessage = RegisterWindowMessage("TrueToneCap_ActivateInstance_v1");
-        s_mutex = new Mutex(true, @"Global\TrueToneCap_SingleInstance", out bool createdNew);
+        s_mutex = new Mutex(true, @"Local\TrueToneCap_SingleInstance", out bool createdNew);
         if (!createdNew)
         {
             LogService.Info("App", "已有实例运行，激活窗口并退出");

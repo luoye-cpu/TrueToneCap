@@ -16,6 +16,15 @@
 ---
 
 
+## [未发布] — 2026-11-22：外部进程全面迁移 ArgumentList、PathSanitizer 修正误杀与应用层可靠性加固
+
+- **🔒 外部进程全面改用 `ProcessStartInfo.ArgumentList`**：`avifenc`、`cjxl`、`cjpegli`、`cwebp`、`ffmpeg`（含探测）、`fxc` 以及 `explorer.exe`（日志目录/模型目录/定位文件）统一改用 `UseShellExecute = false` + `ArgumentList`，消除命令行字符串拼接导致的引号拆分、含空格路径失效（`LogService.OpenLogDirectory`）与参数注入风险，同时修正 `cjxl` 输出路径与 `cjpegli` 灰度路径未校验以及 `ffmpeg` 超时后未等待即读 `ExitCode` 的问题。
+- **🛠 修复 `PathSanitizer` 误杀合法 Windows 路径**：移除面向 Shell 的元字符黑名单（不再拒绝 `)`、`&`、`'`、`;` 等合法目录/用户名字符，如 `R&D`、`O'Brien`、`新建文件夹 (2)`），仅拦截控制字符与 Windows 非法路径字符（`" < > | * ?`）并规范化绝对路径；清理遗留的破损脚本 `scripts/security-patch.sh`，同步更新 `SECURITY.md` 与校验脚本并补齐单元测试。
+- **🔐 修复 `SecretStore` 读取失败污染缓存**：只读路径在瞬时 I/O 错误或解密失败时不再向 `s_cache` 写入空字典；写路径在瞬时 I/O 错误时拒绝静默覆写已有 `secrets.bin`，在无法解密时先尽力备份旧文件再重建，并在加密/解密完成后清零敏感明文缓冲，防止覆盖导致其它凭据永久丢失。
+- **⚡ 修复 `StartupManager` 在 WinUI STA 线程同步阻塞**：将 `StartupManager` 改为纯异步 `GetEnabledAsync()` / `SetEnabledAsync(bool)`，MSIX 下 `StartupTask.GetAsync` / `RequestEnableAsync` 全部 `await` 执行，移除 UI 线程上的 `.GetAwaiter().GetResult()` 死锁/卡顿风险。
+- **📝 修复 `LogService.InitializeFileLog` 刚开即关与句柄泄漏**：拆分 `StopCleanupTimer()` 并在打开 `StreamWriter` 之前调用（避免原先末尾 `Shutdown()` 立即关闭刚打开的 writer），`RotateLogFile` 补齐加锁与异常分支流释放。
+- **🪟 单实例互斥锁改为会话级 `Local\`**：`App.xaml.cs` 的 `Global\TrueToneCap_SingleInstance` 改为 `Local\TrueToneCap_SingleInstance`，避免多用户/RDP 跨会话互踩锁导致其他会话静默无法启动。
+
 ## [0.3.19] — 2026-11-19：WGC 黄色捕获边框修复与 20 秒会话回收
 
 - **WGC 黄色捕获边框修复**：MSIX 清单新增 `graphicsCaptureWithoutBorder` 能力；无感截图与选区截图每次进入捕获前刷新一次 `GraphicsCaptureAccess.RequestAccessAsync(Borderless)`。系统状态为 `Prompt` 时提示一次，用户允许/拒绝后不再无限弹窗；只有允许时才关闭每个捕获会话的 `IsBorderRequired`，拒绝或撤销许可则恢复系统边框。绿色/未打包包保持原有路径。

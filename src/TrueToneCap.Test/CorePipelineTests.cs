@@ -310,6 +310,7 @@ public static class CorePipelineTests
         Test_RecordingActivation_Wiring();              // 2026-11-02 D 流：录制激活的接线/兜底/声明形态锁
         Test_SettingsControls_RealtimeWriteback();      // 2026-11-04 C-1：托盘常驻形态下"只靠全量保存"= 静默丢失
         Test_AnimatedContainerColor_Surgery();          // 2026-11-02 D 流：WebP ICCP / PNG cICP 容器手术（真跑）
+        Test_PathSanitizer_And_AppHardening();          // ArgumentList 迁移 / PathSanitizer / SecretStore / StartupManager / LogService / Local Mutex
 
         Console.WriteLine($"\n══════════════════════════════════════");
         TestSummary.Report("--unit-tests", _passed, _failed, 0, null, _skipped);
@@ -1678,7 +1679,7 @@ public static class CorePipelineTests
                      .Where(f => !f.Contains("\\obj\\") && !f.Contains("\\bin\\")))
         {
             var src = StripLineComments(ReadSourceNormalized(f));
-            foreach (Match m in Regex.Matches(src, @"StartupManager\.IsEnabled\s*=[^;\r\n]*"))
+            foreach (Match m in Regex.Matches(src, @"StartupManager\.(?:IsEnabled\s*=[^;\r\n]*|SetEnabledAsync\s*\([^)]*\))"))
             {
                 int owner = src.LastIndexOf("void ", m.Index, StringComparison.Ordinal);
                 var head = owner < 0 ? "" : src.Substring(owner, Math.Min(60, m.Index - owner));
@@ -1698,7 +1699,7 @@ public static class CorePipelineTests
         // 构造路径必须改成"只读 + 不一致就报警"，不许静默改写
         var ctor = StripLineComments(ReadSourceNormalized(mwPath));
         Assert("启动路径改成了只读一致性检查，并且不一致会报警（不许悄悄吞掉漂移）",
-            ctor.Contains("StartupManager.IsEnabled", StringComparison.Ordinal)
+            ctor.Contains("StartupManager.GetEnabledAsync()", StringComparison.Ordinal)
             && Regex.IsMatch(ctor, @"registered\s*!=\s*_settings\.AutoStart"),
             "构造路径里既读又比、还要 Warn —— 少了报警就等于漂移无人知");
     }
@@ -3672,14 +3673,14 @@ public static class CorePipelineTests
             && f.IndexOf("return (candidate, \"PATH\");", StringComparison.Ordinal)
                 < f.IndexOf("return (candidate, \"常见位置\");", StringComparison.Ordinal));
         Assert("探测实跑 -version 且带超时（文件存在不等于能跑）",
-            f.Contains("\"-hide_banner -version\"") && f.Contains("ProbeTimeoutMs"));
+            f.Contains("\"-hide_banner\"") && f.Contains("\"-version\"") && f.Contains("ProbeTimeoutMs"));
         Assert("探测异常不打断调用方（Resolve 整体 catch 按找不到处理）",
             Regex.IsMatch(f, @"catch \(Exception ex\)[\s\S]{0,200}探测异常"));
 
         // ── ⑦ 引擎：假选项锁 + 声明 + 回退 16-bit + 自动收尾 ──
         Assert("AnimatedAVIF 有显式 avif 分支（不再静默编出 WebP）",
             a.Contains("AnimationFormat.AnimatedAVIF => (\"avif\", \".avif\")")
-            && a.Contains("\"avif\" =>") && a.Contains("-still-picture 0"));
+            && a.Contains("\"avif\" =>") && a.Contains("\"-still-picture\"") && a.Contains("\"0\""));
         Assert("两处 switch 的 _ => 兜底都是显式抛错（不许枚举值掉进错误分支）",
             a.Contains("_ => throw new InvalidOperationException($\"未知的动图格式:")
             && a.Contains("_ => throw new InvalidOperationException($\"未知的动图 ffmpeg 参数分支:"));
@@ -3692,7 +3693,7 @@ public static class CorePipelineTests
         Assert("声明通道按格式分派（WebP ICCP / APNG cICP+iCCP / AVIF nclx flags；2026-11-12 起 APNG 走 CICP 优先、WebP 非sRGB 才嵌）",
             a.Contains("AnimatedContainerColor.TryEmbedWebpIcc(path, webpIcc)")
             && a.Contains("AnimatedContainerColor.TryEmbedPngDeclaration(path, cicp, icc)")
-            && a.Contains("-color_primaries") && a.Contains("-color_trc iec61966-2-1")
+            && a.Contains("\"-color_primaries\"") && a.Contains("\"-color_trc\"") && a.Contains("\"iec61966-2-1\"")
             && a.Contains("GIF 容器无色彩声明通道"));
         Assert("回退单帧走 16-bit 且带声明（与 PerfWiring A1 的Encode 判据互补）",
             a.Contains("ManagedPngEncoder.Encode(bakedPixels, w0, h0, fallbackPath, 16,")
@@ -5145,7 +5146,7 @@ public static class CorePipelineTests
         {
             var deferBody = src.Substring(low, locale - low);
             Assert("推迟的三件都在同一个 Low 回调里（自启动一致性检查 / Toast 注册 / 日志页订阅）",
-                deferBody.Contains("StartupManager.IsEnabled", StringComparison.Ordinal)
+                deferBody.Contains("StartupManager.GetEnabledAsync()", StringComparison.Ordinal)
                 && deferBody.Contains("ToastService.Register();", StringComparison.Ordinal)
                 && deferBody.Contains("SubscribeLogEvents();", StringComparison.Ordinal));
             Assert("日志订阅只此一处（留在外面再调一次=订阅两遍，日志页每行画两次）",
@@ -9093,6 +9094,8 @@ public static class CorePipelineTests
         // 读端也必须分支：只改写端会导致"界面显示已禁用、实际已启用"（或反之）这种谎报
         var getter = text.Contains("Packaged") && text.Contains("IsEnabledPackaged");
         Assert("StartupManager: 读端也走打包分支（否则界面与实际状态相反）", getter);
+        Assert("StartupManager: 打包分支纯异步 await，不在 WinUI STA 线程做 GetAwaiter().GetResult() 同步阻塞",
+            !text.Contains(".GetAwaiter().GetResult()"));
     }
 
     /// <summary>
@@ -11475,7 +11478,7 @@ public static class CorePipelineTests
         var src = StripLineComments(ReadSourceNormalized(srcPath));
         Assert("AVIF: q 由 CrfToQuality(crf) 算出（唯一换算点）",
             src.Contains("int q = CrfToQuality(crf);"));
-        Assert("AVIF: -q {q} 进参数串", src.Contains("$\"-q {q}\""),
+        Assert("AVIF: -q {q} 进参数列表", src.Contains("\"-q\", q.ToString("),
             "组装形态变了 ⇒ 对照 avifenc CLI 语义与 artifacts/quality-probe 实证核对后改判据");
         Assert("AVIF: 命令行 Debug 留痕在位（修复项C）", src.Contains("CoreLog.Debug(\"AVIF\""));
     }
@@ -11499,7 +11502,9 @@ public static class CorePipelineTests
         if (body is not null)
         {
             Assert("WebP: quality 直取整进 -q（无换算、无方向反转）",
-                body.Contains("lossless ? \"-lossless\" : $\"-q {(int)quality}\""));
+                body.Contains("psi.ArgumentList.Add(\"-lossless\")")
+                && body.Contains("psi.ArgumentList.Add(\"-q\")")
+                && body.Contains("((int)quality).ToString("));
             Assert("WebP: 方法体内无 100-x 型方向反转", !body.Contains("100 - "),
                 "出现了 100-x ⇒ 有人把\"越大越好\"刻度反转了（q55 会变成 q45，方向灾难）");
             Assert("WebP: 命令行 Debug 留痕在位（修复项C）", body.Contains("CoreLog.Debug(\"WEBP\""));
@@ -14711,14 +14716,14 @@ public static class CorePipelineTests
         var code = string.Join("\n", jxlSrc.Split('\n')
             .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
         Assert("icc_pathname 只在码点盲分支出现，且不叠 color_space（二选一形态不许退化成双给）",
-            System.Text.RegularExpressions.Regex.Matches(code, @"colorArg = \$?""-x icc_pathname").Count == 2
-            && code.Contains("-x color_space={JxlColorSpaceValue(colorSpaceTag)}"));
+            System.Text.RegularExpressions.Regex.Matches(code, @"colorHintValue = \$?""icc_pathname=").Count == 3
+            && code.Contains("color_space={JxlColorSpaceValue(colorSpaceTag)}"));
 
         // 2026-09-26 实测（cjxl v0.11.2）：`-x icc_pathname=… -x color_space=Rec2100PQ` 无论先后，
         // 产物都只剩 ICC 的声明（PQ 被丢弃）⇒ "两个都给"不是"冗余"，而是【静默丢掉一半声明】。
         // HDR 分支原先就这么写着（那一格 color_space 是死参数），现已改成二选一。这条锁住回退。
         var bothArgs = code.Split('\n')
-            .Where(l => l.Contains("Arguments =") && l.Contains("iccArg") && l.Contains("color_space"))
+            .Where(l => (l.Contains("Arguments =") || l.Contains("ArgumentList.Add")) && l.Contains("icc_pathname") && l.Contains("color_space"))
             .Select(l => { var s = l.Trim(); return s.Substring(0, Math.Min(70, s.Length)); }).ToList();
         Assert("任何一条 cjxl 命令行都不许同时出现 icc_pathname 与 color_space（同时给 = ICC 赢、PQ 消失）",
             bothArgs.Count == 0, string.Join(" | ", bothArgs));
@@ -15525,6 +15530,105 @@ public static class CorePipelineTests
             try { _listener.Stop(); } catch { }
             try { _acceptLoop.Wait(2000); } catch { }
         }
+    }
+
+    /// <summary>
+    /// 外部进程参数列表化 + PathSanitizer 合法路径不误杀 + 应用层可靠性加固（SecretStore / StartupManager / LogService / Local Mutex）。
+    /// </summary>
+    static void Test_PathSanitizer_And_AppHardening()
+    {
+        // ① PathSanitizer 行为级：放行合法 Windows 路径字符 ()&'; 等，拦截控制字符与非法路径字符
+        var tmpRoot = Path.Combine(Path.GetTempPath(), $"ttc_path_test_{Guid.NewGuid():N}");
+        var trickyDir = Path.Combine(tmpRoot, "R&D (2)", "O'Brien;Shots");
+        try
+        {
+            Directory.CreateDirectory(trickyDir);
+            var trickyFile = Path.Combine(trickyDir, "capture (1) & O'Brien.avif");
+            var sanitized = TrueToneCap.Core.Security.PathSanitizer.SanitizeForEncoding(trickyFile);
+            Assert("PathSanitizer: 合法 Windows 路径（含 ) & ' ; 空格）放行并规范化",
+                sanitized == Path.GetFullPath(trickyFile), sanitized);
+
+            bool emptyRejected = false;
+            try { TrueToneCap.Core.Security.PathSanitizer.SanitizeForEncoding("   "); }
+            catch (ArgumentException) { emptyRejected = true; }
+            Assert("PathSanitizer: 空白路径抛 ArgumentException", emptyRejected);
+
+            foreach (var bad in new[]
+            {
+                Path.Combine(trickyDir, "bad\0name.png"),
+                Path.Combine(trickyDir, "bad\nname.png"),
+                Path.Combine(trickyDir, "bad\"name.png"),
+                Path.Combine(trickyDir, "bad<name>.png"),
+                Path.Combine(trickyDir, "bad|name.png"),
+                Path.Combine(trickyDir, "bad*name.png"),
+                Path.Combine(trickyDir, "bad?name.png"),
+            })
+            {
+                bool rejected = false;
+                try { TrueToneCap.Core.Security.PathSanitizer.SanitizeForEncoding(bad); }
+                catch (ArgumentException) { rejected = true; }
+                Assert($"PathSanitizer: 非法路径字符被拒绝 ({bad.Replace("\0", "\\0").Replace("\n", "\\n")})", rejected);
+            }
+
+            bool missingDirRejected = false;
+            try { TrueToneCap.Core.Security.PathSanitizer.SanitizeForEncoding(Path.Combine(tmpRoot, "no_such_dir", "out.png")); }
+            catch (DirectoryNotFoundException) { missingDirRejected = true; }
+            Assert("PathSanitizer: 父目录不存在抛 DirectoryNotFoundException", missingDirRejected);
+        }
+        finally
+        {
+            try { if (Directory.Exists(tmpRoot)) Directory.Delete(tmpRoot, recursive: true); } catch { }
+        }
+
+        // ② 所有外部编码器 + ffmpeg + explorer 全部使用 ArgumentList，不再拼 Arguments 字符串
+        foreach (var rel in new[]
+        {
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeAvifEncoder.cs"),
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeJxlEncoder.cs"),
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "NativeWebPEncoder.cs"),
+            Path.Combine("src", "TrueToneCap.Core", "Encoding", "JpegLiNative.cs"),
+            Path.Combine("src", "TrueToneCap.App", "Services", "AnimationRecorder.cs"),
+            Path.Combine("src", "TrueToneCap.App", "Services", "FfmpegLocator.cs"),
+            Path.Combine("src", "TrueToneCap.App", "Services", "LogService.cs"),
+        })
+        {
+            var p = FindRepoFile(rel);
+            Assert($"找到 {rel.Replace('\\', '/')}", p is not null);
+            if (p is null) continue;
+            var code = CodeOnly(p);
+            Assert($"{Path.GetFileName(rel)}: 使用 ArgumentList 且不再拼接 Arguments =",
+                code.Contains("ArgumentList.Add") && !code.Contains("Arguments ="));
+        }
+
+        // ③ SecretStore / LogService / App 单实例锁 / 清理死脚本
+        var secPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "SecretStore.cs"));
+        if (secPath is not null)
+        {
+            var sec = CodeOnly(secPath);
+            Assert("SecretStore: 读写分流（读失败不污染 s_cache，写路径先清零敏感缓冲）",
+                sec.Contains("LoadForRead()") && sec.Contains("LoadForWrite()")
+                && sec.Contains("CryptographicOperations.ZeroMemory"));
+        }
+
+        var logPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "Services", "LogService.cs"));
+        if (logPath is not null)
+        {
+            var log = StripLineComments(ReadSourceNormalized(logPath));
+            var initBody = MethodBodyOf(log, "public static void InitializeFileLog(");
+            Assert("LogService.InitializeFileLog: 只停清理定时器，不再在打开 writer 后立即调用 Shutdown()",
+                initBody is not null && initBody.Contains("StopCleanupTimer()") && !initBody.Contains("Shutdown()"));
+        }
+
+        var appPath = FindRepoFile(Path.Combine("src", "TrueToneCap.App", "App.xaml.cs"));
+        if (appPath is not null)
+        {
+            var app = CodeOnly(appPath);
+            Assert("App: 单实例互斥锁使用 Local\\ 会话级命名空间（不跨登录会话互相踩锁）",
+                app.Contains(@"Local\TrueToneCap_SingleInstance") && !app.Contains(@"Global\TrueToneCap_SingleInstance"));
+        }
+
+        Assert("冗余破损脚本 scripts/security-patch.sh 已清理",
+            FindRepoFile(Path.Combine("scripts", "security-patch.sh")) is null);
     }
 
     /// <param name="detail">失败时补充的上下文（实测值 / 期望值）。
