@@ -13,6 +13,7 @@
 // 产物一致性：lib 与 exe 同参数输出逐字节相同（门禁保证）；回退路径产出的
 //   JPEG 仍合法，仅当回退件与 DLL 的 jpegli commit 不同时字节可能有微差。
 
+using System.Globalization;
 using System.Runtime.InteropServices;
 using TrueToneCap.Core.ColorManagement;
 using TrueToneCap.Core.Logging;
@@ -75,12 +76,12 @@ public static class JpegLiNative
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = exePath,
-                    Arguments = "-h",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
+                psi.ArgumentList.Add("-h");
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) { _available = false; return false; }
                 bool probed = NativeProcess.DrainProbe(proc, NativeProcess.ProbeTimeoutMs,
@@ -197,13 +198,14 @@ public static class JpegLiNative
             // 回退到 PATH
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo("cjpegli.exe", "-h")
+                var psi = new System.Diagnostics.ProcessStartInfo("cjpegli.exe")
                 {
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
+                psi.ArgumentList.Add("-h");
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is not null
                     && NativeProcess.DrainProbe(proc, NativeProcess.ProbeTimeoutMs, out int ec, out _, out _)
@@ -310,7 +312,8 @@ public static class JpegLiNative
         }
 
         // ═══ 回退路径：cjpegli.exe 子进程 ═══
-        return EncodeViaExe(bgra, width, height, argsFragment, hasNonSrgbIcc, iccToEmbed);
+        return EncodeViaExe(bgra, width, height, clampedDist, chromaSubsampling, forceBaseline, xyb,
+            hasNonSrgbIcc, iccToEmbed);
     }
 
     /// <summary>lib 主路径：BGRA→RGB24 内存转换后直调 shim（零临时文件）。</summary>
@@ -374,9 +377,10 @@ public static class JpegLiNative
         return rgb;
     }
 
-    /// <summary>cjpegli.exe 子进程回退路径（原实现原样保留）。</summary>
+    /// <summary>cjpegli.exe 子进程回退路径（参数全部走 ArgumentList，避免命令行字符串拼接）。</summary>
     private static byte[] EncodeViaExe(byte[] bgra, int width, int height,
-        string argsFragment, bool hasNonSrgbIcc, byte[]? iccProfile)
+        float clampedDist, string chromaSubsampling, bool forceBaseline, bool xyb,
+        bool hasNonSrgbIcc, byte[]? iccProfile)
     {
         var exePath = GetExePath();
 
@@ -394,33 +398,46 @@ public static class JpegLiNative
                 File.WriteAllBytes(tmpIcc, iccProfile!);
             }
 
-            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
-            var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
+            var (safeTmpPpm, safeOutPath) = Core.Security.PathSanitizer.SanitizePair(tmpPpm, tmpPpm + ".jpg");
 
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"{argsFragment} \"{safeTmpPpm}\" \"{tmpPpm}.jpg\"",
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+            psi.ArgumentList.Add("--distance");
+            psi.ArgumentList.Add(clampedDist.ToString("F4", CultureInfo.InvariantCulture));
+            if (forceBaseline)
+            {
+                psi.ArgumentList.Add("--progressive_level");
+                psi.ArgumentList.Add("0");
+            }
+            if (xyb)
+                psi.ArgumentList.Add("--xyb");
+            if (chromaSubsampling is "420" or "422")
+            {
+                psi.ArgumentList.Add("--chroma_subsampling");
+                psi.ArgumentList.Add(chromaSubsampling);
+            }
+            psi.ArgumentList.Add(safeTmpPpm);
+            psi.ArgumentList.Add(safeOutPath);
 
             // 2026-08-10 诊断代码（无条件写 %TEMP%\ttc_encoder_cmd.log）已移除：
             // 该日志在 Release 下也会持续写入并最终无限增长，且命令行只在排查时才有意义。
             // 需要排查参数传递时用 Debug 输出即可。
-            CoreLog.Debug("JPEGLI", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+            CoreLog.Debug("JPEGLI", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
 
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");
             var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 30_000, "cjpegli");
 
-            string outPath = tmpPpm + ".jpg";
-            if (exitCode != 0 || !File.Exists(outPath))
+            if (exitCode != 0 || !File.Exists(safeOutPath))
                 throw new InvalidOperationException($"[jpegli] cjpegli 失败 (exit={exitCode}) {stderr.Trim()}");
 
-            var jpegBytes = File.ReadAllBytes(outPath);
+            var jpegBytes = File.ReadAllBytes(safeOutPath);
 
             // 后处理注入 ICC: 插在 APP0(JFIF) 之后，形态是 APP2 + 分块字段（见 InjectIccIntoJpeg）
             // cjpegli 不支持 --icc_profile，需要手动注入
@@ -599,27 +616,38 @@ public static class JpegLiNative
                 fs.Write(gray, 0, gray.Length);
             }
 
+            var (safeTmpPpm, safeOutPath) = Core.Security.PathSanitizer.SanitizePair(tmpPpm, tmpPpm + ".jpg");
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"--distance {clampedDist:F4}{progArg}{xybArg} \"{tmpPpm}\" \"{tmpPpm}.jpg\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+            psi.ArgumentList.Add("--distance");
+            psi.ArgumentList.Add(clampedDist.ToString("F4", CultureInfo.InvariantCulture));
+            if (forceBaseline)
+            {
+                psi.ArgumentList.Add("--progressive_level");
+                psi.ArgumentList.Add("0");
+            }
+            if (xyb)
+                psi.ArgumentList.Add("--xyb");
+            psi.ArgumentList.Add(safeTmpPpm);
+            psi.ArgumentList.Add(safeOutPath);
 
-            CoreLog.Debug("JPEGLI_GRAY", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+            CoreLog.Debug("JPEGLI_GRAY", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
 
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) throw new InvalidOperationException("无法启动 cjpegli");
             var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 30_000, "cjpegli(gray)");
 
-            string outPath = tmpPpm + ".jpg";
-            if (exitCode != 0 || !File.Exists(outPath))
+            if (exitCode != 0 || !File.Exists(safeOutPath))
                 throw new InvalidOperationException($"[jpegli] 灰度编码失败 (exit={exitCode}) {stderr.Trim()}");
 
-            return File.ReadAllBytes(outPath);
+            return File.ReadAllBytes(safeOutPath);
         }
         finally
         {

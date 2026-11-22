@@ -154,12 +154,13 @@ internal static class FfmpegLocator
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = "-hide_banner -version",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
+            psi.ArgumentList.Add("-hide_banner");
+            psi.ArgumentList.Add("-version");
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) return false;
             var stdoutTask = proc.StandardOutput.ReadToEndAsync();

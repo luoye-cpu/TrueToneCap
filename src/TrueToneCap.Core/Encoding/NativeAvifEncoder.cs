@@ -4,6 +4,7 @@
 // AVIF 原生编码器 — 通过 avifenc 命令行工具编码 (libaom 软件路径)
 // 硬件编码路径 (MFT/NVENC/QSV) 保持不变
 
+using System.Globalization;
 using System.Runtime.InteropServices;
 using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Services;
@@ -63,19 +64,28 @@ public static class NativeAvifEncoder
             ? null
             : $"当前内嵌 avifenc 未编译 SVT-AV1（--version 只有 aom：[{VersionText.Replace("\n", " ").Replace("\r", "").Trim()}]）";
 
-    /// <summary>生成 `--codec` 参数；Auto 时不传，沿用 avifenc 默认。
+    /// <summary>向参数列表追加 `--codec` 项；Auto 时不传，沿用 avifenc 默认。
     /// <para>P2-5 修复：改为按调用传参（避免全局静态竞态）。
     /// 原为全局可变字段 `Codec`，并发编码任务会互相覆盖。</para></summary>
-    private static string GetCodecArg(string codec) => codec switch
+    private static void AddCodecArgs(List<string> args, string codec)
     {
-        // 选了 SVT 但当前 avifenc 未启用它 → 不传 --codec，回落到默认（即 libaom）。
-        // 否则会因为不支持的 codec 直接编码失败。
-        // ⚠ 这一支是"用户手选的编码器被静默换掉"，必须配套 CodecDowngradeNote 留痕（见下）。
-        "SvtAv1" when !IsSvtAvailable => "",
-        "LibAom" => "--codec aom",
-        "SvtAv1" => "--codec svt",
-        _ => ""
-    };
+        if (CodecDowngradeNote(codec) is { } note) EncoderFallbackNotifier.LastReason = note;
+        switch (codec)
+        {
+            // 选了 SVT 但当前 avifenc 未启用它 → 不传 --codec，回落到默认（即 libaom）。
+            // 否则会因为不支持的 codec 直接编码失败。
+            case "SvtAv1" when !IsSvtAvailable:
+                return;
+            case "LibAom":
+                args.Add("--codec");
+                args.Add("aom");
+                return;
+            case "SvtAv1":
+                args.Add("--codec");
+                args.Add("svt");
+                return;
+        }
+    }
 
     /// <summary>「最小体积」档要下发给 libaom 的高级选项（<c>-a key=value</c>）。
     /// <para>实测（4K，2026-10-07）：<c>tune=ssim</c> 是唯一真正减小体积的小参 ——
@@ -113,13 +123,6 @@ public static class NativeAvifEncoder
             ? "本机 avifenc 未编译 SVT-AV1 ⇒ 手选的 \"Svt 已被省略，本张按 avifenc 默认的 AOM 编码"
             : null;
 
-    /// <summary>取 <c>--codec</c> 参数，并顺手把"手选编码器被省略"记进对外痕迹。</summary>
-    private static string CodecArgNoting(string codec)
-    {
-        if (CodecDowngradeNote(codec) is { } note) EncoderFallbackNotifier.LastReason = note;
-        return GetCodecArg(codec);
-    }
-
     // ═══ speed：实测后由 4 改为 6 ═══
     // 依据 scripts/precision/avif_bench.py 实测（1080p, q=60）：
     //   speed 4 → 1.53s / 322.5 KB
@@ -147,12 +150,12 @@ public static class NativeAvifEncoder
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = exePath,
-                    Arguments = "--version",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
+                psi.ArgumentList.Add("--version");
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) { _available = false; return false; }
                 // stdout 要留着判断编译进了哪些编码器（见 IsSvtAvailable）；排空与超时见 NativeProcess.DrainProbe
@@ -202,8 +205,6 @@ public static class NativeAvifEncoder
 
         var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
         int q = CrfToQuality(crf);
-        string cicpArgs = BuildCicpArgs(isHdr, colorSpaceTag);
-        string chromaArg = chroma switch { "420" => "--yuv 420", "422" => "--yuv 422", _ => "--yuv 444" };
 
         // ═══ 2026-09-17：SDR 路径的位深参数传递 ═══
         // avifenc 的 `-d,--depth D` = 输出位深，D 只能取 8/10/12，且**仅对 JPEG/PNG 输入做转换**
@@ -211,34 +212,66 @@ public static class NativeAvifEncoder
         // 本路径输入是 8-bit PNG，故传 --depth 10/12 即可让 avifenc 升采样输出高位深。
         // HDR 不经本方法：现行 HDR 的 avifenc 兜底路是 EncodeFile + 16-bit PNG 中转（见 FormatEncoders
         // 的 HDR 分支），下面这两处调用都写 isHdr: false ⇒ 这里的位深只服务 SDR 升位深。
-        string depthArg = isHdr ? "" : GetDepthArg(bitDepth);
+        int targetDepth = isHdr ? 8 : FormatHelper.AvifContainerDepth(bitDepth);
+        bool hasDepth = targetDepth > 8;
 
         // ICC 参数（仍需临时文件，avifenc 不支持 stdin ICC）
         // 能不能嵌只问一个地方：FormatHelper.IsEmbeddableIcc（与 cjxl 路径同判据，见 §31.3-9）
-        string iccArg = "";
         string? tmpIccPath = null;
+        string? safeTmpIccPath = null;
         if (FormatHelper.IsEmbeddableIcc(iccProfile))
         {
             tmpIccPath = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
-            try { File.WriteAllBytes(tmpIccPath, iccProfile); iccArg = $"--icc \"{tmpIccPath}\""; }
-            catch { }
+            try
+            {
+                File.WriteAllBytes(tmpIccPath, iccProfile);
+                safeTmpIccPath = Core.Security.PathSanitizer.SanitizeForEncoding(tmpIccPath);
+            }
+            catch
+            {
+                tmpIccPath = null;
+                safeTmpIccPath = null;
+            }
         }
 
         FormatHelper.ValidateNativePath(path, nameof(path));
+        var safePath = Core.Security.PathSanitizer.SanitizeForEncoding(path);
 
         // SDR 路径：PNG → avifenc stdin（--stdin --input-format png）
         // 消除临时 PNG 文件 I/O（4K 约 8-16MB 写+读 → 零磁盘 I/O）
         // ⚠ 「最小体积」档额外下发的 libaom 高级选项（tune=ssim）**只在该 codec 解析为 aom 时加**：
         //   SVT-AV1 / NVENC 不认 aom 的 key，avifenc 会对未使用的 key 报警告（其帮助文档明说）。
-        string advArgs = JoinArgs(BuildAomAdvancedArgs(codec, effort));
-        string commonArgs = JoinArgs(
-            $"-q {q}", $"-s {CompressionEffortMap.AvifencSpeed(effort)}", CodecArgNoting(codec), chromaArg, cicpArgs, iccArg, advArgs, "--stdin --input-format png");
+        var commonArgs = new List<string>
+        {
+            "-q", q.ToString(CultureInfo.InvariantCulture),
+            "-s", CompressionEffortMap.AvifencSpeed(effort).ToString(CultureInfo.InvariantCulture)
+        };
+        AddCodecArgs(commonArgs, codec);
+        commonArgs.Add("--yuv");
+        commonArgs.Add(chroma switch { "420" => "420", "422" => "422", _ => "444" });
+        AddCicpArgs(commonArgs, isHdr, colorSpaceTag);
+        if (safeTmpIccPath is not null)
+        {
+            commonArgs.Add("--icc");
+            commonArgs.Add(safeTmpIccPath);
+        }
+        commonArgs.AddRange(BuildAomAdvancedArgs(codec, effort));
+        commonArgs.Add("--stdin");
+        commonArgs.Add("--input-format");
+        commonArgs.Add("png");
 
         try
         {
-            RunPngViaStdin(exePath, JoinArgs(commonArgs, depthArg, $"\"{path}\""), bgra, w, h, path);
+            var args = new List<string>(commonArgs);
+            if (hasDepth)
+            {
+                args.Add("--depth");
+                args.Add(targetDepth.ToString(CultureInfo.InvariantCulture));
+            }
+            args.Add(safePath);
+            RunPngViaStdin(exePath, args, bgra, w, h, safePath);
         }
-        catch (Exception ex) when (depthArg.Length > 0)
+        catch (Exception ex) when (hasDepth)
         {
             // 本机 avifenc 不接受所请求位深（老版本可能没有 -d/--depth，或该 codec 不支持 12-bit）
             // → 回退 8-bit 重试，最坏情况等价于修复前的行为；重试仍失败则原样抛出，绝不吞掉。
@@ -249,7 +282,8 @@ public static class NativeAvifEncoder
             EncoderFallbackNotifier.LastReason =
                 $"avifenc 拒绝 {bitDepth}-bit 输出（{ex.Message}）⇒ 本次已按 8-bit 重新编码，"
                 + "容器位深降为 8";
-            RunPngViaStdin(exePath, JoinArgs(commonArgs, $"\"{path}\""), bgra, w, h, path);
+            var fallbackArgs = new List<string>(commonArgs) { safePath };
+            RunPngViaStdin(exePath, fallbackArgs, bgra, w, h, safePath);
         }
         finally
         {
@@ -259,17 +293,15 @@ public static class NativeAvifEncoder
         }
     }
 
-    /// <summary>拼接命令行片段，自动跳过空片段（否则会出现连续空格）。</summary>
-    private static string JoinArgs(params string?[] parts)
+    /// <summary>向参数列表追加 <c>--depth</c>（仅高位深 >8-bit 时追加）。</summary>
+    private static void AddDepthArgs(List<string> args, int bitDepth)
     {
-        var sb = new System.Text.StringBuilder();
-        foreach (var p in parts)
+        int depth = FormatHelper.AvifContainerDepth(bitDepth);
+        if (depth > 8)
         {
-            if (string.IsNullOrWhiteSpace(p)) continue;
-            if (sb.Length > 0) sb.Append(' ');
-            sb.Append(p);
+            args.Add("--depth");
+            args.Add(depth.ToString(CultureInfo.InvariantCulture));
         }
-        return sb.ToString();
     }
 
     /// <summary>
@@ -285,7 +317,7 @@ public static class NativeAvifEncoder
     }
 
     /// <summary>把 BGRA 像素编码成 PNG 流写入 avifenc 的 stdin，并等待其完成。</summary>
-    private static void RunPngViaStdin(string exePath, string arguments, byte[] bgra, int w, int h, string path)
+    private static void RunPngViaStdin(string exePath, IReadOnlyList<string> arguments, byte[] bgra, int w, int h, string path)
         => RunStdinCore(exePath, arguments, s => ManagedPngEncoder.EncodeFast(bgra, w, h, s, null), path);
 
     /// <summary>
@@ -295,23 +327,23 @@ public static class NativeAvifEncoder
     /// 复用同一套进程/排水/超时骨架，只换"往 stdin 里写什么"（Encode16 流式写 16-bit PNG）。
     /// 临时 PNG 文件 I/O（4K 16-bit 约 66MB 写+读）就此归零。</para>
     /// </summary>
-    private static void RunStdinCore(string exePath, string arguments, Action<Stream> writePng, string avifPath)
+    private static void RunStdinCore(string exePath, IReadOnlyList<string> arguments, Action<Stream> writePng, string avifPath)
     {
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = arguments,
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
             CreateNoWindow = true
         };
+        foreach (var arg in arguments) psi.ArgumentList.Add(arg);
 
-        // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
+        // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs 的既有形态（Debug 级、含完整参数串）。
         // 位深回退重试会再次进入本方法 ⇒ 每次实际下发 avifenc 的参数串都各留一条
         // （2026-11-06 质量链路实证报告 §1.4）。
-        CoreLog.Debug("AVIF", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+        CoreLog.Debug("AVIF", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
 
         using var proc = System.Diagnostics.Process.Start(psi);
         if (proc is null) throw new InvalidOperationException("无法启动 avifenc");
@@ -354,17 +386,19 @@ public static class NativeAvifEncoder
     private static int CrfToQuality(int crf) =>
         (int)Math.Clamp(100 - (crf * 100.0 / 63.0), 0, 100);
 
-    /// <summary>根据 isHdr 和 colorSpaceTag 构建 CICP 参数。
+    /// <summary>根据 isHdr 和 colorSpaceTag 向参数列表追加 CICP 参数。
     /// <para>matrix 槽的取值统一问 <see cref="FormatHelper.AvifMatrixCoefficients"/>（含"为什么不用
     /// identity"的说明）；transfer 用 <see cref="FormatHelper.CicpTransferPq"/> /
     /// <see cref="FormatHelper.CicpTransferSrgb"/>，与 PNG cICP、NVENC colr(nclx) 同一套常量。</para></summary>
-    private static string BuildCicpArgs(bool isHdr, string? colorSpaceTag)
+    private static void AddCicpArgs(List<string> args, bool isHdr, string? colorSpaceTag)
     {
         if (isHdr)
         {
             byte primaries = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(colorSpaceTag ?? "BT2020");
-            return $"--cicp {primaries}/{FormatHelper.CicpTransferPq}/{FormatHelper.AvifMatrixCoefficients(primaries)}"
-                 + $" {GetDepthArg(10)}";   // HDR 恒 10-bit（PQ，与 AvifEncoderCapabilities.HdrBitDepth 同档）
+            args.Add("--cicp");
+            args.Add($"{primaries}/{FormatHelper.CicpTransferPq}/{FormatHelper.AvifMatrixCoefficients(primaries)}");
+            AddDepthArgs(args, 10);   // HDR 恒 10-bit（PQ，与 AvifEncoderCapabilities.HdrBitDepth 同档）
+            return;
         }
 
         // ═══ 2026-09-19 缺陷 B（交接 §30.9 / 本批 B2）：SDR 侧"无码点 ⇒ 不下发码点"必须与 EncodeFile 同源 ═══
@@ -376,11 +410,12 @@ public static class NativeAvifEncoder
         // 省略 --cicp 后由容器侧的 ICC 承担声明（Adobe 标准 profile 由 PrepareSdrLinearFloat 兜底注入，
         // 恒 >400B）；本机 avifenc 实测：输入带 iCCP/--icc 而不传 --cicp ⇒ 写 2/2/6（unspecified）+ prof，
         // 即"不猜码点"而不是"猜错码点"。HDR 分支不经此处（恒 BT.2020 家族，且 tag 已在源头归一）。
-        if (FormatHelper.BuildSdrCicp(colorSpaceTag) is null) return "";
+        if (FormatHelper.BuildSdrCicp(colorSpaceTag) is null) return;
 
         // SDR: 根据 colorSpaceTag 选择原色；transfer = sRGB(13)（图片/截图标准，非 BT.709 视频 OETF）
         byte prim = ColorManagement.ColorSpaceConverter.GetCicpPrimaries(colorSpaceTag ?? "sRGB");
-        return $"--cicp {prim}/{FormatHelper.CicpTransferSrgb}/{FormatHelper.AvifMatrixCoefficients(prim)}";
+        args.Add("--cicp");
+        args.Add($"{prim}/{FormatHelper.CicpTransferSrgb}/{FormatHelper.AvifMatrixCoefficients(prim)}");
     }
 
     /// <summary>直接从 PNG 文件编码为 AVIF，支持 CICP 参数。</summary>
@@ -396,33 +431,34 @@ public static class NativeAvifEncoder
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
 
         var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
-        string args = BuildAvifencArgs(crf, chroma, cicp, colorSpaceTag, peakNits, codec, bitDepth,
+        var args = BuildAvifencArgs(crf, chroma, cicp, colorSpaceTag, peakNits, codec, bitDepth,
             iccProfile, effort, out string? tmpIccPath);
-
-        // ═══ 2026-11-08: P0 Security Fix - Sanitize all file paths before encoding ═══
-        var (safePngPath, safeAvifPath) = Core.Security.PathSanitizer.SanitizePair(pngPath, avifPath);
-
-        var psi = new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = exePath,
-            Arguments = $"{args} \"{safePngPath}\" \"{safeAvifPath}\"".Trim(),
-            UseShellExecute = false,
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            CreateNoWindow = true
-        };
-
-        // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
-        CoreLog.Debug("AVIF", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
 
         try
         {
-        using var proc = System.Diagnostics.Process.Start(psi);
-        if (proc is null) throw new InvalidOperationException("无法启动 avifenc");
-        // 排空两条管道与等超时同时发生（缓冲区满不死锁，进程不退出也拿得到超时）
-        var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "avifenc");
-        if (exitCode != 0 || !File.Exists(avifPath))
-            throw new InvalidOperationException($"[AVIF] avifenc 失败 (exit={exitCode}) {stderr.Trim()}");
+            var (safePngPath, safeAvifPath) = Core.Security.PathSanitizer.SanitizePair(pngPath, avifPath);
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exePath,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            foreach (var arg in args) psi.ArgumentList.Add(arg);
+            psi.ArgumentList.Add(safePngPath);
+            psi.ArgumentList.Add(safeAvifPath);
+
+            // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs 的既有形态（Debug 级、含完整参数串）。
+            CoreLog.Debug("AVIF", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) throw new InvalidOperationException("无法启动 avifenc");
+            // 排空两条管道与等超时同时发生（缓冲区满不死锁，进程不退出也拿得到超时）
+            var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "avifenc");
+            if (exitCode != 0 || !File.Exists(safeAvifPath))
+                throw new InvalidOperationException($"[AVIF] avifenc 失败 (exit={exitCode}) {stderr.Trim()}");
         }
         finally
         {
@@ -430,22 +466,35 @@ public static class NativeAvifEncoder
         }
     }
 
-    /// <summary>构建 avifenc 公共参数串（质量/速度/编码器/色度/CICP/ICC/clli/位深/aom 高级项）。
+    /// <summary>构建 avifenc 公共参数列表（质量/速度/编码器/色度/CICP/ICC/clli/位深/aom 高级项）。
     /// <para>2026-11-11 性能审计 P2 起从 EncodeFile 抽出：<see cref="EncodeStdin16"/>（16-bit stdin 路）
     /// 必须与文件路逐字同一套参数 —— 色彩声明写两份迟早漂移（本仓反复付过学费的形态）。</para>
-    /// <para>尾部不带输入/输出路径；icc/clli/depth/adv 片段各带前导空格（沿用旧拼接约定，空串无尾随空格）。
-    /// <paramref name="tmpIccPath"/> 非 null 时调用方负责在 finally 里删除。</para></summary>
-    private static string BuildAvifencArgs(int crf, string chroma, byte[]? cicp, string? colorSpaceTag,
+    /// <para>尾部不带输入/输出路径；<paramref name="tmpIccPath"/> 非 null 时调用方负责在 finally 里删除。</para></summary>
+    private static List<string> BuildAvifencArgs(int crf, string chroma, byte[]? cicp, string? colorSpaceTag,
         float peakNits, string codec, int bitDepth, byte[]? iccProfile, CompressionEffort effort,
         out string? tmpIccPath)
     {
         int q = CrfToQuality(crf);
+        var args = new List<string>
+        {
+            "-q", q.ToString(CultureInfo.InvariantCulture),
+            "-s", CompressionEffortMap.AvifencSpeed(effort).ToString(CultureInfo.InvariantCulture)
+        };
+        AddCodecArgs(args, codec);
+
+        // ═══ 2026-09-17：HDR 路径的色度参数 ═══
+        // 此前 EncodeFile 完全不传 --yuv ⇒ HDR 输出的实际色度由 avifenc 默认策略决定，
+        // 与设置里的 ChromaSubsampling 无关（典型的"改了不生效"）。
+        // 这里与 SDR 路径使用**逐字相同**的映射，未知值同样落到 444。
+        // 2026-11-03 加 "400"：增益图（Gray 档）必须是真单平面灰度 AVIF —— 写出器会拿 pixi
+        // 平面数对撞 tmap 声明的通道数，喂"复制成三份的灰度 + 444"会产出"声明 1 通道、实交付 3 平面"的谎件。
+        args.Add("--yuv");
+        args.Add(chroma switch { "420" => "420", "422" => "422", "400" => "400", _ => "444" });
 
         // cicp 参数缺省值（sRGB）：下面两条分支会按需覆盖 —— 有 cicp 四元组 ⇒ 按数组拼（HDR/SDR 看 transfer 槽）；
-        // 只有 colorSpaceTag ⇒ 走 BuildCicpArgs。三处 transfer/matrix 取值 2026-09-19 起统一取自
+        // 只有 colorSpaceTag ⇒ 走 AddCicpArgs。三处 transfer/matrix 取值 2026-09-19 起统一取自
         // FormatHelper 的常量与 AvifMatrixCoefficients（此前这里硬编码 "--cicp 1/13/1"，是第三处写死矩阵的地方）。
-        string cicpArgs = $"--cicp {FormatHelper.CicpPrimariesBt709}/{FormatHelper.CicpTransferSrgb}"
-                        + $"/{FormatHelper.AvifMatrixCoefficients(FormatHelper.CicpPrimariesBt709)}";
+        bool depthAdded = false;
         if (cicp is { Length: 4 })
         {
             // ═══ 上游的 CICP 四元组是 PNG cICP 形态（matrix 槽 = identity，因为 PNG 存 RGB 采样），
@@ -454,13 +503,17 @@ public static class NativeAvifEncoder
             bool hdr = cicp[1] == FormatHelper.CicpTransferPq;
             byte m = (byte)(cicp[2] == FormatHelper.CicpMatrixIdentity
                 ? FormatHelper.AvifMatrixCoefficients(cicp[0]) : cicp[2]);
-            cicpArgs = $"--cicp {cicp[0]}/{cicp[1]}/{m}";
+            args.Add("--cicp");
+            args.Add($"{cicp[0]}/{cicp[1]}/{m}");
             // PQ 的位深**下限**是 10（8-bit PQ 分层严重），上限按调用方请求（libaom 可到 12）。
             // 2026-09-25 前这里无条件写死 GetDepthArg(10)，与上游 NegotiateBitDepth 的协商结果无关
             // ⇒ 会出现"管线算出 12-bit、命令行仍给 10-bit"的静默改参数。
             // 形参 bitDepth 默认 8 ⇒ Math.Max 兜到 10，不传位深的老调用行为不变（刻意保留的兼容点）。
             if (hdr)
-                cicpArgs += $" {GetDepthArg(Math.Max(bitDepth, AvifEncoderCapabilities.HdrBitDepth))}";
+            {
+                AddDepthArgs(args, Math.Max(bitDepth, AvifEncoderCapabilities.HdrBitDepth));
+                depthAdded = true;
+            }
         }
         else if (!string.IsNullOrEmpty(colorSpaceTag))
         {
@@ -469,42 +522,20 @@ public static class NativeAvifEncoder
             // GetCicpPrimaries("AdobeRGB") 返回 1 (BT.709) → cicp=null 兜底仍写出
             // --cicp 1/13/1，误标 sRGB 且优先于 ICC → 色彩丢失。与 PNG GetColorMetadata
             // 的既有修复一致：AdobeRGB 仅靠 ICC 声明，跳过 --cicp 参数。
-            if (colorSpaceTag == "AdobeRGB")
-                cicpArgs = "";
-            else
+            if (colorSpaceTag != "AdobeRGB")
                 // 没有 CICP 字节数组但有 colorSpaceTag 时动态构建。
                 // ⚠ isHdr 这里恒 false：走到本分支说明四元组缺失（上面 Length:4 的判定不成立），
                 //   HDR 无从判定 ⇒ 按标签拼 SDR 声明。旧写法读 cicp?[1]（非 null 但长度≠4 时会
                 //   直接 IndexOutOfRange），现在由 Length 判定保证只走安全路径。
                 //   要输出 HDR 的调用方必须同时给出 cicp 四元组（见 FormatEncoders 的 AVIF HDR 分支）。
-                cicpArgs = BuildCicpArgs(isHdr: false, colorSpaceTag);
+                AddCicpArgs(args, isHdr: false, colorSpaceTag);
         }
-
-        // ═══ 2026-08-10 修复: HDR 写 clli (内容亮度级别)；2026-09-20 取值收进 FormatHelper ═══
-        // avifenc --clli MaxCLL,MaxPALL。恒 10000 让 tone-map 查看器把 SDR 桌面
-        // 内容显示极暗 → 传内容实际峰值。
-        // 规则本身（clamp 203..10000、FALL = 峰值一半）现在只有一份：
-        // 硬件路（IvfWriter 写容器 clli 盒）问的是同一个函数 ⇒ 同一张图两条路声明同一亮度范围。
-        string clliArg = FormatHelper.AvifContentLightLevel(peakNits) is { } cll
-            ? $" --clli {cll.MaxCLL},{cll.MaxFALL}" : "";
-
-        // ═══ 2026-09-17：HDR 路径的色度参数 ═══
-        // 此前 EncodeFile 完全不传 --yuv ⇒ HDR 输出的实际色度由 avifenc 默认策略决定，
-        // 与设置里的 ChromaSubsampling 无关（典型的"改了不生效"）。
-        // 这里与 SDR 路径使用**逐字相同**的映射，未知值同样落到 444。
-        // 2026-11-03 加 "400"：增益图（Gray 档）必须是真单平面灰度 AVIF —— 写出器会拿 pixi
-        // 平面数对撞 tmap 声明的通道数，喂"复制成三份的灰度 + 444"会产出"声明 1 通道、实交付 3 平面"的谎件。
-        string chromaArg = chroma switch { "420" => "--yuv 420", "422" => "--yuv 422", "400" => "--yuv 400", _ => "--yuv 444" };
-
-        // ═══ 2026-10-08 修复(P1①): SDR ≥10-bit 分支补传 --depth ═══
-        // 此前 16-bit PNG 中转后未传位深 → avifenc 默认按 8-bit 处理高位深输入。
-        // 复用 GetDepthArg：8-bit 不传（默认），10/12 钳到 avifenc 上限 12。
-        string depthArg = bitDepth > 8 ? " " + GetDepthArg(bitDepth).Trim() : "";
-
-        // 「最小体积」档的 libaom 高级选项（tune=ssim）。前导空格按本文件既有约定手工加
-        // （iccArg/clliArg/depthArg 都是这个形状），空串时不留多余空格。
-        var advArgs = BuildAomAdvancedArgs(codec, effort);
-        string advArg = advArgs.Length > 0 ? " " + string.Join(' ', advArgs) : "";
+        else
+        {
+            args.Add("--cicp");
+            args.Add($"{FormatHelper.CicpPrimariesBt709}/{FormatHelper.CicpTransferSrgb}"
+                   + $"/{FormatHelper.AvifMatrixCoefficients(FormatHelper.CicpPrimariesBt709)}");
+        }
 
         // ═══ 2026-09-20：EncodeFile 也要能把 ICC 交给 avifenc ═══
         // 实测（publish/…/native/avifenc.exe 1.4.2，同一张带 iCCP 的 P3 PNG）：
@@ -516,7 +547,6 @@ public static class NativeAvifEncoder
         //   所以"≥10-bit 走 16-bit PNG 中转"那条 SDR 路的广色域产物只有 nclx 声明，
         //   而硬件路同一设置写的是 prof + nclx —— 同一张图两条路声明不同，采信 ICC 的
         //   查看器（Windows 照片等）对软件产物就只能按码点猜。
-        string iccArg = "";
         tmpIccPath = null;
         if (FormatHelper.IsEmbeddableIcc(iccProfile))
         {
@@ -524,7 +554,9 @@ public static class NativeAvifEncoder
             try
             {
                 File.WriteAllBytes(tmpIccPath, iccProfile);
-                iccArg = $" --icc \"{tmpIccPath}\"";
+                var safeTmpIcc = Core.Security.PathSanitizer.SanitizeForEncoding(tmpIccPath);
+                args.Add("--icc");
+                args.Add(safeTmpIcc);
             }
             catch
             {
@@ -532,7 +564,27 @@ public static class NativeAvifEncoder
             }
         }
 
-        return $"-q {q} -s {CompressionEffortMap.AvifencSpeed(effort)} {CodecArgNoting(codec)} {chromaArg} {cicpArgs}{iccArg}{clliArg}{depthArg}{advArg}";
+        // ═══ 2026-08-10 修复: HDR 写 clli (内容亮度级别)；2026-09-20 取值收进 FormatHelper ═══
+        // avifenc --clli MaxCLL,MaxPALL。恒 10000 让 tone-map 查看器把 SDR 桌面
+        // 内容显示极暗 → 传内容实际峰值。
+        // 规则本身（clamp 203..10000、FALL = 峰值一半）现在只有一份：
+        // 硬件路（IvfWriter 写容器 clli 盒）问的是同一个函数 ⇒ 同一张图两条路声明同一亮度范围。
+        if (FormatHelper.AvifContentLightLevel(peakNits) is { } cll)
+        {
+            args.Add("--clli");
+            args.Add($"{cll.MaxCLL},{cll.MaxFALL}");
+        }
+
+        // ═══ 2026-10-08 修复(P1①): SDR ≥10-bit 分支补传 --depth ═══
+        // 此前 16-bit PNG 中转后未传位深 → avifenc 默认按 8-bit 处理高位深输入。
+        // 复用 AddDepthArgs：8-bit 不传（默认），10/12 钳到 avifenc 上限 12。
+        if (!depthAdded && bitDepth > 8)
+            AddDepthArgs(args, bitDepth);
+
+        // 「最小体积」档的 libaom 高级选项（tune=ssim）。
+        args.AddRange(BuildAomAdvancedArgs(codec, effort));
+
+        return args;
     }
 
     /// <summary>
@@ -552,21 +604,25 @@ public static class NativeAvifEncoder
             throw new DllNotFoundException("[AVIF] avifenc 不可用");
 
         var exePath = NativeLibraryResolver.GetExePath("avifenc.exe");
-        string args = BuildAvifencArgs(crf, chroma, cicp, colorSpaceTag, peakNits, codec, bitDepth,
+        var args = BuildAvifencArgs(crf, chroma, cicp, colorSpaceTag, peakNits, codec, bitDepth,
             iccProfile, effort, out string? tmpIccPath);
-        FormatHelper.ValidateNativePath(avifPath, nameof(avifPath));
-        var safeAvifPath = Core.Security.PathSanitizer.SanitizeForEncoding(avifPath);
-        string arguments = $"{args} --stdin --input-format png \"{safeAvifPath}\"".Trim();
 
         try
         {
+            FormatHelper.ValidateNativePath(avifPath, nameof(avifPath));
+            var safeAvifPath = Core.Security.PathSanitizer.SanitizeForEncoding(avifPath);
+            args.Add("--stdin");
+            args.Add("--input-format");
+            args.Add("png");
+            args.Add(safeAvifPath);
+
             // cICP 照旧嵌进 PNG 流（与旧临时文件内容一致）；ICC 走 --icc
             //（avifenc 不从 PNG 继承 iCCP，2026-09-20 实测）。
             // omitAlpha 直通：GainMap 16-bit 底图必须写 RGB（color type 2），见 FormatEncoders 调用点。
-            RunStdinCore(exePath, arguments,
+            RunStdinCore(exePath, args,
                 s => ManagedPngEncoder.Encode16(bgra16, w, h, s, cicp: cicp, iccProfile: null,
                     bitDepth: bitDepth, fastest: true, omitAlpha: omitAlpha),
-                avifPath);
+                safeAvifPath);
         }
         finally
         {

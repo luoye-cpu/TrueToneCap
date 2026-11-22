@@ -15,79 +15,45 @@ If you discover a security vulnerability in TrueToneCap, please report it respon
 
 ## Security Features / 安全特性
 
-### Command Injection Prevention / 命令注入防护
+### Command / Argument Injection Prevention / 命令与参数注入防护
 
-**CWE-78 OS Command Injection** is fully mitigated through `PathSanitizer.SanitizeForEncoding`:
+All external encoders and helper processes are launched with `UseShellExecute = false` and structured **`ProcessStartInfo.ArgumentList`** (direct `CreateProcessW` argv passing without shell interpretation), combined with **`PathSanitizer.SanitizeForEncoding`** for path validation and canonicalization:
 
-通过 `PathSanitizer.SanitizeForEncoding` 全面防御 **CWE-78 OS 命令注入**：
+所有外部编码器及辅助工具进程均采用 `UseShellExecute = false` 与结构化 **`ProcessStartInfo.ArgumentList`**（直接通过 `CreateProcessW` 传递参数，不经 Shell 解释），并配合 **`PathSanitizer.SanitizeForEncoding`** 完成路径规范化与非法字符校验：
 
 #### Protected Components / 受保护组件
 
-| Encoder / 编码器 | File Path / 文件路径 | Sanitization Level / 清洗等级 |
-|------------------|----------------------|-------------------------------|
-| `avifenc` (AVIF) | Input PNG + Output AVIF | Full path validation |
-| `cjxl` (JPEG XL) | Input PPM + Output JXL + Intermediate files | Full path validation |
-| `cjpegli` (JPEG) | Input PPM + Output JPEG + Gain map | Full path validation |
-| `cwebp` (WebP) | Input PNG + Output WebP | Full path validation |
-| `ffmpeg` (Animation) | All input/output paths | Full path validation |
+| Component / 组件 | Arguments & Paths / 参数与路径 | Protection / 防护机制 |
+|------------------|--------------------------------|-----------------------|
+| `avifenc` (AVIF) | Input PNG / stdin + ICC + Output AVIF | `ArgumentList` + `PathSanitizer` |
+| `cjxl` (JPEG XL) | Input PPM/PNG + ICC + Output JXL | `ArgumentList` + `PathSanitizer` |
+| `cjpegli` (JPEG) | Input PPM/PGM + Output JPEG | `ArgumentList` + `PathSanitizer` |
+| `cwebp` (WebP) | Input PNG + Output WebP | `ArgumentList` + `PathSanitizer` |
+| `ffmpeg` (Animation & Probe) | Input frame pattern + Output animation | `ArgumentList` + `PathSanitizer` |
+| `explorer.exe` / `fxc.exe` | Folder / file / shader paths | `ArgumentList` (`UseShellExecute = false`) |
 
-#### Invalid Characters Blocked / 禁止的字符
+#### Path Validation Rules / 路径校验规则
 
-```csharp
-// Windows invalid path characters
-Path.GetInvalidPathChars() // < > : " / \ | ? * + 
-
-// Shell metacharacters (command injection vectors)
-";" "|" "&" "`" "$(" "${" ")" 
-```
-
-Any file path containing these characters will throw `SecurityException` before the external process is spawned.
-
-包含这些字符的文件路径在启动外部进程前就会被拒绝并抛出 `SecurityException`。
+`PathSanitizer.SanitizeForEncoding`:
+- Rejects empty/whitespace paths, control characters (`\0`, `\r`, `\n`, `char.IsControl`), `Path.GetInvalidPathChars()`, and Windows-illegal filename characters (`"`, `<`, `>`, `|`, `*`, `?`).
+- Canonicalizes via `Path.GetFullPath(...)` and verifies the parent directory exists (also preventing leading `-` option injection).
+- **Preserves legitimate Windows path characters** such as `)`, `(`, `&`, `'`, `;`, spaces, and Unicode (avoiding false positives on common paths like `R&D`, `O'Brien`, or `New Folder (2)`).
 
 #### Code Example / 代码示例
 
 ```csharp
-// src/TrueToneCap.Core/Security/PathSanitizer.cs
-public static string SanitizeForEncoding(string rawPath)
-{
-    var fullPath = Path.GetFullPath(rawPath);
-    
-    // Check for invalid path characters
-    foreach (var c in s_invalidChars)
-        if (fullPath.Contains(c))
-            throw new ArgumentException($"Invalid character '{c}' in path", nameof(rawPath));
-    
-    // Check for shell metacharacters
-    foreach (var metaChar in s_shellMetacharacters)
-        if (fullPath.Contains(metaChar))
-            throw new SecurityException(
-                $"Path contains potentially dangerous shell metacharacter '{metaChar}'");
-    
-    return fullPath;
-}
-```
-
-### Usage Pattern / 使用模式
-
-All encoder calls now sanitize paths before passing to `Process.Start`:
-
-所有编码器调用在传递给 `Process.Start` 之前都会先对路径进行清洗：
-
-```csharp
-// Before (vulnerable):
+var (safeInputPath, safeOutputPath) = PathSanitizer.SanitizePair(inputPath, outputPath);
 var psi = new ProcessStartInfo
 {
-    Arguments = $"\"{inputPath}\" \"{outputPath}\"".Trim(),
+    FileName = exePath,
+    UseShellExecute = false,
+    RedirectStandardOutput = true,
+    RedirectStandardError = true,
+    CreateNoWindow = true,
 };
-
-// After (secure):
-var safeInputPath = PathSanitizer.SanitizeForEncoding(inputPath);
-var safeOutputPath = PathSanitizer.SanitizeForEncoding(outputPath);
-var psi = new ProcessStartInfo
-{
-    Arguments = $"\"{safeInputPath}\" \"{safeOutputPath}\"".Trim(),
-};
+psi.ArgumentList.Add("-o");
+psi.ArgumentList.Add(safeOutputPath);
+psi.ArgumentList.Add(safeInputPath);
 ```
 
 ---
@@ -171,6 +137,7 @@ In case of a security incident:
 
 | Version / 版本 | Date / 日期 | Security Improvements / 安全改进 |
 |----------------|-------------|----------------------------------|
+| Unreleased | 2026-11-22 | Migrated all external encoders (`avifenc`/`cjxl`/`cjpegli`/`cwebp`), `ffmpeg`, `fxc`, and `explorer.exe` to `ProcessStartInfo.ArgumentList`; fixed `PathSanitizer` false positives on valid Windows path chars (`)`, `&`, `'`, `;`); hardened `SecretStore` against cache corruption on transient read failure & zeroed plaintext buffers; removed broken `scripts/security-patch.sh` |
 | v0.3.17 | 2026-11-16 | LLM translation hardening (strict batch validation, no response-body leakage in fallback errors); no new CVE fixes |
 | v0.3.16 | 2026-11-13 | No security-relevant changes; Store display-name localization only (app identity and code unchanged) |
 | v0.3.15 | 2026-11-13 | No new CVE fixes this release; offline translation mode added (OCR text no longer leaves the device when selected) |
@@ -191,5 +158,5 @@ TrueToneCap 设计符合以下标准：
 
 ---
 
-**Last Updated / 最后更新时间**: 2026-11-08  
+**Last Updated / 最后更新时间**: 2026-11-22  
 **Maintainer / 维护者**: TrueToneCap Team

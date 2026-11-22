@@ -319,8 +319,9 @@ public sealed class AnimationRecorder : IDisposable
             // transfer 恒 sRGB：录制源是 SDR 8-bit 池，decision 恒 HdrOutput=false。
             // WebP 容器没有 CICP 通道（传了也只是编解码器自嗨）⇒ flags 只给 AVIF；
             // GIF/APNG 的声明走编码后的 chunk 手术（AnimatedContainerColor）。
-            string colorFlags = avifPrimaries is null ? "" :
-                $" -color_primaries {avifPrimaries} -color_trc iec61966-2-1 -colorspace rgb -color_range pc";
+            string[] colorFlagArgs = avifPrimaries is null
+                ? []
+                : ["-color_primaries", avifPrimaries, "-color_trc", "iec61966-2-1", "-colorspace", "rgb", "-color_range", "pc"];
 
             try
             {
@@ -357,19 +358,32 @@ public sealed class AnimationRecorder : IDisposable
                 if (!path.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
                     path = Path.ChangeExtension(path, ext);
 
-                var fps = _config.FrameRate;
+                var outDir = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(outDir) && !Directory.Exists(outDir))
+                    Directory.CreateDirectory(outDir);
+
+                var inputPattern = Path.Combine(tmpDir, "frame_%05d.png");
+                var (safeInputPattern, safeOutputPath) = TrueToneCap.Core.Security.PathSanitizer.SanitizePair(inputPattern, path);
+                path = safeOutputPath;
+
+                var fps = _config.FrameRate.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 var quality = _config.Quality;
                 int avifCrf = Math.Clamp((int)Math.Round((100 - quality) * 63.0 / 100), 0, 63);
-                string args = fmt switch
+                string[] formatArgs = fmt switch
                 {
-                    "webp" => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -c:v libwebp -quality {quality} -loop 0 \"{path}\"",
-                    "apng" => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -plays 0 -f apng \"{path}\"",
+                    "webp" => ["-c:v", "libwebp", "-quality", quality.ToString(System.Globalization.CultureInfo.InvariantCulture), "-loop", "0"],
+                    "apng" => ["-plays", "0", "-f", "apng"],
                     // 2026-11-03 实机：libaom 默认 cpu-used=1 对 4K 动图完全不可用（2 帧编了 95s），
                     // cpu-used 4 也仍超 120s（24 帧 4K）⇒ 6 是动图档的实际速度位（实测 3 帧 4K 4.3s，
                     // ~1.4s/帧；屏幕内容对 cpu-used 不如实拍敏感）。⚠ tiles 参数名是 -tile-columns，
                     // 不是 -tiles（后者会让 ffmpeg 直接退出）。速度/超时实测记录见台账 §11.4。
-                    "avif" => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -c:v libaom-av1 -still-picture 0 -cpu-used 6 -row-mt 1 -tile-columns 1 -crf {avifCrf} -b:v 0{colorFlags} \"{path}\"",
-                    "gif" => $"-framerate {fps} -i \"{tmpDir}/frame_%05d.png\" -vf \"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{path}\"",
+                    "avif" => [
+                        "-c:v", "libaom-av1", "-still-picture", "0", "-cpu-used", "6",
+                        "-row-mt", "1", "-tile-columns", "1",
+                        "-crf", avifCrf.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        "-b:v", "0", .. colorFlagArgs
+                    ],
+                    "gif" => ["-vf", "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"],
                     _ => throw new InvalidOperationException($"未知的动图 ffmpeg 参数分支: {fmt}")
                 };
 
@@ -377,12 +391,18 @@ public sealed class AnimationRecorder : IDisposable
                 {
                     // 2026-11-02（D 流第 3/5 步）：FileName 来自 FfmpegLocator 的解析结果；空则退回裸名。
                     FileName = string.IsNullOrWhiteSpace(_config.FfmpegPath) ? "ffmpeg" : _config.FfmpegPath,
-                    Arguments = $"-y {args}",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
+                psi.ArgumentList.Add("-y");
+                psi.ArgumentList.Add("-framerate");
+                psi.ArgumentList.Add(fps);
+                psi.ArgumentList.Add("-i");
+                psi.ArgumentList.Add(safeInputPattern);
+                foreach (var arg in formatArgs) psi.ArgumentList.Add(arg);
+                psi.ArgumentList.Add(safeOutputPath);
 
                 System.Diagnostics.Process? proc = null;
                 // ═══ 2026-11-03（遗留 5）：进程根本没起来 ≠ 编码失败 ═══
@@ -418,16 +438,17 @@ public sealed class AnimationRecorder : IDisposable
                         int timeoutMs = Math.Max(120_000, 1_500 * _encodedFrames.Count);
                         var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                         var stderrTask = proc.StandardError.ReadToEndAsync();
-                        if (!proc.WaitForExit(timeoutMs))
+                        bool timedOut = !proc.WaitForExit(timeoutMs);
+                        if (timedOut)
                         {
-                            proc.Kill();
+                            try { proc.Kill(entireProcessTree: true); } catch { }
+                            try { proc.WaitForExit(5_000); } catch { }
                             LogService.Warn("AnimationRecorder", $"ffmpeg 超时 ({timeoutMs / 1000}s)，已终止");
                         }
                         // 确保两个流都读完，释放管道缓冲区
                         Task.WhenAll(stdoutTask, stderrTask).GetAwaiter().GetResult();
-                        // ⚠ 先取退出码再 Dispose：2026-11-03 实机抓到 Dispose 后读 ExitCode 抛
-                        // "No process is associated with this object"（超时 Kill 后未等退出同理可能炸）。
-                        exitCode = proc.ExitCode;
+                        // ⚠ 超时或尚未退出时不读 ExitCode（2026-11-03 实机抓到未退出/Dispose 后读 ExitCode 抛异常）。
+                        exitCode = (!timedOut && proc.HasExited) ? proc.ExitCode : -1;
                         var stderr = stderrTask.Result;
                         if (!string.IsNullOrEmpty(stderr) && exitCode != 0)
                             LogService.Warn("AnimationRecorder", $"ffmpeg stderr: {stderr[..Math.Min(stderr.Length, 500)]}");

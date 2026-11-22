@@ -10,34 +10,46 @@ Write-Host "`n╔═════════════════════
 Write-Host "║   SECURITY VALIDATION: Command Injection Prevention    ║`n" -ForegroundColor Cyan
 Write-Host "╚════════════════════════════════════════════════════════╝`n" -ForegroundColor Cyan
 
-# Test 1: Valid paths should work
+# Test 1: Valid paths (including common Windows chars like ) & ' ;) should work
 Write-Host "[TEST 1] Valid path acceptance..." -ForegroundColor Yellow
 
+$tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ttc_secval_" + [Guid]::NewGuid().ToString("N"))
+$trickyDir = Join-Path $tmpDir "R&D (2)\O'Brien;Shots"
+New-Item -ItemType Directory -Force -Path $trickyDir | Out-Null
+
 try {
-    $validPath = "C:\Users\Public\Pictures\screenshot_2026-11-08.png"
-    
+    $validPaths = @(
+        (Join-Path $tmpDir "screenshot_2026-11-22.png"),
+        (Join-Path $trickyDir "capture (1) & O'Brien;final.avif")
+    )
+
     # Import the security module
-    Add-Type -Path "src/TrueToneCap.Core/bin/Debug/net11.0-windows/TrueToneCap.Core.dll"
-    
-    # Call PathSanitizer.SanitizeForEncoding
-    $result = [TrueToneCap.Core.Security.PathSanitizer]::SanitizeForEncoding($validPath)
-    
-    Write-Host "  ✓ Valid path accepted: $validPath" -ForegroundColor Green
-    Write-Host "    → Sanitized to: $result`n" -ForegroundColor Gray
+    $coreDll = Get-ChildItem -Path "src/TrueToneCap.Core/bin" -Recurse -Filter "TrueToneCap.Core.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $coreDll) { throw "TrueToneCap.Core.dll not found under src/TrueToneCap.Core/bin; run dotnet build first." }
+    Add-Type -Path $coreDll.FullName
+
+    foreach ($validPath in $validPaths) {
+        $result = [TrueToneCap.Core.Security.PathSanitizer]::SanitizeForEncoding($validPath)
+        Write-Host "  ✓ Valid path accepted: $validPath" -ForegroundColor Green
+        Write-Host "    → Sanitized to: $result`n" -ForegroundColor Gray
+    }
 } catch {
     Write-Host "  ✗ FAILED to accept valid path!" -ForegroundColor Red
     Write-Host "    Error: $($_.Exception.Message)`n" -ForegroundColor Red
+    exit 1
 }
 
-# Test 2: Malicious paths should be blocked
-Write-Host "[TEST 2] Malicious path rejection..." -ForegroundColor Yellow
+# Test 2: Invalid / control-character paths should be blocked
+Write-Host "[TEST 2] Invalid path rejection..." -ForegroundColor Yellow
 
 $maliciousPaths = @(
-    "C:\test;echo hacked.png",
-    "C:\test|whoami.png", 
-    "C:\test&cmd.exe.png",
-    "C:\test`rm`.png",
-    "C:\test$(id).png"
+    (Join-Path $tmpDir "test|whoami.png"),
+    (Join-Path $tmpDir 'test"quote.png'),
+    (Join-Path $tmpDir "test<angle>.png"),
+    (Join-Path $tmpDir "test*star.png"),
+    (Join-Path $tmpDir "test?mark.png"),
+    (Join-Path $tmpDir "test`nnewline.png"),
+    (Join-Path $tmpDir "test`0null.png")
 )
 
 $blockCount = 0
@@ -47,14 +59,17 @@ foreach ($path in $maliciousPaths) {
         Write-Host "  ✗ UNEXPECTEDLY ACCEPTED: $path" -ForegroundColor Red
     } catch {
         $blockCount++
-        Write-Host "  ✓ Correctly BLOCKED: $path" -ForegroundColor Green
+        Write-Host "  ✓ Correctly BLOCKED: $($path -replace "`n", '\n' -replace "`0", '\0')" -ForegroundColor Green
     }
 }
 
+Remove-Item -Recurse -Force -Path $tmpDir -ErrorAction SilentlyContinue
+
 if ($blockCount -eq $maliciousPaths.Count) {
-    Write-Host "`n  SUCCESS: All malicious paths were blocked!`n" -ForegroundColor Green
+    Write-Host "`n  SUCCESS: All invalid paths were blocked!`n" -ForegroundColor Green
 } else {
-    Write-Host "`n  WARNING: Some malicious paths slipped through!`n" -ForegroundColor Red
+    Write-Host "`n  FAILURE: Some invalid paths slipped through!`n" -ForegroundColor Red
+    exit 1
 }
 
 # Test 3: Edge cases
