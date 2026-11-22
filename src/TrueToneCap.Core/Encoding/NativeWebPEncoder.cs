@@ -5,6 +5,7 @@
 // 支持: 有损/无损, 8-bit, ICC 嵌入 (通过 cwebp 的 -metadata icc)
 // 回退: cwebp.exe 不可用时自动回退到 PNG
 
+using System.Globalization;
 using System.IO;
 using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Services;
@@ -29,12 +30,12 @@ public static class NativeWebPEncoder
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = exePath,
-                    Arguments = "-version",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
+                psi.ArgumentList.Add("-version");
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) { _available = false; return false; }
                 // 排空两条管道与等超时并行（旧写法先同步 ReadToEnd，子进程不退出时永远走不到 5s 判据）
@@ -62,38 +63,49 @@ public static class NativeWebPEncoder
         {
             ManagedPngEncoder.EncodeFast(bgra, w, h, tmpPng, iccProfile);
 
-            // 路径直接拼接进命令行 → 校验不含引号/换行，防止参数注入
             FormatHelper.ValidateNativePath(path, nameof(path));
+            var (safeTmpPng, safePath) = Core.Security.PathSanitizer.SanitizePair(tmpPng, path);
 
             var exePath = NativeLibraryResolver.GetExePath("cwebp.exe");
-            var qualityArg = lossless ? "-lossless" : $"-q {(int)quality}";
-            var iccArg = FormatHelper.IsEmbeddableIcc(iccProfile) ? "-metadata icc" : "";
-            // ═══ 2026-10-07：新增 `-m`（压缩方法）—— 原来根本不传，即一直吃 cwebp 默认值 4 ═══
-            // 4K 真实截图实测：m0 0.39s/306KB  m2 0.42s/268KB  m4 0.74s/258KB  m6 0.95s/248KB。
-            // ⚠ 如实说明：三档之间的差别**远小于** AVIF/JXL（总跨度只有 0.39→0.95 s、306→248 KB），
-            //   所以这一栏对 WebP 的实际收益有限。仍然提供，是因为"用户能否控制"与"收益大不大"是两件事。
-            // ⚠ 默认档 = m4，与改动前 cwebp 的默认值**相同** ⇒ WebP 的默认产物不变。
-            var methodArg = $"-m {CompressionEffortMap.WebPMethod(effort)}";
-            // ═══ 2026-11-08: P0 Security Fix - Sanitize all file paths ═══
-            var safeTmpPng = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPng);
-            var safePath = Core.Security.PathSanitizer.SanitizeForEncoding(path);
-            
-            var args = $"{qualityArg} {methodArg} {iccArg} -mt \"{safeTmpPng}\" -o \"{safePath}\"";
-
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = args,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
 
-            // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs:165 的既有形态（Debug 级、含完整参数串）。
+            if (lossless)
+            {
+                psi.ArgumentList.Add("-lossless");
+            }
+            else
+            {
+                psi.ArgumentList.Add("-q");
+                psi.ArgumentList.Add(((int)quality).ToString(CultureInfo.InvariantCulture));
+            }
+            // ═══ 2026-10-07：新增 `-m`（压缩方法）—— 原来根本不传，即一直吃 cwebp 默认值 4 ═══
+            // 4K 真实截图实测：m0 0.39s/306KB  m2 0.42s/268KB  m4 0.74s/258KB  m6 0.95s/248KB。
+            // ⚠ 如实说明：三档之间的差别**远小于** AVIF/JXL（总跨度只有 0.39→0.95 s、306→248 KB），
+            //   所以这一栏对 WebP 的实际收益有限。仍然提供，是因为"用户能否控制"与"收益大不大"是两件事。
+            // ⚠ 默认档 = m4，与改动前 cwebp 的默认值**相同** ⇒ WebP 的默认产物不变。
+            psi.ArgumentList.Add("-m");
+            psi.ArgumentList.Add(CompressionEffortMap.WebPMethod(effort).ToString(CultureInfo.InvariantCulture));
+            if (FormatHelper.IsEmbeddableIcc(iccProfile))
+            {
+                psi.ArgumentList.Add("-metadata");
+                psi.ArgumentList.Add("icc");
+            }
+            psi.ArgumentList.Add("-mt");
+            psi.ArgumentList.Add(safeTmpPng);
+            psi.ArgumentList.Add("-o");
+            psi.ArgumentList.Add(safePath);
+
+            // 2026-11-06 命令行留痕：对齐 JpegLiNative.cs 的既有形态（Debug 级、含完整参数串）。
             // 之前组装完参数不落任何日志，"命令行数字必须逐字等于日志质量="的排查判据
             // 对 WebP 无法落地（2026-11-06 质量链路实证报告 §1.4）。
-            CoreLog.Debug("WEBP", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+            CoreLog.Debug("WEBP", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
 
             var result = NativeEncoderGuard.TryExecute("WebP", () =>
             {
@@ -102,7 +114,7 @@ public static class NativeWebPEncoder
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 30_000, "cwebp");
 
                 // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
-                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
+                if (exitCode != 0 || !File.Exists(safePath) || new FileInfo(safePath).Length == 0)
                     throw new InvalidOperationException($"[WebP] cwebp 失败 (exit={exitCode}) {stderr.Trim()}");
             });
             if (!result.Success)

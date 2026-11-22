@@ -395,12 +395,13 @@ public sealed partial class MainWindow : Window
         try
         {
             Directory.CreateDirectory(PkgManager.ModelsDir);
-            Process.Start(new ProcessStartInfo
+            var psi = new ProcessStartInfo
             {
                 FileName = "explorer.exe",
-                Arguments = $"\"{PkgManager.ModelsDir}\"",
-                UseShellExecute = true,
-            });
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(PkgManager.ModelsDir);
+            Process.Start(psi);
         }
         catch (Exception ex)
         {

@@ -429,19 +429,8 @@ public sealed partial class MainWindow : Window
         // ═══ 2026-10-30：原先这里还有一次 `Task.Run(MultiOcrService.Initialize)` ——
         //     App.xaml.cs 的启动段已经启动过同一次初始化（内部 _initialized 短路），
         //     这里那次是纯重复投递，已删。模型目录的解析只保留 App 那一处。═══
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, async () =>
         {
-            try
-            {
-                bool registered = StartupManager.IsEnabled;
-                if (registered != _settings.AutoStart)
-                    LogService.Warn("Startup",
-                        $"开机自启动的实际状态（{(registered ? "已注册" : "未注册")}）与设置里的 "
-                        + $"AutoStart={_settings.AutoStart} 不一致；本进程不自动改写注册表"
-                        + "（否则会随最后启动的那个构建漂移），请在设置页按一次「保存设置」以对齐");
-            }
-            catch (Exception ex) { LogService.Warn("Startup", $"读取开机自启动状态失败: {ex.Message}"); }
-
             try
             {
                 ToastService.Register();
@@ -452,6 +441,17 @@ public sealed partial class MainWindow : Window
             catch (Exception ex) { LogService.Warn("MainWindow", $"通知注册失败: {ex.Message}"); }
 
             SubscribeLogEvents();
+
+            try
+            {
+                bool registered = await StartupManager.GetEnabledAsync();
+                if (registered != _settings.AutoStart)
+                    LogService.Warn("Startup",
+                        $"开机自启动的实际状态（{(registered ? "已注册" : "未注册")}）与设置里的 "
+                        + $"AutoStart={_settings.AutoStart} 不一致；本进程不自动改写注册表"
+                        + "（否则会随最后启动的那个构建漂移），请在设置页按一次「保存设置」以对齐");
+            }
+            catch (Exception ex) { LogService.Warn("Startup", $"读取开机自启动状态失败: {ex.Message}"); }
         });
 
         // ═══ _uiReady 在 ApplySettingsToUI 之后已置为 true ═══

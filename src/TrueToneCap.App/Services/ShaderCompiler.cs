@@ -120,11 +120,17 @@ public static class ShaderCompiler
             var psi = new ProcessStartInfo
             {
                 FileName = fxcPath,
-                Arguments = $"/T {profile} /E {s_entry} /Fo \"{output}\" \"{input}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true
             };
+            psi.ArgumentList.Add("/T");
+            psi.ArgumentList.Add(profile);
+            psi.ArgumentList.Add("/E");
+            psi.ArgumentList.Add(s_entry);
+            psi.ArgumentList.Add("/Fo");
+            psi.ArgumentList.Add(output);
+            psi.ArgumentList.Add(input);
 
             using var proc = Process.Start(psi);
             proc?.WaitForExit(30000);
@@ -151,8 +157,9 @@ public static class ShaderCompiler
         // 1. PATH 中的 fxc.exe
         try
         {
-            var psi = new ProcessStartInfo("where", "fxc.exe")
+            var psi = new ProcessStartInfo("where")
             { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+            psi.ArgumentList.Add("fxc.exe");
             using var proc = Process.Start(psi);
             proc?.WaitForExit(2000);
             var path = proc?.StandardOutput.ReadToEnd()?.Trim().Split('\n')[0].Trim();

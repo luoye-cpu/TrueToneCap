@@ -74,6 +74,21 @@ public static class NativeProcess
         return (ec, so, se);
     }
 
+    /// <summary>将 <c>ProcessStartInfo.ArgumentList</c> 格式化为可读日志串（仅用于 Debug 留痕，不用于进程执行）。</summary>
+    public static string FormatArgsForLog(System.Collections.Generic.IEnumerable<string> args)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var a in args)
+        {
+            if (sb.Length > 0) sb.Append(' ');
+            if (a.Length == 0 || a.Contains(' ') || a.Contains('\t'))
+                sb.Append('"').Append(a).Append('"');
+            else
+                sb.Append(a);
+        }
+        return sb.ToString();
+    }
+
     /// <summary>进程退出后排空两条管道；用尽窗口就按"没读到"返回，不把它变成第二个挂死点。</summary>
     private static (string stdout, string stderr) AwaitDrain(
         System.Threading.Tasks.Task<string> outTask, System.Threading.Tasks.Task<string> errTask)

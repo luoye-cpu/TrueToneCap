@@ -5,6 +5,7 @@
 // 内嵌在 Resources/cjxl.exe，启动时自动提取到 native/ 目录
 // 与 avifenc/cwebp/cjpegli 相同的子进程模式，崩溃隔离 + 自动回退
 
+using System.Globalization;
 using TrueToneCap.Core.Logging;
 using TrueToneCap.Core.Services;
 
@@ -28,12 +29,12 @@ public static class NativeJxlEncoder
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = exePath,
-                    Arguments = "--version",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
+                psi.ArgumentList.Add("--version");
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is null) { _available = false; return false; }
                 _available = NativeProcess.DrainProbe(proc, NativeProcess.ProbeTimeoutMs,
@@ -52,13 +53,14 @@ public static class NativeJxlEncoder
             // 回退到 PATH
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo("cjxl.exe", "--version")
+                var psi = new System.Diagnostics.ProcessStartInfo("cjxl.exe")
                 {
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
+                psi.ArgumentList.Add("--version");
                 using var proc = System.Diagnostics.Process.Start(psi);
                 if (proc is not null
                     && NativeProcess.DrainProbe(proc, NativeProcess.ProbeTimeoutMs, out int ec, out _, out _)
@@ -111,8 +113,21 @@ public static class NativeJxlEncoder
         _ => "",          // null / "" / "422" / 未知值：不传，保持编码器自选
     };
 
-    /// <summary>可选命令行片段的前置空格（空片段不留多余空格，纯排版）。</summary>
-    private static string WithSpace(string arg) => arg.Length > 0 ? " " + arg : "";
+    /// <summary>向 <c>ArgumentList</c> 追加 <c>--resampling</c> 参数项。</summary>
+    private static void AddResamplingArgs(IList<string> args, string? chroma)
+    {
+        switch (chroma?.Trim())
+        {
+            case "444":
+                args.Add("--resampling");
+                args.Add("1");
+                break;
+            case "420":
+                args.Add("--resampling");
+                args.Add("2");
+                break;
+        }
+    }
 
     /// <summary>编码 BGRA 像素为 JXL 文件 (SDR)。</summary>
     /// <param name="bitDepth">目标位深 (8/10/12/16)。cjxl **没有** -b 参数（见下方 2026-08-09 记录），
@@ -209,49 +224,47 @@ public static class NativeJxlEncoder
             // 能不能嵌只问一个地方：FormatHelper.IsEmbeddableIcc（cjxl / avifenc 同判据，见 §31.3-9）
             // 没 ICC ⇒ 按【目标标签】选 IDE 名，不再一律回落 sRGB（回落 sRGB 曾把 BT.2020 的产物
             //           主动声明成 sRGB，是"写错"而不是"没写"）
-            string colorArg;
+            string colorHintValue;
             if (FormatHelper.IsEmbeddableIcc(iccProfile) && !FormatHelper.CicpDeclarable(colorSpaceTag))
             {
                 tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
                 File.WriteAllBytes(tmpIcc, iccProfile);
-                colorArg = $"-x icc_pathname=\"{tmpIcc}\"";
+                var safeTmpIcc = Core.Security.PathSanitizer.SanitizeForEncoding(tmpIcc);
+                colorHintValue = $"icc_pathname={safeTmpIcc}";
             }
             else
             {
-                colorArg = $"-x color_space={JxlColorSpaceValue(colorSpaceTag)}";
+                colorHintValue = $"color_space={JxlColorSpaceValue(colorSpaceTag)}";
             }
-
-            // ═══ 2026-08-09 修复: 删除无效的 -b 参数 ═══
-            // cjxl v0.11.2 无 -b 参数 (Unknown argument: -b → exit 1), 位深由输入格式决定。
-            // ⚠ 之前传 -b {bitDepth>8} → 无感截图 JXL 失败 (Unknown argument: -b)
-            //
-            // 2026-09-17 注释勘误：下面这段"此处忽略 bitDepth (8-bit)"是**过期**的 ——
-            // 现在 bitDepth>8 时上方已改用 16-bit PNG 中转（use16Bit），cjxl 按输入容器编码，
-            // 输出为 16-bit 容器。即：8-bit 请求走 PPM 输出 8-bit；10/12/16-bit 请求走 16-bit PNG
-            // 中转，输出 16-bit 容器（cjxl 无法区分 10 与 12，二者产物相同）。
-            string bitsArg = "";
 
             // ═══ 2026-10-07：effort 由「压缩强度」三档决定（原为硬编码 `-e 9`）═══
             // 实测（4K 真实截图）：e9 要 25.0 s 且产物 541 KB，而 e5 只要 0.82 s / 491 KB
             // —— 即旧的硬编码值既慢得多、体积**还更大**。三档取 7/5/3，理由见 CompressionEffort.cs 文件头。
             var effortArg = CompressionEffortMap.JxlEffort(effort);
 
-            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
-            var safeTmpPpm = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPpm);
-            
+            var (safeTmpPpm, safePath) = Core.Security.PathSanitizer.SanitizePair(tmpPpm, path);
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e {effortArg}{bitsArg} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{safeTmpPpm}\" \"{path}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+            psi.ArgumentList.Add("-d");
+            psi.ArgumentList.Add(clampedDist.ToString("F4", CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-e");
+            psi.ArgumentList.Add(effortArg.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-x");
+            psi.ArgumentList.Add(colorHintValue);
+            AddResamplingArgs(psi.ArgumentList, chroma);
+            psi.ArgumentList.Add(safeTmpPpm);
+            psi.ArgumentList.Add(safePath);
 
             // 2026-08-10 诊断代码（无条件写 %TEMP%\ttc_encoder_cmd.log）已移除：
             // 该日志在 Release 下也会持续写入并最终无限增长，且命令行只在排查时才有意义。
-            CoreLog.Debug("JXL", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+            CoreLog.Debug("JXL", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
 
             var result = NativeEncoderGuard.TryExecute("JXL", () =>
             {
@@ -260,7 +273,7 @@ public static class NativeJxlEncoder
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "cjxl");
 
                 // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
-                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
+                if (exitCode != 0 || !File.Exists(safePath) || new FileInfo(safePath).Length == 0)
                     throw new InvalidOperationException($"[JXL] cjxl 编码失败 (exit={exitCode}) {stderr.Trim()}");
             });
             if (!result.Success)
@@ -317,35 +330,41 @@ public static class NativeJxlEncoder
 
             // ═══ 与 Encode 同一份规则（helper 只有一份）：color fields 能枚举的空间不再交
             //     icc_pathname（2026-11-12 CICP 优先，ICC 只留码点盲空间 AdobeRGB）═══
-            string colorArg;
+            string colorHintValue;
             if (FormatHelper.IsEmbeddableIcc(iccProfile) && !FormatHelper.CicpDeclarable(colorSpaceTag))
             {
                 tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
                 File.WriteAllBytes(tmpIcc, iccProfile);
-                colorArg = $"-x icc_pathname=\"{tmpIcc}\"";
+                var safeTmpIcc = Core.Security.PathSanitizer.SanitizeForEncoding(tmpIcc);
+                colorHintValue = $"icc_pathname={safeTmpIcc}";
             }
             else
             {
-                colorArg = $"-x color_space={JxlColorSpaceValue(colorSpaceTag)}";
+                colorHintValue = $"color_space={JxlColorSpaceValue(colorSpaceTag)}";
             }
 
             // 无 -b 参数（cjxl v0.11.2 不支持，位深由输入格式决定 —— 见 Encode 同段注释）
+            var (safeTmpPng, safePath) = Core.Security.PathSanitizer.SanitizePair(tmpPng, path);
 
-            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
-            var safeTmpPng = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPng);
-            var safePath = Core.Security.PathSanitizer.SanitizeForEncoding(path);
-            
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg}{WithSpace(BuildResamplingArg(chroma))} \"{safeTmpPng}\" \"{safePath}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+            psi.ArgumentList.Add("-d");
+            psi.ArgumentList.Add(clampedDist.ToString("F4", CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-e");
+            psi.ArgumentList.Add(CompressionEffortMap.JxlEffort(effort).ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-x");
+            psi.ArgumentList.Add(colorHintValue);
+            AddResamplingArgs(psi.ArgumentList, chroma);
+            psi.ArgumentList.Add(safeTmpPng);
+            psi.ArgumentList.Add(safePath);
 
-            CoreLog.Debug("JXL16", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+            CoreLog.Debug("JXL16", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
 
             // ═══ 照抄 Encode 的进程调用 + NativeEncoderGuard 隔离 ═══
             var result = NativeEncoderGuard.TryExecute("JXL16", () =>
@@ -355,7 +374,7 @@ public static class NativeJxlEncoder
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "cjxl");
 
                 // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
-                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
+                if (exitCode != 0 || !File.Exists(safePath) || new FileInfo(safePath).Length == 0)
                     throw new InvalidOperationException($"[JXL] cjxl 编码失败 (exit={exitCode}) {stderr.Trim()}");
             });
             if (!result.Success)
@@ -409,40 +428,49 @@ public static class NativeJxlEncoder
             // ═══ 2026-08-09: clamp distance 到 cjxl 合法范围 [0,25] (同 Encode) ═══
             float clampedDist = Math.Clamp(distance, 0.0f, 25.0f);
 
-            // ICC 参数
-            string iccArg = "";
-            if (FormatHelper.IsEmbeddableIcc(iccProfile))
-            {
-                tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
-                File.WriteAllBytes(tmpIcc, iccProfile);
-                iccArg = $"-x icc_pathname=\"{tmpIcc}\"";
-            }
-
             // ═══ ICC 与 color fields 在 JXL 里是【二选一】，两个都给时 color fields 会被整个丢弃 ═══
-            // 实测（cjxl v0.11.2，同一输入）：`-x icc_pathname=sRGB.icc -x color_space=Rec2100PQ`
+            // 实测（cjxl v0.11.2，同一输入）：`-x icc_pathname=… -x color_space=Rec2100PQ`
             // 与反过来写，产物都是 sRGB 声明 —— PQ 没了；cjxl 见到 icc_pathname 就置
             // kIccIsPrimary，只调 JxlEncoderSetICCProfile，另一个提示根本不进码流（与先后顺序无关）。
             // 所以下面这行以前是"死参数"：iccArg 在时它不产生任何效果，却让人以为 HDR 声明写的是 PQ。
             // 现在按编码器自己的规矩来：有可嵌 ICC 就只交 ICC，没有才交 color_space=Rec2100PQ。
-            string colorArg = iccArg.Length > 0 ? iccArg : "-x color_space=Rec2100PQ";
+            string colorHintValue;
+            if (FormatHelper.IsEmbeddableIcc(iccProfile))
+            {
+                tmpIcc = Path.Combine(Path.GetTempPath(), $"ttc_icc_{Guid.NewGuid():N}.icc");
+                File.WriteAllBytes(tmpIcc, iccProfile);
+                var safeTmpIcc = Core.Security.PathSanitizer.SanitizeForEncoding(tmpIcc);
+                colorHintValue = $"icc_pathname={safeTmpIcc}";
+            }
+            else
+            {
+                colorHintValue = "color_space=Rec2100PQ";
+            }
 
-            // ═══ 2026-11-08: P0 Security Fix - Sanitize file paths ═══
-            var safeTmpPng = Core.Security.PathSanitizer.SanitizeForEncoding(tmpPng);
-            var safePath = Core.Security.PathSanitizer.SanitizeForEncoding(path);
-            
+            var (safeTmpPng, safePath) = Core.Security.PathSanitizer.SanitizePair(tmpPng, path);
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = $"-d {clampedDist:F4} -e {CompressionEffortMap.JxlEffort(effort)} {colorArg} --intensity_target={intensityTarget:F0}{WithSpace(BuildResamplingArg(chroma))} \"{safeTmpPng}\" \"{safePath}\"".Trim(),
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+            psi.ArgumentList.Add("-d");
+            psi.ArgumentList.Add(clampedDist.ToString("F4", CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-e");
+            psi.ArgumentList.Add(CompressionEffortMap.JxlEffort(effort).ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-x");
+            psi.ArgumentList.Add(colorHintValue);
+            psi.ArgumentList.Add($"--intensity_target={intensityTarget.ToString("F0", CultureInfo.InvariantCulture)}");
+            AddResamplingArgs(psi.ArgumentList, chroma);
+            psi.ArgumentList.Add(safeTmpPng);
+            psi.ArgumentList.Add(safePath);
 
             // 2026-08-10 诊断代码（无条件写 %TEMP%\ttc_encoder_cmd.log）已移除：
             // 该日志在 Release 下也会持续写入并最终无限增长。
-            CoreLog.Debug("JXL_HDR", $"{psi.FileName} {psi.Arguments}", LogCategory.Encoding);
+            CoreLog.Debug("JXL_HDR", $"{psi.FileName} {NativeProcess.FormatArgsForLog(psi.ArgumentList)}", LogCategory.Encoding);
 
             var result = NativeEncoderGuard.TryExecute("JXL_HDR", () =>
             {
@@ -451,7 +479,7 @@ public static class NativeJxlEncoder
                 var (exitCode, _, stderr) = NativeProcess.DrainAndFinish(proc, 60_000, "cjxl(HDR)");
 
                 // Length==0 是原 TryEncode 的"编码输出为空"校验，删了它 0 字节产物会变成"保存成功"
-                if (exitCode != 0 || !File.Exists(path) || new FileInfo(path).Length == 0)
+                if (exitCode != 0 || !File.Exists(safePath) || new FileInfo(safePath).Length == 0)
                     throw new InvalidOperationException($"[JXL] cjxl HDR 编码失败 (exit={exitCode}) {stderr.Trim()}");
             });
             if (!result.Success)

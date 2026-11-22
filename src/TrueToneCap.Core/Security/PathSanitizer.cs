@@ -1,61 +1,66 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
-// ═══ Security Fix: Command Injection Prevention for External Encoders ═══
-// 2026-11-08: Critical CVE fix - Sanitize file paths before passing to native encoders
-// Reference: CWE-78 OS Command Injection in NativeAvifEncoder.cs:485, etc.
+// TrueToneCap.Core/Security/PathSanitizer.cs
+// 外部进程文件路径校验 —— 与 ProcessStartInfo.ArgumentList (UseShellExecute = false) 配合使用
 
 using System;
 using System.IO;
-using System.Security;
 
 namespace TrueToneCap.Core.Security;
 
 /// <summary>
-/// Provides input sanitization for file paths passed to external process encoders
-/// Prevents OS command injection via malicious filename/path characters
+/// 校验传给外部编码器 / 工具进程的文件路径。
+/// <para>所有外部进程均通过 <c>ProcessStartInfo.ArgumentList</c>（<c>UseShellExecute = false</c>）
+/// 直接调用 <c>CreateProcessW</c>，不经过 Shell 解释；因此本类只拒绝 Windows 路径非法字符与控制字符，
+/// 不再误杀 <c>)</c>、<c>&amp;</c>、<c>'</c>、<c>;</c> 等合法 Windows 目录/用户名字符。</para>
 /// </summary>
 public static class PathSanitizer
 {
-    private static readonly char[] s_invalidChars = Path.GetInvalidPathChars();
-    private static readonly string[] s_shellMetacharacters = new[] { ";", "|", "&", "`", "$(", "${", ")", "'", "\"", "<", ">", "\n", "\r" };
+    private static readonly char[] s_invalidPathChars = Path.GetInvalidPathChars();
+
+    // Windows NTFS/FAT 路径段中永远非法的字符（与 Path.GetInvalidFileNameChars 中非分隔符子集对齐）。
+    // 合法的 Windows 路径字符如 ) ( & ' ; $ ` % 等绝不拦截。
+    private static readonly char[] s_disallowedSegmentChars = ['"', '<', '>', '|', '*', '?'];
 
     /// <summary>
-    /// Validates and sanitizes a file path for safe use in external encoder commands
+    /// 校验并规范化用于外部编码器进程的文件路径。
     /// </summary>
     public static string SanitizeForEncoding(string rawPath)
     {
         if (string.IsNullOrWhiteSpace(rawPath))
             throw new ArgumentException("Path cannot be empty", nameof(rawPath));
 
+        foreach (var c in rawPath)
+        {
+            if (char.IsControl(c) || Array.IndexOf(s_invalidPathChars, c) >= 0)
+                throw new ArgumentException($"Invalid control or path character (U+{(int)c:X4}) in path", nameof(rawPath));
+        }
+
         var fullPath = Path.GetFullPath(rawPath);
-        
-        // Check for invalid path characters (Windows-specific)
-        foreach (var c in s_invalidChars)
-        {
-            if (fullPath.Contains(c))
-                throw new ArgumentException($"Invalid character '{c}' in path", nameof(rawPath));
-        }
 
-        // Check for shell metacharacters that could execute arbitrary commands
-        foreach (var metaChar in s_shellMetacharacters)
-        {
-            if (fullPath.Contains(metaChar))
-                throw new SecurityException(
-                    $"Path contains potentially dangerous shell metacharacter '{metaChar}'");
-        }
+        // 跳过 Windows 扩展长度路径前缀 (\\?\ 或 \\.\) 后再检查非法字符，避免误伤 \\?\ 中的 '?'
+        ReadOnlySpan<char> body = fullPath.AsSpan();
+        if (body.StartsWith(@"\\?\", StringComparison.Ordinal) || body.StartsWith(@"\\.\", StringComparison.Ordinal))
+            body = body[4..];
 
-        // Additional validation: Ensure path exists or is creatable
+        int badIdx = body.IndexOfAny(s_disallowedSegmentChars);
+        if (badIdx >= 0)
+            throw new ArgumentException($"Invalid character '{body[badIdx]}' in path", nameof(rawPath));
+
+        // 绝对路径正常以盘符 (X:\) 或 UNC (\\) 开头；防御性拦截以 '-' 开头避免被 CLI 当成选项
+        if (fullPath.StartsWith('-'))
+            throw new ArgumentException("Normalized path must not start with '-'", nameof(rawPath));
+
+        // 确保父目录已存在
         var dir = Path.GetDirectoryName(fullPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-        {
             throw new DirectoryNotFoundException($"Parent directory does not exist: {dir}");
-        }
 
         return fullPath;
     }
 
     /// <summary>
-    /// Validates multiple paths at once (batch mode for encoding pipelines)
+    /// 批量校验输入与输出文件路径。
     /// </summary>
     public static (string input, string output) SanitizePair(string inputPath, string outputPath)
     {

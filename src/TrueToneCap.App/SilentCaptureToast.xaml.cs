@@ -303,12 +303,13 @@ public sealed partial class SilentCaptureToast : Window
         try
         {
             // /select, 会在资源管理器中打开所在文件夹并选中该文件
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "explorer.exe",
-                Arguments = $"/select,\"{_filePath}\"",
-                UseShellExecute = true
-            });
+                UseShellExecute = false
+            };
+            psi.ArgumentList.Add($"/select,{_filePath}");
+            System.Diagnostics.Process.Start(psi);
         }
         catch (Exception ex)
         {
