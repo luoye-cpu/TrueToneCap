@@ -1,6 +1,6 @@
 # TrueToneCap / 真色截图
 
-> **v0.3.19** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/detail/9N42LP5NVFWR) · GitHub Release
+> **v0.3.20** · Windows 11 24H2+ · WinUI 3 · .NET 11 · WGC · [Microsoft Store](https://apps.microsoft.com/detail/9N42LP5NVFWR) · GitHub Release
 >
 > 🔒 **Secure**: Command injection prevention | ♿ **Accessible**: WCAG 2.1 AA partial compliance
 

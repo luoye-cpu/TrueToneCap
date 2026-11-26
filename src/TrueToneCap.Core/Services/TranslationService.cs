@@ -146,6 +146,11 @@ public class TranslationService
     private string? _lastBackendServed;
     internal string? LastBackendServed => _lastBackendServed;
 
+    /// <summary>最近一次批量/视觉翻译中，由“内容覆盖补译”救回的疑似未翻译行数。
+    /// <para>与 <see cref="TranslationBatchResult.ContentRetryCount"/> 同源；视觉路没有
+    /// batch 结果对象，UI 通过这个读数把“补了几行”写进状态栏。</para></summary>
+    public int LastContentRetryCount { get; private set; }
+
     /// <summary>最近一次失败的留痕句。<b>成功时不清空</b> —— 这正是这条链的排障入口：
     /// 降级链会静默吃掉前面每一档的失败，用户与测试都只看到"最后一档成功了"。
     /// 端到端用例要靠它回答"第一档为什么没跑成"（2026-10-23 就是这么逮到
@@ -416,6 +421,23 @@ public class TranslationService
 
         /// <summary>批量分片/逐行同 LLM 重试过、且最终成功的行数（不包含跨后端回退）。</summary>
         public int LlmRetryCount { get; init; }
+
+        /// <summary>最终仍疑似整行未翻译的行数（译文等于原文/没有目标语言脚本）。
+        /// <para>与 <see cref="FailedCount"/> 分开：这些行不是 null，旧的 FailedCount 口径会把它们
+        /// 当成成功；UI 必须把两者都显示出来，才能避免“画面还是原文、状态栏却 ✅”。</para></summary>
+        public int UnchangedCount { get; init; }
+
+        /// <summary>最终仍疑似只翻译了一部分的行数（保留整段/明显源文词）。</summary>
+        public int PartialCount { get; init; }
+
+        /// <summary>由“内容覆盖补译”救回的行数（不计入 <see cref="LlmRetryCount"/>）。</summary>
+        public int ContentRetryCount { get; init; }
+
+        /// <summary>成功按段落合并翻译的连续行组数；0 = 没有形成段落组。</summary>
+        public int ParagraphGroupCount { get; init; }
+
+        /// <summary>成功按段落合并翻译覆盖的行数。</summary>
+        public int ParagraphGroupRows { get; init; }
     }
 
     /// <summary>当前配置是否适合走 LLM 文本批量。视觉路与离线路有自己的整批实现，不能混用。</summary>
@@ -428,11 +450,15 @@ public class TranslationService
 
     private sealed record LlmBatchChunk(IReadOnlyList<int> Indices);
 
+    /// <summary>同一段落的连续 OCR 行：Indices 是原始下标，Text 是按语言规则拼好的段落。</summary>
+    private sealed record ParagraphGroup(int[] Indices, string Text);
+
     /// <summary>
     /// 批量翻译一组 OCR 行：LLM 按编号/JSON 结构化整批发送；任何缺行、格式坏、超时或 HTTP 失败
     /// 都先尝试同一 LLM（拆小分片/同片重试/逐行），跨后端只作最后兜底，不会把整屏静默换成免费端点。
-    /// <para>⚠ 不把多行拼成一段长文：OCR 行是布局单元，拼文会让模型合并/漏行/改顺序；
-    /// 这里用带 <c>id</c> 的 JSON 数组并强制返回等数量数组，逐行校验后回填。</para>
+    /// <para>⚠ 不无条件把整屏拼成一段长文：OCR 行是布局单元，菜单/按钮/读数之间没有语法关系。
+    /// 只有“上一行明显没说完、下一行是小写或中日文”的连续行才先按段落请求；输出仍强制
+    /// 按原行 <c>id</c> 等数量回填，段落只提供上下文，不改变回填粒度。</para>
     /// <para>离线/视觉模式不调用本方法（它们已有自己的整批路径）；若误调用则明确报错，
     /// 不偷偷按在线文本处理。</para>
     /// </summary>
@@ -477,9 +503,86 @@ public class TranslationService
         }
 
         bool llmBlocked = false;
+        int paragraphGroupCount = 0;
+        int paragraphGroupRows = 0;
+
+        // ═══ 2026-11-27：先按段落后按行 ═══
+        // OCR 常把一句长文案折成多行；逐行发送时模型看不到完整句子，代词/术语/语序容易断。
+        // 这里把“像同一段”的连续行拼成段落发一次，要求模型按原行 id 拆回逐行译文；
+        // 段落调用失败的行不会丢，后面的批量/逐行兜底仍会接住。
         if (llmBatch)
         {
-            foreach (var chunk in BuildLlmBatchChunks(lines))
+            var paragraphGroups = BuildParagraphGroups(lines);
+            var pendingGroups = new List<ParagraphGroup>();
+            int pendingRows = 0;
+            int pendingChars = 0;
+
+            async Task FlushParagraphBatchAsync()
+            {
+                if (pendingGroups.Count == 0) return;
+                var batchGroups = pendingGroups.ToArray();
+                pendingGroups.Clear();
+                pendingRows = 0;
+                pendingChars = 0;
+                if (llmBlocked) return;
+
+                int expectedRows = batchGroups.Sum(g => g.Indices.Length);
+                try
+                {
+                    var got = await TranslateLlmParagraphBatchAsync(
+                        batchGroups, lines, targetLang, sourceLang, ct);
+                    int offset = 0;
+                    foreach (var group in batchGroups)
+                    {
+                        for (int k = 0; k < group.Indices.Length; k++)
+                            translated[group.Indices[k]] = got[offset + k];
+                        offset += group.Indices.Length;
+                    }
+                    paragraphGroupCount += batchGroups.Length;
+                    paragraphGroupRows += expectedRows;
+                    CoreLog.Info("Translate",
+                        $"段落合并成功：{batchGroups.Length} 段 / {expectedRows} 行", LogCategory.Network);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    var kind = ClassifyLlmBatchFailure(ex);
+                    NoteFailure("段落合并: " + ExplainLlmBatchFailure(ex));
+                    CoreLog.Warn("Translate",
+                        $"段落合并失败 kind={kind}（{batchGroups.Length} 段 / {expectedRows} 行）：{firstError}",
+                        ex, LogCategory.Network);
+                    if (kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.Configuration)
+                        llmBlocked = true;
+                }
+            }
+
+            foreach (var group in paragraphGroups)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (llmBlocked) break;
+                if (group.Text.Length > LlmBatchMaxChars) continue;   // 过长的段落退回逐行，避免请求超限
+
+                if (pendingGroups.Count > 0
+                    && (pendingRows + group.Indices.Length > LlmBatchMaxLines
+                        || pendingChars + group.Text.Length > LlmBatchMaxChars))
+                    await FlushParagraphBatchAsync();
+
+                pendingGroups.Add(group);
+                pendingRows += group.Indices.Length;
+                pendingChars += group.Text.Length;
+            }
+            await FlushParagraphBatchAsync();
+        }
+
+        if (llmBatch)
+        {
+            // 段落组已经交出的行不再发批量；失败的行仍在 translated 里是 null，照常进入分片兜底。
+            var alreadyTranslated = new HashSet<int>(
+                Enumerable.Range(0, lines.Count).Where(i => translated[i] is not null));
+            foreach (var chunk in BuildLlmBatchChunks(lines, alreadyTranslated))
             {
                 ct.ThrowIfCancellationRequested();
                 if (llmBlocked) continue;   // Auth/429 已判定 LLM 不可用，剩余分片不再打
@@ -526,7 +629,6 @@ public class TranslationService
         int perLineLlmRows = 0;
         bool perLineAttempted = false;
         var degradedBackends = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
-
         if (missing.Length > 0 && llmBatch && !llmBlocked)
         {
             perLineAttempted = true;
@@ -609,14 +711,46 @@ public class TranslationService
             await Task.WhenAll(tasks);
         }
 
+        // ═══ 2026-11-27：内容覆盖补译 ═══
+        // 到这里“有非空字符串”的行不一定真的翻译了：模型可能整行回显原文、只翻半句，
+        // 或从输入对象回显 `text`。这些行不会进入上面的 missing（它只找 null），
+        // 所以必须再做一次逐行内容判定；疑似行用同 LLM 单行重试，绝不静默算成功。
+        int contentRetryCount = 0;
+        if (llmBatch && !llmBlocked)
+        {
+            var repair = await RepairContentIssuesAsync(
+                lines, translated, targetLang, sourceLang, ct);
+            contentRetryCount = repair.Recovered;
+            if (repair.FirstError is not null)
+                Interlocked.CompareExchange(ref firstError, repair.FirstError, null);
+        }
+
         // 最终兜底：仍为空的行保留原文；空白行不算失败。
+        bool[] hardFailed = new bool[translated.Length];
         for (int i = 0; i < translated.Length; i++)
         {
             if (translated[i] is null)
             {
                 translated[i] = lines[i];
-                if (!string.IsNullOrWhiteSpace(lines[i])) failedCount++;
+                if (!string.IsNullOrWhiteSpace(lines[i]))
+                {
+                    failedCount++;
+                    hardFailed[i] = true;
+                }
             }
+        }
+
+        // 内容层计数：与 FailedCount 分开。硬失败行已经回填原文，不应再重复算一次“未翻译”。
+        int unchangedCount = 0;
+        int partialCount = 0;
+        for (int i = 0; i < translated.Length; i++)
+        {
+            if (hardFailed[i] || string.IsNullOrWhiteSpace(lines[i])) continue;
+            var assessment = TranslationQuality.Assess(lines[i], translated[i], targetLang);
+            if (assessment.Quality == TranslationLineQuality.Untranslated)
+                unchangedCount++;
+            else if (assessment.Quality == TranslationLineQuality.Partial)
+                partialCount++;
         }
 
         string? degradedBackend = degradedCount > 0 && !degradedBackends.IsEmpty
@@ -629,6 +763,8 @@ public class TranslationService
         else if (perLineAttempted) mode = "LLM 批量 + 同后端逐行";
         else if (llmRetryCount > 0) mode = "LLM 批量 + 同后端重试";
         else mode = "LLM 批量";
+        if (contentRetryCount > 0) mode += " + 内容补译";
+        if (paragraphGroupCount > 0) mode += " + 段落合并";
 
         // FallbackCount 的口径是"批量没交出、并且真的进入过回退阶段"的行数。
         // Auth 阻断时 missing 仍是全部行，但同 LLM 逐行被跳过、跨后端可能也没配：
@@ -647,17 +783,25 @@ public class TranslationService
             DegradedCount = degradedCount,
             DegradedBackend = degradedBackend,
             LlmRetryCount = llmRetryCount,
+            UnchangedCount = unchangedCount,
+            PartialCount = partialCount,
+            ContentRetryCount = contentRetryCount,
+            ParagraphGroupCount = paragraphGroupCount,
+            ParagraphGroupRows = paragraphGroupRows,
         };
     }
 
     /// <summary>批量的分片规则：最多 8 行或 3000 字符，避免一次请求过大/模型漏行。
     /// <para>只收非空白行的<b>原始下标</para>，不按“连续区间 + 非空计数”切 —— 中间夹一个空行时
     /// 区间会跨过它，把后面的行漏出这一片（2026-11-16 自审发现的边界）。</para></summary>
-    private static List<LlmBatchChunk> BuildLlmBatchChunks(IReadOnlyList<string> lines) =>
-        BuildLlmBatchChunkIndices(lines).Select(g => new LlmBatchChunk(g)).ToList();
+    private static List<LlmBatchChunk> BuildLlmBatchChunks(
+        IReadOnlyList<string> lines, IReadOnlySet<int>? skip = null) =>
+        BuildLlmBatchChunkIndices(lines, skip).Select(g => new LlmBatchChunk(g)).ToList();
 
-    /// <summary>分片下标（internal 供测试钉边界：空行夹在中间时不许把后面的行漏掉）。</summary>
-    internal static List<int[]> BuildLlmBatchChunkIndices(IReadOnlyList<string> lines)
+    /// <summary>分片下标（internal 供测试钉边界：空行夹在中间时不许把后面的行漏掉）。
+    /// <paramref name="skip"/> 用于段落组已经翻好的行，避免再发一次批量请求。</summary>
+    internal static List<int[]> BuildLlmBatchChunkIndices(
+        IReadOnlyList<string> lines, IReadOnlySet<int>? skip = null)
     {
         var chunks = new List<int[]>();
         List<int> current = new();
@@ -665,6 +809,7 @@ public class TranslationService
         for (int i = 0; i < lines.Count; i++)
         {
             if (string.IsNullOrWhiteSpace(lines[i])) continue;
+            if (skip?.Contains(i) == true) continue;
             int len = lines[i].Length;
             if (current.Count >= LlmBatchMaxLines || (current.Count > 0 && chars + len > LlmBatchMaxChars))
             {
@@ -678,6 +823,125 @@ public class TranslationService
         if (current.Count > 0) chunks.Add(current.ToArray());
         return chunks;
     }
+
+    /// <summary>
+    /// 把连续 OCR 行按“像不像同一段被折行”的分组。只合并有把握的折行：
+    /// 上一行足够长且不是句末/标题，下一行是小写英文或中日文；空行、列表项永远断开。
+    /// <para>为什么不把整屏直接拼成一段：菜单项、按钮、状态栏读数之间没有语法关系，
+    /// 强行合并会让模型把无关文本串成一句话。</para>
+    /// </summary>
+    internal static List<int[]> BuildParagraphGroupIndices(IReadOnlyList<string> lines)
+    {
+        var groups = new List<int[]>();
+        var current = new List<int>();
+        int lastIndex = -1;
+
+        void Flush()
+        {
+            if (current.Count > 0) groups.Add(current.ToArray());
+            current = new List<int>();
+            lastIndex = -1;
+        }
+
+        for (int i = 0; i < lines.Count; i++)
+        {
+            string line = lines[i];
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                Flush();   // 空行是最强的段落边界
+                continue;
+            }
+
+            if (current.Count > 0
+                && i == lastIndex + 1
+                && current.Count < LlmBatchMaxLines
+                && ShouldMergeParagraphLines(lines[lastIndex], line))
+            {
+                current.Add(i);
+                lastIndex = i;
+                continue;
+            }
+
+            Flush();
+            current.Add(i);
+            lastIndex = i;
+        }
+        Flush();
+        return groups;
+    }
+
+    /// <summary>构造段落组（含拼好的段落文本）。只返回真正需要“按段落翻译”的组。</summary>
+    private static List<ParagraphGroup> BuildParagraphGroups(IReadOnlyList<string> lines)
+    {
+        var groups = new List<ParagraphGroup>();
+        foreach (int[] indices in BuildParagraphGroupIndices(lines))
+        {
+            if (indices.Length < 2) continue;
+            var texts = indices.Select(i => lines[i]).ToArray();
+            groups.Add(new ParagraphGroup(indices, JoinWrappedTranslationLines(texts)));
+        }
+        return groups;
+    }
+
+    /// <summary>
+    /// 判断两行是否像同一段落的折行。保守规则：
+    /// 空行/列表项断开；句末标点（.?!。！？；;）断开；标题冒号断开；
+    /// 上一行短于 12 字符（多半是 UI 标签）不断开；下一行必须是小写英文或中日文。
+    /// </summary>
+    private static bool ShouldMergeParagraphLines(string previous, string next)
+    {
+        string p = previous.Trim();
+        string n = next.Trim();
+        if (p.Length < 8 || n.Length < 4) return false;
+        // 中文短行常靠逗号表示“还没说完”；没有标点的 8~11 字中文多半是标签，不合并。
+        // 英文没有这个歧义，8 字以上只要下一行是小写就按折行处理。
+        bool hasCjk = p.Any(IsCjkChar);
+        if (hasCjk && p.Length < 12
+            && !(p.EndsWith("，") || p.EndsWith("、") || p.EndsWith(",")))
+            return false;
+        if (IsListMarkerLine(p) || IsListMarkerLine(n)) return false;
+
+        // 英文连字符断词/路径断行：无条件接上。
+        if (p.EndsWith("-") || p.EndsWith("‐") || p.EndsWith("–")) return true;
+
+        char last = p[^1];
+        if (".!?。！？…;；:：".Contains(last)) return false;
+        if (n.EndsWith(":") || n.EndsWith("：")) return false;
+
+        bool endsComma = last is ',' or '，' or '、';
+        bool endsCue = hasCjk
+            ? (p.Length >= 12 || endsComma)
+            : (p.Length >= 12 || endsComma || IsEnglishContinuationCue(p));
+        // 逗号/顿号后仍是同一句；下一行必须是小写或中日文，避免把 “Value” 这类新标签接进来。
+        return endsCue && StartsLowerOrCjk(n);
+    }
+
+    private static bool IsEnglishContinuationCue(string p) =>
+        Regex.IsMatch(p, @"\b(?:and|or|the|a|an|to|of|in|on|for|with|that|which|who|is|are|was|were|"
+            + @"will|would|can|could|should|may|might|must|not|by|from|as|at|but|if|than|then|"
+            + @"when|where|while|because|so|this|these|those|its|their|his|her|our|your)$",
+            RegexOptions.IgnoreCase);
+
+    private static bool StartsLowerOrCjk(string s)
+    {
+        foreach (char c in s)
+        {
+            if (char.IsWhiteSpace(c) || "\"'‘’“”([{（《【".Contains(c)) continue;
+            if (char.IsLower(c)) return true;
+            if (IsCjkChar(c)) return true;
+            return false;
+        }
+        return false;
+    }
+
+    private static bool IsCjkChar(char c) =>
+        (c >= '\u4E00' && c <= '\u9FFF')
+        || (c >= '\u3400' && c <= '\u4DBF')
+        || (c >= '\u3040' && c <= '\u30FF')
+        || (c >= '\u31F0' && c <= '\u31FF');
+
+    private static bool IsListMarkerLine(string s) =>
+        Regex.IsMatch(s, @"^\s*(?:[-*•·‣▪◦>]|\d+[.)、]|[（(]\d+[）)]|#+)\s*");
 
     /// <summary>批量失败的恢复类型；分类决定重试/拆分/跨后端。</summary>
     internal enum LlmBatchFailureKind
@@ -849,8 +1113,178 @@ public class TranslationService
 
     /// <summary>只走同一个 LLM 的单行翻译；不进入免费/有道降级链。</summary>
     private Task<string> TranslateSingleLineWithLlmOnlyAsync(
-        string text, string targetLang, string? sourceLang, CancellationToken ct)
-        => TranslateWithLlmAsync(text, targetLang, sourceLang, ct);
+        string text, string targetLang, string? sourceLang, CancellationToken ct,
+        bool coverageRepair = false)
+        => TranslateWithLlmAsync(text, targetLang, sourceLang, ct, coverageRepair);
+
+    private sealed record ContentRepairResult(int Recovered, string? FirstError);
+
+    /// <summary>一次批量最多补译多少行：模型整屏回显时不能把 40 行放大成 40 次串行请求，
+    /// 先补最前面的疑似行，其余如实留在 UnchangedCount/PartialCount 里由状态栏告警。</summary>
+    private const int MaxContentRepairLines = 8;
+
+    /// <summary>
+    /// 对“非空但内容仍是原文/半译”的行做同 LLM 单行补译。
+    /// <para>只处理内容问题，不碰 null 行（null 已由批量/逐行/跨后端链处理）；
+    /// 也不跨后端：模型回显原文时偷偷把 OCR 文本发给免费端点，属于另一种产品行为，
+    /// 不能藏在“补译”里发生。补不回来就如实计数，让状态栏亮黄灯。</para>
+    /// </summary>
+    private async Task<ContentRepairResult> RepairContentIssuesAsync(
+        IReadOnlyList<string> lines,
+        string?[] translated,
+        string targetLang,
+        string? sourceLang,
+        CancellationToken ct)
+    {
+        if (_config.UseOfflineArgos)
+            return new ContentRepairResult(0, null);   // 离线承诺：绝不因内容补译把文本发到网上
+
+        var issues = Enumerable.Range(0, lines.Count)
+            .Where(i => !string.IsNullOrWhiteSpace(lines[i])
+                && translated[i] is not null
+                && TranslationQuality.Assess(lines[i], translated[i], targetLang).IsIssue)
+            .Take(MaxContentRepairLines)
+            .ToArray();
+        if (issues.Length == 0)
+            return new ContentRepairResult(0, null);
+
+        int recovered = 0;
+        string? firstErrorLocal = null;
+        bool fatal = false;
+        using var sem = new SemaphoreSlim(2);
+        var tasks = new Task[issues.Length];
+        for (int t = 0; t < issues.Length; t++)
+        {
+            int i = issues[t];
+            tasks[t] = Task.Run(async () =>
+            {
+                if (Volatile.Read(ref fatal)) return;
+                await sem.WaitAsync(ct);
+                try
+                {
+                    if (Volatile.Read(ref fatal)) return;
+                    var repaired = await TranslateSingleLineWithLlmOnlyAsync(
+                        lines[i], targetLang, sourceLang, ct, coverageRepair: true);
+                    var assessment = TranslationQuality.Assess(lines[i], repaired, targetLang);
+                    if (!assessment.IsIssue)
+                    {
+                        translated[i] = repaired;
+                        Interlocked.Increment(ref recovered);
+                    }
+                    else
+                    {
+                        // 只记录行号和判定类型，不把 OCR 原文/模型返回写进日志。
+                        CoreLog.Warn("Translate",
+                            $"内容补译仍未通过：行 {i + 1}（{assessment.Quality}）",
+                            LogCategory.Network);
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.CompareExchange(ref firstErrorLocal, ClassifyLlmFailure(ex), null);
+                    var kind = ClassifyLlmBatchFailure(ex);
+                    if (kind is LlmBatchFailureKind.Auth or LlmBatchFailureKind.RateLimited
+                        or LlmBatchFailureKind.Configuration)
+                        Volatile.Write(ref fatal, true);
+                    CoreLog.Warn("Translate", "内容补译失败: " + ex.Message, ex, LogCategory.Network);
+                }
+                finally
+                {
+                    sem.Release();
+                }
+            });
+        }
+        await Task.WhenAll(tasks);
+        return new ContentRepairResult(recovered, firstErrorLocal);
+    }
+
+    /// <summary>发一个段落批量请求：paragraphs 给模型完整上下文，lines 保留逐行 id；
+    /// 返回与“所有段落行总数”等数量的逐行译文。</summary>
+    private async Task<string[]> TranslateLlmParagraphBatchAsync(
+        IReadOnlyList<ParagraphGroup> groups, IReadOnlyList<string> allLines,
+        string targetLang, string? sourceLang, CancellationToken ct)
+    {
+        int count = groups.Sum(g => g.Indices.Length);
+        var inputLines = new LlmBatchLine[count];
+        var paragraphs = new LlmParagraphGroup[groups.Count];
+        int lineOffset = 0;
+        for (int g = 0; g < groups.Count; g++)
+        {
+            var group = groups[g];
+            int[] lineIds = new int[group.Indices.Length];
+            for (int k = 0; k < group.Indices.Length; k++)
+            {
+                int id = lineOffset + k + 1;   // 本次请求内的局部 id，按输出数组回填
+                lineIds[k] = id;
+                inputLines[lineOffset + k] = new LlmBatchLine(id, allLines[group.Indices[k]]);
+            }
+            paragraphs[g] = new LlmParagraphGroup(g + 1, group.Text, lineIds);
+            lineOffset += group.Indices.Length;
+        }
+
+        string inputJson = JsonSerializer.Serialize(
+            new LlmParagraphInput(paragraphs, inputLines),
+            LlmJsonContext.Default.LlmParagraphInput);
+
+        string systemPrompt = LlmPromptPolicy.BuildParagraphBatchSystemPrompt(
+            _config.SystemPrompt, targetLang, count);
+        string userPrompt = LlmPromptPolicy.BuildParagraphBatchUserPrompt(
+            targetLang, sourceLang, inputJson);
+        string model = !string.IsNullOrWhiteSpace(_config.ModelName)
+            ? _config.ModelName
+            : LlmModelPolicy.DefaultModel;
+
+        var requestBody = new LlmChatRequest(
+            Model: model,
+            Messages: [
+                new LlmChatMessage("system", systemPrompt),
+                new LlmChatMessage("user", userPrompt)
+            ],
+            Temperature: LlmModelPolicy.TemperatureFor(model),
+            MaxTokens: 4096
+        );
+
+        string content = await SendLlmChatAsync(requestBody, ct);
+        var parsed = ParseLlmBatchContent(content, count);
+        if (parsed.Lines is null)
+            throw new TranslationException(parsed.Error ?? "LLM 段落批量响应不可用");
+        ValidateParagraphAlignment(groups, parsed.Lines, allLines);
+        return parsed.Lines;
+    }
+
+    /// <summary>
+    /// 防止模型把整段译文重复塞给组内每一行：源行不同、译文却全相同，多半是“段落压成一条”
+    /// 而不是正常的同义重复；这种情况必须退回逐行批量，不能把整段重复显示 N 次。
+    /// </summary>
+    private static void ValidateParagraphAlignment(
+        IReadOnlyList<ParagraphGroup> groups, string[] translations, IReadOnlyList<string> allLines)
+    {
+        int offset = 0;
+        foreach (var group in groups)
+        {
+            int n = group.Indices.Length;
+            if (n > 1)
+            {
+                int sourceDistinct = group.Indices
+                    .Select(i => allLines[i].Trim())
+                    .Distinct(StringComparer.Ordinal)
+                    .Count();
+                int translationDistinct = translations
+                    .Skip(offset).Take(n)
+                    .Select(t => t.Trim())
+                    .Distinct(StringComparer.Ordinal)
+                    .Count();
+                if (sourceDistinct > 1 && translationDistinct == 1)
+                    throw new TranslationException(
+                        "LLM 段落响应把整段压成了同一条译文，无法安全拆回原行");
+            }
+            offset += n;
+        }
+    }
 
     /// <summary>发一个 LLM 批量分片，返回与输入等数量的译文；行数/格式不符时抛异常。</summary>
     private async Task<string[]> TranslateLlmBatchChunkAsync(
@@ -1801,9 +2235,11 @@ public class TranslationService
     // ═══════════════════════════════════════
 
     private async Task<string> TranslateWithLlmAsync(string text, string targetLang,
-        string? sourceLang, CancellationToken ct)
+        string? sourceLang, CancellationToken ct, bool coverageRepair = false)
     {
-        string systemPrompt = LlmPromptPolicy.BuildSingleSystemPrompt(_config.SystemPrompt, targetLang);
+        string systemPrompt = coverageRepair
+            ? LlmPromptPolicy.BuildCoverageRepairSystemPrompt(_config.SystemPrompt, targetLang)
+            : LlmPromptPolicy.BuildSingleSystemPrompt(_config.SystemPrompt, targetLang);
         string userPrompt = LlmPromptPolicy.BuildSingleUserPrompt(targetLang, sourceLang, text);
 
         string model = !string.IsNullOrWhiteSpace(_config.ModelName)
@@ -1924,8 +2360,9 @@ public class TranslationService
 
     /// <summary>
     /// 解析 LLM 批量响应。接受四种常见形状：等长字符串数组、<c>{"translations":[...]}</c>、
-    /// 带 <c>id</c> 的对象数组、按编号分行的纯文本。**任何形状都必须等数量且逐行可校验**，
-    /// 否则整批退回逐行 —— 不允许“按顺序硬套”造成错位覆盖。
+    /// 带 <c>id</c> 的对象数组、按编号分行的纯文本。**任何形状最终都必须得到 expectedCount 条译文**；
+    /// 单条译文被模型折成多行时会在同一条内合并，编号行允许无编号续行，漏行/多行仍整批退回。
+    /// 不允许“按顺序硬套”造成错位覆盖。
     /// </summary>
     internal static LlmBatchParseResult ParseLlmBatchContent(string? raw, int expectedCount)
     {
@@ -2090,26 +2527,121 @@ public class TranslationService
         return null;
     }
 
+    /// <summary>编号行前缀：1. / 1、 / 1) / 1：；但 1.2.3 的 1. 后跟数字，不当编号剥掉。</summary>
+    private static readonly string s_numberedBatchLinePrefix =
+        @"^\s*(\d+)\s*(?:[、)：:]\s*|\.\s*(?=[^\d]))";
+
+    private static readonly Regex s_numberedBatchLine = new(
+        s_numberedBatchLinePrefix + @"(?<text>.*)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private static LlmBatchParseResult ParseNumberedBatchLines(string text, int expectedCount)
     {
         var rawLines = text.Replace("\r\n", "\n").Replace('\r', '\n')
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (rawLines.Length != expectedCount)
+        if (rawLines.Length == 0)
+            return new LlmBatchParseResult(null, "LLM 批量响应为空");
+
+        // 有编号时按 id 聚合续行：模型把一条译文折行时，续行没有编号，必须归到上一条。
+        bool hasAnyNumbered = rawLines.Any(l => s_numberedBatchLine.IsMatch(l));
+        var numbered = new Dictionary<int, List<string>>();
+        int currentId = 0;
+        int numberedCount = 0;
+        bool sawNumbered = false;
+        foreach (string line in rawLines)
+        {
+            var match = s_numberedBatchLine.Match(line);
+            if (match.Success)
+            {
+                sawNumbered = true;
+                int id;
+                if (!int.TryParse(match.Groups[1].Value, out id))
+                    return new LlmBatchParseResult(null, "LLM 批量响应存在非法编号");
+                if (id < 1 || id > expectedCount)
+                    return new LlmBatchParseResult(null,
+                        $"LLM 批量响应编号 id={id} 超出输入范围 1..{expectedCount}");
+                if (numbered.ContainsKey(id))
+                    return new LlmBatchParseResult(null,
+                        $"LLM 批量响应存在重复 id={id}");
+                currentId = id;
+                numberedCount++;
+                numbered[id] = new List<string>();
+                string rest = match.Groups["text"].Value.Trim();
+                if (rest.Length > 0) numbered[id].Add(rest);
+                continue;
+            }
+
+            if (sawNumbered)
+            {
+                // 编号之后的非编号行是续行；但模型常见的“Hope this helps”式尾巴不并进译文。
+                if (IsMetaFooterLine(line)) continue;
+                numbered[currentId].Add(line);
+                continue;
+            }
+
+            // 完全没有编号时走下面的等数量逐行分支；有编号时，第一编号之前的正文不能被当前言吞掉。
+            if (!hasAnyNumbered) continue;
+            if (!IsBatchPreambleLine(line))
+                return new LlmBatchParseResult(null,
+                    $"LLM 批量响应在第一个编号前出现正文/无法识别的内容：{Truncate(line, 24)}");
+        }
+
+        if (!sawNumbered)
+        {
+            // 没有编号的旧格式：允许前后各一句元话术，但正文仍必须等数量逐行。
+            var meaningful = rawLines;
+            while (meaningful.Length > expectedCount && IsBatchPreambleLine(meaningful[0]))
+                meaningful = meaningful[1..];
+            while (meaningful.Length > expectedCount && IsMetaFooterLine(meaningful[^1]))
+                meaningful = meaningful[..^1];
+            if (meaningful.Length != expectedCount)
+                return new LlmBatchParseResult(null,
+                    $"LLM 批量响应行数 {meaningful.Length} ≠ 输入 {expectedCount}（可能合并或漏行）");
+
+            var plainLines = new string[expectedCount];
+            for (int i = 0; i < expectedCount; i++)
+            {
+                var line = SanitizeSingleLine(meaningful[i]);
+                if (line is null)
+                    return new LlmBatchParseResult(null,
+                        $"LLM 批量响应第 {i + 1} 行不是可用的单行译文");
+                plainLines[i] = line;
+            }
+            return new LlmBatchParseResult(plainLines, null);
+        }
+
+        if (numberedCount != expectedCount || numbered.Count != expectedCount)
             return new LlmBatchParseResult(null,
-                $"LLM 批量响应行数 {rawLines.Length} ≠ 输入 {expectedCount}（可能合并或漏行）");
+                $"LLM 批量响应有效编号数 {numbered.Count} ≠ 输入 {expectedCount}（可能漏行/合并）");
+        for (int i = 1; i <= expectedCount; i++)
+            if (!numbered.ContainsKey(i))
+                return new LlmBatchParseResult(null, $"LLM 批量响应缺少 id={i}");
 
         var lines = new string[expectedCount];
-        for (int i = 0; i < expectedCount; i++)
+        for (int i = 1; i <= expectedCount; i++)
         {
-            string withoutNumber = Regex.Replace(rawLines[i], @"^\s*\d+\s*[.、)：:]\s*", "");
-            var line = SanitizeSingleLine(withoutNumber);
+            var joined = JoinWrappedTranslationLines(numbered[i]);
+            var line = SanitizeSingleLine(joined);
             if (line is null)
                 return new LlmBatchParseResult(null,
-                    $"LLM 批量响应第 {i + 1} 行不是可用的单行译文");
-            lines[i] = line;
+                    $"LLM 批量响应 id={i} 的译文为空/解释性文字/格式不可用");
+            lines[i - 1] = line;
         }
         return new LlmBatchParseResult(lines, null);
     }
+
+    private static bool IsBatchPreambleLine(string line)
+    {
+        string lower = line.Trim().ToLowerInvariant();
+        if (lower.Length == 0) return true;
+        if (IsMetaPreambleLine(line)) return true;
+        return Regex.IsMatch(lower,
+            @"^(?:(?:sure|okay|ok)[,.!]?\s*)?(?:here\s+(?:is|are)|here's|below\s+is)\s+(?:the\s+)?translations?\b")
+            || line.Contains("以下是翻译") || line.Contains("译文如下") || line.Contains("翻译如下");
+    }
+
+    private static string Truncate(string s, int max) =>
+        s.Length <= max ? s : s[..max] + "…";
 
     private static string? ExtractJsonPayload(string text)
     {
@@ -2139,18 +2671,59 @@ public class TranslationService
     }
 
     /// <summary>
-    /// 把模型输出收敛成"一条可覆盖 OCR 行的译文"：去代码块、引号、编号、Translation: 前缀；
-    /// 多行/解释性文字/拒答语返回 null（由调用方判失败并换后端）。
+    /// 把模型输出收敛成“一条可覆盖 OCR 行的译文”：去代码块、引号、编号、Translation: 前缀；
+    /// 解释性文字/拒答语仍拒收。模型把一条译文折成多行时按语言规则合并成一行，
+    /// 不再因为“多行”整批判失败；多个编号项则属于批量形状，仍拒收。
     /// </summary>
     internal static string? SanitizeSingleLine(string? content)
     {
         if (string.IsNullOrWhiteSpace(content)) return null;
         string s = StripCodeFence(content.Trim());
 
+        // 先去掉常见的“以下是翻译”式前缀；\s* 允许模型在冒号后换行。
         s = Regex.Replace(s,
-            @"^(?:here\s+is\s+the\s+translation|here's\s+the\s+translation|translation|译文|翻译|output)\s*[：:]\s*",
+            @"^(?:(?:sure|okay|ok)[,.!]?\s*)?(?:" +
+            @"here\s+(?:is|are)\s+(?:the\s+)?translations?|here's\s+the\s+translation|" +
+            @"translation|译文|翻译|output)\s*[：:]\s*",
             "", RegexOptions.IgnoreCase);
-        s = Regex.Replace(s, @"^\s*\d+\s*[.、)：:]\s*", "");
+        s = s.Trim();
+
+        // 网关常把单行翻译包成 ["译文"] / {"translation":"译文"}。
+        // JSON 字符串内部的换行必须先拆包再合并，不能按原文直接 split。
+        var (isJsonContainer, unwrapped) = TryUnwrapSingleJsonTranslation(s);
+        if (isJsonContainer)
+        {
+            if (unwrapped is null) return null;
+            s = unwrapped.Trim();
+        }
+
+        string normalizedNewlines = s.Replace("\r\n", "\n").Replace('\r', '\n');
+        var rawLines = normalizedNewlines
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        // 多个编号项不是“一条译文折行”，而是批量/多行列表，单行入口不能把它们拼在一起。
+        if (rawLines.Length > 1
+            && rawLines.Count(l => s_numberedBatchLine.IsMatch(l)) > 1)
+            return null;
+
+        if (rawLines.Length > 1)
+        {
+            // 容忍模型在译文前后加一句“Sure / Hope this helps”，只保留真正的译文行。
+            while (rawLines.Length > 1 && IsMetaPreambleLine(rawLines[0]))
+                rawLines = rawLines[1..];
+            while (rawLines.Length > 1 && IsMetaFooterLine(rawLines[^1]))
+                rawLines = rawLines[..^1];
+            if (rawLines.Any(IsMetaCommentaryLine))
+                return null;
+            s = JoinWrappedTranslationLines(rawLines);
+        }
+        else
+        {
+            s = normalizedNewlines.Trim();
+        }
+
+        // 只去掉“一个”开头的编号；1.2.3 这类版本号不能被当成编号剥成 2.3。
+        s = Regex.Replace(s, s_numberedBatchLinePrefix, "");
         s = s.Trim();
 
         if ((s.StartsWith("\"", StringComparison.Ordinal) && s.EndsWith("\"", StringComparison.Ordinal)
@@ -2162,19 +2735,63 @@ public class TranslationService
         if (s.Length == 0) return null;
         if (s.Contains('\n') || s.Contains('\r')) return null;
 
-        string lower = s.ToLowerInvariant();
+        if (IsMetaCommentaryLine(s)) return null;
+        return s;
+    }
 
-        // 拒答/解释性输出要拒收，但不能用“包含 i cannot / note:”这种宽匹配：
-        // 目标语言是英文时，“I cannot open the file”“Note: takes effect after saving”
-        // 都是合法 UI 文案，宽匹配会把它们误判成拒答，再触发拆片/逐行/跨后端。
-        // 这里只认完整的拒答句或明确的元话术；宁可放过一句真正的拒答，也不误伤普通译文。
+    /// <summary>把一条译文被模型折成的多行合并回一行；中文/日文之间不插空格，
+    /// 英文/韩文/中英交界处保留一个空格。连字符、斜杠断行不插空格。</summary>
+    private static string JoinWrappedTranslationLines(IReadOnlyList<string> lines)
+    {
+        var sb = new StringBuilder();
+        foreach (string raw in lines)
+        {
+            string line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (sb.Length == 0)
+            {
+                sb.Append(line);
+                continue;
+            }
+
+            char prev = sb[^1];
+            char next = line[0];
+            if (NeedsSpaceBetween(prev, next)) sb.Append(' ');
+            sb.Append(line);
+        }
+        return sb.ToString().Trim();
+    }
+
+    private static bool NeedsSpaceBetween(char prev, char next)
+    {
+        if (char.IsWhiteSpace(prev) || char.IsWhiteSpace(next)) return false;
+        // 英文跨行断词/路径断行
+        if (prev is '-' or '/' or '\\' or '_' or '@') return false;
+        // 中文/日文行内折行：两侧都是汉字/假名/中文标点时直接接上
+        if (IsCjkNoSpace(prev) && IsCjkNoSpace(next)) return false;
+        return true;
+    }
+
+    private static bool IsCjkNoSpace(char c) =>
+        (c >= '\u4E00' && c <= '\u9FFF')
+        || (c >= '\u3400' && c <= '\u4DBF')
+        || (c >= '\u3040' && c <= '\u30FF')
+        || (c >= '\u31F0' && c <= '\u31FF')
+        || "，。！？；：、）》】”’…".Contains(c);
+
+    /// <summary>单行入口的元话术前缀/拒答检测；合法 UI 文案（Note: takes effect…）不在这里误杀。</summary>
+    private static bool IsMetaCommentaryLine(string s)
+    {
+        string lower = s.Trim().ToLowerInvariant();
+        if (lower.Length == 0) return false;
+
         if (Regex.IsMatch(lower, @"^as an ai(?: language model| assistant)?[.!]?$")
             || Regex.IsMatch(lower, @"^i(?:'m| am) sorry[.!]?$")
             || Regex.IsMatch(lower, @"^i cannot[.!]?$")
             || Regex.IsMatch(lower,
                 @"\b(?:i cannot|i can't|i am unable to|i'm unable to)\s+(?:assist|help|translate|comply|continue|provide|do that|fulfill)\b")
-            || lower.StartsWith("here is the translation", StringComparison.Ordinal)
-            || lower.StartsWith("here's the translation", StringComparison.Ordinal)
+            || Regex.IsMatch(lower,
+                @"^(?:(?:sure|okay|ok)[,.!]?\s*)?(?:here\s+(?:is|are)|here's|below\s+is)\s+(?:the\s+)?translations?\b")
             || (lower.StartsWith("note:", StringComparison.Ordinal)
                 && Regex.IsMatch(lower, @"(?:the original|source text|the translation|translated text|tone|wording|phrasing|literal meaning)"))
             || (lower.StartsWith("explanation:", StringComparison.Ordinal)
@@ -2182,11 +2799,65 @@ public class TranslationService
             || s.Contains("以下是翻译")
             || s.Contains("译文如下")
             || s.Contains("翻译如下"))
-            return null;
-
-        return s;
+            return true;
+        return false;
     }
 
+    private static bool IsMetaPreambleLine(string s)
+    {
+        string lower = s.Trim().ToLowerInvariant();
+        return Regex.IsMatch(lower, @"^(?:sure|okay|ok|certainly|of\s+course)(?:[,.!]|\s|$)")
+            || Regex.IsMatch(lower, @"^(?:here|below)\s+(?:is|are)\b");
+    }
+
+    private static bool IsMetaFooterLine(string s)
+    {
+        string lower = s.Trim().ToLowerInvariant();
+        return Regex.IsMatch(lower,
+            @"^(?:hope\s+this\s+helps|i\s+hope\s+this\s+helps|"
+            + @"(?:please\s+)?let\s+me\s+know\s+if|feel\s+free\s+to|"
+            + @"if\s+you\s+(?:need|have)\s+(?:any\s+)?(?:questions?|help)|any\s+questions\b)");
+    }
+
+    /// <summary>把单行响应外层的一元 JSON 容器拆掉。
+    /// <para>返回 <c>IsJsonContainer=false</c> 表示“看起来不是 JSON”（例如占位符 {name}），
+    /// 调用方保留原串；<c>IsJsonContainer=true, Value=null</c> 表示“确实是 JSON 容器但形状
+    /// 不能当单行译文”，调用方必须拒收。</para></summary>
+    private static (bool IsJsonContainer, string? Value) TryUnwrapSingleJsonTranslation(string s)
+    {
+        char first = s.Length > 0 ? s[0] : '\0';
+        char last = s.Length > 0 ? s[^1] : '\0';
+        if (!((first == '[' && last == ']') || (first == '{' && last == '}')))
+            return (false, null);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(s);
+            JsonElement value = doc.RootElement;
+            if (value.ValueKind == JsonValueKind.Array)
+            {
+                if (value.GetArrayLength() != 1) return (true, null);
+                value = value[0];
+            }
+            if (value.ValueKind == JsonValueKind.String)
+                return (true, value.GetString());
+
+            if (value.ValueKind != JsonValueKind.Object)
+                return (true, null);
+            foreach (string key in new[] { "translation", "translated", "value", "text" })
+            {
+                if (value.TryGetProperty(key, out var prop)
+                    && prop.ValueKind == JsonValueKind.String)
+                    return (true, prop.GetString());
+            }
+            return (true, null);
+        }
+        catch (JsonException)
+        {
+            // {name} / {0} 这类占位符不是合法 JSON，不能被当成“畸形 JSON 译文”拒收。
+            return (false, null);
+        }
+    }
     // ═══════════════════════════════════════
     //  视觉翻译（整图直传支持 vision 的 OpenAI 兼容端点）
     // ═══════════════════════════════════════
@@ -2209,8 +2880,10 @@ public class TranslationService
     /// 第一行的译文画到第五行上，那比失败更难发现。</para>
     /// </summary>
     public async Task<string[]> TranslateImageWithVisionAsync(byte[] png, string targetLang,
-        int expectedLineCount, CancellationToken ct = default)
+        int expectedLineCount, CancellationToken ct = default,
+        IReadOnlyList<string>? sourceLines = null)
     {
+        LastContentRetryCount = 0;
         if (!VisionConfigured(_config))
             throw new TranslationNotConfiguredException(DescribeBackends(_config));
 
@@ -2300,7 +2973,25 @@ public class TranslationService
                 "（错位覆盖比失败更难发现）。可重试一次，或切回 LLM 文字路。");
         }
 
-        CoreLog.Info("Translate", $"视觉路成功: {expectedLineCount} 行", LogCategory.Network);
+        // 视觉路只校验“行数对不对”，模型仍可能把某几行原样抄回来（尤其低对比度/按钮短语）。
+        // OCR 源文在这里可用，所以做与文本批量同一套逐行内容判定 + 同 LLM 单行补译；
+        // 补不回来由 UI 的状态栏按逐行质量报告亮黄灯，而不是把整批算成功。
+        if (sourceLines is not null && sourceLines.Count == expectedLineCount)
+        {
+            var repair = await RepairContentIssuesAsync(
+                sourceLines, mapped, targetLang, null, ct);
+            LastContentRetryCount = repair.Recovered;
+            if (repair.FirstError is not null)
+            {
+                _lastBackendNote ??= repair.FirstError;
+                CoreLog.Warn("Translate", "视觉路内容补译失败: " + repair.FirstError, LogCategory.Network);
+            }
+        }
+
+        CoreLog.Info("Translate",
+            $"视觉路成功: {expectedLineCount} 行" +
+            (LastContentRetryCount > 0 ? $"（内容补译 {LastContentRetryCount} 行）" : ""),
+            LogCategory.Network);
         return mapped;
     }
 
@@ -2317,9 +3008,10 @@ public class TranslationService
     }
 
     /// <summary>
-    /// 把模型返回的整段文本切成 expectedLineCount 行。正好等行才返回，否则 null。
+    /// 把模型返回的整段文本切成 expectedLineCount 行。正好等行，或编号+续行能恢复出等数量时返回；
+    /// 其余行数偏差返回 null。
     /// <para>容忍 "1. " / "2、" / "3)" 这类编号前缀：模型即使被要求"不要编号"也常会带上，
-    /// 去掉编号不改变行数，因此可以安全容忍；而任何行数偏差都必须判为不可用。</para>
+    /// 去掉编号不改变行数，因此可以安全容忍；无编号且行数偏差无法对齐仍判为不可用。</para>
     /// </summary>
     internal static string[]? MapVisionLines(string? raw, int expectedLineCount)
     {
@@ -2328,9 +3020,13 @@ public class TranslationService
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(SanitizeSingleLine)
             .ToArray();
-        return mapped.Length == expectedLineCount && mapped.All(l => l is not null)
-            ? mapped.Select(l => l!).ToArray()
-            : null;
+        if (mapped.Length == expectedLineCount && mapped.All(l => l is not null))
+            return mapped.Select(l => l!).ToArray();
+
+        // 模型在每条译文前带 1./2. 编号、并把同一条译文折成续行时，按编号聚合；
+        // 这比“行数不等于 N 就整批放弃”更接近用户要的结果，也保留 id 对齐不串行。
+        var numbered = ParseNumberedBatchLines(raw, expectedLineCount);
+        return numbered.Lines;
     }
 }
 

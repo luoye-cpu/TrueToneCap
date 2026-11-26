@@ -16,28 +16,58 @@ public static class MultiOcrService
     private static bool _initialized;
     private static string _modelDir = "";
 
+    // ═══ 2026-11-27 资源回收：ONNX 会话空闲卸载 ═══
+    // WGC 修好之后，OCR 成为最大的常驻块：一次 DirectML 识别会把检测/识别两套 session
+    // 与张量池一直留到进程退出（历史实测约 +2.3–2.5GB）。这里用"空闲时长"而不是内存阈值
+    // 触发卸载：连续 N 分钟没有 OCR 就释放 Onnx 引擎，保留用户选择；下次识别懒加载。
+    private static System.Threading.Timer? s_idleTimer;
+    private static long s_lastOcrUseTick = Environment.TickCount64;
+    private static readonly TimeSpan s_idleUnloadAfter = ReadIdleUnloadAfter();
+
+    private static TimeSpan ReadIdleUnloadAfter()
+    {
+        // 默认 5 分钟；调试/现场验证可用 TTC_OCR_IDLE_UNLOAD_SECONDS=10 缩短，不写死进产品逻辑。
+        int seconds = 300;
+        try
+        {
+            var raw = Environment.GetEnvironmentVariable("TTC_OCR_IDLE_UNLOAD_SECONDS");
+            if (int.TryParse(raw, out var parsed) && parsed >= 5 && parsed <= 3600) seconds = parsed;
+        }
+        catch { }
+        return TimeSpan.FromSeconds(seconds);
+    }
+
+    /// <summary>当前的空闲卸载阈值（仅供诊断/测试读取）。</summary>
+    internal static TimeSpan IdleUnloadAfter => s_idleUnloadAfter;
+
     /// <summary>当前选中的引擎类型（null = 未选择）。</summary>
     public static OcrEngineType? SelectedEngineType { get; set; }
 
-    /// <summary>所有已注册的引擎。</summary>
-    public static IReadOnlyList<IOcrEngine> Engines => _engines;
+    /// <summary>所有已注册的引擎（快照；避免调用方枚举时和空闲卸载并发修改）。</summary>
+    public static IReadOnlyList<IOcrEngine> Engines
+    {
+        get { lock (s_initLock) return _engines.ToArray(); }
+    }
 
     /// <summary>获取当前选中的引擎实例（CPU 引擎按需构建）。</summary>
     public static IOcrEngine? SelectedEngine
     {
         get
         {
-            if (SelectedEngineType is null) return null;
-            var type = SelectedEngineType.Value;
-            var existing = _engines.FirstOrDefault(e => e.Info.EngineType == type);
-            if (existing is not null) return existing;
-            // 2026-10-30：CPU 会话改为按需构建（那时启动只剩 DirectML + Windows OCR 两档）。
-            // 用户显式选了 CPU、或 DirectML 不可用而默认落到 CPU 时，这里补建一次。
-            // 2026-10-31：DirectML 会话改成同一形状（默认按需，TTC_OCR_EAGER_GPU=1 回旧行为），
-            // 所以 GPU 这一档也要能在【引擎选择的同一处】补建 —— 降级顺序仍由登记顺序决定，
-            // 这里只补建、不改 SelectedEngineType（"只回退不改选择"是 10-30 那批定下的口径）。
-            if (type == OcrEngineType.OnnxGpu) return EnsureGpuEngine();
-            return type == OcrEngineType.OnnxCpu ? EnsureCpuEngine() : null;
+            lock (s_initLock)
+            {
+                if (SelectedEngineType is null) return null;
+                var type = SelectedEngineType.Value;
+                var existing = _engines.FirstOrDefault(e => e.Info.EngineType == type);
+                if (existing is not null) return existing;
+                // 2026-10-30：CPU 会话改为按需构建（那时启动只剩 DirectML + Windows OCR 两档）。
+                // 用户显式选了 CPU、或 DirectML 不可用而默认落到 CPU 时，这里补建一次。
+                // 2026-10-31：DirectML 会话改成同一形状（默认按需，TTC_OCR_EAGER_GPU=1 回旧行为），
+                // 所以 GPU 这一档也要能在【引擎选择的同一处】补建 —— 降级顺序仍由登记顺序决定，
+                // 这里只补建、不改 SelectedEngineType（"只回退不改选择"是 10-30 那批定下的口径）。
+                if (type == OcrEngineType.OnnxGpu) return EnsureGpuEngine();
+                return type == OcrEngineType.OnnxCpu ? EnsureCpuEngine() : null;
+            }
         }
     }
 
@@ -141,6 +171,111 @@ public static class MultiOcrService
             // ⚠ 懒建不改变这句的语义：置位时表里已经登记了"启动期该登记的"全部内容，
             //   GPU/CPU 是【刻意】留给引擎选择处的补建，不是"没建起来"。
             _initialized = true;
+            Interlocked.Exchange(ref s_lastOcrUseTick, Environment.TickCount64);
+            EnsureIdleTimerLocked();
+        }
+    }
+
+    /// <summary>启动空闲卸载计时器（调用方须持 s_initLock；锁可重入）。</summary>
+    private static void EnsureIdleTimerLocked()
+    {
+        if (s_idleTimer is not null) return;
+        // 30s 检查一次，成本只有一次 TickCount 差值和一次 Wait(0)；真正卸载要连续 IdleUnloadAfter 无 OCR。
+        s_idleTimer = new System.Threading.Timer(
+            _ => TryReleaseIdleOnnxEngines(),
+            null,
+            TimeSpan.FromSeconds(30),
+            TimeSpan.FromSeconds(30));
+        CoreLog.Info("OCR", $"空闲卸载已启用：连续 {(s_idleUnloadAfter.TotalSeconds < 60 ? $"{s_idleUnloadAfter.TotalSeconds:F0} 秒" : $"{s_idleUnloadAfter.TotalMinutes:F0} 分钟")}无 OCR 则释放 Onnx 会话",
+            LogCategory.OCR);
+    }
+
+    /// <summary>计时器回调：连续空闲达标且没有 OCR 在途时，卸载所有 Onnx 引擎。</summary>
+    private static void TryReleaseIdleOnnxEngines()
+    {
+        try
+        {
+            long idleMs = Environment.TickCount64 - Interlocked.Read(ref s_lastOcrUseTick);
+            if (idleMs < s_idleUnloadAfter.TotalMilliseconds) return;
+
+            // 有识别在跑就不动；等下一拍。不能先 Dispose 再等，Dispose 本身会等推理门。
+            if (!s_ocrGate.Wait(0)) return;
+            try
+            {
+                List<IOcrEngine> toDispose;
+                lock (s_initLock)
+                {
+                    toDispose = _engines
+                        .Where(e => e.Info.EngineType is OcrEngineType.OnnxGpu or OcrEngineType.OnnxCpu)
+                        .ToList();
+                    if (toDispose.Count == 0) return;
+                    foreach (var e in toDispose) _engines.Remove(e);
+                    // 会话已经不在表里 ⇒ "GPU 已建过并自降"的旧痕迹作废；下次重新试一次。
+                    _gpuBuiltDegraded = false;
+                }
+
+                foreach (var e in toDispose)
+                {
+                    try
+                    {
+                        if (e is IDisposable d) d.Dispose();
+                        else CoreLog.Warn("OCR", $"空闲卸载：{e.Info.Name} 不是 IDisposable，已从引擎表移除",
+                            LogCategory.OCR);
+                    }
+                    catch (Exception ex)
+                    {
+                        CoreLog.Warn("OCR", $"空闲卸载 {e.Info.Name} 失败", ex, LogCategory.OCR);
+                    }
+                }
+                CoreLog.Info("OCR",
+                    $"空闲 {idleMs / 1000}s：已卸载 {toDispose.Count} 个 Onnx 会话" +
+                    $"（{string.Join(", ", toDispose.Select(e => e.Info.Name))}）；下次识别懒加载",
+                    LogCategory.OCR);
+            }
+            finally
+            {
+                s_ocrGate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            CoreLog.Warn("OCR", "空闲卸载回调异常", ex, LogCategory.OCR);
+        }
+    }
+
+    /// <summary>应用退出：停止计时器并释放所有 Onnx 会话（不改变用户设置）。</summary>
+    public static void Shutdown()
+    {
+        try
+        {
+            var timer = s_idleTimer;
+            s_idleTimer = null;
+            timer?.Dispose();
+        }
+        catch { }
+
+        // 退出路径不等待太久；推理若真的卡死，进程退出会回收。
+        bool acquired = false;
+        try { acquired = s_ocrGate.Wait(TimeSpan.FromSeconds(5)); } catch { }
+        try
+        {
+            if (!acquired) return;
+            List<IOcrEngine> toDispose;
+            lock (s_initLock)
+            {
+                toDispose = _engines
+                    .Where(e => e.Info.EngineType is OcrEngineType.OnnxGpu or OcrEngineType.OnnxCpu)
+                    .ToList();
+                foreach (var e in toDispose) _engines.Remove(e);
+            }
+            foreach (var e in toDispose)
+            {
+                try { if (e is IDisposable d) d.Dispose(); } catch { }
+            }
+        }
+        finally
+        {
+            if (acquired) s_ocrGate.Release();
         }
     }
 
@@ -363,6 +498,8 @@ public static class MultiOcrService
         {
             await s_ocrGate.WaitAsync(ct).ConfigureAwait(false);
             acquired = true;
+            // 从进入识别到交回结果都算"在用"，空闲计时不能从请求开始时算。
+            Interlocked.Exchange(ref s_lastOcrUseTick, Environment.TickCount64);
             return await RecognizeCoreAsync(bgra, w, h, lang, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -371,6 +508,7 @@ public static class MultiOcrService
         }
         finally
         {
+            Interlocked.Exchange(ref s_lastOcrUseTick, Environment.TickCount64);
             if (acquired) s_ocrGate.Release();
         }
     }
@@ -531,7 +669,7 @@ public static class MultiOcrService
     /// <summary>根据引擎类型查找引擎实例。</summary>
     public static IOcrEngine? FindEngine(OcrEngineType type)
     {
-        return _engines.FirstOrDefault(e => e.Info.EngineType == type);
+        lock (s_initLock) return _engines.FirstOrDefault(e => e.Info.EngineType == type);
     }
 
     /// <summary>
@@ -656,7 +794,8 @@ public static class MultiOcrService
     /// <summary>检查指定引擎类型是否可用。</summary>
     public static bool IsEngineAvailable(OcrEngineType type)
     {
-        return _engines.Any(e => e.Info.EngineType == type && e.Info.IsAvailable);
+        var engine = FindEngine(type);
+        return engine is not null && engine.Info.IsAvailable;
     }
 }
 

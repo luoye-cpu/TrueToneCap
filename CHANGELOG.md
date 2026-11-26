@@ -16,6 +16,15 @@
 ---
 
 
+## [0.3.20] — 2026-11-27：4K 捕获资源治理与翻译覆盖状态
+
+- **显示器变更不再重建 4K 帧池**：`WM_DISPLAYCHANGE` 后比较当前显示器矩形与 WGC 会话尺寸；尺寸未变时保留 session/framePool/D3D 设备，只清共享槽并 `Trim`，只有尺寸真的变化才完整重建。真机连续 3 次同尺寸变更后 GPU Local 稳定在 `262.4 → 262.4 → 262.4 → 251.9 MB`，截图均成功；按轮约 190 MB 的滞留已消除。真实分辨率变化仍需一次设备级重建，WGC 没有“保留会话但替换尺寸并归还缓冲”的 API。
+- **OCR 模型空闲卸载**：`MultiOcrService` 每 30 秒检查一次，连续默认 300 秒无 OCR 后释放 Onnx GPU/CPU 会话（`TTC_OCR_IDLE_UNLOAD_SECONDS=5..3600` 可调），下次识别懒加载；`AppServices.Shutdown()` 同步释放。真机以 5 秒阈值验证 30 秒检查拍成功卸载 DirectML 会话。
+- **无感截图编码任务封顶**：`MaxPendingEncodeTasks=4`，达到上限在创建 `CaptureResult` 前直接拒绝并提示，不再先分配 4K 私有帧。
+- **翻译覆盖状态**：新增逐行译文质量判定与状态栏格式化；原文回显、目标语言缺失、半译等非空但未翻译的行不再显示 ✅，与硬失败/回退/降级分开计数。
+- **验证**：Release 构建 0 警告 / 0 错误；8 个套件共 **2940 条断言通过、0 失败**；另有 2 处外部判据因缺 numpy/tifffile/ICC ProfileID 样本跳过，未计为通过。
+- **版本坐标**：`Directory.Build.props` 三行、`Package.appxmanifest` 的 `Identity/@Version`、README 徽章统一为 `0.3.20` / `0.3.20.0`。
+
 ## [0.3.19] — 2026-11-19：WGC 黄色捕获边框修复与 20 秒会话回收
 
 - **WGC 黄色捕获边框修复**：MSIX 清单新增 `graphicsCaptureWithoutBorder` 能力；无感截图与选区截图每次进入捕获前刷新一次 `GraphicsCaptureAccess.RequestAccessAsync(Borderless)`。系统状态为 `Prompt` 时提示一次，用户允许/拒绝后不再无限弹窗；只有允许时才关闭每个捕获会话的 `IsBorderRequired`，拒绝或撤销许可则恢复系统边框。绿色/未打包包保持原有路径。

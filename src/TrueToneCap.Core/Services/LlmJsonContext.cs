@@ -21,6 +21,14 @@ internal sealed record LlmChatMessage(string Role, string Content);
 /// <summary>LLM 文本批量输入的一行：<c>id</c> 从 1 开始，模型必须按这个编号返回。</summary>
 internal sealed record LlmBatchLine(int Id, string Text);
 
+/// <summary>一个段落组：<c>text</c> 是把该组 OCR 行拼成的连续段落，<c>lineIds</c> 是组内各行的 id。
+/// <para>段落翻译不是让模型把多条源文合并成一条结果，而是让模型先看到完整段落，
+/// 再把译文按同样的 id 对齐回每一行；<c>lines</c> 数组仍用于逐行校验/回填。</para></summary>
+internal sealed record LlmParagraphGroup(int Id, string Text, int[] LineIds);
+
+/// <summary>段落批量输入：<c>paragraphs</c> 给模型看连续段落，<c>lines</c> 保留逐行 id 映射。</summary>
+internal sealed record LlmParagraphInput(LlmParagraphGroup[] Paragraphs, LlmBatchLine[] Lines);
+
 /// <summary>
 /// 多模态消息的内容片段（OpenAI 兼容形态）：一条 user 消息 = 一段文字 + 一张图，
 /// 图以 <c>image_url.url</c> 的 <c>data:image/png;base64,...</c> 内联。
@@ -62,6 +70,7 @@ internal sealed record LlmVisionRequest(
 [JsonSerializable(typeof(LlmVisionRequest))]
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(LlmBatchLine[]))]
+[JsonSerializable(typeof(LlmParagraphInput))]
 internal partial class LlmJsonContext : JsonSerializerContext
 {
 }

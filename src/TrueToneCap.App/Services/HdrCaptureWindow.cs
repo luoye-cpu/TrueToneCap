@@ -1209,12 +1209,65 @@ public sealed partial class HdrCaptureWindow : IDisposable
     }
 
     /// <summary>
+    /// 清空共享 ImmediateContext 的绑定并提交一次。交换链/RTV 在仍被上下文绑定时
+    /// 直接 Dispose，只会把托管包装释放掉，底层 4K 后台缓冲仍被上下文引用链拖住。
+    /// </summary>
+    private void ClearAndFlushD3DContext()
+    {
+        try
+        {
+            if (_ctx is null) return;
+            _ctx.ClearState();
+            _ctx.Flush();
+        }
+        catch { }
+    }
+
+    /// <summary>让 DXGI 修剪本进程视频内存；交换链 Dispose 后仍可能被驱动缓存拖住。</summary>
+    private void TrimDeviceMemory()
+    {
+        try
+        {
+            if (_device is null) return;
+            using var dxgi3 = _device.QueryInterface<IDXGIDevice3>();
+            dxgi3.Trim();
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// 释放桌面纹理。共享模式下 _desktopTex 与 _sharedTexOpen 通常是同一块打开纹理；
+    /// 设备丢失/兜底上传后可能变成两个不同对象，必须分别减引用，不能只把
+    /// _sharedTexOpen 置 null —— 那会把预览侧持有的 4K 共享纹理漏在 DXGI 里。
+    /// </summary>
+    private void ReleaseDesktopResources()
+    {
+        try { _desktopSrv?.Dispose(); } catch { }
+        _desktopSrv = null;
+
+        var desktop = _desktopTex;
+        var shared = _sharedTexOpen;
+        try
+        {
+            if (shared is not null && !ReferenceEquals(shared, desktop))
+                shared.Dispose();
+        }
+        catch { }
+        try { desktop?.Dispose(); } catch { }
+        _desktopTex = null;
+        _sharedTexOpen = null;
+    }
+
+    /// <summary>
     /// 释放所有 D3D 资源（重建前调用）。逐项 try：设备已失效时 Dispose 本身可能抛异常。
     /// </summary>
     private void ReleaseDeviceResources()
     {
+        // 先解绑/Flush，再释放 RTV/后台缓冲/交换链。
+        ClearAndFlushD3DContext();
+
         void Safe(System.IDisposable? d) { try { d?.Dispose(); } catch { } }
-        Safe(_desktopSrv); Safe(_desktopTex); Safe(_pooledStaging);
+        ReleaseDesktopResources(); Safe(_pooledStaging);
         Safe(_textAtlasSrv); Safe(_textAtlas);
         Safe(_badgeSrv); Safe(_badgeTex);
         Safe(_editSrv); Safe(_editTex);
@@ -4532,6 +4585,10 @@ public sealed partial class HdrCaptureWindow : IDisposable
             return;
         }
 
+        // 共享 ImmediateContext 在 RenderCore 里绑过 _rtv；先 ClearState/Flush，
+        // 否则 RTV→后台缓冲→交换链的引用链会跨窗保留，4K FP16 双缓冲永远不归还。
+        ClearAndFlushD3DContext();
+
         _overlayPs?.Dispose(); _overlayPs = null;
         _uiCb?.Dispose(); _uiCb = null;
         _rsNoCull?.Dispose(); _rsNoCull = null;
@@ -4539,9 +4596,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _textAtlas?.Dispose(); _textAtlas = null;
         _badgeSrv?.Dispose(); _badgeSrv = null;
         _badgeTex?.Dispose(); _badgeTex = null;
-        _desktopSrv?.Dispose(); _desktopSrv = null;
-        _desktopTex?.Dispose(); _desktopTex = null;
-        _sharedTexOpen = null;
+        ReleaseDesktopResources();
         _pooledStaging?.Dispose(); _pooledStaging = null;
         _rtv?.Dispose(); _rtv = null;
         _backBuffer?.Dispose(); _backBuffer = null;
@@ -4549,6 +4604,7 @@ public sealed partial class HdrCaptureWindow : IDisposable
         _vs?.Dispose(); _vs = null;
         // _ps 已删除（死代码）
         _samp?.Dispose(); _samp = null;
+        TrimDeviceMemory();
         if (_hwnd != 0) { s_windows.TryRemove(_hwnd, out _); DestroyWindow(_hwnd); _hwnd = 0; }
     }
 

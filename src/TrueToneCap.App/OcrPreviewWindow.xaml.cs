@@ -47,6 +47,7 @@ public sealed partial class OcrPreviewWindow : Window
         int DegradedCount,
         string? DegradedBackend,
         int LlmRetryCount,
+        int ContentRetryCount,
         string? FirstError);
 
     private TranslationSnapshot? _translation;
@@ -799,6 +800,7 @@ public sealed partial class OcrPreviewWindow : Window
             int degradedCount = 0;          // 最终由免费/有道跨后端补译的行数
             string? degradedBackend = null; // 跨后端最后兜底实际使用的后端名
             int llmRetryCount = 0;          // 同 LLM 分片/逐行重试救回的行数
+            int contentRetryCount = 0;      // 批量/视觉路对“非空但仍是原文/半译”的行补译救回数
             List<string> translated;
 
             if (TranslationService.VisionConfigured(_translationConfig))
@@ -816,11 +818,12 @@ public sealed partial class OcrPreviewWindow : Window
                     throw new TranslationException($"截图编码 PNG 失败，无法走视觉路：{ex.Message}");
                 }
                 translated = (await translator.TranslateImageWithVisionAsync(
-                    png, _translationConfig.TargetLanguage, lines.Count, ct)).ToList();
-                // 视觉路要么整批交出 N 行、要么抛异常（见 TranslateImageWithVisionAsync），
-                // 所以这里不存在"某行失败"。不显式记这一笔的话，下面那句按
-                // "译文 == 原文"数失败的兜底统计会把专有名词/同语言的正常行算成失败。
+                    png, _translationConfig.TargetLanguage, lines.Count, ct,
+                    lines.Select(l => l.Text).ToArray())).ToList();
+                // 视觉路要么整批交出 N 行、要么抛异常（见 TranslateImageWithVisionAsync）；
+                // 但“行数对”不等于“内容真的翻译了”，Core 已在视觉返回后对疑似行做同 LLM 补译。
                 definiteFailed = 0;
+                contentRetryCount = translator.LastContentRetryCount;
             }
             else if (_translationConfig.UseOfflineArgos)
             {
@@ -839,9 +842,11 @@ public sealed partial class OcrPreviewWindow : Window
             }
             else if (TranslationService.LlmTextBatchConfigured(_translationConfig))
             {
-                // ═══ LLM 文本路：整批带编号 JSON 发送，按行回填 ═══
+                // ═══ LLM 文本路：明显折行的连续 OCR 行先按段落请求，再按原行 id 回填 ═══
                 // 2026-11-16：旧实现把 N 行分别发给 LLM，单行缺上下文 + 无行数约束，
                 // 模型容易漏词/扩写/带解释；批量接口在 Core 内做等行数校验，失败分片才逐行回退。
+                // 2026-11-27：Core 会把“上一行没说完、下一行是小写/中日文”的连续行先拼成段落，
+                // 让模型看到完整句子后再拆回逐行；菜单/按钮/读数仍按行发送，不牺牲布局回填。
                 var batch = await translator.TranslateBatchAsync(
                     lines.Select(l => l.Text).ToArray(),
                     _translationConfig.TargetLanguage, null, ct);
@@ -851,6 +856,7 @@ public sealed partial class OcrPreviewWindow : Window
                 degradedCount = batch.DegradedCount;
                 degradedBackend = batch.DegradedBackend;
                 llmRetryCount = batch.LlmRetryCount;
+                contentRetryCount = batch.ContentRetryCount;
                 if (batch.FirstError is not null) firstError = batch.FirstError;
             }
             else
@@ -902,7 +908,7 @@ public sealed partial class OcrPreviewWindow : Window
             // 渲染端读到的永远是"完整的一份"，不会再出现半成品。
             _translation = new TranslationSnapshot(
                 translated, definiteFailed, fallbackCount,
-                degradedCount, degradedBackend, llmRetryCount, firstError);
+                degradedCount, degradedBackend, llmRetryCount, contentRetryCount, firstError);
 
 DispatcherQueue.TryEnqueue(() =>
             {
@@ -919,36 +925,32 @@ DispatcherQueue.TryEnqueue(() =>
                 if (toggleWasChecked) { RenderOverlay(); UpdateInfo(); }
                 var snap = _translation;
                 if (snap is null) return;                 // 理论不可达（上面刚赋值），但读快照而非字段更稳
-                int total = snap.Lines.Count;
-                // "译文 == 原文"只是文本路的近似判据：同语言或专有名词会被算成失败。
-                // 视觉路自己知道结果（整批成功或整批抛异常），走 definiteFailed。
-                int failed = snap.DefiniteFailed ??
-                    snap.Lines.Zip(lines, (t, l) => t == l.Text ? 1 : 0).Sum();
-                string fallbackNote = snap.FallbackCount > 0
-                    ? $"；批量未交出 {snap.FallbackCount} 行，已进入回退阶段"
-                    : "";
-                string retryNote = snap.LlmRetryCount > 0
-                    ? $"；{snap.LlmRetryCount} 行经同 LLM 重试成功"
-                    : "";
-                string degradedNote = snap.DegradedCount > 0
-                    ? $"；其中 {snap.DegradedCount} 行由 {snap.DegradedBackend ?? "备用翻译引擎"} 跨后端补译" +
-                      "（风格可能与其余行不一致）"
-                    : "";
-                string why = snap.FirstError is null ? "" : $"（原因示例：{snap.FirstError}）";
-                bool hadExplicitError = snap.FirstError is not null;
-                InfoTxt.Text = failed switch
-                {
-                    0 when !hadExplicitError && snap.DegradedCount == 0 =>
-                        $"✅ 翻译完成（{total} 行）{fallbackNote}{retryNote}，点击文字块可复制译文",
-                    // 回退成功 ≠ 没有错误：批量失败/跨后端降级必须留下警告，不能只显示普通成功。
-                    0 => $"⚠ 翻译完成（{total} 行），但曾发生错误或降级" +
-                         $"{fallbackNote}{retryNote}{degradedNote}{why}，点击文字块可复制译文",
-                    // 全行皆败不叫"完成"——原先这里仍打 ✅ 语气的"翻译完成"，是把故障说成成功
-                    _ when failed == total => $"❌ 翻译失败：{total}/{total} 行都没出译文 " +
-                        $"{fallbackNote}{retryNote}{degradedNote}{why}",
-                    _ => $"⚠ 翻译完成（{failed}/{total} 行失败，已保留原文）" +
-                        $"{fallbackNote}{retryNote}{degradedNote}{why}，点击文字块可复制",
-                };
+                int total = lines.Count;
+                // ═══ 2026-11-27：状态栏必须同时看“硬失败”和“内容覆盖” ═══
+                // 旧逻辑只信 DefiniteFailed，而批量路的 FailedCount 只统计 null；模型回显原文/
+                // 只翻半句时 failed=0，状态栏直接 ✅。这里用与 Core 同一套 TranslationQuality
+                // 逐行判定，把“非空但没真翻译”的行也算进警告，且不再把每一行都当失败。
+                var coverage = TranslationQuality.Analyze(
+                    lines.Select(l => l.Text).ToArray(),
+                    snap.Lines,
+                    _translationConfig.TargetLanguage);
+                // DefiniteFailed 是硬失败（null→回填原文）；quality.Untranslated 里也包含这些行，
+                // 所以只在非 null 时扣除硬失败，避免同一行被算两次。
+                int failed = snap.DefiniteFailed ?? coverage.UntranslatedCount;
+                int extraUnchanged = snap.DefiniteFailed is null
+                    ? 0
+                    : Math.Max(0, coverage.UntranslatedCount - failed);
+                int contentIssues = extraUnchanged + coverage.PartialCount;
+                InfoTxt.Text = TranslationStatusFormatter.Build(
+                    total,
+                    failed,
+                    contentIssues,
+                    snap.FallbackCount,
+                    snap.LlmRetryCount,
+                    snap.ContentRetryCount,
+                    snap.DegradedCount,
+                    snap.DegradedBackend,
+                    snap.FirstError);
             });
         }
         catch (OperationCanceledException)

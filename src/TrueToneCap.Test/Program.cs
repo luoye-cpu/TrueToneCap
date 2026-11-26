@@ -46,6 +46,7 @@ var chainedSuites = new (string Arg, string Name, Func<int> Run)[]
     ("--encoding-tests", "编码管线集成",   TrueToneCap.Test.EncodingIntegrationTests.RunAll),
     ("--service-tests",  "基础设施服务",   TrueToneCap.Test.ServiceTests.RunAll),
     ("--ocr-tests",      "OCR 服务",       TrueToneCap.Test.OcrServiceTests.RunAll),
+    ("--translation-quality-tests", "翻译内容覆盖", TrueToneCap.Test.TranslationQualityTests.RunAll),
     ("--qr-tests",       "二维码解码",     TrueToneCap.Test.QrDecodeTests.RunAll),
     ("--offline-tests",  "离线翻译包",     TrueToneCap.Test.OfflineTranslationTests.RunAll),
     ("--format-tests",   "输出结构合法性", TrueToneCap.Test.FormatStructureTests.RunAll),

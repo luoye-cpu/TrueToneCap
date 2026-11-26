@@ -124,6 +124,9 @@ public static class AppServices
         // 保存设置
         try { GetOptional<SettingsService>()?.SaveQuiet(); } catch { }
 
+        // OCR 引擎是 static 缓存，DI 容器不会替它释放；显式停计时器并 Dispose Onnx 会话。
+        try { TrueToneCap.Core.Services.MultiOcrService.Shutdown(); } catch { }
+
         // 释放 DI 容器（自动 Dispose 所有 IDisposable 单例）
         _serviceProvider?.Dispose();
         _serviceProvider = null;

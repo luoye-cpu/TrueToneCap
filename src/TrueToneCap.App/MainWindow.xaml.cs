@@ -60,6 +60,9 @@ public sealed partial class MainWindow : Window
     // 各任务独立 CancellationTokenSource (旧任务不被新任务取消)。
     private readonly List<Task> _pendingEncodeTasks = [];
     private readonly object _pendingLock = new();
+    /// <summary>无感截图的后台编码队列上限。每个 4K HDR CaptureResult 约 126MB 私有像素，
+    /// 慢格式（JXL 等）编码未完成时连按热键会同时压住多份；不设上限会变成“每按一次多一份”。</summary>
+    private const int MaxPendingEncodeTasks = 4;
     private void TrackPendingTask(Task task)
     {
         lock (_pendingLock) _pendingEncodeTasks.Add(task);
@@ -86,6 +89,11 @@ public sealed partial class MainWindow : Window
     //   blocking: true 是有意的：非阻塞时 decommit 还没做完就采样，量不出归还效果；
     //   而此刻已确认没有在途工作，一次全量压缩的百毫秒级停顿落在空闲期。
     private int _heapReturnScheduled;
+
+    private int PendingEncodeCount()
+    {
+        lock (_pendingLock) return _pendingEncodeTasks.Count;
+    }
 
     private bool IsCaptureBusy()
     {
@@ -1723,6 +1731,15 @@ public sealed partial class MainWindow : Window
     /// <summary>无感截图：按下热键后自动截取当前显示器 → 编码保存 → 复制到剪贴板 → 右下角提示。</summary>
     private async void SilentCapture()
     {
+        // 后台编码队列有界：慢格式未完成时连按热键，不能无限复制 4K 私有帧。
+        // 在捕获前检查，超限就不创建 CaptureResult，避免先分配 126MB 再发现队列满。
+        if (PendingEncodeCount() >= MaxPendingEncodeTasks)
+        {
+            LogService.Warn("SilentCapture",
+                $"待编码任务已达上限 {MaxPendingEncodeTasks}，拒绝本次无感截图（避免继续堆 4K 私有帧）");
+            ToastService.ShowCaptureFailed("已有多个截图正在编码，请稍后再试");
+            return;
+        }
         // ═══ 2026-08-25 发布版修复: 后台持续编码模型 ═══
         // 旧: 防重入拦截 + await 旧任务 → 24s JXL 编码阻塞新截图
         // 新: 捕获阶段防重入 (快, <1s), 编码阶段后台跟踪, 不阻塞新截图。
@@ -4111,10 +4128,15 @@ public sealed partial class MainWindow : Window
         }
         try
         {
+            // 显示器拓扑变了：先关掉正在使用 WGC 共享帧的选区窗，再清会话和旧 D3D 设备。
+            // 旧实现只 InvalidateSessions、复用设备；实测每次变更仍会留下约 190MB 4K 帧池（GPU Local 45.8→253.7→444.9）。
+            try { _activeHdrWindow?.RequestCancel(); } catch { }
+            if (_wgcService is not null)
+                await _wgcService.ResetForDisplayChangeAsync();
+
             // 清除旧的 ICC 缓存、显示器枚举缓存和 WGC 会话
             ColorProfileProvider.InvalidateCache();
             Core.Capture.DisplayEnumerator.InvalidateCache();
-            _wgcService?.InvalidateSessions();
 
             // 重新检测
             await DetectAndApplySystemCapabilitiesAsync();

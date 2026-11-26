@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 TrueToneCap contributors
 // TrueToneCap.App/Services/WgcCaptureService.cs
 // Windows.Graphics.Capture (WGC) 统一捕获服务 — 会话池化高性能版
@@ -7,6 +7,7 @@
 
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Channels;
 using Windows.Graphics.Capture;
@@ -180,13 +181,30 @@ public sealed partial class WgcCaptureService : IDisposable
     private readonly long[] _mPoolLockUs = new long[PoolLockSites];
     private readonly long[] _mPoolLockMaxUs = new long[PoolLockSites];
     private CancellationTokenSource? _idleStopCts;
-    // ═══ 2026-11-19 性能回收：120000 → 20000 ═══
-    // 2 分钟的保活窗口对真实截图间隔来说太长：一次截图后会话仍持续收帧/占着
-    // staging+latest+shared ≈ 40-140MB/会话，HDR 屏还有 SDR+HDR 两套。
-    // 20s 足够覆盖连续截图；超过 20s 重新建会话只多付首帧冷启动（p50 51ms +
-    // SDR 首帧 83ms + Float16 等帧 160ms），比长时间占 GPU/显存更划算。
-    // SharedHeld 顺延保护不变（选区窗开着不收）。
-    private const int IdleStopDelayMs = 20000; // 20 秒无截图则自动停止会话
+
+    // ═══ 2026-11-27 主动回收（不做设备熔断）═══
+    // 现场已证明：WGC 的 4K 帧池缓冲一旦分配，Dispose/Recreate 都不会让驱动提前归还；
+    // 每次重建 = 多一份 190MB。因此策略是【能不重建就不重建】：
+    //   · 空闲 20s 只 Pause（释放 CPU 帧/staging/latest/共享槽），保留 4K 帧池；
+    //   · 显示器变更时尺寸没变就原样保留 session/framePool（DPI/色彩/HDR 开关走这条）；
+    //   · 只有尺寸真的变了才做完整设备重建（一次 190MB，随后由空闲 Pause 持有复用）。
+    private const int IdleStopDelayMs = 20000; // 20 秒无截图则暂停会话并释放缓存
+
+    /// <summary>
+    /// 请求 DXGI 修剪本进程的视频内存分配。会话/交换链都 Dispose 后，驱动仍可能
+    /// 把 4K 缓冲留在内部缓存里；Trim 让 DXGI 立即尝试归还，而不是等设备销毁。
+    /// </summary>
+    private void TrimGpuAllocations()
+    {
+        var dev = _d3dDevice;
+        if (dev is null) return;
+        try
+        {
+            using var dxgi3 = dev.QueryInterface<IDXGIDevice3>();
+            dxgi3.Trim();
+        }
+        catch { }
+    }
 
     /// <summary>结算一次 _poolLock 持有（在锁**外面**调用：先出锁再记账，绝不让仪表把临界区延长）。</summary>
     private void RecordPoolLock(int site, long t0)
@@ -308,7 +326,10 @@ public sealed partial class WgcCaptureService : IDisposable
     {
         private readonly nint _hmonitor;
         private readonly DirectXPixelFormat _format;
-        private readonly ID3D11Device _d3dDevice;
+        // ⚠ 不能 readonly：Dispose 时必须主动断开这个 COM 引用，否则即使会话已经从
+        // 池里摘掉、FrameArrived 也解绑，PooledSession 只要还被任何 RCW/事件环间接
+        // 可达，旧的 ID3D11Device 就不会真正销毁，4K 帧池缓冲会按轮滞留在驱动里。
+        private ID3D11Device _d3dDevice;
         // ═══ D3D11 设备锁：ImmediateContext 非线程安全，所有 GPU 操作必须加锁 ═══
         // 同一 WgcCaptureService 实例的所有 PooledSession 共享此锁（同一 D3D11 设备）
         private readonly object _gpuLock;
@@ -351,6 +372,8 @@ public sealed partial class WgcCaptureService : IDisposable
         private readonly ManualResetEventSlim _firstFrameEvent = new(false);
         private volatile bool _hasFrame;
         private volatile bool _disposed; // ═══ 防止 Dispose 后 FrameArrived 回调访问已释放资源 ═══
+        private volatile bool _idle;     // 空闲暂停后置位：帧回调直接丢帧，不再做 GPU 拷贝/CPU 回读
+        internal bool IsIdle => _idle;
 
         // ═══ 在途回调跟踪：Dispose 时等待正在执行的 FrameArrived 回调完成，避免释放竞态 ═══
         private int _inFlightCallbacks;
@@ -473,6 +496,111 @@ public sealed partial class WgcCaptureService : IDisposable
             }
         }
 
+        /// <summary>
+        /// 空闲暂停：保留 WGC 会话/4K 帧池，只释放本会话的 CPU 帧、staging、latest 和共享槽。
+        /// 不 Recreate 帧池、不 Dispose 会话；下次截图恢复同一 4K 帧池，避免“Dispose 再重建”
+        /// 造成的 190MB/轮滞留。
+        /// </summary>
+        internal void Pause()
+        {
+            if (_disposed || _idle) return;
+            _idle = true;
+
+            lock (_gpuLock)
+            {
+                try
+                {
+                    var ctx = _d3dDevice.ImmediateContext;
+                    ctx.ClearState();
+                    ctx.Flush();
+                }
+                catch { }
+                try { _stagingTex?.Dispose(); } catch { }
+                _stagingTex = null; _stagingW = _stagingH = 0;
+                try { _latestTexture?.Dispose(); } catch { }
+                _latestTexture = null; _latestTexW = _latestTexH = 0; _latestTexValid = false;
+                try { ResetSharedSlotLocked(); } catch { }
+            }
+
+            lock (_frameLock)
+            {
+                _latestSdr = null;
+                _latestHdr = null;
+                _writeBufferSdr = null;
+                _writeBufferHdr = null;
+                _frameTimestamp = 0;
+                _cpuSdrTick = _cpuHdrTick = 0;
+            }
+            _hasFrame = false;
+            _consumerUntil = 0;
+            TryResetEvent(_firstFrameEvent);
+
+            if (PerfMeter.DumpEnabled)
+                Log($"[Pool] {_hmonitor:X}: 空闲暂停：CPU/CPU纹理缓存已释放，4K 帧池保留（WGC 不支持无设备释放帧池）");
+        }
+
+        /// <summary>从空闲暂停恢复。帧池保持 4K，不重新分配，也不再触发设备重建。</summary>
+        internal bool Resume()
+        {
+            if (_disposed) return false;
+            if (!_idle) return true;
+
+            _hasFrame = false;
+            TryResetEvent(_firstFrameEvent);
+            _idle = false;
+            if (PerfMeter.DumpEnabled)
+                Log($"[Pool] {_hmonitor:X}: 从空闲暂停恢复 {_width}x{_height}（帧池未重建）");
+            return true;
+        }
+
+        /// <summary>
+        /// 显示器配置变更时尝试保留本会话的 4K 帧池与 D3D 设备。
+        /// <para>2026-11-27 现场实测：就算把 session/framePool/设备全部 Dispose、等 RCW
+        /// 终结器，甚至对同一帧池调用 Recreate，WGC 的 4K 缓冲仍会按 190MB/轮滞留；
+        /// 只有尺寸没变时完全不动 session/framePool 才不产生第二份分配。尺寸真的变了
+        /// 返回 false，由调用方走完整重建。</para>
+        /// </summary>
+        internal bool TryKeepForDisplayChange()
+        {
+            if (_disposed) return false;
+            try
+            {
+                if (_framePool is null || _winrtDevice is null) return false;
+
+                // 只读 Win32 的当前显示器矩形，不创建 GraphicsCaptureItem：
+                // 创建 item 本身也会增加 WinRT 对象，没必要为一次尺寸比较去建。
+                var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+                if (!GetMonitorInfo(_hmonitor, ref mi)) return false;
+                int currentW = mi.rcMonitor.Right - mi.rcMonitor.Left;
+                int currentH = mi.rcMonitor.Bottom - mi.rcMonitor.Top;
+
+                // 只有尺寸没变才走"会话/帧池原样保留"的快路径。
+                // 尺寸变了说明捕获目标几何已变，必须换 item/session；那个路径在
+                // WGC 上实测 CreateCaptureSession 会返回 E_UNEXPECTED，交给完整重建。
+                if (_width != currentW || _height != currentH)
+                {
+                    LogInfo($"[Pool] {_hmonitor:X}: 显示器尺寸 {_width}x{_height} → " +
+                        $"{currentW}x{currentH}，走完整重建");
+                    return false;
+                }
+
+                // ═══ 2026-11-27 关键结论 ═══
+                // 尺寸没变的 WM_DISPLAYCHANGE（DPI/色彩配置/HDR 开关/显示器休眠恢复）
+                // 不需要重建 WGC 会话：Recreate 本身就会再分配一份 4K 双缓冲，旧缓冲
+                // 仍被驱动保留 ⇒ 每轮 +190MB。这里直接保留现有 session/framePool，
+                // 让 WGC 自己处理这次配置通知；只有尺寸真的变了才走完整重建。
+                LogInfo($"[Pool] {_hmonitor:X}: 显示器变更但尺寸未变，会话/帧池原样保留" +
+                    $" {_width}x{_height} {(IsHdr ? "HDR" : "SDR")}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogInfo($"[Pool] {_hmonitor:X}: 显示器变更后重启失败: {ex.Message}");
+                return false;
+            }
+        }
+
+
         /// <summary>把当前 Borderless 许可应用到这条会话；没有许可时恢复系统边框。</summary>
         internal void SetBorderRequired(bool required)
         {
@@ -499,7 +627,7 @@ public sealed partial class WgcCaptureService : IDisposable
             try
             {
                 using var frame = sender.TryGetNextFrame();
-                if (frame is null || _disposed)
+                if (frame is null || _disposed || _idle)
                 {
                     return;
                 }
@@ -976,7 +1104,7 @@ public sealed partial class WgcCaptureService : IDisposable
         {
             lock (_frameLock)
             {
-                if (!_latestTexValid || _latestTexture is null) return null;
+                if (_idle || !_latestTexValid || _latestTexture is null) return null;
                 // ═══ 2026-09-15 P0-C 修复：不得返回 _latestTexture 的共享引用 ═══
                 // 之前的 QueryInterface 返回的是缓存纹理本身，下一帧 CacheTextureGpuCopy 的
                 // CopyResource 会在调用方仍持有引用时原地覆盖其内容，导致编码期间画面被撕裂。
@@ -1024,8 +1152,9 @@ public sealed partial class WgcCaptureService : IDisposable
                 // ═══ D3D11 操作必须在 GPU 锁内 ═══
                 lock (_gpuLock)
                 {
-                // 尺寸变化时重新创建
-                if (_latestTexture is null || _latestTexW != w || _latestTexH != h)
+                    if (_idle) return;
+                    // 尺寸变化时重新创建
+                    if (_latestTexture is null || _latestTexW != w || _latestTexH != h)
                 {
                     _latestTexture?.Dispose();
                     _latestTexture = _d3dDevice.CreateTexture2D(new Texture2DDescription
@@ -1443,6 +1572,8 @@ public sealed partial class WgcCaptureService : IDisposable
 
         public void Dispose()
         {
+            if (_disposed) return;
+
             // ═══ 1. 先取消订阅，防止新回调进入 ═══
             if (_framePool is not null)
                 try { _framePool.FrameArrived -= OnFrameArrived; } catch { }
@@ -1457,20 +1588,55 @@ public sealed partial class WgcCaptureService : IDisposable
             }
 
             // ═══ 4. 释放资源 ═══
-            try { _session?.Dispose(); } catch { }
-            try { _framePool?.Dispose(); } catch { }
-            try { _winrtDevice?.Dispose(); } catch { }
+            // 官方 ScreenCapture 示例的 StopCapture 顺序：先 session、后 framePool。
+            // 反序（先 framePool）在部分驱动/WGC 实现上会让会话仍持有一份 4K 双缓冲引用，
+            // 后续即使释放会话也不归还（2026-11-27 显示器变更复现每轮 +190MB）。
+            try { _session?.Dispose(); }
+            catch (Exception ex) { Log($"[Pool] {_hmonitor:X}: Session Dispose 失败: {ex.Message}"); }
+            try { _framePool?.Dispose(); }
+            catch (Exception ex) { Log($"[Pool] {_hmonitor:X}: FramePool Dispose 失败: {ex.Message}"); }
+            try { _winrtDevice?.Dispose(); }
+            catch (Exception ex) { Log($"[Pool] {_hmonitor:X}: WinRT device Dispose 失败: {ex.Message}"); }
+
             // ═══ D3D11 资源释放也必须在 GPU 锁内 ═══
             lock (_gpuLock)
             {
+                // 先把共享设备上下文里可能残留的绑定/未完成拷贝推平，再释放纹理。
+                // 否则 ImmediateContext 仍可能持有 4K staging/latest 的引用。
+                try
+                {
+                    var ctx = _d3dDevice.ImmediateContext;
+                    ctx.ClearState();
+                    ctx.Flush();
+                }
+                catch { }
                 try { _stagingTex?.Dispose(); } catch { }
                 try { _latestTexture?.Dispose(); } catch { }
                 // 共享槽：先关句柄再弃纹理。已在预览侧打开的那份由 DXGI 引用计数保命，
                 // 所以这里释放不影响"用户还在框选"这种情形（预览窗自己持着引用）。
                 try { ResetSharedSlotLocked(); } catch { }
             }
+
+            // 断开所有托管/COM 字段，避免 PooledSession 被事件或上层引用时，
+            // 已释放的 4K 资源仍被这个壳对象间接保持可达。
+            _item = null;
+            _framePool = null;
+            _session = null;
+            _winrtDevice = null;
+            _stagingTex = null;
+            _latestTexture = null;
+            // 断开共享 D3D 设备的 COM 引用：服务侧 DisposeDeviceAndNotify() 才能真正
+            // 把设备引用计数打到 0，驱动才会归还该设备创建的 4K 帧池缓冲。
+            _d3dDevice = null!;
             _firstFrameEvent.Dispose();
             _callbacksDrained.Dispose();
+
+            if (PerfMeter.DumpEnabled)
+            {
+                using var proc = Process.GetCurrentProcess();
+                Log($"[Meter/F5] 会话 0x{_hmonitor:X} Dispose 后: 私有={proc.PrivateMemorySize64 / (1024 * 1024)}MB " +
+                    $"工作集={proc.WorkingSet64 / (1024 * 1024)}MB 托管={GC.GetTotalMemory(false) / (1024 * 1024)}MB");
+            }
 
             // ═══ F5 仪表结算：一条会话一行（诊断档才落盘；逐帧只累加内存，不碰磁盘）═══
             // 落点选在这里是因为"每条会话各几次"就是这条路的原问题：会话生命周期由
@@ -1503,7 +1669,30 @@ public sealed partial class WgcCaptureService : IDisposable
     /// </summary>
     private void DisposeDeviceAndNotify()
     {
-        lock (_d3dContextLock) { _d3dDevice?.Dispose(); }
+        lock (_d3dContextLock)
+        {
+            if (_d3dDevice is not null)
+            {
+                // 先把上下文里可能挂着的 4K CopyResource/绑定推平，再对【旧设备】做一次
+                // IDXGIDevice3.Trim()。只 Dispose COM 不够：驱动可能把帧池/交换链的 4K
+                // 分配留在进程级缓存里，下一张新截图重建时仍按 190MB/次累积（2026-11-27
+                // 显示器变更复现：45.8→253.7→444.9 MB）。Trim 必须在旧设备还活着时调用。
+                try
+                {
+                    var ctx = _d3dDevice.ImmediateContext;
+                    ctx.ClearState();
+                    ctx.Flush();
+                }
+                catch { }
+                try
+                {
+                    using var dxgi3 = _d3dDevice.QueryInterface<IDXGIDevice3>();
+                    dxgi3.Trim();
+                }
+                catch { }
+                _d3dDevice.Dispose();
+            }
+        }
         _d3dDevice = null;
         NvencAvifBackend.NotifySharedDeviceDisposed();
     }
@@ -1668,6 +1857,7 @@ public sealed partial class WgcCaptureService : IDisposable
     private PooledSession GetOrCreateSdrSession(nint hmonitor)
     {
         var key = (hmonitor, false);
+        PooledSession? stale = null;
         long tLock = PerfMeter.Now();   // F5 仪表：包住原有临界区，不改其中任何一步
         try
         {
@@ -1675,8 +1865,18 @@ public sealed partial class WgcCaptureService : IDisposable
             {
                 if (_sessionPool.TryGetValue(key, out var existing))
                 {
-                    // 会话已存在（无论是否有帧），直接复用
-                    return existing;
+                    // 空闲缩池的会话要先扩回 4K；扩不回去才淘汰重建。
+                    if (existing.IsIdle)
+                    {
+                        if (existing.Resume()) return existing;
+                        stale = existing;
+                        _sessionPool.Remove(key);
+                    }
+                    else
+                    {
+                        // 会话已存在（无论是否有帧），直接复用
+                        return existing;
+                    }
                 }
 
                 var device = GetOrCreateDevice(hmonitor);
@@ -1694,7 +1894,11 @@ public sealed partial class WgcCaptureService : IDisposable
                 return session;
             }
         }
-        finally { RecordPoolLock(LockGetSdr, tLock); }
+        finally
+        {
+            RecordPoolLock(LockGetSdr, tLock);
+            stale?.Dispose();
+        }
     }
 
     /// <summary>
@@ -1801,8 +2005,18 @@ public sealed partial class WgcCaptureService : IDisposable
         {
             lock (_poolLock)
             {
-                if (_sessionPool.TryGetValue(key, out var existing) && existing.HasFrame)
-                    return existing;
+                if (_sessionPool.TryGetValue(key, out var existing))
+                {
+                    // 空闲缩池的会话先扩回 4K；扩得回来就直接复用，扩不回来才按旧逻辑淘汰。
+                    if (existing.IsIdle)
+                    {
+                        if (existing.Resume()) return existing;
+                    }
+                    else if (existing.HasFrame)
+                    {
+                        return existing;
+                    }
+                }
 
                 // ═══ 2026-09-19 软冷却判定：位置很讲究，必须在「复用已出帧会话」之后、「新建」之前 ═══
                 // 在复用之后 ⇒ 冷却绝不会挡掉一个正在正常出帧的 Float16 会话（那才是我们要的高精度源）；
@@ -1930,6 +2144,7 @@ public sealed partial class WgcCaptureService : IDisposable
                 await Task.Delay(IdleStopDelayMs, cts.Token);
                 // 超时 → 停止所有会话释放资源
                 long tLock = PerfMeter.Now();   // F5 仪表
+                bool anyHeld = false;           // 有选区窗冻结槽时不做 Trim/GC，避免卡用户正在看的预览
                 try
                 {
                     lock (_poolLock)
@@ -1943,7 +2158,6 @@ public sealed partial class WgcCaptureService : IDisposable
                             // ⇒ "❌ 截图失败"（实机复现两次：Meter/F5 恒在捕获后 15s 整出现，
                             // 点动作 17-19s ⇒ 必挂）。槽还冻着就顺延一轮，等窗口 Dispose 交还后再收。
                             // 旧注释"15 秒后 Dispose 与下游无关"只对"像素已复制出会话"的旧路线成立。
-                            bool anyHeld = false;
                             foreach (var s in _sessionPool.Values) { if (s.SharedHeld) { anyHeld = true; break; } }
                             if (anyHeld)
                             {
@@ -1952,17 +2166,27 @@ public sealed partial class WgcCaptureService : IDisposable
                             }
                             else
                             {
-                                // 2026-11-11 审计 #3：Dispose（内含回调排水，最长 2s）移出锁外 ——
-                                // 先摘引用并清池，再逐个释放；与回读/取帧的并发安全由 _gpuLock 保证。
-                                var toDispose = _sessionPool.Values.ToList();
-                                _sessionPool.Clear();
-                                foreach (var s in toDispose) s.Dispose();
-                                Log("[WGC] 空闲超时，所有会话已自动停止");
+                                // 不销毁会话：只释放 CPU/纹理缓存，4K 帧池保留，下一次截图恢复。
+                                foreach (var s in _sessionPool.Values)
+                                {
+                                    try { s.Pause(); }
+                                    catch (Exception ex) { Log($"[WGC] 空闲暂停失败: {ex.Message}"); }
+                                }
+                                Log("[WGC] 空闲超时：所有会话已暂停并释放 CPU/纹理缓存（4K 帧池保留）");
                             }
                         }
                     }
                 }
                 finally { RecordPoolLock(LockIdleStop, tLock); }
+                // 有选区窗冻结槽：用户正在用预览，跳过 Trim/GC，等下一轮真正空闲。
+                if (anyHeld) return;
+                // 缩池后再让 DXGI 修剪一次视频内存；不销毁设备、不做熔断。
+                try { TrimGpuAllocations(); }
+                catch (Exception ex) { Log($"[MemoryGuard] DXGI Trim 失败: {ex.Message}"); }
+                // 空闲期把托管堆已死对象也收一次，归还 LOH/数组段；20s 无截图时做，
+                // 不阻塞用户操作，也不再依赖 MainWindow 的堆归还定时器是否恰好触发。
+                try { GC.Collect(2, GCCollectionMode.Aggressive, true, true); }
+                catch (Exception ex) { Log($"[MemoryGuard] 空闲 GC 失败: {ex.Message}"); }
                 // 结算点：一批截图结束时把 _poolLock 的持锁账打成一行（诊断档）。
                 // 选这里而不是"每 N 次"：空闲回收本来就是"这一批结束了"的天然边界，
                 // 一次回收一行，量级与截图批数同阶。
@@ -1970,6 +2194,57 @@ public sealed partial class WgcCaptureService : IDisposable
             }
             catch (OperationCanceledException) { }
         });
+    }
+
+    /// <summary>
+    /// 显示器配置变更后的完整重置：先确保没有捕获在途，再清会话并释放 WGC 设备。
+    /// <para>2026-11-27 根因：PooledSession 原来 readonly 持有 _d3dDevice，Dispose 后
+    /// 这个 COM 引用仍在；只要会话对象还被 WGC 的事件环/RCW 间接可达，设备就永远
+    /// 销毁不了，旧 4K 帧池缓冲留在驱动里。现在 Dispose 主动断开该引用，服务侧
+    /// DisposeDeviceAndNotify() 才能把设备引用计数打到 0 并切一次 DXGI Trim。</para>
+    /// <para>⚠ 不能让本方法和 <see cref="CaptureMonitorAsync"/> 并发：销毁设备时若还有
+    /// Map/CopyResource/GetLatest 在跑，会变成 use-after-free。因此先拿 <c>s_captureLock</c>。</para>
+    /// </summary>
+    public async Task ResetForDisplayChangeAsync()
+    {
+        await s_captureLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            List<((nint Monitor, bool IsHdr) Key, PooledSession Session)> sessions;
+            lock (_poolLock)
+            {
+                sessions = _sessionPool.Select(kv => (kv.Key, kv.Value)).ToList();
+            }
+
+            int kept = 0;
+            foreach (var (key, session) in sessions)
+            {
+                if (session.TryKeepForDisplayChange())
+                {
+                    kept++;
+                    continue;
+                }
+                lock (_poolLock) { _sessionPool.Remove(key); }
+                session.Dispose();
+            }
+
+            if (sessions.Count > 0 && kept == 0)
+            {
+                // 尺寸变化/设备丢失/取不到显示器矩形时，只能退回完整重建。
+                // 这条兜底路径会承担一次 190MB 的设备级重建，但不会静默留下不可用会话。
+                DisposeDeviceAndNotify();
+            }
+
+            _reuseSdr = null;
+            _reuseHdr = null;
+            try { TrimGpuAllocations(); } catch { }
+            Log($"[WGC] 显示器变更：{kept}/{sessions.Count} 条会话原样保留" +
+                (kept == 0 && sessions.Count > 0 ? "（尺寸变化，已走完整设备重建）" : "（帧池/设备复用）"));
+        }
+        finally
+        {
+            s_captureLock.Release();
+        }
     }
 
     /// <summary>使所有会话失效（显示器配置变更时调用）。</summary>

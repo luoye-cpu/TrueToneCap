@@ -1354,6 +1354,12 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
         try { _recSession?.Dispose(); } catch { }
         _detSession = null;
         _recSession = null;
+        // 会话释放后张量池仍会继续引用大块 float 数组；空闲卸载时尽快断引用，
+        // 不要等下一次 GC 才释放（4K 输入下单块张量可达数十 MB）。
+        _detTensor = null;
+        _recTensor = null;
+        _recBatchTensor = null;
+        _dict = null;
         // 注意：此处【故意不调用 _inferGate.Release()】—— 详见上方说明。
     }
 
