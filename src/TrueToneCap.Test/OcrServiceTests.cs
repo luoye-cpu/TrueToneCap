@@ -30,6 +30,14 @@ public static class OcrServiceTests
         Preprocess_AutoPreprocess_SmallUpscale();
         Preprocess_AutoPreprocess_HighContrast_NoOp();
 
+        // ── 视觉行合并 / 中文空格 ──
+        Console.WriteLine("\n── OcrLineComposer ──");
+        OcrLineComposerTests.Run(Assert);
+
+        // ── CTC 解码映射（尾随空格类） ──
+        Console.WriteLine("\n── OcrDecodeMapping ──");
+        OcrDecodeMappingTests.Run(Assert);
+
         // ── LLM 提供商/模型清单 ──
         Console.WriteLine("\n── LLM 提供商/模型清单 ──");
         LlmProviderTables_AreClosed();

@@ -487,6 +487,10 @@ public sealed partial class OcrPreviewWindow : Window
         var snap = _translation;
         if (snap is not null)
             return string.Join("\n", snap.Lines);
+        // 2026-11-27：OCR 的 Text 与 Lines 必须同序；优先从预览实际使用的行拼全文，
+        // 不再依赖 Core 单独维护的一份 Text。
+        if (_ocr.Lines is { Count: > 0 })
+            return string.Join("\n", _ocr.Lines.Select(l => l.Text));
         return _ocr.Text;
     }
 

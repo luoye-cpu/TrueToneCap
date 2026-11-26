@@ -15,6 +15,7 @@
 
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using System.Text;
 using TrueToneCap.Core.Logging;
 
 namespace TrueToneCap.Core.Services;
@@ -144,6 +145,16 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     // output[[..]] 多维索引 ⇒ 4K 概率图上百万次维度换算。默认走 Span，开关只用于对撞。
     private static readonly bool s_spanDecodeEnabled =
         Environment.GetEnvironmentVariable("TTC_OCR_SPAN") != "0";
+
+    // ═══ 2026-11-27 OCR 行合并开关 ═══
+    // 默认走新的 OcrLineComposer；TTC_OCR_LEGACY_LINE_MERGE=1 回到旧 MergeDetLines。
+    // 仅用于实机验收失败时的快速回退，不暴露到设置页。
+    private static readonly bool s_legacyLineMerge =
+        Environment.GetEnvironmentVariable("TTC_OCR_LEGACY_LINE_MERGE") == "1";
+
+    // 只读诊断：把合并前的 det 框写到 %TEMP%\ttc-ocr-boxes-*.tsv。
+    private static readonly bool s_dumpRawBoxes =
+        Environment.GetEnvironmentVariable("TTC_OCR_DUMP_BOXES") == "1";
 
     // ═══ 2026-09-13 P0 修复: 推理串行化信号量 ═══
     // OnnxRuntime InferenceSession 非线程安全, 同一 session 并发 Run() 会导致
@@ -459,7 +470,6 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
 
                 // 2. 逐区域识别（2026-10-30：>1 框时按 RecBatchSize 合批，同一份预处理/解码）
                 var lines = new List<OcrLine>();
-                var allText = new List<string>();
                 int batchSize = s_recBatchEnabled ? RecBatchSize : 1;
                 for (int i = 0; i < boxes.Count; i += batchSize)
                 {
@@ -486,14 +496,21 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
                             X = bx, Y = by, Width = bw, Height = bh,
                             Words = [new OcrWord { Text = text, X = bx, Y = by, Width = bw, Height = bh }]
                         });
-                        allText.Add(text);
                     }
                 }
 
+                if (s_dumpRawBoxes)
+                    DumpRawBoxes(lines, w, h);
+
+                var merged = s_legacyLineMerge
+                    ? MergeDetLinesLegacy(lines)
+                    : OcrLineComposer.Compose(lines);
                 var result = new OcrResult
                 {
-                    Text = string.Join("\n", allText),
-                    Lines = MergeDetLines(lines),
+                    // 2026-11-27：Text 必须与 Lines 同序。旧实现按原始 det 顺序
+                    // 另拼一份 allText，导致复制全文与预览行序不一致。
+                    Text = OcrLineComposer.BuildText(merged),
+                    Lines = merged,
                 };
 
                 if (result.Lines.Count == 0)
@@ -516,18 +533,15 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
     //  文字检测 (DBNet, PP-OCRv6)
     // ═══════════════════════════════════════
 
+    /// <summary>原始 det 行 → 视觉行（新 composer；测试与旧调用点共用）。</summary>
+    internal static List<OcrLine> MergeDetLines(List<OcrLine> lines) =>
+        OcrLineComposer.Compose(lines);
+
     /// <summary>
-    /// det 框 → 视觉行合并（2026-11-11，实机排障）。
+    /// 旧行合并实现（2026-11-11）。保留为 <c>TTC_OCR_LEGACY_LINE_MERGE=1</c> 的回退路径，
+    /// 不再作为默认；它按中心点落簇并用空格连接所有框，中文逐字框会出现人为空格。
     /// </summary>
-    /// <remarks>
-    /// det 在大字号/大词距下会把同一视觉行拆成多框（实测 40px 行 4 词 4 框，行数从 2 虚报成 5），
-    /// 下游"一行一块"的覆盖渲染跟着碎成词芯片；且词框相邻（间隙可低至 2px）时，
-    /// 预览端任何按框的横向扩块/墨迹扫描都会跨进邻词 ⇒ 芯片互相重叠盖字。
-    /// 行级合并后块间只有行距，几何操作天然安全。
-    /// 规则：词的垂直中心落在簇的垂直范围内 ⇒ 同簇；簇内按 X 排序、文本以空格连接，
-    /// 行框取并集。多栏文本会并成一行 —— 与 OcrService 混合路的行重建口径一致。
-    /// </remarks>
-    internal static List<OcrLine> MergeDetLines(List<OcrLine> lines)
+    internal static List<OcrLine> MergeDetLinesLegacy(List<OcrLine> lines)
     {
         if (lines.Count <= 1) return lines;
         var sorted = lines.OrderBy(l => l.Y + l.Height / 2.0).ToList();
@@ -560,6 +574,37 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
             });
         }
         return result.OrderBy(l => l.Y).ToList();
+    }
+
+    /// <summary>
+    /// 只读诊断：TTC_OCR_DUMP_BOXES=1 时把合并前的原始行框导出到 %TEMP%，
+    /// 用于区分“同词距空格”“跨行串簇”“长行碎片”和“坐标映射错误”。
+    /// 默认关闭；导出失败不影响 OCR。
+    /// </summary>
+    private static void DumpRawBoxes(List<OcrLine> lines, int imageW, int imageH)
+    {
+        try
+        {
+            var path = Path.Combine(Path.GetTempPath(),
+                $"ttc-ocr-boxes-{DateTime.Now:yyyyMMdd-HHmmss-fff}.tsv");
+            var rows = new List<string>
+            {
+                "idx\tx\ty\tw\th\twords\ttext",
+            };
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var l = lines[i];
+                string text = (l.Text ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
+                rows.Add($"{i}\t{l.X}\t{l.Y}\t{l.Width}\t{l.Height}\t{l.Words.Count}\t{text}");
+            }
+            rows.Add($"# image\t{imageW}\t{imageH}");
+            File.WriteAllLines(path, rows);
+            CoreLog.Info("OCR", $"原始 det 框已导出: {path}", LogCategory.OCR);
+        }
+        catch (Exception ex)
+        {
+            CoreLog.Warn("OCR", "原始 det 框导出失败", ex, LogCategory.OCR);
+        }
     }
 
     private List<Box> RunDetection(byte[] bgra, int w, int h)
@@ -1099,11 +1144,28 @@ public sealed class OnnxOcrEngine : IOcrEngine, IDisposable
             }
         }
 
-        // 字典映射: 模型输出索引 1..N 对应字典 0..N-1 (blank 占索引 0)
-        if (_dict is null) return "";
-        return string.Concat(decoded
-            .Where(d => d - 1 < _dict.Length)
-            .Select(d => _dict[d - 1]));
+        // 字典映射: 模型输出索引 1..N 对应字典 0..N-1 (blank 占索引 0)。
+        // 2026-11-27：该模型是 18710 类 = blank(0) + 18708 字典字符 + 1 个尾随空格类。
+        // 旧实现把尾随类直接丢弃，导致英文整行被识别成 “Thisisonelong…”。
+        // 尾随类映射为空格；它不会出现在汉字/假名之间（否则中文也会被空格污染）。
+        return MapDecodedIndices(decoded, _dict);
+    }
+
+    /// <summary>
+    /// CTC 类别索引 → 文本。索引 1..dict.Length 对应字典；索引 dict.Length+1
+    /// 是模型的尾随空格类；其余索引丢弃。拆成纯函数便于单测。
+    /// </summary>
+    internal static string MapDecodedIndices(IReadOnlyList<int> decoded, string[]? dict)
+    {
+        if (dict is null || dict.Length == 0) return "";
+        var sb = new StringBuilder(decoded.Count);
+        foreach (int d in decoded)
+        {
+            int dictIndex = d - 1;
+            if (dictIndex >= 0 && dictIndex < dict.Length) sb.Append(dict[dictIndex]);
+            else if (dictIndex == dict.Length) sb.Append(' ');
+        }
+        return sb.ToString();
     }
 
     // ═══════════════════════════════════════
