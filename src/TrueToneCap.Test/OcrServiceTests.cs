@@ -38,6 +38,10 @@ public static class OcrServiceTests
         Console.WriteLine("\n── OcrDecodeMapping ──");
         OcrDecodeMappingTests.Run(Assert);
 
+        // ── Windows 混合语言行拼接 ──
+        Console.WriteLine("\n── OcrWindowsLine ──");
+        OcrWindowsLineTests.Run(Assert);
+
         // ── LLM 提供商/模型清单 ──
         Console.WriteLine("\n── LLM 提供商/模型清单 ──");
         LlmProviderTables_AreClosed();

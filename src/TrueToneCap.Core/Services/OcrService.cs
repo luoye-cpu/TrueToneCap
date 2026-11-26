@@ -203,14 +203,14 @@ public static class OcrService
             {
                 if (currentLine.Count > 0 && Math.Abs(word.Y - lastY) > lineGap)
                 {
-                    lines.Add(new OcrLine { Text = string.Join(" ", currentLine.Select(w => w.Text)), Words = [.. currentLine] });
+                    lines.Add(ComposeWindowsLine(currentLine));
                     currentLine = [];
                 }
                 currentLine.Add(word);
                 lastY = word.Y;
             }
             if (currentLine.Count > 0)
-                lines.Add(new OcrLine { Text = string.Join(" ", currentLine.Select(w => w.Text)), Words = [.. currentLine] });
+                lines.Add(ComposeWindowsLine(currentLine));
 
             return new OcrResult
             {
@@ -225,6 +225,33 @@ public static class OcrService
             return new OcrResult { Text = "", Error = $"混合 OCR 异常: {ex.Message}" };
         }
         finally { bitmap.Dispose(); }
+    }
+
+    /// <summary>
+    /// 把 Windows OCR 同一视觉行的词拼成 OcrLine。文本走 composer 的脚本感知拼接，
+    /// 避免中文逐词之间被 `string.Join(" ")` 插空格；行框取词框并集，供预览覆盖定位。
+    /// </summary>
+    internal static OcrLine ComposeWindowsLine(List<OcrWord> words)
+    {
+        var ordered = words.OrderBy(w => w.X).ThenBy(w => w.Y).ToList();
+        if (ordered.Count == 0)
+            return new OcrLine { Text = "", Words = [] };
+        double rowHeight = ordered.Select(w => (double)w.Height).OrderBy(h => h).ElementAt(ordered.Count / 2);
+        string text = OcrLineComposer.JoinWords(ordered, rowHeight);
+
+        int x1 = ordered.Min(w => w.X);
+        int y1 = ordered.Min(w => w.Y);
+        int x2 = ordered.Max(w => w.X + w.Width);
+        int y2 = ordered.Max(w => w.Y + w.Height);
+        return new OcrLine
+        {
+            Text = text,
+            X = x1,
+            Y = y1,
+            Width = Math.Max(1, x2 - x1),
+            Height = Math.Max(1, y2 - y1),
+            Words = ordered,
+        };
     }
 
     /// <summary>位置去重：重叠 >50% 的词保留文本更长的。</summary>
