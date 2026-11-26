@@ -78,7 +78,9 @@
 
 ### 3.2 `MergeDetLines` 的处置
 
-保留 `MergeDetLines` 作为兼容入口，内部委托 `OcrLineComposer.Compose`；等所有调用点迁移并跑完回归后再删旧实现。这样不破坏 Test 的 internal 调用，也不让旧逻辑和新的 composer 同时存在两套行为。
+保留 `MergeDetLines` 作为兼容入口，内部委托 `OcrLineComposer.Compose`；旧实现 `MergeDetLinesLegacy` 保留给 `TTC_OCR_LEGACY_LINE_MERGE=1` 回退。这样不破坏 Test 的 internal 调用，也不让旧逻辑和新的 composer 同时成为默认行为。
+
+Windows OCR 混合语言路径不经过 det，但同样存在 `string.Join(" ", ...)` 的中文逐词空格；该路径改用 `OcrLineComposer.JoinWords` 分行拼接，行框取词框并集。
 
 ### 3.3 UI 侧
 

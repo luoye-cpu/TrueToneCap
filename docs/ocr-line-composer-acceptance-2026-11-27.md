@@ -3,7 +3,7 @@
 - 日期：2026-11-27
 - 基线：`main` / `8a5834a`（v0.3.20 发布后）
 - 范围：只改 `C:\PLAN\TrueToneCap`；未触碰其他仓库
-- 状态：**已实现、已单测、已真实图像验收；待 Git 提交与版本化**
+- 状态：**已实现、已单测、已真实图像验收、已提交 Git（`3603275` + 本记录所在提交）；未版本化**
 
 ## 1. 结论
 
@@ -21,9 +21,11 @@
 |---|---|
 | `src/TrueToneCap.Core/Services/OcrLineComposer.cs` | 新增；视觉行聚类、分段、脚本感知拼接、孤立碎片回收、`Text` 构建 |
 | `src/TrueToneCap.Core/Services/OnnxOcrEngine.cs` | `MergeDetLines` 委托 composer；保留 `MergeDetLinesLegacy` 回退；`Text` 由 `Lines` 生成；CTC 尾随空格类映射；`TTC_OCR_DUMP_BOXES=1` 只读诊断 |
+| `src/TrueToneCap.Core/Services/OcrService.cs` | Windows OCR 混合语言路径改用 `OcrLineComposer.JoinWords` 分行拼接，中文逐词不插空格；行框取词框并集 |
 | `src/TrueToneCap.App/OcrPreviewWindow.xaml.cs` | `CurrentFullText()` 无译文时优先从 `_ocr.Lines` 拼全文，避免两套顺序 |
 | `src/TrueToneCap.Test/OcrLineComposerTests.cs` | 新增 19 条 composer 断言 |
 | `src/TrueToneCap.Test/OcrDecodeMappingTests.cs` | 新增 5 条 CTC 类别映射断言，锁住尾随空格类 |
+| `src/TrueToneCap.Test/OcrWindowsLineTests.cs` | 新增 4 条 Windows 混合行断言：中文不插空格、英文词距、行框并集、空列表安全 |
 | `src/TrueToneCap.Test/OcrServiceTests.cs` | 把上述两组测试挂进现有 `--ocr-tests`，不新增套件参数 |
 
 回退开关：
@@ -114,8 +116,8 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 
 ## 4. 自动化验证
 
-- `--ocr-tests`：**36 通过 / 0 失败**（7 条预处理 + 19 条 composer + 5 条 LLM 清单 + 5 条解码映射）。
-- 全量 `scripts/verify.ps1`：**8 个套件 2964 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
+- `--ocr-tests`：**40 通过 / 0 失败**（7 条预处理 + 19 条 composer + 5 条 LLM 清单 + 5 条解码映射 + 4 条 Windows 混合行）。
+- 全量 `scripts/verify.ps1`：**8 个套件 2968 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
 - Release 构建：**0 警告 / 0 错误**。
 - 既有 `--usability-tests` 238 条断言通过，包含 `OcrPreviewWindow` 构造探针；覆盖块几何在真实图像验收中 0 越界。
 
@@ -134,4 +136,4 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 - [x] 真实 4K 截图 `CJK\s+CJK` 计数 0。
 - [x] 覆盖框全部在原图内、词框在行框内（`GEOMETRY_BAD=0`）。
 - [x] 翻译段落组：受控段落 1 组 3 行；真实截图 14 组 31 行。
-- [x] `--ocr-tests` 36 通过 / 0 失败；全量 2964 通过 / 0 失败；Release 0 警告 0 错误。
+- [x] `--ocr-tests` 40 通过 / 0 失败；全量 2968 通过 / 0 失败；Release 0 警告 0 错误。
