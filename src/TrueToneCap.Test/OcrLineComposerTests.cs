@@ -22,6 +22,10 @@ internal static class OcrLineComposerTests
         Text_MatchesLines(check);
         EmptyAndSingle_Safe(check);
         Normalize_CjkAndLatinSpaces(check);
+        Kana_NoSpaces(check);
+        JapaneseBrackets_Normalize(check);
+        HalfwidthKana_NoSpaces(check);
+        CompatibilityIdeograph_NoSpaces(check);
     }
 
     private static void CjkChars_NoSpaces(Action<string, bool, string?> check)
@@ -159,6 +163,58 @@ internal static class OcrLineComposerTests
         check("中文标点前空格消除",
             OcrLineComposer.NormalizeFragment("你好 ，") == "你好，",
             OcrLineComposer.NormalizeFragment("你好 ，"));
+        check("全角空格（U+3000）也归一化",
+            OcrLineComposer.NormalizeFragment("你\u3000好") == "你好",
+            OcrLineComposer.NormalizeFragment("你\u3000好"));
+        check("不换行空格（NBSP）也归一化",
+            OcrLineComposer.NormalizeFragment("你\u00A0好") == "你好",
+            OcrLineComposer.NormalizeFragment("你\u00A0好"));
+        check("日文左括号后空格消除",
+            OcrLineComposer.NormalizeFragment("「 A") == "「A",
+            OcrLineComposer.NormalizeFragment("「 A"));
+        check("日文右括号前空格消除",
+            OcrLineComposer.NormalizeFragment("A 」") == "A」",
+            OcrLineComposer.NormalizeFragment("A 」"));
+    }
+
+    private static void Kana_NoSpaces(Action<string, bool, string?> check)
+    {
+        var words = new[]
+        {
+            Word("こ", 0, 0, 18, 20),
+            Word("れ", 26, 0, 18, 20),   // gap 8 = 0.4H，英文会插空格，假名不应插
+            Word("は", 52, 0, 18, 20),
+        };
+        string text = OcrLineComposer.JoinWords(words, 20);
+        check("平假名：0.4H 词距也不插空格", text == "これは", text);
+    }
+
+    private static void JapaneseBrackets_Normalize(Action<string, bool, string?> check)
+    {
+        string text = OcrLineComposer.NormalizeFragment("「 これ 」");
+        check("日文括号：内侧空格消除", text == "「これ」", text);
+    }
+
+    private static void HalfwidthKana_NoSpaces(Action<string, bool, string?> check)
+    {
+        var words = new[]
+        {
+            Word("ｺ", 0, 0, 18, 20),
+            Word("ﾚ", 26, 0, 18, 20),   // gap 8 = 0.4H
+        };
+        string text = OcrLineComposer.JoinWords(words, 20);
+        check("半角片假名：0.4H 词距也不插空格", text == "ｺﾚ", text);
+    }
+
+    private static void CompatibilityIdeograph_NoSpaces(Action<string, bool, string?> check)
+    {
+        var words = new[]
+        {
+            Word("\uF900", 0, 0, 18, 20),   // 﨑（CJK 兼容表意文字）
+            Word("野", 26, 0, 18, 20),      // gap 8 = 0.4H
+        };
+        string text = OcrLineComposer.JoinWords(words, 20);
+        check("兼容汉字：0.4H 词距也不插空格", text == "\uF900野", text);
     }
 
     private static OcrLine Line(string text, int x, int y, int width, int height) => new()

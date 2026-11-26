@@ -298,9 +298,9 @@ internal static class OcrLineComposer
         for (int i = 0; i < text.Length; i++)
         {
             char c = text[i];
-            if (c is ' ' or '\t')
+            if (char.IsWhiteSpace(c))
             {
-                if (sb.Length == 0 || sb[^1] == ' ') continue;
+                if (sb.Length == 0 || char.IsWhiteSpace(sb[^1])) continue;
                 char prev = sb[^1];
                 char? next = NextNonSpace(text, i + 1);
 
@@ -325,13 +325,16 @@ internal static class OcrLineComposer
     private static bool IsCjkNoSpace(char c) =>
         (c >= '\u4E00' && c <= '\u9FFF')
         || (c >= '\u3400' && c <= '\u4DBF')
-        || (c >= '\u3040' && c <= '\u30FF')
-        || (c >= '\u31F0' && c <= '\u31FF')
-        || "，。！？；：、）》】”’…".Contains(c);
+        || (c >= '\u3000' && c <= '\u303F')   // CJK 标点/符号：、。「」〈〉〜 等
+        || (c >= '\u3040' && c <= '\u30FF')   // 平假名/片假名
+        || (c >= '\u3100' && c <= '\u312F')   // 注音符号
+        || (c >= '\u31C0' && c <= '\u31FF')   // CJK 笔画/片假名语音扩展
+        || (c >= '\uF900' && c <= '\uFAFF')   // CJK 兼容表意文字
+        || (c >= '\uFF61' && c <= '\uFF9D');  // 半角 CJK 标点/片假名
 
-    private static bool IsOpeningPunctuation(char c) => "\"'‘“([{（《【".Contains(c);
+    private static bool IsOpeningPunctuation(char c) => "\"'‘“([{（《【「『〈".Contains(c);
 
-    private static bool IsClosingPunctuation(char c) => "\"'))]}）》】”’，。！？；：、,.;:!?".Contains(c);
+    private static bool IsClosingPunctuation(char c) => "\"'))]}）》】”’，。！？；：、,.;:!?」』〉".Contains(c);
 
     // ═══════════════════════════════════════
     //  孤立碎片 / 输出
