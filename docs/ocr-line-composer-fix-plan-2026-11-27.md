@@ -20,6 +20,8 @@
 
 真实图像验收发现，英文整行会被识别成 `ThisisonelongEnglishsentence,`。根因不在 composer，而在 CTC 解码：PP-OCRv6 rec 输出 **18710 类 = blank(0) + 18708 字典字符 + 1 个尾随空格类**；旧解码把索引 `> dict.Length` 的尾随类直接丢弃。现在把 `dict.Length + 1` 映射为空格，英文词距恢复；汉字间空格仍由 `NormalizeFragment` 清理。该映射已抽成 `OnnxOcrEngine.MapDecodedIndices` 并补单测。
 
+收口时又补了汉字/假名边界：`IsCjkNoSpace` 覆盖 CJK 标点、全/半角假名、兼容表意文字；`NormalizeFragment` 改为按 `char.IsWhiteSpace` 处理所有 Unicode 空白（含 U+3000、NBSP），并补了平假名、半角片假名、日文括号、兼容汉字断言。
+
 ## 2. 现有链路与证据
 
 ### 2.1 代码事实

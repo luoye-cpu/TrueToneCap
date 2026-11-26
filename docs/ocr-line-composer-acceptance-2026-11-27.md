@@ -11,7 +11,7 @@
 
 1. `OcrLineComposer` 按垂直重叠率聚类视觉行，替换旧的“中心点落簇”；旧实现会把不同窗口/列的独立控件按中心点串成一行，也会把中文逐字框用空格连接。
 2. 行内按 X 排序；只有水平 gap 超过 `max(2.5×行高, 40px)` 才拆成独立视觉段。常规英文词距不再被拆成独立行。
-3. 文本拼接脚本感知：汉字/假名之间不插空格；中文标点、开括号、连字符旁不插空格；英文按 `0.25H` 词距、中英交界按 `0.5H` 判定。
+3. 文本拼接脚本感知：汉字/假名之间不插空格；覆盖 CJK 标点、全/半角假名、兼容表意文字；U+3000 全角空格、NBSP 也归一化；中文标点、开括号、连字符旁不插空格；英文按 `0.25H` 词距、中英交界按 `0.5H` 判定。
 4. `OcrResult.Text` 改为由合并后的 `Lines` 生成，`Text` 与 `Lines` 同序；预览复制全文也优先走 `Lines`。
 5. 额外发现并修复 **CTC 尾随空格类被丢弃**：PP-OCRv6 rec 输出 18710 类 = blank(0) + 18708 字典字符 + 1 个空格类。旧解码把最后一类直接过滤，导致英文整行变成 `ThisisonelongEnglish…`。现在最后一类映射为空格，英文词距恢复，汉字间仍由 composer 归一化为 0 空格。
 
@@ -23,7 +23,7 @@
 | `src/TrueToneCap.Core/Services/OnnxOcrEngine.cs` | `MergeDetLines` 委托 composer；保留 `MergeDetLinesLegacy` 回退；`Text` 由 `Lines` 生成；CTC 尾随空格类映射；`TTC_OCR_DUMP_BOXES=1` 只读诊断 |
 | `src/TrueToneCap.Core/Services/OcrService.cs` | Windows OCR 混合语言路径改用 `OcrLineComposer.JoinWords` 分行拼接，中文逐词不插空格；行框取词框并集 |
 | `src/TrueToneCap.App/OcrPreviewWindow.xaml.cs` | `CurrentFullText()` 无译文时优先从 `_ocr.Lines` 拼全文，避免两套顺序 |
-| `src/TrueToneCap.Test/OcrLineComposerTests.cs` | 新增 19 条 composer 断言 |
+| `src/TrueToneCap.Test/OcrLineComposerTests.cs` | 新增 27 条 composer 断言，覆盖汉字、平假名、半角片假名、日文括号、兼容表意文字、U+3000/NBSP 空格 |
 | `src/TrueToneCap.Test/OcrDecodeMappingTests.cs` | 新增 5 条 CTC 类别映射断言，锁住尾随空格类 |
 | `src/TrueToneCap.Test/OcrWindowsLineTests.cs` | 新增 4 条 Windows 混合行断言：中文不插空格、英文词距、行框并集、空列表安全 |
 | `src/TrueToneCap.Test/OcrServiceTests.cs` | 把上述两组测试挂进现有 `--ocr-tests`，不新增套件参数 |
@@ -116,8 +116,8 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 
 ## 4. 自动化验证
 
-- `--ocr-tests`：**40 通过 / 0 失败**（7 条预处理 + 19 条 composer + 5 条 LLM 清单 + 5 条解码映射 + 4 条 Windows 混合行）。
-- 全量 `scripts/verify.ps1`：**8 个套件 2968 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
+- `--ocr-tests`：**48 通过 / 0 失败**（7 条预处理 + 27 条 composer + 5 条 LLM 清单 + 5 条解码映射 + 4 条 Windows 混合行）。
+- 全量 `scripts/verify.ps1`：**8 个套件 2976 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
 - Release 构建：**0 警告 / 0 错误**。
 - 既有 `--usability-tests` 238 条断言通过，包含 `OcrPreviewWindow` 构造探针；覆盖块几何在真实图像验收中 0 越界。
 
@@ -126,6 +126,7 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 - `EngIish`、`DlspIay`、`rosoft` 等 rec 字符错误仍属模型/字典覆盖，不在本轮后处理范围。
 - 多栏文章的自动阅读顺序未做；本轮只保证同一视觉行/独立控件不被错误串并。
 - 真实 4K 截图里图标、任务栏小字符仍可能形成单字符行；它们没有足够水平邻接证据，归为独立 UI 元素，不做强制合并。
+- 汉字/假名空格覆盖 BMP 常用汉字、扩展 A、兼容表意文字、全/半角假名、CJK 标点与注音符号；Unicode Extension B 及以上的代理对仍未纳入（PP-OCRv6 字典基本不含这些字，本轮不虚构覆盖）。
 - 翻译仍可能把模型字符错误带入译文；本轮只保证行序、空格、段落组输入正确。
 
 ## 6. 验收判据
@@ -136,4 +137,4 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 - [x] 真实 4K 截图 `CJK\s+CJK` 计数 0。
 - [x] 覆盖框全部在原图内、词框在行框内（`GEOMETRY_BAD=0`）。
 - [x] 翻译段落组：受控段落 1 组 3 行；真实截图 14 组 31 行。
-- [x] `--ocr-tests` 40 通过 / 0 失败；全量 2968 通过 / 0 失败；Release 0 警告 0 错误。
+- [x] `--ocr-tests` 48 通过 / 0 失败；全量 2976 通过 / 0 失败；Release 0 警告 0 错误。
