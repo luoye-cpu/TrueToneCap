@@ -3,7 +3,7 @@
 - 日期：2026-11-27
 - 基线：v0.3.20，`main` / `ec440aa` + `f7a764b`
 - 范围：只改 `C:\PLAN\TrueToneCap`；不触碰其他仓库
-- 状态：**计划，未实施**
+- 状态：**已实施并验收（2026-11-27）**；验收记录见 `docs/ocr-line-composer-acceptance-2026-11-27.md`
 
 ## 1. 结论先行
 
@@ -15,6 +15,10 @@
 4. `one`、`on` 这类词被排到行尾的个例，不能只用“按 X 排序”解释；必须先抓原始框坐标确认是聚类边界、长行拆分还是坐标映射问题，不能盲改阈值。
 
 **不在这轮修**：`EngIish`、`DlspIay`、`rosoft` 这类字符级误识别。它们属于 rec 模型/字典覆盖与图像质量，换后处理规则修不了；本轮只保证“框怎么合、字怎么拼、行怎么排”正确。
+
+### 1.1 实施中新增的根因（2026-11-27）
+
+真实图像验收发现，英文整行会被识别成 `ThisisonelongEnglishsentence,`。根因不在 composer，而在 CTC 解码：PP-OCRv6 rec 输出 **18710 类 = blank(0) + 18708 字典字符 + 1 个尾随空格类**；旧解码把索引 `> dict.Length` 的尾随类直接丢弃。现在把 `dict.Length + 1` 映射为空格，英文词距恢复；汉字间空格仍由 `NormalizeFragment` 清理。该映射已抽成 `OnnxOcrEngine.MapDecodedIndices` 并补单测。
 
 ## 2. 现有链路与证据
 
