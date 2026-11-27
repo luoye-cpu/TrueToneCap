@@ -92,7 +92,7 @@
 - `Directory.Build.props`：`Version=0.3.20`、`AssemblyVersion=0.3.20.0`、`FileVersion=0.3.20.0`。
 - `src/TrueToneCap.App/Package.appxmanifest`：`Identity/@Version=0.3.20.0`。
 - `README.md` 徽章 `v0.3.20`。
-- `git tag` 里没有 `v0.3.20`；修复提交 `7c9173b` 之后 `main` 领先 `origin/main` **11 个提交**，尚未 push。
+- `git tag` 里没有 `v0.3.20`；修复提交 `7c9173b` 之后 `main` 领先 `origin/main`（本地未 push）。
 - 工作树仅剩未跟踪的审查计划 `docs/reviews/ocr/post-release-review-plan-2026-11-27.md`；产品代码/测试已提交。
 - `CHANGELOG` 顶部是 `[未发布] — 2026-11-27`，不是可发布条目。
 
