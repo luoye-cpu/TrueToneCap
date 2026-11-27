@@ -38,6 +38,11 @@ public static class OcrService
                     float sx = (float)width / preprocessed.Width;
                     float sy = (float)height / preprocessed.Height;
                     foreach (var line in result2.Lines)
+                    {
+                        line.X = (int)(line.X * sx);
+                        line.Y = (int)(line.Y * sy);
+                        line.Width = (int)Math.Max(1, line.Width * sx);
+                        line.Height = (int)Math.Max(1, line.Height * sy);
                         foreach (var word in line.Words)
                         {
                             word.X = (int)(word.X * sx);
@@ -45,6 +50,7 @@ public static class OcrService
                             word.Width = (int)Math.Max(1, word.Width * sx);
                             word.Height = (int)Math.Max(1, word.Height * sy);
                         }
+                    }
                 }
                 result2.Mode = preprocessed.Mode.ToString();
                 return result2;
@@ -190,27 +196,7 @@ public static class OcrService
 
             // 去重合并：如果两个词的位置重叠 >50%，保留文本更长的那个
             var merged = MergeOverlappingWords(allWords);
-
-            // 按 Y → X 排序，重建行结构
-            merged.Sort((a, b) => a.Y != b.Y ? a.Y.CompareTo(b.Y) : a.X.CompareTo(b.X));
-
-            var lines = new List<OcrLine>();
-            var currentLine = new List<OcrWord>();
-            int lastY = -100;
-            const int lineGap = 8; // Y 坐标差 <8px 视为同一行
-
-            foreach (var word in merged)
-            {
-                if (currentLine.Count > 0 && Math.Abs(word.Y - lastY) > lineGap)
-                {
-                    lines.Add(ComposeWindowsLine(currentLine));
-                    currentLine = [];
-                }
-                currentLine.Add(word);
-                lastY = word.Y;
-            }
-            if (currentLine.Count > 0)
-                lines.Add(ComposeWindowsLine(currentLine));
+            var lines = GroupWindowsWords(merged);
 
             return new OcrResult
             {
@@ -225,6 +211,14 @@ public static class OcrService
             return new OcrResult { Text = "", Error = $"混合 OCR 异常: {ex.Message}" };
         }
         finally { bitmap.Dispose(); }
+    }
+
+    private static double MedianOf(IEnumerable<double> values)
+    {
+        var sorted = values.OrderBy(v => v).ToList();
+        if (sorted.Count == 0) return 0;
+        int mid = sorted.Count / 2;
+        return sorted.Count % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
     }
 
     /// <summary>
@@ -252,6 +246,41 @@ public static class OcrService
             Height = Math.Max(1, y2 - y1),
             Words = ordered,
         };
+    }
+
+    /// <summary>
+    /// 把 Windows OCR 的词按视觉行分组。固定 8px 对 1700px 受控图已经不够：
+    /// 同一视觉行里单词的 Y 会随基线/字号摆动 10px 以上，结果把句中的 “a” 甩成单独一行。
+    /// 按词高中位数给行内基线容差，下限仍保留 8px，避免极小字号被噪声并到相邻行。
+    /// </summary>
+    internal static List<OcrLine> GroupWindowsWords(IReadOnlyList<OcrWord> words)
+    {
+        if (words.Count == 0) return [];
+        var ordered = words
+            .OrderBy(w => w.Y)
+            .ThenBy(w => w.X)
+            .ToList();
+        double medianWordH = MedianOf(ordered.Select(w => (double)w.Height));
+        int lineGap = (int)Math.Max(8, medianWordH * 0.6);
+
+        var lines = new List<OcrLine>();
+        var currentLine = new List<OcrWord>();
+        foreach (var word in ordered)
+        {
+            if (currentLine.Count > 0)
+            {
+                double rowY = MedianOf(currentLine.Select(w => (double)w.Y));
+                if (Math.Abs(word.Y - rowY) > lineGap)
+                {
+                    lines.Add(ComposeWindowsLine(currentLine));
+                    currentLine = [];
+                }
+            }
+            currentLine.Add(word);
+        }
+        if (currentLine.Count > 0)
+            lines.Add(ComposeWindowsLine(currentLine));
+        return lines;
     }
 
     /// <summary>位置去重：重叠 >50% 的词保留文本更长的。</summary>

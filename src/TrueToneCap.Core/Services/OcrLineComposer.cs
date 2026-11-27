@@ -67,7 +67,7 @@ internal static class OcrLineComposer
         var parts = new List<string>();
         foreach (var line in lines)
         {
-            string text = NormalizeFragment(line.Text);
+            string text = line.Text ?? "";
             if (text.Length > 0) parts.Add(text);
         }
         return string.Join("\n", parts);
@@ -261,13 +261,14 @@ internal static class OcrLineComposer
             sb.Append(text);
             previous = frag;
         }
-        return sb.ToString().Trim();
+        return CleanAsciiQuoteSpacing(sb.ToString().Trim());
     }
 
     private static bool NeedsSpaceBetween(char prev, char next, double gap, double rowHeight)
     {
         if (char.IsWhiteSpace(prev) || char.IsWhiteSpace(next)) return false;
         if (IsOpeningPunctuation(prev) || IsClosingPunctuation(next)) return false;
+        if (IsCjkNoSpace(prev) && IsClosingPunctuation(prev)) return false;
         if (prev is '-' or '‐' or '–' or '/' or '\\' or '@' or '_') return false;
 
         // 汉字/假名/中文标点之间永不插空格 —— 这是旧实现“逐字空格”的根因。
@@ -305,6 +306,7 @@ internal static class OcrLineComposer
                 char? next = NextNonSpace(text, i + 1);
 
                 if (IsOpeningPunctuation(prev)) continue;
+                if (IsCjkNoSpace(prev) && IsClosingPunctuation(prev)) continue;
                 if (next is not null && IsClosingPunctuation(next.Value)) continue;
                 if (next is not null && IsCjkNoSpace(prev) && IsCjkNoSpace(next.Value)) continue;
                 sb.Append(' ');
@@ -312,7 +314,76 @@ internal static class OcrLineComposer
             }
             sb.Append(c);
         }
-        return sb.ToString().Trim();
+        return CleanAsciiQuoteSpacing(sb.ToString().Trim());
+    }
+
+    /// <summary>
+    /// ASCII 单/双引号是开/闭同形，不能像中文引号那样按字符类别判空格。
+    /// 这里只在确认是“开引号之后 / 闭引号之前”时吃掉空格：英文闭引号后的
+    /// 词距必须保留，否则 <c>He said "hello"to me</c> 会把两个词粘死。
+    /// </summary>
+    private static string CleanAsciiQuoteSpacing(string text)
+    {
+        text = CleanAsciiQuoteSpacing(text, '"', apostropheAware: false);
+        return CleanAsciiQuoteSpacing(text, '\'', apostropheAware: true);
+    }
+
+    private static string CleanAsciiQuoteSpacing(string text, char quote, bool apostropheAware)
+    {
+        if (text.IndexOf(quote) < 0) return text;
+        var sb = new StringBuilder(text.Length);
+        bool inQuote = false;
+        for (int i = 0; i < text.Length;)
+        {
+            char c = text[i];
+            if (c == quote)
+            {
+                char prev = i > 0 ? text[i - 1] : '\0';
+                char next = i + 1 < text.Length ? text[i + 1] : '\0';
+
+                // 单引号夹在两个字母/数字之间是撇号（It's / students'），不是引号定界符。
+                bool embeddedApostrophe = apostropheAware && !inQuote
+                    && char.IsLetterOrDigit(prev) && char.IsLetterOrDigit(next);
+                if (embeddedApostrophe)
+                {
+                    sb.Append(c);
+                    i++;
+                    continue;
+                }
+
+                // 开/闭同形不能只靠奇偶翻转：英寸符号 5" display 只有一个引号，
+                // 奇偶会把后面的空格当“开引号后空格”吃掉。用两侧邻接形态判角色。
+                bool atOpenBoundary = i == 0 || char.IsWhiteSpace(prev) || IsOpeningPunctuation(prev);
+                bool atCloseBoundary = i == text.Length - 1 || char.IsWhiteSpace(next) || IsClosingPunctuation(next);
+                if (atOpenBoundary && !atCloseBoundary) inQuote = true;
+                else if (atCloseBoundary && !atOpenBoundary) inQuote = false;
+                else if (!inQuote && char.IsLetterOrDigit(prev) && char.IsLetterOrDigit(next))
+                    inQuote = false;   // 词尾紧贴下一个词：按闭引号处理，不能翻成开引号
+                else inQuote = !inQuote;
+                sb.Append(c);
+                // 闭引号后如果是英文/数字，词距不能因为 OCR 词框贴得太近而丢。
+                // 中文/日文闭引号后仍由 CJK 规则保持无空格。
+                if (!inQuote && i + 1 < text.Length
+                    && char.IsLetterOrDigit(text[i + 1]) && !IsCjkNoSpace(text[i + 1]))
+                    sb.Append(' ');
+                i++;
+                continue;
+            }
+            if (char.IsWhiteSpace(c))
+            {
+                int j = i;
+                while (j < text.Length && char.IsWhiteSpace(text[j])) j++;
+                bool afterOpening = sb.Length > 0 && sb[^1] == quote && inQuote;
+                bool beforeClosing = j < text.Length && text[j] == quote && inQuote;
+                if (!afterOpening && !beforeClosing && sb.Length > 0 && !char.IsWhiteSpace(sb[^1]))
+                    sb.Append(' ');
+                i = j;
+                continue;
+            }
+            sb.Append(c);
+            i++;
+        }
+        return sb.ToString();
     }
 
     private static char? NextNonSpace(string text, int start)
@@ -329,12 +400,19 @@ internal static class OcrLineComposer
         || (c >= '\u3040' && c <= '\u30FF')   // 平假名/片假名
         || (c >= '\u3100' && c <= '\u312F')   // 注音符号
         || (c >= '\u31C0' && c <= '\u31FF')   // CJK 笔画/片假名语音扩展
+        || (c >= '\uFE10' && c <= '\uFE1F')   // 竖排标点
+        || (c >= '\uFE30' && c <= '\uFE4F')   // CJK 兼容标点
+        || (c >= '\uFF01' && c <= '\uFF0F')   // 全角标点
+        || (c >= '\uFF1A' && c <= '\uFF20')   // 全角冒号/分号/问号等
+        || (c >= '\uFF3B' && c <= '\uFF40')   // 全角括号/反斜杠/下划线
+        || (c >= '\uFF5B' && c <= '\uFF5E')   // 全角花括号/竖线/波浪号
+        || (c >= '\uFF61' && c <= '\uFF9D')   // 半角 CJK 标点/片假名
         || (c >= '\uF900' && c <= '\uFAFF')   // CJK 兼容表意文字
-        || (c >= '\uFF61' && c <= '\uFF9D');  // 半角 CJK 标点/片假名
+        || "“”‘’…".Contains(c);               // 中文引号/省略号
 
-    private static bool IsOpeningPunctuation(char c) => "\"'‘“([{（《【「『〈".Contains(c);
+    private static bool IsOpeningPunctuation(char c) => "‘“([{（《【「『〈".Contains(c);
 
-    private static bool IsClosingPunctuation(char c) => "\"'))]}）》】”’，。！？；：、,.;:!?」』〉".Contains(c);
+    private static bool IsClosingPunctuation(char c) => ")]}）》】”’，。！？；：、,.;:!?」』〉".Contains(c);
 
     // ═══════════════════════════════════════
     //  孤立碎片 / 输出

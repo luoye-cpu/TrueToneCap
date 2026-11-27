@@ -114,19 +114,29 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 
 新实现按实际水平间隔分成独立行；英文词距恢复（`Space - CodeArts Agent`）。行数增加来自“拆开旧实现误并的不同窗口/列控件”，不是把同一段中文/英文重新切碎。
 
+### 3.5 英文引号 / 日文 / 全角标点补测
+
+- 英文引号：`quotes-test.png`（1400×420）输出 3 行，`He said "hello" to me.`、`She said 'goodbye' now.`、`5" display and 3' cable.` 全部保留闭引号后的词距；`TEXT_EQ_LINES=True`、`GEOMETRY_BAD=0`。对应单测覆盖双引号内侧空格、英寸符号、单引号撇号（`It's` / `students'` / `O'Reilly's`）和闭引号紧贴英文词。
+- 日文假名：`japanese-test.png`（1200×420）输出 `こんにちは世界`、`カタカナ`、`テスト`、`日本語の文章です。`；`CJK_SPACE=0`、`TEXT_EQ_LINES=True`。注意：源图 `カタカナ　テスト` 中的全角空格形成两个视觉段，composer 按 `max(2.5H,40px)` 拆成两行，这是“视觉段拆分”，不是“汉字/假名之间插空格”。
+- 全角标点：Windows 混合路径中文设置页曾输出 `像素； 未`，原因是 `IsCjkNoSpace` 未覆盖 U+FF01–FF5E 全角标点；已补全角标点范围与“闭标点后不插空格”规则，复跑为 `像素；未安`。单测覆盖 `中文，English`、`Hello. World` 等边界，确保不会把英文句号后的词距误删。
+
 ## 4. 自动化验证
 
-- `--ocr-tests`：**48 通过 / 0 失败**（7 条预处理 + 27 条 composer + 5 条 LLM 清单 + 5 条解码映射 + 4 条 Windows 混合行）。
-- 全量 `scripts/verify.ps1`：**8 个套件 2976 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
+- `--ocr-tests`：**65 通过 / 0 失败**（含预处理、composer、解码映射、Windows 混合行与引号/标点边界）。
+- 全量 `scripts/verify.ps1`：**8 个套件 2993 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
 - Release 构建：**0 警告 / 0 错误**。
 - 既有 `--usability-tests` 238 条断言通过，包含 `OcrPreviewWindow` 构造探针；覆盖块几何在真实图像验收中 0 越界。
 
 ## 5. 未修 / 已知残余
 
 - `EngIish`、`DlspIay`、`rosoft` 等 rec 字符错误仍属模型/字典覆盖，不在本轮后处理范围。
+- Windows OCR 中文设置页仍有明显字符错误（如 `I-IDR截图工具`、`只蟛外观`）；这是 Windows 语言包/识别质量问题，与 composer 的行合并不等价，不能用 ONNX 结果替代验收。
 - 多栏文章的自动阅读顺序未做；本轮只保证同一视觉行/独立控件不被错误串并。
 - 真实 4K 截图里图标、任务栏小字符仍可能形成单字符行；它们没有足够水平邻接证据，归为独立 UI 元素，不做强制合并。
 - 汉字/假名空格覆盖 BMP 常用汉字、扩展 A、兼容表意文字、全/半角假名、CJK 标点与注音符号；Unicode Extension B 及以上的代理对仍未纳入（PP-OCRv6 字典基本不含这些字，本轮不虚构覆盖）。
+- `CJK\s+CJK` 只统计汉字-空白-汉字，不覆盖“汉字-全角标点-空白-汉字”；全角标点已由专门单测覆盖，但后续验收脚本应把标点邻接也纳入计数，避免指标盲区。
+- `MergeOrphans` 的 ≤2 字符/重叠/间距阈值仍可能把相邻短 UI 标签并入段落；`BuildRows` 的 0.60 重叠比例对超高框/旋转框没有成规模真实语料，属于残余风险。
+- `TTC_OCR_DUMP_BOXES=1` 会把完整 OCR 文本写到 `%TEMP%\ttc-ocr-boxes-*.tsv`，默认关闭，但没有 UI 提示与自动清理；发布前应确认诊断开关的隐私/保留策略。
 - 翻译仍可能把模型字符错误带入译文；本轮只保证行序、空格、段落组输入正确。
 
 ## 6. 验收判据
@@ -134,7 +144,10 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 - [x] `OcrResult.Text` 与 `Lines` 逐行相等（ONNX 路径，真实图像 4/4 通过）。
 - [x] 受控 3 行段落输出 3 行、无孤立 `a` 行、`one` 在正确词位。
 - [x] 中文设置页 `CJK\s+CJK` 计数 0；旧实现的 3 处逐字空格消失。
+- [x] 中文全角标点（`；` `，` `。` `？` `：`）后无多余空格；全角标点后接英文也不额外插空格。
+- [x] ASCII 单/双引号内侧空格消除、闭引号后英文词距保留；`It's` / `students'` / `O'Reilly's` 不被误当引号。
+- [x] 日文假名与汉字之间不插空格；`こんにちは世界`、`日本語の文章です。` 实测成立。
 - [x] 真实 4K 截图 `CJK\s+CJK` 计数 0。
 - [x] 覆盖框全部在原图内、词框在行框内（`GEOMETRY_BAD=0`）。
 - [x] 翻译段落组：受控段落 1 组 3 行；真实截图 14 组 31 行。
-- [x] `--ocr-tests` 48 通过 / 0 失败；全量 2976 通过 / 0 失败；Release 0 警告 0 错误。
+- [x] `--ocr-tests` 65 通过 / 0 失败；全量 2993 通过 / 0 失败；Release 0 警告 0 错误。

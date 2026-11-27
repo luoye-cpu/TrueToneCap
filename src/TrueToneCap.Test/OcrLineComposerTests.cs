@@ -22,6 +22,7 @@ internal static class OcrLineComposerTests
         Text_MatchesLines(check);
         EmptyAndSingle_Safe(check);
         Normalize_CjkAndLatinSpaces(check);
+        Normalize_AsciiQuotes(check);
         Kana_NoSpaces(check);
         JapaneseBrackets_Normalize(check);
         HalfwidthKana_NoSpaces(check);
@@ -71,6 +72,14 @@ internal static class OcrLineComposerTests
         };
         string text = OcrLineComposer.JoinWords(words, 20);
         check("中文标点：不留空格", text == "你好，", text);
+
+        var punctuationThenLatin = new[]
+        {
+            Word("中文，", 0, 0, 45, 20),
+            Word("English", 55, 0, 60, 20),
+        };
+        string mixed = OcrLineComposer.JoinWords(punctuationThenLatin, 20);
+        check("中文标点后接英文：不额外插空格", mixed == "中文，English", mixed);
     }
 
     private static void Rows_DoNotMerge(Action<string, bool, string?> check)
@@ -163,6 +172,18 @@ internal static class OcrLineComposerTests
         check("中文标点前空格消除",
             OcrLineComposer.NormalizeFragment("你好 ，") == "你好，",
             OcrLineComposer.NormalizeFragment("你好 ，"));
+        check("全角分号后空格消除",
+            OcrLineComposer.NormalizeFragment("像素； 未安装") == "像素；未安装",
+            OcrLineComposer.NormalizeFragment("像素； 未安装"));
+        check("全角标点后接英文也不插空格",
+            OcrLineComposer.NormalizeFragment("中文， English") == "中文，English",
+            OcrLineComposer.NormalizeFragment("中文， English"));
+        check("英文句号后词距不被误删",
+            OcrLineComposer.NormalizeFragment("Hello. World") == "Hello. World",
+            OcrLineComposer.NormalizeFragment("Hello. World"));
+        check("全角逗号/括号/句号旁空格消除",
+            OcrLineComposer.NormalizeFragment("中文 ， （测试） 。") == "中文，（测试）。",
+            OcrLineComposer.NormalizeFragment("中文 ， （测试） 。"));
         check("全角空格（U+3000）也归一化",
             OcrLineComposer.NormalizeFragment("你\u3000好") == "你好",
             OcrLineComposer.NormalizeFragment("你\u3000好"));
@@ -175,6 +196,40 @@ internal static class OcrLineComposerTests
         check("日文右括号前空格消除",
             OcrLineComposer.NormalizeFragment("A 」") == "A」",
             OcrLineComposer.NormalizeFragment("A 」"));
+    }
+
+    private static void Normalize_AsciiQuotes(Action<string, bool, string?> check)
+    {
+        string quoted = "He said \"hello\" to me";
+        check("ASCII 双引号后的词距保留", OcrLineComposer.NormalizeFragment(quoted) == quoted,
+            OcrLineComposer.NormalizeFragment(quoted));
+        string single = "It's a 'quoted' word";
+        check("ASCII 单引号后的词距保留", OcrLineComposer.NormalizeFragment(single) == single,
+            OcrLineComposer.NormalizeFragment(single));
+        check("ASCII 双引号内侧空格消除",
+            OcrLineComposer.NormalizeFragment("\" hello \"") == "\"hello\"",
+            OcrLineComposer.NormalizeFragment("\" hello \""));
+        check("ASCII 单引号内侧空格消除",
+            OcrLineComposer.NormalizeFragment("She said ' goodbye ' now") == "She said 'goodbye' now",
+            OcrLineComposer.NormalizeFragment("She said ' goodbye ' now"));
+        check("ASCII 单引号撇号不误判",
+            OcrLineComposer.NormalizeFragment("It's O'Reilly's students' work") == "It's O'Reilly's students' work",
+            OcrLineComposer.NormalizeFragment("It's O'Reilly's students' work"));
+        check("英寸符号后的词距保留",
+            OcrLineComposer.NormalizeFragment("5\" display") == "5\" display",
+            OcrLineComposer.NormalizeFragment("5\" display"));
+        check("闭引号后紧贴英文词也补回词距",
+            OcrLineComposer.NormalizeFragment("He said \"hello\"to me") == "He said \"hello\" to me",
+            OcrLineComposer.NormalizeFragment("He said \"hello\"to me"));
+        check("词尾闭引号紧贴下一词也补回词距",
+            OcrLineComposer.NormalizeFragment("hello\"to") == "hello\" to",
+            OcrLineComposer.NormalizeFragment("hello\"to"));
+        check("单引号闭引号后紧贴英文词也补回词距",
+            OcrLineComposer.NormalizeFragment("She said 'hello'to me") == "She said 'hello' to me",
+            OcrLineComposer.NormalizeFragment("She said 'hello'to me"));
+        check("中文引号/省略号旁空格消除",
+            OcrLineComposer.NormalizeFragment("“ 你好 ” 世界… 再见") == "“你好”世界…再见",
+            OcrLineComposer.NormalizeFragment("“ 你好 ” 世界… 再见"));
     }
 
     private static void Kana_NoSpaces(Action<string, bool, string?> check)
