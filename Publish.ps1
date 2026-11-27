@@ -732,10 +732,19 @@ try {
         $scArgs += "-p:WindowsAppSDKSelfContained=true"
     }
 
+    # NuGet 在这里用不带 RID 的显式还原生成 assets，再让 publish 走 --no-restore。
+    # 2026-11-28 实测：在本机对 App 直接 `dotnet publish -r win-x64`（或 restore 带 -r）
+    # 会在 CommitAssetsFile 阶段报 "当文件已存在时，无法创建该文件"；不带 -r 的 restore
+    # 正常，随后 `publish --no-restore` 可稳定产出。App.csproj 已声明 RuntimeIdentifier，
+    # 所以这里不需要再向 restore 注入 -r。
+    & dotnet restore $AppProj
+    if ($LASTEXITCODE -ne 0) { throw "依赖还原失败 (dotnet restore 退出码 $LASTEXITCODE)" }
+
     & dotnet publish $AppProj `
         -c $Configuration -r $Runtime `
         @scArgs `
         @extraArgs `
+        --no-restore `
         -o $OutputDir
     if ($LASTEXITCODE -ne 0) { throw "编译失败 (dotnet publish 退出码 $LASTEXITCODE)" }
 } finally {
