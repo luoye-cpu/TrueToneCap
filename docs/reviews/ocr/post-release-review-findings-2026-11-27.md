@@ -19,12 +19,12 @@
 
 ### 1.2 发布判断
 
-- **源码候选：可以进入 0.3.21 版本的“提交 + 重建”阶段。**
-  但这不等于“所有 OCR 问题已修复”：Windows OCR 的中文字符质量仍有明显错误，见 F8。
+- **源码候选：可以进入 0.3.21 版本的“版本坐标 + 重建”阶段。**
+  修复已提交为 `7c9173b`；但这不等于“所有 OCR 问题已修复”：Windows OCR 的中文字符质量仍有明显错误，见 F8。
 - **0.3.20 包：不可作为“已修复 OCR”的交付物。**
   当前 7z/MSIX 里的 `TrueToneCap.Core.dll` 是 OCR 修复前的旧二进制，见 F1。
 - **0.3.21 包：尚未具备打包条件。**
-  版本坐标仍是 0.3.20，CHANGELOG 顶部是 `[未发布]`，没有 `v0.3.20` tag，工作树有未提交修复，见 F7。
+  版本坐标仍是 0.3.20，CHANGELOG 顶部是 `[未发布]`，没有 `v0.3.20` tag，见 F7。
 
 ## 2. 阻断/高优先问题
 
@@ -49,7 +49,7 @@
 - 修复为 `OcrService.GroupWindowsWords`（`src/TrueToneCap.Core/Services/OcrService.cs:256`）：按词高中位数 ×0.6、下限 8px 给行内容差，并用当前行 Y 中位数做锚点；受控图复跑 **4→3 行**，`TEXT_EQ_LINES=True`，`CJK_SPACE=0`，`GEOMETRY_BAD=0`。
 - 回归测试：`OcrWindowsLineTests.BaselineVariation_SameLine`。
 
-结论：修复候选有效；**未提交、未进入包**。
+结论：修复候选有效；已提交 `7c9173b`。
 
 ### F3（P1，已修复候选）ASCII 闭引号后的英文词距被删除
 
@@ -59,7 +59,7 @@
 - 修复：开/闭标点集合移除 ASCII 引号；新增 `CleanAsciiQuoteSpacing`（`OcrLineComposer.cs:325`），按两侧邻接形态判开/闭引号，保留闭引号后英文词距，处理 `5" display`、`'hello'to`、`It's` / `students'` / `O'Reilly's` 等边界。
 - 真实 `quotes-test.png` 复跑 3 行，`He said "hello" to me.`、`She said 'goodbye' now.`、`5" display and 3' cable.` 全部正确；`TEXT_EQ_LINES=True`。
 
-结论：修复候选有效；**未提交、未进入包**。
+结论：修复候选有效；已提交 `7c9173b`。
 
 ### F4（P1，已修复候选）全角中文标点后仍会插空格
 
@@ -71,7 +71,7 @@
 - 修复：`IsCjkNoSpace` 补全 U+FF01–FF0F、U+FF1A–FF20、U+FF3B–FF40、U+FF5B–FF5E，以及 U+FE10–FE1F / U+FE30–FE4F；`NeedsSpaceBetween` 和 `NormalizeFragment` 增加“CJK 闭标点后不插空格”规则（`OcrLineComposer.cs:271`、`:309`）。
 - 复跑 Windows 设置页：`像素；未安`；单测覆盖 `中文，English`、`Hello. World`、`像素； 未安装` 等边界。
 
-结论：修复候选有效；**未提交、未进入包**。
+结论：修复候选有效；已提交 `7c9173b`。
 
 ## 3. 中优先问题
 
@@ -79,20 +79,21 @@
 
 旧 `BuildText` 对 `line.Text` 再做一次 `NormalizeFragment`，legacy 路径下 `settings-cn.png` 为 12 行、`TEXT_EQ_LINES=False`。改为直接按 `Lines` 文本拼接（`OcrLineComposer.cs:65`）后，legacy 复跑 `TEXT_EQ_LINES=True`，CJK 空格仍为 3（旧行为）。
 
-结论：修复候选有效；未提交。
+结论：修复候选有效；已提交 `7c9173b`。
 
 ### F6（P2，已修复候选）Windows 预处理放大时行框没有随词框缩放
 
 `OcrService.ExtractTextAsync` 在 `preprocessed.Width/Height` 与原因尺寸不同时，原先只缩放 `line.Words`，没有缩放 `line.X/Y/Width/Height`；预览覆盖会错位。已在缩放块同时更新行框（`OcrService.cs:36–53`）。
 
-结论：静态缺陷已修；未提交，当前真实图 `GEOMETRY_BAD=0`。
+结论：静态缺陷已修；已提交 `7c9173b`；当前真实图 `GEOMETRY_BAD=0`。
 
 ### F7（P1，发布准备）版本坐标和发布文档仍是 0.3.20
 
 - `Directory.Build.props`：`Version=0.3.20`、`AssemblyVersion=0.3.20.0`、`FileVersion=0.3.20.0`。
 - `src/TrueToneCap.App/Package.appxmanifest`：`Identity/@Version=0.3.20.0`。
 - `README.md` 徽章 `v0.3.20`。
-- `git tag` 里没有 `v0.3.20`；`main` 领先 `origin/main` 9 个提交，尚未 push。
+- `git tag` 里没有 `v0.3.20`；修复提交 `7c9173b` 之后 `main` 领先 `origin/main` **11 个提交**，尚未 push。
+- 工作树仅剩未跟踪的审查计划 `docs/reviews/ocr/post-release-review-plan-2026-11-27.md`；产品代码/测试已提交。
 - `CHANGELOG` 顶部是 `[未发布] — 2026-11-27`，不是可发布条目。
 
 结论：直接执行 `Publish.ps1 -Version 0.3.21` 会得到版本坐标不一致的 MSIX；必须先同步这四处，并把 `[未发布]` 收口为 0.3.21 条目。**这是打包前置阻断项。**
@@ -140,9 +141,9 @@
 
 这两项不是本轮 OCR 改动引入，但全量门禁不能宣称“全部判据通过”；发布说明应保留“未判”字样。
 
-## 4. 当前工作树修复清单
+## 4. 已提交修复清单（`7c9173b`）
 
-未提交文件：
+已提交：
 
 - `src/TrueToneCap.Core/Services/OcrLineComposer.cs`
 - `src/TrueToneCap.Core/Services/OcrService.cs`
@@ -150,15 +151,15 @@
 - `src/TrueToneCap.Test/OcrWindowsLineTests.cs`
 - `CHANGELOG.md`
 - `docs/ocr-line-composer-acceptance-2026-11-27.md`
+- `docs/reviews/ocr/post-release-review-findings-2026-11-27.md`（本文件）
 
 未跟踪：
 
-- `docs/reviews/ocr/post-release-review-plan-2026-11-27.md`
-- `docs/reviews/ocr/post-release-review-findings-2026-11-27.md`（本文件）
+- `docs/reviews/ocr/post-release-review-plan-2026-11-27.md`（审查框架，尚未收口；不影响打包）
 
 ## 5. 0.3.21 打包前置清单
 
-1. **提交**上述源码/测试/文档修复；确认工作树干净。
+1. **已完成**：修复提交 `7c9173b`；工作树仅剩未跟踪的审查计划。打包前确认这一点。
 2. **同步版本坐标**：`Directory.Build.props` 三行、`Package.appxmanifest` 的 `Identity/@Version`、`README` 徽章统一为 `0.3.21` / `0.3.21.0`。
 3. **收口 CHANGELOG**：把 `[未发布]` 改为 `[0.3.21] — 2026-11-27`，写入 65 OCR / 2993 全量 / 2 处未判，以及 Windows 质量残余（不要写成“Windows OCR 已修复”）。
 4. **重跑门禁**：`scripts/verify.ps1 -Configuration Release`；真实图复跑 ONNX/Windows/legacy 三路径；确认 Core DLL 大小/符号与旧包不同。
