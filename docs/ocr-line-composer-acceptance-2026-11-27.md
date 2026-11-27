@@ -154,7 +154,7 @@ TEXT_EQ_LINES=True CJK_SPACE=0 GEOMETRY_BAD=0
 ## 4. 自动化验证
 
 - `--ocr-tests`：**74 通过 / 0 失败**（含预处理、composer、解码映射、Windows 混合行/标点基线/视觉段、引号/标点边界与 `HDR` 中英空格）。
-- 全量 `scripts/verify.ps1`：**8 个套件 3002 通过 / 0 失败**；3 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`icc_selfbuilt_referee.py` 缺 lcms2；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
+- 全量 `scripts/verify.ps1`：**8 个套件 3002 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过；`icc_selfbuilt_referee.py` 本轮已通过。
 - Release 构建：**0 警告 / 0 错误**。
 - 既有 `--usability-tests` 238 条断言通过，包含 `OcrPreviewWindow` 构造探针；覆盖块几何在真实图像验收中 0 越界。
 
@@ -182,4 +182,4 @@ TEXT_EQ_LINES=True CJK_SPACE=0 GEOMETRY_BAD=0
 - [x] 真实 4K 截图 `CJK\s+CJK` 计数 0。
 - [x] 覆盖框全部在原图内、词框在行框内（`GEOMETRY_BAD=0`）。
 - [x] 翻译段落组：受控段落 1 组 3 行；真实截图 14 组 31 行。
-- [x] `--ocr-tests` 74 通过 / 0 失败；全量 3002 通过 / 0 失败；Release 构建通过（本轮 C 盘满、输出目录临时接到 E 盘，MSBuild 报 1 次 MSB3101 状态文件警告，非代码告警）。
+- [x] `--ocr-tests` 74 通过 / 0 失败；全量 3002 通过 / 0 失败；Release 0 警告 0 错误。

@@ -140,7 +140,7 @@ TTC_OCR_LEGACY_LINE_MERGE=1  → 走旧 MergeDetLines
 3. **P2 行聚类**：换成垂直重叠率 + 中位锚点；补两行/高矮框/孤立碎片用例。
 4. **P3 接入 UI**：`CurrentFullText` 改 Lines；确认覆盖几何和翻译行数不变。
 5. **P4 真实验收**：跑受控图 + 两张真实截图 + 预览窗手工点击；记录前后行数、空格数、状态栏。
-6. **P5 收口**：更新验收文档与 CHANGELOG；Release 构建 + `--ocr-tests` + 全量套件；通过后再考虑 0.3.21 打包。
+6. **P5 收口**：更新验收文档与 CHANGELOG；Release 构建 + `--ocr-tests` + 全量套件；通过后再考虑重打包。
 
 预计：实现 4–6h，真机验收 1–2h；不含模型字符纠错。
 

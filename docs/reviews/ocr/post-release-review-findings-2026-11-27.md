@@ -2,16 +2,16 @@
 
 日期：2026-11-27
 审查范围：`ec440aa`（v0.3.20 源码基线）之后的 8 个提交，以及修复提交 `7c9173b`。
-重打目标：**0.3.20**（不是新开 0.3.21）。版本坐标保持 `0.3.20` / `0.3.20.0`。
+重打目标：**0.3.20**。版本坐标保持 `0.3.20` / `0.3.20.0`。
 原则：不沿用旧验收文档的 48 OCR / 2976 断言结论；所有结论以当前源码、当前构建和真实图像复跑为准。
 
 ## 1. 结论先行
 
 ### 1.1 当前源码/工作树
 
-- Release 构建：通过；本轮 C 盘满、输出目录临时接到 E 盘，MSBuild 报 1 次 MSB3101 状态文件警告，非代码告警。
+- Release 构建：**0 警告 / 0 错误**。
 - `--ocr-tests`：**74 通过 / 0 失败**。
-- 全量 `scripts/verify.ps1 -Configuration Release`：**8 套件 3002 通过 / 0 失败**；另有 **3 处外部判据未判**（ICC ProfileID 样本缺失、自建 ICC 缺 lcms2、tiff/png 外部裁判缺 numpy/tifffile/Pillow），未计为通过。
+- 全量 `scripts/verify.ps1 -Configuration Release`：**8 套件 3002 通过 / 0 失败**；另有 **2 处外部判据未判**（ICC ProfileID 样本缺失、tiff/png 外部裁判缺 numpy/tifffile/Pillow），未计为通过；`icc_selfbuilt_referee.py` 本轮已通过。
 - 真实图复跑（ONNX 默认路径）：
   - `controlled-paragraph-only.png`：3 行，`TEXT_EQ_LINES=True`，`CJK_SPACE=0`，`GEOMETRY_BAD=0`，段落组 1 组 3 行。
   - `settings-cn.png`：15 行，`TEXT_EQ_LINES=True`，`CJK_SPACE=0`，`GEOMETRY_BAD=0`，段落组 0。
@@ -21,7 +21,7 @@
 ### 1.2 发布判断
 
 - **源码候选：可以进入 0.3.20 的“用当前提交重打包”阶段。**
-  修复已提交为 `7c9173b`；Windows OCR 中文字符质量已由后续 `PrepareForWindowsOcr` / 质量分 / zh 优先合并修到可接受（见 F8），但 4K Windows OCR 仍应回退 ONNX，不能宣称“所有 Windows OCR 场景已修复”。
+  修复已提交为 `7c9173b`；本次 Windows OCR 中文字符质量修复在 `a400c3d`，Windows OCR 已由后续 `PrepareForWindowsOcr` / 质量分 / zh 优先合并修到可接受（见 F8），但 4K Windows OCR 仍应回退 ONNX，不能宣称“所有 Windows OCR 场景已修复”。
 - **现有 0.3.20 包：不可作为“已修复 OCR”的交付物。**
   当前 7z/MSIX 里的 `TrueToneCap.Core.dll` 是 OCR 修复前的旧二进制，见 F1。
 - **0.3.20 重打包：版本号不用升。**
@@ -40,7 +40,7 @@
 
 影响：现在安装 0.3.20 的用户拿到的仍是旧 OCR 行为；`CHANGELOG` 的 `[未发布]` 却已经声称修复，存在“用户以为已修复、实际没有”的发布缺口。
 
-结论：**必须重建 0.3.20/0.3.21 包；不能用现有 7z/MSIX 直接发。**
+结论：**必须重建 0.3.20 包；不能用现有 7z/MSIX 直接发。**
 
 ### F2（P1，已修复候选）Windows 混合路径固定 8px 行距会甩掉单词
 
@@ -96,7 +96,7 @@
 - `git tag` 里没有 `v0.3.20`；修复提交 `7c9173b` 之后 `main` 领先 `origin/main`（本地未 push）。
 - 工作树已清理，产品代码/测试已提交。
 - `CHANGELOG` 顶部仍是 `[未发布] — 2026-11-27`；0.3.20 条目在它下面。重打 0.3.20 时不能把这条留在“未发布”，否则包与发布说明对不上。
-- **MSIX 平台约束**：若 0.3.20.0 已经装过或已提交商店，同版本不能作为增量更新；绿色 7z 可以同名重打，MSIX 要么本地重签/重装，要么另起版本号。先确认商店状态再决定，不要默认升 0.3.21。
+- **MSIX 平台约束**：若 0.3.20.0 已经装过或已提交商店，同版本不能作为增量更新；绿色 7z 可以同名重打，MSIX 要么本地重签/重装，要么另起版本号。先确认商店状态再决定，不要默认升版本号。
 
 结论：**重打 0.3.20 不需要改版本坐标**；需要收口 `CHANGELOG` / `v0.3.20` tag，并确认 MSIX 是本地重装还是商店更新。
 
@@ -136,7 +136,7 @@
 - 分段阈值 `max(2.5×行高,40px)` 对小字（40px 可能相当于 2–3 个字符宽）偏宽，对大字偏窄；它按视觉 gap 判断，无法区分“同一段落的词距”和“两栏/两个控件”。
 - `BuildRows` 的 0.60 重叠/中心比例对超高框、旋转框、上下标仍可能吞行；已有测试覆盖“高框不吞下一行”，但没有真实旋转/上下标语料。
 
-结论：这些是设计上的启发式残余，不是本轮已证实的确定性 bug；0.3.21 前至少保留现有回归，不宜再扩大阈值改动。
+结论：这些是设计上的启发式残余，不是本轮已证实的确定性 bug；本次 0.3.20 重打前至少保留现有回归，不宜再扩大阈值改动。
 
 ### F12（P3，已知限制）Unicode Extension B 代理对未覆盖
 
@@ -144,15 +144,14 @@
 
 ### F13（P3，性能未判）`BuildRows` / `MergeOrphans` 没有 p50/p95 压力读数
 
-`BuildRows` 为 O(n²)，`MergeOrphans` 多轮扫描最坏 O(n³)。4K 真实图 165 行可接受，但没有 1000+ 框的密集页面基准；0.3.21 若遇到复杂 IDE/网页截图，可能卡在 composer 而不是模型。
+`BuildRows` 为 O(n²)，`MergeOrphans` 多轮扫描最坏 O(n³)。4K 真实图 165 行可接受，但没有 1000+ 框的密集页面基准；后续若遇到复杂 IDE/网页截图，可能卡在 composer 而不是模型。
 
-### F14（P3，未判）外部判据仍有 3 处未判
+### F14（P3，未判）外部判据仍有 2 处未判
 
 - `icc_profile_id_check.py`：5 个候选 ICC 的 ProfileID 均为零，缺有效样本。
-- `icc_selfbuilt_referee.py`：本机缺 lcms2，自产 ICC 读回未做。
 - `tiff_png_referee.py`：缺 numpy / tifffile / Pillow，外部读回未做。
 
-这三项不是本轮 OCR 改动引入，但全量门禁不能宣称“全部判据通过”；发布说明应保留“未判”字样。
+这两项不是本轮 OCR 改动引入，但全量门禁不能宣称“全部判据通过”；发布说明应保留“未判”字样。`icc_selfbuilt_referee.py` 本轮已通过。
 
 ## 4. 已提交修复清单（`7c9173b` + 本次 Windows 质量修复）
 
@@ -173,7 +172,7 @@
 ## 5. 0.3.20 重打前置清单
 
 1. **已完成**：修复提交 `7c9173b`；工作树已清理。
-2. **不改版本坐标**：保持 `0.3.20` / `0.3.20.0`；不要为了这次重打升 0.3.21。
+2. **不改版本坐标**：保持 `0.3.20` / `0.3.20.0`；不要为了这次重打升版本。
 3. **收口 CHANGELOG**：把顶部 `[未发布]` 合并进 `[0.3.20]`，或明确写“本次为 0.3.20 重打包，包含以下 OCR 修复”；不要留下“未发布”字样。
 4. **重跑门禁**：`scripts/verify.ps1 -Configuration Release`；真实图复跑 ONNX/Windows/legacy 三路径；确认 Core DLL 大小/符号与旧包不同。
 5. **重建 0.3.20 包**：`Publish.ps1 -Version 0.3.20`（绿色 7z）；需要 MSIX 时再加 `-Msix`。打包后从包内解出 `TrueToneCap.Core.dll`，确认包含 `OcrLineComposer` / `MapDecodedIndices`；MSIX 清单 `Identity/@Version` 应为 `0.3.20.0`。
@@ -182,19 +181,20 @@
 
 ## 6. 证据文件
 
-- `artifacts/verify-winocr-fix-final.log`：3002 / 0 / 3 skipped。
+- `artifacts/verify-winocr-fix-final.log`：3002 / 0 / 2 skipped。
+- `artifacts/verify-build-final.log`：Release 构建 0 警告 / 0 错误。
 - `artifacts/verify-ocr-winocr-final.log`：74 OCR 测试。
 - `artifacts/ocr-acceptance/probe-onnx-final.log`：受控 3 行、设置页 15 行。
 - `artifacts/ocr-acceptance/probe-4k-final.log`：4K 165 行。
 - `artifacts/ocr-acceptance/probe-legacy-final.log`：legacy 12 行 / CJK 3 / Text 一致。
-- `artifacts/ocr-acceptance/probe-windows-current-controlled.log`：Windows 受控 3 行。
-- `artifacts/ocr-acceptance/probe-windows-punct.log`：Windows 设置页 6 行 / `；` 空格已消除。
+- `artifacts/ocr-acceptance/probe-windows-current-controlled.log`：Windows 受控段落 3 行，外加 Settings/Display/Microsoft Store/This PC 4 个独立标签，共 7 行。
+- `artifacts/ocr-acceptance/probe-windows-punct.log`：Windows 设置页 4 行 / `；` 与标点空格已消除。
 - `artifacts/ocr-acceptance/probe-quotes-real.log`：英文引号 3 行。
 - `artifacts/ocr-acceptance/probe-japanese.log`：日文假名 4 行。
 - `artifacts/ocr-acceptance/pkg-0.3.20-core/TrueToneCap.Core.dll`：旧包 Core DLL 742,400 B。
 - `artifacts/ocr-acceptance/pkg-0.3.20-msix/AppxManifest.xml`：`Version=0.3.20.0`。
-- 当前 Release Core DLL：`src/TrueToneCap.Core/bin/Release/net11.0-windows10.0.26100.0/TrueToneCap.Core.dll`，759,808 B。
+- 当前 Release Core DLL：`src/TrueToneCap.Core/bin/Release/net11.0-windows10.0.26100.0/TrueToneCap.Core.dll`，761,856 B。
 
 ## 7. 一句话给发包人
 
-**现有 0.3.20 包里的 OCR 仍是旧的；用当前提交重打 0.3.20，不要新开 0.3.21，也不要用旧包当“已修复”交付。**
+**现有 0.3.20 包里的 OCR 仍是旧的；用当前提交重打 0.3.20，不要新开版本号，也不要用旧包当“已修复”交付。**
