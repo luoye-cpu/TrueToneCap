@@ -275,7 +275,11 @@ internal static class OcrLineComposer
         if (IsCjkNoSpace(prev) && IsCjkNoSpace(next)) return false;
 
         // 中英交界：只有真正拉开词距才插空格；紧邻的“详情 s/”不拆。
-        if (IsCjkNoSpace(prev) || IsCjkNoSpace(next))
+        // 拉丁 → 汉字用更低的 0.25H：UI 常见 “HDR 截图工具”，Windows OCR 的
+        // HDR 词框与“截”只隔 6px（约 0.35H），用 0.5H 会粘成 “HDR截图工具”。
+        if (IsCjkNoSpace(next))
+            return gap >= LatinSpaceRatio * rowHeight;
+        if (IsCjkNoSpace(prev))
             return gap >= MixedSpaceRatio * rowHeight;
 
         // 英文/数字之间：gap 小于词距视为 det 把同一个词拆开，直接拼。

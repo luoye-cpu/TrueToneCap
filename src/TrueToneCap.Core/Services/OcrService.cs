@@ -20,16 +20,20 @@ public static class OcrService
         // ── Pass 1: 原始图像 ──
         var result1 = await RunOcrAsync(bgraPixels, width, height, languageTag, ct);
 
-        // ── Pass 2: 自动预处理后图像 ──
-        var preprocessed = BitmapPreprocessor.AutoPreprocess(bgraPixels, width, height);
+        // ── Pass 2: Windows OCR 专用预处理（2x + 对比度，不做二值化）──
+        var preprocessed = BitmapPreprocessor.PrepareForWindowsOcr(bgraPixels, width, height);
         if (preprocessed.Mode != BitmapPreprocessor.PreprocessMode.None)
         {
             var result2 = await RunOcrAsync(preprocessed.Pixels, preprocessed.Width,
                 preprocessed.Height, languageTag, ct);
 
-            // 选择更长的结果（通常更准确）
-            if (!string.IsNullOrEmpty(result2.Text) &&
-                (string.IsNullOrEmpty(result1.Text) || result2.Text.Length > result1.Text.Length))
+            // 不按 Text.Length 选较长结果：阈值/放大产生的碎片行会让“更长”变成“更差”。
+            // 用有效字母/数字为主、孤立标点为负分的质量分；同分时保留原图结果。
+            bool usePass2 = string.IsNullOrEmpty(result1.Text);
+            if (!usePass2 && !string.IsNullOrEmpty(result2.Text))
+                usePass2 = OcrQualityScore(result2) > OcrQualityScore(result1);
+
+            if (usePass2 && !string.IsNullOrEmpty(result2.Text))
             {
                 // 预处理若改变了尺寸（如 ScaleUp 2x），坐标处于放大坐标系，
                 // 必须按比例归一化回原图坐标，否则 OCR 预览窗口的"点对点覆盖"会对不齐。
@@ -61,6 +65,30 @@ public static class OcrService
             result1.Error = "未检测到文字（尝试放大截图区域或增强对比度）";
 
         return result1;
+    }
+
+    /// <summary>
+    /// OCR 结果质量分：有效字母/数字为主，孤立标点/单字符碎片为负分。
+    /// 只用于在“原图 vs 2x 增强”两个 pass 之间择优，不参与最终文本拼接。
+    /// </summary>
+    private static int OcrQualityScore(OcrResult result)
+    {
+        int score = 0;
+        foreach (var line in result.Lines)
+        {
+            string text = line.Text.Trim();
+            if (text.Length == 0) continue;
+            int meaningful = 0;
+            foreach (char c in text)
+            {
+                if (char.IsLetterOrDigit(c)) meaningful++;
+                else if (c == '\uFFFD') score -= 10;
+            }
+            score += meaningful * 2;
+            if (meaningful == 0) score -= 8;      // “，。”“．”这类纯标点噪声行
+            if (text.Length <= 1) score -= 2;     // 单个“0”“，”通常不是完整行
+        }
+        return score;
     }
 
     private static async Task<OcrResult> RunOcrAsync(byte[] bgraPixels, int width, int height,
@@ -184,6 +212,11 @@ public static class OcrService
             {
                 foreach (var line in enResult.Lines)
                     foreach (var w in line.Words)
+                    {
+                        // 中文截图里 en-US 引擎会吐“iAmæ(RF”“，。”这类非拉丁碎片；
+                        // 只接受纯 ASCII 字母/数字/常见标点的英文补充，避免污染中文行。
+                        string text = w.Text.Trim();
+                        if (!IsSafeEnglishSupplement(text)) continue;
                         allWords.Add((new OcrWord
                         {
                             Text = w.Text,
@@ -192,6 +225,7 @@ public static class OcrService
                             Width = (int)w.BoundingRect.Width,
                             Height = (int)w.BoundingRect.Height
                         }, "en"));
+                    }
             }
 
             // 去重合并：如果两个词的位置重叠 >50%，保留文本更长的那个
@@ -260,11 +294,17 @@ public static class OcrService
             .OrderBy(w => w.Y)
             .ThenBy(w => w.X)
             .ToList();
-        double medianWordH = MedianOf(ordered.Select(w => (double)w.Height));
-        int lineGap = (int)Math.Max(8, medianWordH * 0.6);
+        // 只用有文字的词估行高；中文标点框高度常只有 4–11px，混进中位数
+        // 会把容差压到 8–9px，正好再次把标点甩成单独一行。
+        var textWords = ordered.Where(w => w.Text.Any(char.IsLetterOrDigit)).ToList();
+        double medianWordH = MedianOf((textWords.Count > 0 ? textWords : ordered).Select(w => (double)w.Height));
+        // 0.75H：中文标点（逗号/句号）常被 Windows OCR 放到基线下方 10–12px，
+        // 0.6H 会把它们甩成单独一条“，。”行；0.75H 仍低于正常行距（通常 ≥1.5H）。
+        int lineGap = (int)Math.Max(8, medianWordH * 0.75);
 
         var lines = new List<OcrLine>();
         var currentLine = new List<OcrWord>();
+        var rows = new List<List<OcrWord>>();
         foreach (var word in ordered)
         {
             if (currentLine.Count > 0)
@@ -272,15 +312,64 @@ public static class OcrService
                 double rowY = MedianOf(currentLine.Select(w => (double)w.Y));
                 if (Math.Abs(word.Y - rowY) > lineGap)
                 {
-                    lines.Add(ComposeWindowsLine(currentLine));
+                    rows.Add(currentLine);
                     currentLine = [];
                 }
             }
             currentLine.Add(word);
         }
         if (currentLine.Count > 0)
-            lines.Add(ComposeWindowsLine(currentLine));
+            rows.Add(currentLine);
+
+        // 同一视觉行里可能并排两个独立控件（中文设置页底行就是
+        // “0 设置已保存” + 极右侧“区域截图”，中间空 792px）。只按 Y 分行
+        // 会把它们拼成一句；再按水平大间隙拆成视觉段。
+        foreach (var row in rows)
+            foreach (var segment in SplitWindowsSegments(row))
+                lines.Add(ComposeWindowsLine(segment));
         return lines;
+    }
+
+    /// <summary>按水平大间隙拆 Windows 同一视觉行；阈值与 composer 的视觉段一致。</summary>
+    private static List<List<OcrWord>> SplitWindowsSegments(List<OcrWord> words)
+    {
+        var ordered = words.OrderBy(w => w.X).ThenBy(w => w.Y).ToList();
+        if (ordered.Count == 0) return [];
+        double medianH = MedianOf(ordered.Select(w => (double)w.Height));
+        // 不用 composer 的 2.5H/40px：受控段落里 “and ends ... a clear” 本来就是
+        // 同一句，119px 词距仍应保留；只有 240px/8H 以上的横向空洞才视为两个控件。
+        double threshold = Math.Max(240, medianH * 8);
+        var segments = new List<List<OcrWord>>();
+        var current = new List<OcrWord>();
+        foreach (var word in ordered)
+        {
+            if (current.Count > 0)
+            {
+                var last = current[^1];
+                double gap = word.X - (last.X + last.Width);
+                if (gap > threshold)
+                {
+                    segments.Add(current);
+                    current = [];
+                }
+            }
+            current.Add(word);
+        }
+        if (current.Count > 0) segments.Add(current);
+        return segments;
+    }
+
+    /// <summary>en-US 引擎补充词只接受纯 ASCII 文本；中文/乱码碎片一律不进混合结果。</summary>
+    private static bool IsSafeEnglishSupplement(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        foreach (char c in text)
+        {
+            if (char.IsAsciiLetterOrDigit(c) || char.IsWhiteSpace(c)) continue;
+            if (" -_./:%()[]{}'\"&+".Contains(c)) continue;
+            return false;
+        }
+        return true;
     }
 
     /// <summary>位置去重：重叠 >50% 的词保留文本更长的。</summary>
@@ -293,15 +382,27 @@ public static class OcrService
         {
             if (used[i]) continue;
             var best = words[i].Word;
+            string bestSource = words[i].Source;
             used[i] = true;
 
             for (int j = i + 1; j < words.Count; j++)
             {
                 if (used[j]) continue;
+                // 同一引擎的词已经是独立词框，不能再按重叠去重；否则中文标点
+                //（如“外观，”里的逗号）会被前一个汉字吞掉。
+                if (words[j].Source == words[i].Source) continue;
                 if (OverlapRatio(best, words[j].Word) > 0.5f)
                 {
                     used[j] = true;
-                    // 保留文本更长的（通常更准确）
+                    // 中文引擎为主：重叠时 en-US 不能覆盖 zh 的词（HDR → I-IDR 就是这么坏的）。
+                    if (bestSource == "zh" && words[j].Source == "en") continue;
+                    if (bestSource == "en" && words[j].Source == "zh")
+                    {
+                        best = words[j].Word;
+                        bestSource = "zh";
+                        continue;
+                    }
+                    // 只有文本更长的候选才替换；同一来源已在上面的 continue 排除。
                     if (words[j].Word.Text.Length > best.Text.Length)
                         best = words[j].Word;
                 }

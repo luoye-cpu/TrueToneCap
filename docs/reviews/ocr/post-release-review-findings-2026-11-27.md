@@ -9,9 +9,9 @@
 
 ### 1.1 当前源码/工作树
 
-- Release 构建：**0 警告 / 0 错误**。
-- `--ocr-tests`：**65 通过 / 0 失败**。
-- 全量 `scripts/verify.ps1 -Configuration Release`：**8 套件 2993 通过 / 0 失败**；另有 **2 处外部判据未判**（ICC ProfileID 样本缺失、tiff/png 外部裁判缺 numpy/tifffile/Pillow），未计为通过。
+- Release 构建：通过；本轮 C 盘满、输出目录临时接到 E 盘，MSBuild 报 1 次 MSB3101 状态文件警告，非代码告警。
+- `--ocr-tests`：**74 通过 / 0 失败**。
+- 全量 `scripts/verify.ps1 -Configuration Release`：**8 套件 3002 通过 / 0 失败**；另有 **3 处外部判据未判**（ICC ProfileID 样本缺失、自建 ICC 缺 lcms2、tiff/png 外部裁判缺 numpy/tifffile/Pillow），未计为通过。
 - 真实图复跑（ONNX 默认路径）：
   - `controlled-paragraph-only.png`：3 行，`TEXT_EQ_LINES=True`，`CJK_SPACE=0`，`GEOMETRY_BAD=0`，段落组 1 组 3 行。
   - `settings-cn.png`：15 行，`TEXT_EQ_LINES=True`，`CJK_SPACE=0`，`GEOMETRY_BAD=0`，段落组 0。
@@ -21,7 +21,7 @@
 ### 1.2 发布判断
 
 - **源码候选：可以进入 0.3.20 的“用当前提交重打包”阶段。**
-  修复已提交为 `7c9173b`；但这不等于“所有 OCR 问题已修复”：Windows OCR 的中文字符质量仍有明显错误，见 F8。
+  修复已提交为 `7c9173b`；Windows OCR 中文字符质量已由后续 `PrepareForWindowsOcr` / 质量分 / zh 优先合并修到可接受（见 F8），但 4K Windows OCR 仍应回退 ONNX，不能宣称“所有 Windows OCR 场景已修复”。
 - **现有 0.3.20 包：不可作为“已修复 OCR”的交付物。**
   当前 7z/MSIX 里的 `TrueToneCap.Core.dll` 是 OCR 修复前的旧二进制，见 F1。
 - **0.3.20 重打包：版本号不用升。**
@@ -35,7 +35,7 @@
 
 - 7z：`publish/TrueToneCap-v0.3.20-win-x64.7z` 内 `TrueToneCap.Core.dll` 为 **742,400 B**，时间 2026-11-27 03:14:30；7z 本身 03:21。
 - MSIX：`publish/store-0.3.20/TrueToneCap.App_0.3.20.0_x64.msix` 内同一个 DLL 也是 **742,400 B**，时间 03:19。
-- 当前源码 Release 构建的 Core DLL 为 **759,808 B**，包含 `OcrLineComposer` / `MapDecodedIndices`；旧包内 ASCII 扫描不到这两个符号。
+- 当前源码 Release 构建的 Core DLL 为 **761,856 B**，包含 `OcrLineComposer` / `MapDecodedIndices` / `PrepareForWindowsOcr`；旧包内 ASCII 扫描不到这些符号。
 - OCR 修复提交时间为 **05:01 之后**（`3603275` 05:01:19、`b609008` 05:11:00、`86aa93a` 05:26:48），晚于 03:19/03:21 的包。
 
 影响：现在安装 0.3.20 的用户拿到的仍是旧 OCR 行为；`CHANGELOG` 的 `[未发布]` 却已经声称修复，存在“用户以为已修复、实际没有”的发布缺口。
@@ -47,8 +47,8 @@
 证据：
 
 - 受控图 `controlled-paragraph-only.png` 走 Windows OCR，修复前输出 4 行，第 4 行只有 `a`；真实词框里第三行的 `a` 与同 line 词基线差约 11px，超过固定 `lineGap=8px`。
-- 修复为 `OcrService.GroupWindowsWords`（`src/TrueToneCap.Core/Services/OcrService.cs:256`）：按词高中位数 ×0.6、下限 8px 给行内容差，并用当前行 Y 中位数做锚点；受控图复跑 **4→3 行**，`TEXT_EQ_LINES=True`，`CJK_SPACE=0`，`GEOMETRY_BAD=0`。
-- 回归测试：`OcrWindowsLineTests.BaselineVariation_SameLine`。
+- 修复为 `OcrService.GroupWindowsWords`（`src/TrueToneCap.Core/Services/OcrService.cs:262`）：按“有文字的词”高度中位数 ×0.75、下限 8px 给行内容差，并用当前行 Y 中位数做锚点；受控图复跑 **4→3 行**，`TEXT_EQ_LINES=True`，`CJK_SPACE=0`，`GEOMETRY_BAD=0`。
+- 回归测试：`OcrWindowsLineTests.BaselineVariation_SameLine`、`PunctuationBaseline_SameLine`。
 
 结论：修复候选有效；已提交 `7c9173b`。
 
@@ -100,15 +100,25 @@
 
 结论：**重打 0.3.20 不需要改版本坐标**；需要收口 `CHANGELOG` / `v0.3.20` tag，并确认 MSIX 是本地重装还是商店更新。
 
-### F8（P2，未修）Windows OCR 中文字符质量仍明显不合格
+### F8（P2，已修复候选）Windows OCR 中文字符质量不合格
 
-同一张 `settings-cn.png`：
+同一张 `settings-cn.png`，Windows 混合路径的旧输出是 6 行、`MODE=Threshold`，字符错误明显：`I-IDR截图工具`、`只蟛外观`、`河图后提0`。根因不是字体/语言包：
 
-- ONNX 默认路径：15 行，文本基本正确。
-- Windows 混合路径：6 行，`MODE=Threshold`，字符错误明显（`I-IDR截图工具`、`只蟛外观`、`河图后提0` 等）；这不是 composer 的行合并/空格问题，而是 Windows 语言包/识别质量问题。
-- `ExtractTextAsync` 在预处理结果胜出时还会把 `result2.Mode="Mixed(zh+en)"` 覆盖成 `Threshold`（`OcrService.cs:55`），只是诊断标记错误，但会误导“走的哪条路径”的判断。
+- `AutoPreprocess` 对低对比度 UI 选了 `AdaptiveThresholdV2`，二值化破坏抗锯齿笔画；
+- `ExtractTextAsync` 按 `Text.Length` 选 pass2，阈值结果更长但更差；
+- en-US 的 `I-IDR` 又按“文本更长”覆盖 zh 的 `HDR`；中文逗号/句号被放到基线下 12px，旧 `0.6H` 行距甩成单独 `，。` 行。
 
-结论：**不要用 Windows OCR 的这张图结果作为 composer 验收通过证据**；如果 0.3.21 要宣称 Windows OCR 可用，需要单独修质量或明确降级提示。
+修复：
+
+- `BitmapPreprocessor.PrepareForWindowsOcr`：≤4MP 图 2x `ScaleUp` + `EnhanceContrast`，不做 Threshold；>4MP 不放大也不拉伸。
+- `OcrQualityScore` 替代 `Text.Length`；纯标点/单字符碎片负分。
+- en-US 补充词只收纯 ASCII；重叠去重只在 zh/en 跨引擎进行，zh 优先；新增 `IsSafeEnglishSupplement`。
+- `GroupWindowsWords` 行距 `0.6H → 0.75H`，用有文字的词估行高，标点并回原行；同一行再按 `max(240px, 8H)` 拆视觉段，设置页底行拆成 `0 设置已保存` / `区域截图`。
+- 中英交界：拉丁→汉字按 `0.25H`，`HDR 截图工具` 恢复空格；CJK→拉丁仍 `0.5H`。
+
+复跑 `settings-cn.png` Windows 路径：4 行，`HDR 截图工具`、`界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。`、`0 设置已保存`、`区域截图`；`TEXT_EQ_LINES=True`、`CJK_SPACE=0`、`GEOMETRY_BAD=0`；不再出现 `I-IDR`/`蟛`/`钷`/`踣`。
+
+残余：4K Windows OCR 仍约 131 行、图标噪声多，质量远低于 ONNX。大图或质量要求高时必须回退 ONNX，Windows OCR 只作 best-effort。**不要用 Windows OCR 的 4K 结果作为 composer 验收通过证据。**
 
 ### F9（P2，未修）`TTC_OCR_DUMP_BOXES=1` 把完整 OCR 文本写到 `%TEMP%`
 
@@ -136,21 +146,24 @@
 
 `BuildRows` 为 O(n²)，`MergeOrphans` 多轮扫描最坏 O(n³)。4K 真实图 165 行可接受，但没有 1000+ 框的密集页面基准；0.3.21 若遇到复杂 IDE/网页截图，可能卡在 composer 而不是模型。
 
-### F14（P3，未判）外部判据仍有 2 处未判
+### F14（P3，未判）外部判据仍有 3 处未判
 
 - `icc_profile_id_check.py`：5 个候选 ICC 的 ProfileID 均为零，缺有效样本。
+- `icc_selfbuilt_referee.py`：本机缺 lcms2，自产 ICC 读回未做。
 - `tiff_png_referee.py`：缺 numpy / tifffile / Pillow，外部读回未做。
 
-这两项不是本轮 OCR 改动引入，但全量门禁不能宣称“全部判据通过”；发布说明应保留“未判”字样。
+这三项不是本轮 OCR 改动引入，但全量门禁不能宣称“全部判据通过”；发布说明应保留“未判”字样。
 
-## 4. 已提交修复清单（`7c9173b`）
+## 4. 已提交修复清单（`7c9173b` + 本次 Windows 质量修复）
 
 已提交：
 
-- `src/TrueToneCap.Core/Services/OcrLineComposer.cs`
-- `src/TrueToneCap.Core/Services/OcrService.cs`
+- `src/TrueToneCap.Core/Services/OcrLineComposer.cs`（本次新增拉丁→汉字 0.25H 空格）
+- `src/TrueToneCap.Core/Services/OcrService.cs`（`PrepareForWindowsOcr` 调用、质量分、en 过滤、zh 优先合并、0.75H 行距）
+- `src/TrueToneCap.Core/Services/BitmapPreprocessor.cs`（`PrepareForWindowsOcr`）
 - `src/TrueToneCap.Test/OcrLineComposerTests.cs`
 - `src/TrueToneCap.Test/OcrWindowsLineTests.cs`
+- `src/TrueToneCap.Test/OcrServiceTests.cs`
 - `CHANGELOG.md`
 - `docs/ocr-line-composer-acceptance-2026-11-27.md`
 - `docs/reviews/ocr/post-release-review-findings-2026-11-27.md`（本文件）
@@ -169,8 +182,8 @@
 
 ## 6. 证据文件
 
-- `artifacts/verify-post-review-final2.log`：2993 / 0 / 2 skipped。
-- `artifacts/verify-ocr-punct3.log`：65 OCR 测试。
+- `artifacts/verify-winocr-fix-final.log`：3002 / 0 / 3 skipped。
+- `artifacts/verify-ocr-winocr-final.log`：74 OCR 测试。
 - `artifacts/ocr-acceptance/probe-onnx-final.log`：受控 3 行、设置页 15 行。
 - `artifacts/ocr-acceptance/probe-4k-final.log`：4K 165 行。
 - `artifacts/ocr-acceptance/probe-legacy-final.log`：legacy 12 行 / CJK 3 / Text 一致。

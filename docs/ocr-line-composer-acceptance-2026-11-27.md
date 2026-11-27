@@ -1,9 +1,9 @@
 # OCR 行合并与中文空格修复验收
 
 - 日期：2026-11-27
-- 基线：`main` / `8a5834a`（v0.3.20 发布后）
+- 基线：`main` / `ec440aa`（v0.3.20 发布后）
 - 范围：只改 `C:\PLAN\TrueToneCap`；未触碰其他仓库
-- 状态：**已实现、已单测、已真实图像验收、已提交 Git（`3603275` + 本记录所在提交）；未版本化**
+- 状态：**已实现、已单测、已真实图像验收、已提交 Git（`7c9173b` + 本记录所在提交）；未版本化**
 
 ## 1. 结论
 
@@ -11,7 +11,7 @@
 
 1. `OcrLineComposer` 按垂直重叠率聚类视觉行，替换旧的“中心点落簇”；旧实现会把不同窗口/列的独立控件按中心点串成一行，也会把中文逐字框用空格连接。
 2. 行内按 X 排序；只有水平 gap 超过 `max(2.5×行高, 40px)` 才拆成独立视觉段。常规英文词距不再被拆成独立行。
-3. 文本拼接脚本感知：汉字/假名之间不插空格；覆盖 CJK 标点、全/半角假名、兼容表意文字；U+3000 全角空格、NBSP 也归一化；中文标点、开括号、连字符旁不插空格；英文按 `0.25H` 词距、中英交界按 `0.5H` 判定。
+3. 文本拼接脚本感知：汉字/假名之间不插空格；覆盖 CJK 标点、全/半角假名、兼容表意文字；U+3000 全角空格、NBSP 也归一化；中文标点、开括号、连字符旁不插空格；英文按 `0.25H` 词距，中英交界拉丁→汉字按 `0.25H`、CJK→拉丁按 `0.5H` 判定。
 4. `OcrResult.Text` 改为由合并后的 `Lines` 生成，`Text` 与 `Lines` 同序；预览复制全文也优先走 `Lines`。
 5. 额外发现并修复 **CTC 尾随空格类被丢弃**：PP-OCRv6 rec 输出 18710 类 = blank(0) + 18708 字典字符 + 1 个空格类。旧解码把最后一类直接过滤，导致英文整行变成 `ThisisonelongEnglish…`。现在最后一类映射为空格，英文词距恢复，汉字间仍由 composer 归一化为 0 空格。
 
@@ -120,17 +120,48 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 - 日文假名：`japanese-test.png`（1200×420）输出 `こんにちは世界`、`カタカナ`、`テスト`、`日本語の文章です。`；`CJK_SPACE=0`、`TEXT_EQ_LINES=True`。注意：源图 `カタカナ　テスト` 中的全角空格形成两个视觉段，composer 按 `max(2.5H,40px)` 拆成两行，这是“视觉段拆分”，不是“汉字/假名之间插空格”。
 - 全角标点：Windows 混合路径中文设置页曾输出 `像素； 未`，原因是 `IsCjkNoSpace` 未覆盖 U+FF01–FF5E 全角标点；已补全角标点范围与“闭标点后不插空格”规则，复跑为 `像素；未安`。单测覆盖 `中文，English`、`Hello. World` 等边界，确保不会把英文句号后的词距误删。
 
+### 3.6 Windows OCR 中文设置页字符质量
+
+依据：同一张 `settings-cn.png`，Windows 混合语言路径（zh-Hans-CN + en-US）。
+
+当前输出：
+
+```text
+[1] HDR 截图工具
+[2] 界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。
+[3] 0 设置已保存
+[4] 区域截图
+TEXT_EQ_LINES=True CJK_SPACE=0 GEOMETRY_BAD=0
+```
+
+根因不是字体/语言包，而是三处叠加：
+
+1. `BitmapPreprocessor.AutoPreprocess` 对低对比度 UI 选了 `AdaptiveThresholdV2`，二值化破坏抗锯齿笔画；1x 阈值输出 `只蟛外观`、`新钷踣`。
+2. `ExtractTextAsync` 按 `Text.Length` 选 pass2，阈值结果虽然更长但更差；en-US 的 `I-IDR` 又按“文本更长”覆盖 zh 的 `HDR`。
+3. Windows OCR 把中文逗号/句号放到基线下 10–12px，旧 `0.6H` 行距会甩出单独的 `，。` 行；中文标点框高度很小，还会把行高中位数拉低。
+
+修复：
+
+- 新增 `BitmapPreprocessor.PrepareForWindowsOcr`：深色先反色；源图 ≤4MP 时 2x `ScaleUp` 后 `EnhanceContrast`，**不再产生 Threshold 候选**；>4MP 不放大也不拉伸，留给上层决定是否回退 ONNX。
+- `OcrQualityScore` 替代 `Text.Length`：有效字母/数字计分，纯标点/单字符碎片负分。
+- en-US 补充词只接受纯 ASCII 文本，过滤 `iAmæ(RF)`、`，。` 等碎片；重叠去重只在 zh/en 跨引擎之间进行，且 zh 词优先，en 不能用更长垃圾覆盖 `HDR`。
+- `GroupWindowsWords` 行距从 `0.6H` 调到 `0.75H`，并用“有文字的词”估行高，中文标点并回原行。
+- 同一视觉行再按 `max(240px, 8H)` 水平空洞拆视觉段：设置页底行“0 设置已保存”与右侧 792px 外的“区域截图”不再拼成一句；受控图 119px 的词距仍留在原句。
+- 中英交界拆分：拉丁 → 汉字按 `0.25H` 插空格，`HDR` 与 `截` 的 6px 间距恢复为 `HDR 截图工具`；CJK → 拉丁仍按 `0.5H`，`详情 s/` 不被拆。
+
+实测同一图 Windows 路径从 `I-IDR截图工具 / 只蟛外观 / 河图后提0` 变为上述 4 行；覆盖框与原图对齐（`GEOMETRY_BAD=0`）。4K 图 Windows OCR 仍明显粗于 ONNX（Windows 路径约 131 行、大量图标噪声），因此大图/高质量要求仍应回退 ONNX，不应把 Windows OCR 当作全量替代。
+
 ## 4. 自动化验证
 
-- `--ocr-tests`：**65 通过 / 0 失败**（含预处理、composer、解码映射、Windows 混合行与引号/标点边界）。
-- 全量 `scripts/verify.ps1`：**8 个套件 2993 通过 / 0 失败**；2 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
+- `--ocr-tests`：**74 通过 / 0 失败**（含预处理、composer、解码映射、Windows 混合行/标点基线/视觉段、引号/标点边界与 `HDR` 中英空格）。
+- 全量 `scripts/verify.ps1`：**8 个套件 3002 通过 / 0 失败**；3 处外部判据跳过（`icc_profile_id_check.py` 无带非零 ProfileID 的候选 ICC；`icc_selfbuilt_referee.py` 缺 lcms2；`tiff_png_referee.py` 缺 numpy/tifffile/Pillow），未计为通过。
 - Release 构建：**0 警告 / 0 错误**。
 - 既有 `--usability-tests` 238 条断言通过，包含 `OcrPreviewWindow` 构造探针；覆盖块几何在真实图像验收中 0 越界。
 
 ## 5. 未修 / 已知残余
 
 - `EngIish`、`DlspIay`、`rosoft` 等 rec 字符错误仍属模型/字典覆盖，不在本轮后处理范围。
-- Windows OCR 中文设置页仍有明显字符错误（如 `I-IDR截图工具`、`只蟛外观`）；这是 Windows 语言包/识别质量问题，与 composer 的行合并不等价，不能用 ONNX 结果替代验收。
+- Windows OCR 中文设置页的 `I-IDR`、`蟛`、`钷踣` 已由 2x + EnhanceContrast + 质量分 + zh 优先合并修掉；底行独立控件也已按 240px 水平空洞拆开。剩余是 4K 大图 Windows OCR 仍明显粗于 ONNX（约 131 行、图标噪声多）。大图或质量要求高时应回退 ONNX，Windows OCR 只作 best-effort。
 - 多栏文章的自动阅读顺序未做；本轮只保证同一视觉行/独立控件不被错误串并。
 - 真实 4K 截图里图标、任务栏小字符仍可能形成单字符行；它们没有足够水平邻接证据，归为独立 UI 元素，不做强制合并。
 - 汉字/假名空格覆盖 BMP 常用汉字、扩展 A、兼容表意文字、全/半角假名、CJK 标点与注音符号；Unicode Extension B 及以上的代理对仍未纳入（PP-OCRv6 字典基本不含这些字，本轮不虚构覆盖）。
@@ -144,10 +175,11 @@ GEOMETRY_BAD=0 PARAGRAPH_GROUPS=1 GROUP_ROWS=3
 - [x] `OcrResult.Text` 与 `Lines` 逐行相等（ONNX 路径，真实图像 4/4 通过）。
 - [x] 受控 3 行段落输出 3 行、无孤立 `a` 行、`one` 在正确词位。
 - [x] 中文设置页 `CJK\s+CJK` 计数 0；旧实现的 3 处逐字空格消失。
+- [x] Windows OCR 中文设置页输出 `HDR 截图工具` 与 `界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。`；不出现 `I-IDR`/`蟛`/`钷`/`踣`；底行拆为 `0 设置已保存` / `区域截图`。
 - [x] 中文全角标点（`；` `，` `。` `？` `：`）后无多余空格；全角标点后接英文也不额外插空格。
 - [x] ASCII 单/双引号内侧空格消除、闭引号后英文词距保留；`It's` / `students'` / `O'Reilly's` 不被误当引号。
 - [x] 日文假名与汉字之间不插空格；`こんにちは世界`、`日本語の文章です。` 实测成立。
 - [x] 真实 4K 截图 `CJK\s+CJK` 计数 0。
 - [x] 覆盖框全部在原图内、词框在行框内（`GEOMETRY_BAD=0`）。
 - [x] 翻译段落组：受控段落 1 组 3 行；真实截图 14 组 31 行。
-- [x] `--ocr-tests` 65 通过 / 0 失败；全量 2993 通过 / 0 失败；Release 0 警告 0 错误。
+- [x] `--ocr-tests` 74 通过 / 0 失败；全量 3002 通过 / 0 失败；Release 构建通过（本轮 C 盘满、输出目录临时接到 E 盘，MSBuild 报 1 次 MSB3101 状态文件警告，非代码告警）。

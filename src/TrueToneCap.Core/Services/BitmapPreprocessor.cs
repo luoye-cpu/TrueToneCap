@@ -66,6 +66,45 @@ public static class BitmapPreprocessor
         return new PreprocessResult(pixels, w, h, mode);
     }
 
+    /// <summary>
+    /// Windows OCR 专用预处理：小/中图放大 2x 后增强对比度，不做自适应二值化。
+    /// 实测 1242×831 中文设置页：1x 原图 zh-Hans 缺“具/装”，1x 阈值把“影响”识别成
+    /// “蟛”、把“默认”识别成“钷踣”；2x + EnhanceContrast 输出
+    /// “HDR 截图工具 / 界面字体只影响外观，不影响截图像素；未安装时回落到默认字体。”
+    /// 阈值版本虽然更长，但字符被破坏，不能按文本长度当选。
+    /// </summary>
+    public static PreprocessResult PrepareForWindowsOcr(byte[] bgra, int w, int h)
+    {
+        // 2x 后面积上限 4MP：1242×831 → 2484×1662 约 4.1MP，可接受；
+        // 4K 原图约 8.3MP，不放大，避免 Windows OCR 处理超大 SoftwareBitmap。
+        const long ScaleUpMaxSourcePixels = 4_000_000;
+
+        var pixels = bgra;
+        var mode = PreprocessMode.None;
+
+        if (IsDarkBackground(pixels, w, h))
+        {
+            pixels = Invert(pixels);
+            mode = PreprocessMode.EnhanceContrast;
+        }
+
+        if ((long)w * h <= ScaleUpMaxSourcePixels)
+        {
+            var up = ScaleUp(pixels, w, h, 2.0f);
+            pixels = up.Pixels;
+            w = up.Width;
+            h = up.Height;
+            mode = PreprocessMode.ScaleUp;
+
+            // 不做 AdaptiveThreshold：UI 文字是抗锯齿灰阶，二值化会丢笔画；
+            // 直方图拉伸对小字更稳，且与 2x 放大叠加时效果最好。
+            pixels = EnhanceContrast(pixels, w, h);
+        }
+        // 大图不放大也不再拉伸：Windows OCR 对 4K 级 UI 本来就只能做粗略识别，
+        // 改变像素反而会破坏它已经学到的行/字模型，留给上层决定是否回退 ONNX。
+        return new PreprocessResult(pixels, w, h, mode);
+    }
+
     /// <summary>检测图像是否为深色背景 (采样四角+中心区域均值 &lt; 110)。</summary>
     public static bool IsDarkBackground(byte[] bgra, int w, int h)
     {

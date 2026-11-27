@@ -14,6 +14,7 @@ internal static class OcrLineComposerTests
         CjkChars_NoSpaces(check);
         LatinSplitWord_NoSpace(check);
         LatinWordGap_OneSpace(check);
+        LatinToCjk_GapOneSpace(check);
         CjkPunctuation_NoSpace(check);
         Rows_DoNotMerge(check);
         TallBox_DoesNotSwallowNextRow(check);
@@ -61,6 +62,22 @@ internal static class OcrLineComposerTests
         };
         string text = OcrLineComposer.JoinWords(words, 20);
         check("英文词距：0.4H 插一个空格", text == "This is", text);
+    }
+
+    private static void LatinToCjk_GapOneSpace(Action<string, bool, string?> check)
+    {
+        // Windows 中文设置页 HDR 词框与“截”只隔 6px（约 0.35H）；
+        // 0.5H 会粘成 HDR截图工具，0.25H 保留空格。
+        var words = new[]
+        {
+            Word("HDR", 0, 0, 37, 14),
+            Word("截", 43, 0, 18, 17),
+            Word("图", 61, 0, 17, 17),
+            Word("工", 78, 0, 18, 17),
+            Word("具", 96, 0, 18, 17),
+        };
+        string text = OcrLineComposer.JoinWords(words, 17);
+        check("拉丁→汉字：0.35H 插一个空格", text == "HDR 截图工具", text);
     }
 
     private static void CjkPunctuation_NoSpace(Action<string, bool, string?> check)

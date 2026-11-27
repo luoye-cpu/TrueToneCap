@@ -29,6 +29,8 @@ public static class OcrServiceTests
         Preprocess_AdaptiveThreshold_BlackWhite();
         Preprocess_AutoPreprocess_SmallUpscale();
         Preprocess_AutoPreprocess_HighContrast_NoOp();
+        Preprocess_WindowsOcr_SmallUpscale_NoThreshold();
+        Preprocess_WindowsOcr_LargeNoScale();
 
         // ── 视觉行合并 / 中文空格 ──
         Console.WriteLine("\n── OcrLineComposer ──");
@@ -164,6 +166,26 @@ public static class OcrServiceTests
         }
         var r = BitmapPreprocessor.AutoPreprocess(bgra, w, h);
         Assert($"AutoPreprocess: 高对比度不处理 (Mode={r.Mode})", r.Mode == BitmapPreprocessor.PreprocessMode.None);
+    }
+
+    static void Preprocess_WindowsOcr_SmallUpscale_NoThreshold()
+    {
+        // Windows OCR 专用：小图必须 2x + 增强对比度，且不能落到 AdaptiveThreshold。
+        int w = 100, h = 100;
+        var bgra = new byte[w * h * 4];
+        var r = BitmapPreprocessor.PrepareForWindowsOcr(bgra, w, h);
+        Assert($"WindowsOCR: 小图放大 2x (得 {r.Width}x{r.Height})", r.Width == w * 2 && r.Height == h * 2);
+        Assert($"WindowsOCR: 不走二值化 (Mode={r.Mode})", r.Mode == BitmapPreprocessor.PreprocessMode.ScaleUp);
+    }
+
+    static void Preprocess_WindowsOcr_LargeNoScale()
+    {
+        // 4K 级面积不放大，避免 Windows OCR 处理超大 SoftwareBitmap；仍做对比度增强。
+        int w = 4000, h = 2000;
+        var bgra = new byte[w * h * 4];
+        var r = BitmapPreprocessor.PrepareForWindowsOcr(bgra, w, h);
+        Assert($"WindowsOCR: 4K 级不放大 (得 {r.Width}x{r.Height})", r.Width == w && r.Height == h);
+        Assert($"WindowsOCR: 4K 级不二值化 (Mode={r.Mode})", r.Mode == BitmapPreprocessor.PreprocessMode.EnhanceContrast);
     }
 
     // ═══════════════════════════════════════
